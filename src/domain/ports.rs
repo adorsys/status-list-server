@@ -79,6 +79,22 @@ pub trait StatusListRepo: Send + Sync + 'static {
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
+
+    /// Reserve `count` unused indices for `list_id`, returning the newly
+    /// allocated indices in ascending order.
+    async fn allocate_indices(
+        &self,
+        list_id: &str,
+        count: u32,
+        size: Option<u32>,
+    ) -> Result<Vec<i32>, StatusListError>;
+
+    /// Record already-chosen indices as allocated for a newly published list.
+    async fn record_allocated_indices(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<(), StatusListError>;
 }
 
 /// Interface for issuer public key credentials.

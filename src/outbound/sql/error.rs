@@ -35,6 +35,8 @@ pub enum RepositoryError {
     /// The issuer's `credentials.list_count` already reached the quota.
     #[error("Status list quota exceeded: issuer holds {count} of {max}")]
     QuotaExceeded { count: u64, max: u64 },
+    #[error("Status list does not have enough unallocated indices")]
+    AllocationExhausted,
 }
 
 // There is deliberately no `impl From<sea_orm::DbErr>` for this type, nor for

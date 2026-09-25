@@ -156,6 +156,29 @@ impl StatusListRepo for SqlStatusListRepo {
             .await?;
         Ok(StatusListUriPage::from_rows(rows, limit))
     }
+
+    async fn allocate_indices(
+        &self,
+        list_id: &str,
+        count: u32,
+        size: Option<u32>,
+    ) -> Result<Vec<i32>, StatusListError> {
+        self.store
+            .allocate_indices(list_id, count, size)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_allocated_indices(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<(), StatusListError> {
+        self.store
+            .record_allocated_indices(list_id, indices)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[async_trait]
@@ -196,6 +219,8 @@ impl From<models::StatusListRecord> for StatusListRecord {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
         }
@@ -211,6 +236,8 @@ impl From<StatusListRecord> for models::StatusListRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
         }
@@ -226,6 +253,8 @@ impl From<models::StatusListHistoryRecord> for StatusListSnapshot {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
@@ -243,6 +272,8 @@ impl From<StatusListSnapshot> for models::StatusListHistoryRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
@@ -269,6 +300,7 @@ impl From<RepositoryError> for StatusListError {
             RepositoryError::QuotaExceeded { count, max } => {
                 StatusListError::QuotaExceeded { count, max }
             }
+            RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,
             other => StatusListError::Backend(Box::new(other)),
         }
     }

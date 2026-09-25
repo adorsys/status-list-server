@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry},
     ops::Bound,
     sync::Arc,
 };
@@ -50,6 +50,7 @@ impl ListStore {
 pub struct MemoryStatusLists {
     values: Arc<RwLock<ListStore>>,
     snapshot: Option<Arc<RwLock<HashMap<String, StatusListSnapshot>>>>,
+    allocations: Arc<RwLock<HashMap<String, BTreeSet<i32>>>>,
 }
 
 impl MemoryStatusLists {
@@ -153,6 +154,54 @@ impl StatusListRepo for MemoryStatusLists {
             .map(|(id, r)| (id.clone(), r.sub.clone()))
             .collect();
         Ok(StatusListUriPage::from_rows(rows, limit))
+    }
+
+    async fn allocate_indices(
+        &self,
+        list_id: &str,
+        count: u32,
+        size: Option<u32>,
+    ) -> Result<Vec<i32>, StatusListError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut allocations = self.allocations.write().await;
+        let allocated = allocations.entry(list_id.to_string()).or_default();
+        let mut result = Vec::with_capacity(count as usize);
+        let limit = size.unwrap_or(u32::MAX);
+
+        for candidate in 0..limit {
+            let candidate = i32::try_from(candidate).map_err(|_| {
+                StatusListError::InvalidStatusList("allocation index exceeds i32".to_string())
+            })?;
+            if allocated.insert(candidate) {
+                result.push(candidate);
+                if result.len() == count as usize {
+                    return Ok(result);
+                }
+            }
+        }
+
+        for index in &result {
+            allocated.remove(index);
+        }
+        Err(StatusListError::AllocationExhausted)
+    }
+
+    async fn record_allocated_indices(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<(), StatusListError> {
+        let mut allocations = self.allocations.write().await;
+        let allocated = allocations.entry(list_id.to_string()).or_default();
+        for index in indices {
+            if !allocated.insert(*index) {
+                return Err(StatusListError::DuplicateIndex { index: *index });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -876,6 +925,8 @@ mod tests {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: 1,
                 lst: String::new(),
+                size: None,
+                default_status: None,
             },
             sub: format!("https://example/{list_id}"),
             updated_at: 0,
@@ -918,6 +969,8 @@ mod tests {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: 1,
                 lst: String::new(),
+                size: None,
+                default_status: None,
             },
             sub: format!("https://example/{id}"),
             iat: 0,

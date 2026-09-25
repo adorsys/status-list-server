@@ -55,6 +55,8 @@ mod database_implementation {
             status_list: StatusList {
                 bits: 1,
                 lst: "initial".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "sub-contention".to_string(),
             updated_at: base_timestamp,
@@ -88,6 +90,8 @@ mod database_implementation {
                 status_list: StatusList {
                     bits: 1,
                     lst: "writer-a".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: updated_at_a,
                 ..base_record_a.clone()
@@ -127,6 +131,8 @@ mod database_implementation {
                 status_list: StatusList {
                     bits: 1,
                     lst: "writer-b".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: updated_at_b,
                 ..base_record_b.clone()
@@ -286,6 +292,8 @@ mod database_implementation {
             status_list: StatusList {
                 bits: 1,
                 lst: lst.to_string(),
+                size: None,
+                default_status: None,
             },
             sub: format!("sub-{list_id}"),
             updated_at,
@@ -297,6 +305,8 @@ mod database_implementation {
             status_list: StatusList {
                 bits: 1,
                 lst: "initial".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: format!("sub-{list_id}"),
             iat,
@@ -838,6 +848,8 @@ mod database_implementation {
                     status_list: StatusList {
                         bits: 1,
                         lst: "writer-b".to_string(),
+                        size: None,
+                        default_status: None,
                     },
                     updated_at: v + 1,
                     ..base.clone()
@@ -975,6 +987,8 @@ mod database_implementation {
                         status_list: StatusList {
                             bits: 1,
                             lst: "writer-b".to_string(),
+                            size: None,
+                            default_status: None,
                         },
                         updated_at: v + 1,
                         ..base
@@ -987,6 +1001,8 @@ mod database_implementation {
                         status_list: StatusList {
                             bits: 1,
                             lst: "writer-b".to_string(),
+                            size: None,
+                            default_status: None,
                         },
                         sub: "sub-deadlock".to_string(),
                         iat: v + 1,
@@ -1076,6 +1092,8 @@ mod database_implementation {
                 status_list: StatusList {
                     bits: 1,
                     lst: "writer-b".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 1,
                 ..base
@@ -1094,6 +1112,8 @@ mod database_implementation {
                                 status_list: StatusList {
                                     bits: 1,
                                     lst: "writer-b".to_string(),
+                                    size: None,
+                                    default_status: None,
                                 },
                                 sub: "sub-pinned".to_string(),
                                 iat: v + 1,

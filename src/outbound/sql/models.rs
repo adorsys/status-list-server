@@ -124,9 +124,31 @@ pub(crate) mod status_list_history {
 
 pub(crate) type StatusListHistoryRecord = status_list_history::Model;
 
+pub(crate) mod status_list_allocations {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "status_list_allocations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub list_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub idx: i32,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Persisted JSON shape of a status list column.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_status: Option<crate::domain::models::status_list::Status>,
 }

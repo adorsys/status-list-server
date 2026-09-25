@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
-    StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
+    Status, StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
     StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
@@ -103,12 +103,48 @@ impl Service {
         max_serialized_list_size: usize,
         max_lists_per_issuer: u64,
     ) -> Result<StatusListRecord, StatusListError> {
+        self.publish_status_list_with_options(
+            list_id,
+            issuer,
+            sub,
+            statuses,
+            None,
+            None,
+            token_exp_secs,
+            max_status_index,
+            max_statuses_per_request,
+            max_serialized_list_size,
+            max_lists_per_issuer,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_status_list_with_options(
+        &self,
+        list_id: String,
+        issuer: Issuer,
+        sub: String,
+        statuses: Vec<StatusEntry>,
+        size: Option<u32>,
+        default_status: Option<Status>,
+        token_exp_secs: u64,
+        max_status_index: i32,
+        max_statuses_per_request: usize,
+        max_serialized_list_size: usize,
+        max_lists_per_issuer: u64,
+    ) -> Result<StatusListRecord, StatusListError> {
         validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
+        let initially_allocated = statuses.iter().map(|entry| entry.index).collect::<Vec<_>>();
 
         let record = StatusListRecord {
             list_id,
             issuer,
-            status_list: StatusList::create(statuses)?,
+            status_list: StatusList::create_with_options(
+                statuses,
+                size,
+                default_status.unwrap_or(Status::Valid),
+            )?,
             sub,
             updated_at: current_unix_timestamp(),
         };
@@ -127,6 +163,10 @@ impl Service {
                 .insert(record.clone(), max_lists_per_issuer)
                 .await?;
         }
+
+        self.status_list_repo
+            .record_allocated_indices(&record.list_id, &initially_allocated)
+            .await?;
         Ok(record)
     }
 
@@ -200,6 +240,27 @@ impl Service {
 
         invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
         Ok(existing)
+    }
+
+    pub async fn allocate_indices(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        count: u32,
+    ) -> Result<Vec<i32>, StatusListError> {
+        let existing = self
+            .status_list_repo
+            .find(list_id)
+            .await?
+            .ok_or(StatusListError::NotFound)?;
+
+        if &existing.issuer != issuer {
+            return Err(StatusListError::IssuerMismatch);
+        }
+
+        self.status_list_repo
+            .allocate_indices(list_id, count, existing.status_list.size)
+            .await
     }
 
     /// Retrieve a status list record from cache or fallback to persistent storage.

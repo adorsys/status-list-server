@@ -85,6 +85,8 @@ pub(super) fn record(
         status_list: StatusList {
             bits: 1,
             lst: lst.to_string(),
+            size: None,
+            default_status: None,
         },
         sub: sub.to_string(),
         updated_at,
@@ -107,6 +109,8 @@ pub(super) fn snapshot(
         status_list: StatusList {
             bits: 1,
             lst: lst.to_string(),
+            size: None,
+            default_status: None,
         },
         sub: sub.to_string(),
         iat,
