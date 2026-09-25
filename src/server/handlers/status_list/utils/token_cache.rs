@@ -122,7 +122,7 @@ impl TokenBytesCache {
     /// to build the token, deduplicated through a per-key in-flight lock so at
     /// most one builder runs per `key` under concurrency (the #564 "single sign
     /// per window per replica" guarantee). Callers that are not interested in
-    /// building should use [`TokenBytesCache::get`].
+    /// building should use `get` instead.
     ///
     /// Returns `Ok(None)` when the window is already closed (the bytes are not
     /// cached and `init` is *not* called); the caller must re-sign with a fresh
