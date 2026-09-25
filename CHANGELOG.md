@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- `limits.max_lists_per_issuer` is new and enforced. Fresh installs enforce it from the first start. When upgrading an existing SQL database, pods refuse to start until it is enabled: deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`, then, once no pod of the previous release is left, run `status-list-server list-quota recount` and `status-list-server list-quota enable`, and remove the setting. See `docs/troubleshooting.md`, "Upgrading to the list quota".
+
 ### Changed
 
 - Bump the Helm chart to `0.5.0` for render-time validation changes.
