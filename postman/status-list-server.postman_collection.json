@@ -1,0 +1,544 @@
+{
+  "info": {
+    "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
+    "name": "Status List Server",
+    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": {
+      "major": 0,
+      "minor": 1,
+      "patch": 0
+    }
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('response has a status code', function () {",
+          "  pm.expect(pm.response.code).to.be.a('number');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Metrics",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/live",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns 200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('returns plain text OK', function () {",
+                  "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('text/plain');",
+                  "  pm.expect(pm.response.text()).to.equal('OK');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns ready or not ready', function () { pm.expect([200, 503]).to.include(pm.response.code); });",
+                  "pm.test('returns readiness text', function () {",
+                  "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('text/plain');",
+                  "  pm.expect(['READY', 'NOT_READY']).to.include(pm.response.text());",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metrics",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/plain"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('metrics are exposed or disabled', function () { pm.expect([200, 404]).to.include(pm.response.code); });",
+                  "pm.test('metrics response has expected content type', function () {",
+                  "  if (pm.response.code === 200) { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('text/plain'); }",
+                  "  if (pm.response.code === 404) { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Issuer Management",
+      "item": [
+        {
+          "name": "Register issuer credentials",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/credentials",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "credentials"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('credentials are accepted or already registered', function () { pm.expect([202, 409]).to.include(pm.response.code); });",
+                  "pm.test('response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
+                  "pm.test('response body matches expected shape', function () {",
+                  "  var body = pm.response.json();",
+                  "  if (pm.response.code === 202) { pm.expect(body).to.have.property('status'); }",
+                  "  if (pm.response.code === 409) { pm.expect(body).to.have.property('error'); }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Status Lists",
+      "item": [
+        {
+          "name": "Publish status list",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"statuses\": [\n    { \"index\": 0, \"status\": 0 },\n    { \"index\": 1, \"status\": 1 },\n    { \"index\": 2, \"status\": 2 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}",
+                "statuses"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('publish creates or reports an expected API error', function () { pm.expect([201, 400, 401, 409, 422]).to.include(pm.response.code); });",
+                  "pm.test('empty body on success, JSON on error', function () {",
+                  "  if (pm.response.code === 201) { pm.expect(pm.response.text()).to.equal(''); }",
+                  "  if (pm.response.code >= 400) { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve status list as JWT",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/statuslist+jwt"
+              },
+              {
+                "key": "Accept-Encoding",
+                "value": "identity"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('JWT retrieval returns token or expected API error', function () { pm.expect([200, 404, 406]).to.include(pm.response.code); });",
+                  "pm.test('JWT success has status-list headers', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+jwt');",
+                  "    pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
+                  "    pm.expect(pm.response.headers.has('Last-Modified')).to.equal(true);",
+                  "    pm.expect(pm.response.headers.get('Vary') || '').to.include('Accept');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve status list as CWT",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/statuslist+cwt"
+              },
+              {
+                "key": "Accept-Encoding",
+                "value": "identity"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('CWT retrieval returns token or expected API error', function () { pm.expect([200, 404, 406]).to.include(pm.response.code); });",
+                  "pm.test('CWT success has binary status-list headers', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+cwt');",
+                  "    pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
+                  "    pm.expect(pm.response.headers.get('Content-Encoding')).to.not.equal('gzip');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve historical status list",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/statuslist+jwt"
+              },
+              {
+                "key": "Accept-Encoding",
+                "value": "identity"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}?time={{historical_time}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}"
+              ],
+              "query": [
+                {
+                  "key": "time",
+                  "value": "{{historical_time}}"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('historical resolution returns token or expected API error', function () { pm.expect([200, 400, 404]).to.include(pm.response.code); });",
+                  "pm.test('historical success has immutable cache headers', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+jwt');",
+                  "    pm.expect(pm.response.headers.get('Cache-Control') || '').to.include('immutable');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update status list",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"statuses\": [\n    { \"index\": 1, \"status\": 1 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}",
+                "statuses"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('update succeeds or reports an expected API error', function () { pm.expect([200, 400, 401, 403, 404, 409, 422]).to.include(pm.response.code); });",
+                  "pm.test('empty body on success, JSON on error', function () {",
+                  "  if (pm.response.code === 200) { pm.expect(pm.response.text()).to.equal(''); }",
+                  "  if (pm.response.code >= 400) { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Aggregation",
+      "item": [
+        {
+          "name": "List hosted status lists",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/aggregation",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "aggregation"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('aggregation returns 200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('aggregation response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
+                  "pm.test('aggregation schema is valid', function () {",
+                  "  pm.response.to.have.jsonSchema({",
+                  "    type: 'object',",
+                  "    required: ['status_lists'],",
+                  "    properties: { status_lists: { type: 'array', items: { type: 'string' } } }",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "list_id",
+      "value": "477121aa-b598-419e-916f-1e74654ff38b"
+    },
+    {
+      "key": "issuer_id",
+      "value": "my-issuer"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "historical_time",
+      "value": "1686925000"
+    }
+  ]
+}
