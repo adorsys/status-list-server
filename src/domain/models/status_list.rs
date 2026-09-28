@@ -155,7 +155,7 @@ impl StatusList {
 
         if status_updates.is_empty() {
             if let Some(size) = size {
-                let bits = determine_bits_for_values(&[default_status.clone()], None)?;
+                let bits = determine_bits_for_values(std::slice::from_ref(&default_status), None)?;
                 let rounded_size = round_size_to_byte_boundary(size, bits)?;
                 let mut status_array = vec![0u8; bytes_for_entries(rounded_size, bits)];
                 fill_status_array(&mut status_array, rounded_size, bits, &default_status)?;
@@ -386,7 +386,7 @@ fn determine_bits_with_default(
     let max_status_value = status_updates
         .iter()
         .map(|entry| status_value(&entry.status))
-        .chain(default_status.map(status_value).into_iter())
+        .chain(default_status.map(status_value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .max()
