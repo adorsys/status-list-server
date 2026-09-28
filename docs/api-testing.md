@@ -31,6 +31,40 @@ matches the issuer public JWK registered through `POST /api/v1/credentials`.
 For fully automated local contract testing, use the Microcks script below; it
 generates and registers a temporary issuer for the run.
 
+## Local Prerequisites
+
+The Postman/Newman and Microcks runners expect these host tools:
+
+- Rust/Cargo to start the local server with `cargo run`.
+- Node.js for generating ephemeral issuer keys and JWTs.
+- `curl` for readiness checks and issuer registration.
+- `python3` plus PyYAML for the Microcks OpenAPI artifact generator. On
+  Debian/Ubuntu install it with `sudo apt-get install python3-yaml`; in an
+  isolated Python environment use `python3 -m pip install PyYAML`.
+- Docker, unless a local `microcks` or `microcks-cli` binary is already
+  installed.
+- Newman, only when running the Postman collection from the command line.
+
+## Newman Collection Check
+
+Start the API first:
+
+```bash
+cargo run
+```
+
+Then run the same collection check used by CI:
+
+```bash
+./scripts/test-postman-collection.sh
+```
+
+The script generates a temporary P-256 issuer key, patches a temporary copy of
+the collection so `POST /api/v1/credentials` registers the matching public JWK,
+and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
+`issuer_id`, `token`, and `historical_time`. No generated collection or
+environment is written into the repository.
+
 ## Microcks Contract Conformance
 
 Start the API first:
@@ -60,6 +94,11 @@ Postman artifacts, and runs the CLI container against that explicit Microcks
 instance. The fallback avoids running Testcontainers from inside another
 container, which is fragile on some Docker hosts.
 
+The Docker fallback pins both Microcks images by immutable digest. The CLI
+container no longer forces `--user 0:0`, and it receives only the generated
+temporary artifacts through a read-only bind mount; the repository checkout is
+not mounted into the container.
+
 Useful environment overrides:
 
 | Variable                       | Default                                             | Purpose                                                                                            |
@@ -72,8 +111,8 @@ Useful environment overrides:
 | `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                          |
 | `RUN_POSTMAN_CONFORMANCE`      | `false`                                             | Set to `true` to additionally try Microcks' Postman runner. The collection is imported either way. |
 | `MICROCKS_VERBOSE`             | `true`                                              | Set to `false` to suppress Microcks CLI request/response dumps.                                    |
-| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli:nightly`             | CLI container image used when no local CLI is installed.                                           |
-| `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber:latest-native`      | Microcks server image used by the Docker fallback.                                                 |
+| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli@sha256:b420...f4c2e` | Pinned CLI container image used when no local CLI is installed.                                    |
+| `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber@sha256:c0da...3d91` | Pinned Microcks server image used by the Docker fallback.                                          |
 | `MICROCKS_MANAGED_PORT`        | `8585`                                              | Host port for the disposable Microcks server.                                                      |
 
 Example against a deployed server with an existing issuer token:

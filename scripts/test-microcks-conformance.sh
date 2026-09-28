@@ -8,16 +8,17 @@ API_ENDPOINT="${API_ENDPOINT:-http://localhost:8000}"
 API_NAME_VERSION="${API_NAME_VERSION:-Status List Server:0.1.0}"
 OPENAPI_ARTIFACT="${OPENAPI_ARTIFACT:-docs/openapi.yaml}"
 POSTMAN_ARTIFACT="${POSTMAN_ARTIFACT:-postman/status-list-server.postman_collection.json}"
-MICROCKS_IMAGE="${MICROCKS_IMAGE:-quay.io/microcks/microcks-cli:nightly}"
+MICROCKS_IMAGE="${MICROCKS_IMAGE:-quay.io/microcks/microcks-cli@sha256:b420720b03d430a54be683c043881ef73377da3c6652263882872a77918f4c2e}"
 MICROCKS_COMMAND="${MICROCKS_COMMAND:-microcks}"
 MICROCKS_WAIT_FOR="${MICROCKS_WAIT_FOR:-30sec}"
 MICROCKS_READY_TIMEOUT="${MICROCKS_READY_TIMEOUT:-180s}"
-MICROCKS_UBER_IMAGE="${MICROCKS_UBER_IMAGE:-quay.io/microcks/microcks-uber:latest-native}"
+MICROCKS_UBER_IMAGE="${MICROCKS_UBER_IMAGE:-quay.io/microcks/microcks-uber@sha256:c0daa6b10aefccb68341828dc98d9fd540f8fd5aa4485ed41c2f428582593d91}"
 MICROCKS_MANAGED_PORT="${MICROCKS_MANAGED_PORT:-8585}"
 RUN_POSTMAN_CONFORMANCE="${RUN_POSTMAN_CONFORMANCE:-false}"
 MICROCKS_VERBOSE="${MICROCKS_VERBOSE:-true}"
 MICROCKS_MANAGED_CONTAINER=""
 token_data_file=""
+microcks_work_dir=""
 microcks_openapi_artifact=""
 microcks_postman_artifact=""
 
@@ -28,11 +29,8 @@ cleanup() {
   if [[ -n "${token_data_file:-}" ]]; then
     rm -f "$token_data_file"
   fi
-  if [[ -n "${microcks_openapi_artifact:-}" ]]; then
-    rm -f "$microcks_openapi_artifact"
-  fi
-  if [[ -n "${microcks_postman_artifact:-}" ]]; then
-    rm -f "$microcks_postman_artifact"
+  if [[ -n "${microcks_work_dir:-}" ]]; then
+    rm -rf "$microcks_work_dir"
   fi
 }
 trap cleanup EXIT
@@ -41,6 +39,28 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Required command not found: $1" >&2
     exit 1
+  fi
+}
+
+require_python_yaml() {
+  if ! python3 - <<'PY' >/dev/null 2>&1
+import yaml
+PY
+  then
+    cat >&2 <<'EOF'
+Required Python package not found: PyYAML.
+Install it with one of:
+  - Debian/Ubuntu: sudo apt-get install python3-yaml
+  - pipx/venv: python3 -m pip install PyYAML
+Then rerun ./scripts/test-microcks-conformance.sh.
+EOF
+    exit 1
+  fi
+}
+
+ensure_microcks_work_dir() {
+  if [[ -z "${microcks_work_dir:-}" ]]; then
+    microcks_work_dir="$(mktemp -d "${TMPDIR:-/tmp}/status-list-microcks.XXXXXX")"
   fi
 }
 
@@ -126,7 +146,9 @@ build_operations_headers() {
 
 prepare_microcks_openapi_artifact() {
   local output_file
-  output_file="$(mktemp "$ROOT_DIR/.microcks-openapi.XXXXXX.yaml")"
+  ensure_microcks_work_dir
+  require_python_yaml
+  output_file="$(mktemp "$microcks_work_dir/openapi.XXXXXX.yaml")"
   python3 - "$OPENAPI_ARTIFACT" "$output_file" "$token_data_file" <<'PY'
 import sys
 from pathlib import Path
@@ -263,7 +285,8 @@ PY
 
 prepare_microcks_postman_artifact() {
   local output_file
-  output_file="$(mktemp "$ROOT_DIR/.microcks-postman.XXXXXX.json")"
+  ensure_microcks_work_dir
+  output_file="$(mktemp "$microcks_work_dir/postman.XXXXXX.json")"
   node - "$POSTMAN_ARTIFACT" "$output_file" "$token_data_file" "$(endpoint_for_container "$API_ENDPOINT")" "$STATUS_LIST_AUTH_TOKEN" <<'NODE'
 const fs = require('fs');
 
@@ -381,13 +404,21 @@ docker_cli() {
     verbose_args+=(--verbose)
   fi
 
+  ensure_microcks_work_dir
   docker run --rm \
-    --user 0:0 \
     --add-host=host.docker.internal:host-gateway \
-    -v "$ROOT_DIR:$ROOT_DIR" \
-    -w "$ROOT_DIR" \
+    --mount "type=bind,source=${microcks_work_dir},target=/microcks-artifacts,readonly" \
+    --workdir /tmp \
     "$MICROCKS_IMAGE" \
     "$MICROCKS_COMMAND" "${verbose_args[@]}" "$@"
+}
+
+stage_docker_artifact() {
+  local source_file="$1"
+  local target_name="$2"
+  ensure_microcks_work_dir
+  cp "$source_file" "$microcks_work_dir/$target_name"
+  printf '/microcks-artifacts/%s\n' "$target_name"
 }
 
 wait_for_managed_microcks() {
@@ -437,7 +468,12 @@ run_microcks_with_managed_server() {
   start_managed_microcks
   test_endpoint="$(endpoint_for_container "$API_ENDPOINT")"
 
-  docker_cli import "${openapi_artifact}:true,${postman_artifact}:false" \
+  local docker_openapi_artifact
+  local docker_postman_artifact
+  docker_openapi_artifact="$(stage_docker_artifact "$openapi_artifact" openapi.yaml)"
+  docker_postman_artifact="$(stage_docker_artifact "$postman_artifact" postman.json)"
+
+  docker_cli import "${docker_openapi_artifact}:true,${docker_postman_artifact}:false" \
     --microcksURL="$microcks_url" \
     --keycloakClientId=foo \
     --keycloakClientSecret=bar
@@ -491,7 +527,10 @@ run_microcks() {
 
 require_command node
 require_command curl
-token_data_file="$(mktemp)"
+require_command python3
+require_python_yaml
+ensure_microcks_work_dir
+token_data_file="$(mktemp "$microcks_work_dir/token-data.XXXXXX.json")"
 generate_token_data "$token_data_file"
 
 if [[ -z "${STATUS_LIST_AUTH_TOKEN:-}" ]]; then

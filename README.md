@@ -92,15 +92,21 @@ publication, JWT/CWT retrieval, historical resolution, status updates, and
 aggregation, with scripts that assert status codes, schemas, and response
 headers.
 
+To run the Postman collection from the command line, start the server and run:
+
+```bash
+./scripts/test-postman-collection.sh
+```
+
 To verify that the live implementation still conforms to the OpenAPI contract
-with Microcks, start the server and run:
+with Microcks, keep the server running and run:
 
 ```bash
 ./scripts/test-microcks-conformance.sh
 ```
 
 See [API Testing](docs/api-testing.md) for Postman import steps, issuer token
-setup, and Microcks runner configuration.
+setup, Newman usage, host prerequisites, and Microcks runner configuration.
 
 ## Cargo Feature Matrix
 

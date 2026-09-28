@@ -362,6 +362,85 @@ jobs:
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
 
+  postman-newman:
+    name: Postman Collection (Newman)
+    runs-on: ubuntu-latest
+    needs: cargo-build
+    timeout-minutes: 20
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect API-facing changes
+        id: api-changes
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+          changed=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- \
+            docs/openapi.yaml \
+            postman \
+            scripts/test-postman-collection.sh \
+            src/config.rs \
+            src/startup.rs \
+            src/domain/models \
+            src/domain/ports.rs \
+            src/server/handlers \
+            Cargo.toml \
+            Cargo.lock \
+            .env.template || true)
+
+          if [ -n "$changed" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            printf 'API-facing changes detected:\n%s\n' "$changed"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No API-facing changes detected; Newman collection gate is a no-op for this PR."
+          fi
+
+      - name: Install Rust
+        if: steps.api-changes.outputs.changed == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache-shared-key: "workspace"
+          cache-save-if: "false"
+
+      - name: Install build dependencies and Newman
+        if: steps.api-changes.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+          npm install -g newman@6.2.1
+
+      - name: Start in-memory server and run collection
+        if: steps.api-changes.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          cargo run --no-default-features --features memory > /tmp/status-list-server.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" >/dev/null 2>&1 || true
+            wait "$server_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          if ! ./scripts/test-postman-collection.sh; then
+            echo "::group::status-list-server logs"
+            cat /tmp/status-list-server.log
+            echo "::endgroup::"
+            exit 1
+          fi
+
   cargo-doc:
     name: Cargo Documentation
     runs-on: ubuntu-latest
@@ -1004,6 +1083,7 @@ jobs:
       - docker-build
       - cargo-clippy
       - cargo-nextest
+      - postman-newman
       - cargo-doc
       - check-crate-type
       - cargo-test-doc
