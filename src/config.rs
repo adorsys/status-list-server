@@ -1192,7 +1192,7 @@ impl CacheConfig {
 }
 
 /// Configuration for the per-replica cache of fully signed status-list token
-/// bytes (#564).
+/// bytes.
 ///
 /// This is deliberately separate from [`CacheConfig`] (which governs the cached
 /// *status list items*): a token cache entry must outlive the status-list item
@@ -1202,13 +1202,32 @@ impl CacheConfig {
 pub struct TokenBytesCacheConfig {
     /// Time-to-live for cached signed token bytes in seconds.
     ///
-    /// Should be at least `status_list.token_exp_secs` so an entry is not
-    /// evicted in the middle of a validity window; a shorter value only means
-    /// more re-signs. Setting this to `0` disables caching entirely.
+    /// Must be either `0` (cache disabled entirely) or at least
+    /// `status_list.token_exp_secs`. A value in the middle would let the cache
+    /// expire mid-window and re-sign unchanged tokens, defeating the feature's
+    /// purpose while forcing operators to keep two independently configured
+    /// values in sync.
     pub ttl: u64,
     /// Upper bound on the number of cached signed-token entries, bounding
     /// memory for large lists.
     pub max_capacity: u64,
+}
+
+impl TokenBytesCacheConfig {
+    /// Reject a TTL that would let cached signed bytes expire in the middle of a
+    /// token validity window. `0` disables the cache; any other value must cover
+    /// at least the full window, otherwise the cache re-signs unchanged tokens
+    /// before they expire.
+    fn validate(&self, token_exp_secs: u64) -> Result<(), ConfigError> {
+        if self.ttl != 0 && self.ttl < token_exp_secs {
+            return Err(ConfigError::Message(format!(
+                "token_bytes_cache.ttl ({}) must be 0 (cache disabled) or at least \
+                 status_list.token_exp_secs ({}) so cached signed bytes never expire mid-window",
+                self.ttl, token_exp_secs
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1274,6 +1293,9 @@ impl Config {
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.limits.validate()?;
+        config
+            .token_bytes_cache
+            .validate(config.status_list.token_exp_secs)?;
         Ok(config)
     }
 }
@@ -1896,6 +1918,28 @@ mod tests {
         assert!(missing_db_password.contains("database.password"));
         assert!(!missing_db_password.contains("postgres://"));
         assert!(!missing_db_password.contains("status-list"));
+
+        // 3a. token_bytes_cache.ttl must be 0 or >= status_list.token_exp_secs
+        let valid_equal = Config::load_from_overrides(&[
+            ("token_bytes_cache.ttl", "600"),
+            ("status_list.token_exp_secs", "600"),
+        ])
+        .expect("ttl equal to token_exp_secs is valid");
+        assert_eq!(valid_equal.token_bytes_cache.ttl, 600);
+
+        let valid_disabled = Config::load_from_overrides(&[("token_bytes_cache.ttl", "0")])
+            .expect("ttl=0 disables the cache and is valid");
+        assert_eq!(valid_disabled.token_bytes_cache.ttl, 0);
+
+        let mid_window = Config::load_from_overrides(&[
+            ("token_bytes_cache.ttl", "300"),
+            ("status_list.token_exp_secs", "900"),
+        ])
+        .expect_err("ttl between 0 and token_exp_secs must be rejected");
+        assert!(
+            mid_window.to_string().contains("token_bytes_cache.ttl"),
+            "unexpected error: {mid_window}"
+        );
 
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[

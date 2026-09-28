@@ -330,7 +330,7 @@ fn build_ok_response(
 /// Historical tokens are intentionally **not** cached in the signed-bytes cache:
 /// each request targets a possibly distinct snapshot (`time`), so the hit rate
 /// would be negligible and the cache would only churn retained memory. This is
-/// an explicit out-of-scope decision for `#564` acceptance criterion #7; the
+/// an explicit out-of-scope decision for the signed-token-bytes cache; the
 /// token is signed fresh per request against one consistent signing snapshot.
 async fn handle_historical_request(
     list_id: &str,
@@ -1617,9 +1617,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_misses_in_fresh_window_single_sign() {
-        // #564 criterion #2: at most one signing operation per (list, window,
-        // format) per replica. Fire many concurrent GETs into a fresh window so
-        // they all miss; the single-flight cache must run the builder once. We
+        // At most one signing operation per (list, window, format) per replica.
+        // Fire many concurrent GETs into a fresh window so they all miss; the
+        // single-flight cache must run the builder once. We
         // assert every response carries the *same* strong ETag: with randomized
         // ECDSA signing, two signs would produce different bytes and hence
         // different ETags, so a single shared ETag across concurrent responses
@@ -1908,9 +1908,7 @@ mod tests {
     async fn test_key_rotation_invalidates_cached_token_bytes() {
         // Rotating the signing key within the same token window must invalidate
         // the cached signed bytes: the next request re-signs with the new key and
-        // serves different bytes/ETag, never the stale key's token. This is the
-        // core of acceptance criterion #5 ("rotating the signing key ... invalidates
-        // cached tokens").
+        // serves different bytes/ETag, never the stale key's token.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             vec!["ZHVtbXlfY2VydA==".to_string()],
@@ -1983,8 +1981,7 @@ mod tests {
     #[tokio::test]
     async fn test_certificate_renewal_invalidates_cached_token_bytes() {
         // Renewing the certificate (fresh x5c/x5chain in the token) within the same
-        // window must also invalidate cached bytes: acceptance criterion #5's
-        // "renewing the certificate ... invalidates cached tokens" half.
+        // window must also invalidate cached bytes, mirroring key rotation.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             vec!["ZHVtbXlfY2VydA==".to_string()],
@@ -2060,7 +2057,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_304_never_extends_cached_token_past_exp_property() {
-        // Property-style invariant (acceptance criterion #3): whatever window a
+        // Property-style invariant: whatever window a
         // client fetched in, a 304 is only ever certified while the token it
         // holds is still valid at `now`. We sweep many configs and many revalidation
         // offsets, fetching with the token's own strong ETag; whenever the server
