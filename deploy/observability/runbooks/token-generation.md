@@ -16,8 +16,9 @@ is an outage SLI and pages.
 
 1. **Signing material backend down** — `signing_key_pem()` / `certificate_chain()`
    fail (Vault, cloud KMS), so `build_status_list_token` errors on the first await.
-2. **Cert chain unavailable** — no cert chain (`StatusListError::Unavailable`)
-   makes every token generation fail.
+2. **Cert chain misconfigured** — no active certificate chain is configured, so
+   token generation fails as a 500 (`StatusListError::Backend`) with an error log
+   from `missing_chain_error`; it does not recover on its own.
 3. **Serialization / crypto regression** — a bad release that breaks JWT/CWT
    signing or gzip encoding.
 4. **Resource exhaustion** — `spawn_blocking` pool starvation under load, or an

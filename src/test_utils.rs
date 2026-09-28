@@ -131,17 +131,19 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
     async fn signing_material(
         &self,
     ) -> Result<
-        crate::domain::ports::SigningMaterial,
+        std::sync::Arc<crate::domain::ports::SigningMaterial>,
         crate::domain::models::status_list::StatusListError,
     > {
         let signing_key =
             crate::utils::crypto::SigningKey::from_pem(&self.key_pem).map_err(|err| {
                 crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
             })?;
-        Ok(crate::domain::ports::SigningMaterial::new(
-            Some(self.cert_chain.clone()),
-            Arc::new(signing_key),
-        )?)
+        Ok(std::sync::Arc::new(
+            crate::domain::ports::SigningMaterial::new(
+                Some(self.cert_chain.clone()),
+                Arc::new(signing_key),
+            )?,
+        ))
     }
 }
 

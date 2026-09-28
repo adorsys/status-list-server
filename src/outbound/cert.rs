@@ -5,7 +5,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 #[cfg(not(feature = "acme"))]
 use base64::prelude::{BASE64_STANDARD, Engine as _};
-#[cfg(not(feature = "acme"))]
 use std::sync::Arc;
 
 use crate::domain::{
@@ -31,7 +30,7 @@ impl AcmeCertificateProvider {
 #[cfg(feature = "acme")]
 #[async_trait]
 impl CertificateProvider for AcmeCertificateProvider {
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
+    async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError> {
         self.manager
             .signing_material()
             .await
@@ -74,8 +73,8 @@ impl ReloadingCertificateProvider {
 #[cfg(not(feature = "acme"))]
 #[async_trait]
 impl CertificateProvider for ReloadingCertificateProvider {
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
-        Ok((*self.active.load_full()).clone())
+    async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError> {
+        Ok(self.active.load_full())
     }
 }
 
@@ -105,8 +104,8 @@ impl InlineCertificateProvider {
 #[cfg(not(feature = "acme"))]
 #[async_trait]
 impl CertificateProvider for InlineCertificateProvider {
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError> {
-        Ok((*self.material).clone())
+    async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError> {
+        Ok(self.material.clone())
     }
 }
 
@@ -372,8 +371,8 @@ mod tests {
             expected_key.public_key_bytes()
         );
         assert_eq!(
-            material.certificate_chain,
-            Some(pem_chain_to_base64_der(&second_cert).expect("chain"))
+            material.certificate_chain.as_ref(),
+            Some(&pem_chain_to_base64_der(&second_cert).expect("chain"))
         );
     }
 
@@ -396,8 +395,8 @@ mod tests {
         .await
         .expect("provider");
         let material = provider.signing_material().await.expect("material");
-        let chain = material.certificate_chain.expect("chain");
-        assert_eq!(chain, pem_chain_to_base64_der(&cert).expect("b64 der"));
+        let chain = material.certificate_chain.as_ref().expect("chain");
+        assert_eq!(chain, &pem_chain_to_base64_der(&cert).expect("b64 der"));
         assert!(!chain[0].contains("BEGIN CERTIFICATE"));
     }
 
@@ -422,7 +421,7 @@ mod tests {
         let (cert, key) = matching_cert_and_key();
         let provider = InlineCertificateProvider::new(cert.clone(), key).expect("provider");
         let material = provider.signing_material().await.expect("material");
-        let chain = material.certificate_chain.expect("chain");
-        assert_eq!(chain, pem_chain_to_base64_der(&cert).expect("b64 der"));
+        let chain = material.certificate_chain.as_ref().expect("chain");
+        assert_eq!(chain, &pem_chain_to_base64_der(&cert).expect("b64 der"));
     }
 }

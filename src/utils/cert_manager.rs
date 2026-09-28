@@ -478,14 +478,14 @@ impl CertManager {
     }
 
     /// Return certificate chain and signing key from one active snapshot.
-    pub async fn signing_material(&self) -> Result<SigningMaterial, CertError> {
+    pub async fn signing_material(&self) -> Result<Arc<SigningMaterial>, CertError> {
         if let Some(material) = self.active_signing_material.load_full() {
-            return Ok((*material).clone());
+            return Ok(material);
         }
 
         let _guard = self.provisioning_lock.lock().await;
         if let Some(material) = self.active_signing_material.load_full() {
-            return Ok((*material).clone());
+            return Ok(material);
         }
 
         let signing_key_pem = self.signing_key_pem().await?;
@@ -496,8 +496,9 @@ impl CertManager {
             Arc::new(signing_key),
         )
         .map_err(|e| CertError::Validation(e.to_string()))?;
+        let material = Arc::new(material);
         self.active_signing_material
-            .store(Some(Arc::new(material.clone())));
+            .store(Some(Arc::clone(&material)));
         Ok(material)
     }
 

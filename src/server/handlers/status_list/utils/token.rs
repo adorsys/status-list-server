@@ -16,8 +16,8 @@ use crate::domain::models::token::SigningAlgorithm;
 use crate::domain::ports::TokenSigner;
 
 use super::constants::{
-    ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-    ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    ACCEPT_STATUS_LISTS_HEADER_CWT, CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST,
+    STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
@@ -93,7 +93,7 @@ struct JwtHeader<'a> {
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: &str,
-    status_record: &StatusListRecord,
+    status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
@@ -102,7 +102,7 @@ pub(crate) async fn build_status_list_token(
     token_metrics().attempts.add(1, &attributes);
     match build_status_list_token_inner(
         state,
-        accept,
+        format,
         status_record,
         validity_window,
         client_accepts_gzip,
@@ -119,8 +119,8 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    accept: &str,
-    status_record: &StatusListRecord,
+    format: &'static str,
+    status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
@@ -131,23 +131,21 @@ async fn build_status_list_token_inner(
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?;
 
-    let accept = accept.to_string();
-    let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
     let validity_window = validity_window.unwrap_or_else(|| {
         let iat = OffsetDateTime::now_utc().unix_timestamp();
         (iat, iat + state.token_exp_secs as i64)
     });
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
+    let should_gzip = client_accepts_gzip && format == "jwt";
 
     tokio::task::spawn_blocking(move || {
-        let token_bytes = match accept.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => {
+        let token_bytes = match format {
+            "cwt" => {
                 let x5chain = cached_x5chain(signing_material.certificate_chain.as_deref())?;
                 issue_cwt(
                     &status_record,
-                    signing_material.signing_key,
+                    Arc::clone(&signing_material.signing_key),
                     x5chain,
                     aggregation_uri,
                     validity_window.0,
@@ -158,10 +156,11 @@ async fn build_status_list_token_inner(
             _ => {
                 let cert_chain = signing_material
                     .certificate_chain
-                    .ok_or(StatusListError::Unavailable)?;
+                    .as_deref()
+                    .ok_or_else(missing_chain_error)?;
                 issue_jwt(
                     &status_record,
-                    signing_material.signing_key,
+                    Arc::clone(&signing_material.signing_key),
                     cert_chain,
                     aggregation_uri,
                     validity_window.0,
@@ -187,6 +186,17 @@ async fn build_status_list_token_inner(
     })
     .await
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
+}
+
+/// A missing certificate chain is a misconfiguration that will not recover on
+/// its own, so it is surfaced as a 500 (Backend) rather than a retryable 503.
+fn missing_chain_error() -> StatusListError {
+    let err = std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no active certificate chain is configured",
+    );
+    tracing::error!(error = %err, "token generation aborted: no certificate chain configured");
+    StatusListError::Backend(Box::new(err))
 }
 
 /// Decode a base64 DER certificate chain and build the CBOR `x5chain`
@@ -217,7 +227,7 @@ fn x5chain_value(chain: &[String]) -> Result<CborValue, StatusListError> {
 /// renewal, so a single-entry cache keeps the CWT hot path from re-decoding the
 /// (unchanged) chain on every request.
 fn cached_x5chain(chain: Option<&[String]>) -> Result<CborValue, StatusListError> {
-    let chain = chain.ok_or(StatusListError::Unavailable)?;
+    let chain = chain.ok_or_else(missing_chain_error)?;
 
     static CACHE: Mutex<Option<(Vec<String>, CborValue)>> = Mutex::new(None);
     let mut guard = CACHE
@@ -313,7 +323,7 @@ fn issue_cwt(
 fn issue_jwt(
     status_record: &StatusListRecord,
     signer: Arc<dyn TokenSigner>,
-    cert_chain: Vec<String>,
+    cert_chain: &[String],
     aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
@@ -336,7 +346,7 @@ fn issue_jwt(
     let header = JwtHeader {
         alg: signer.algorithm().jose_name(),
         typ: STATUS_LISTS_HEADER_JWT,
-        x5c: &cert_chain,
+        x5c: cert_chain,
     };
     let header =
         serde_json::to_vec(&header).map_err(|err| StatusListError::Backend(Box::new(err)))?;
@@ -452,7 +462,7 @@ mod tests {
             let signer: Arc<dyn TokenSigner> =
                 Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
             let token =
-                issue_jwt(&record, signer, cert_chain.clone(), None, 1000, 2000, 300).unwrap();
+                issue_jwt(&record, signer, &cert_chain, None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
             assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));

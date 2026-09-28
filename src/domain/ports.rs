@@ -137,6 +137,12 @@ impl SigningMaterial {
         signing_key: Arc<dyn TokenSigner>,
     ) -> Result<Self, StatusListError> {
         if let Some(parts) = &certificate_chain {
+            if parts.is_empty() {
+                return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "certificate chain is empty",
+                ))));
+            }
             validate_cert_chain_base64(parts)?;
         }
         Ok(Self {
@@ -174,7 +180,11 @@ impl fmt::Debug for SigningMaterial {
 pub trait CertificateProvider: Send + Sync + 'static {
     /// Retrieve the current certificate chain and signing key from one
     /// internally consistent snapshot.
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError>;
+    ///
+    /// Returns an [`Arc`] so a per-request clone of the chain is avoided; token
+    /// encoders move the cheap `Arc` clone into a blocking task and borrow the
+    /// material inside it.
+    async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError>;
 }
 
 /// Cryptographic port used by token encoders.
@@ -192,3 +202,36 @@ pub trait TokenSigner: Send + Sync {
     /// Return raw public-key bytes for X.509 certificate validation.
     fn public_key_bytes(&self) -> &[u8];
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::crypto::SigningKey;
+
+    fn signer() -> Arc<dyn TokenSigner> {
+        Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap())
+    }
+
+    #[test]
+    fn new_accepts_none_chain() {
+        assert!(SigningMaterial::new(None, signer()).is_ok());
+    }
+
+    #[test]
+    fn new_rejects_empty_chain() {
+        assert!(SigningMaterial::new(Some(vec![]), signer()).is_err());
+    }
+
+    #[test]
+    fn new_rejects_malformed_base64_chain() {
+        assert!(SigningMaterial::new(Some(vec!["not-base64!".into()]), signer()).is_err());
+    }
+
+    #[test]
+    fn new_accepts_valid_chain() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let chain = vec![BASE64_STANDARD.encode(b"cert-der")];
+        assert!(SigningMaterial::new(Some(chain), signer()).is_ok());
+    }
+}
+
