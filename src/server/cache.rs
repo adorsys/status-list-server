@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -9,8 +8,6 @@ use opentelemetry::{
     metrics::Counter,
     {KeyValue, global},
 };
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::OwnedMutexGuard;
 
 const HIT_METRIC: &str = "token_bytes_cache_hits";
 const MISS_METRIC: &str = "token_bytes_cache_misses";
@@ -102,86 +99,10 @@ pub(crate) struct TokenCacheKey {
 /// `time_to_live`, so no eager invalidation is needed.
 ///
 /// Per-replica by design: ETag consistency across replicas is out of scope and
-/// would require a shared store (see the ticket's open questions).
+/// would require a shared store.
 #[derive(Clone, Debug)]
 pub struct TokenBytesCache {
     inner: MokaCache<TokenCacheKey, CachedToken>,
-    /// Per-key in-flight locks that serialize the expensive re-sign path so that
-    /// concurrent misses for the same key build the token only once (single
-    /// flight). Steady-state hits take the lock-free fast path in
-    /// [`TokenBytesCache::get_or_build`], so this only ever contends during a
-    /// genuine miss.
-    inflight: Arc<Inflight>,
-}
-
-/// Per-key single-flight lock registry.
-///
-/// Each live entry is an `Arc<AsyncMutex<()>>` retained by this map *and* by
-/// every waiter currently holding or awaiting the lock. The entry is removed
-/// only once the last waiter for that key releases its guard, so a key can
-/// never be reclaimed — and a second, fresh mutex created — while a build is
-/// still in flight. This is what preserves the one-build-per-key guarantee even
-/// when many distinct keys (and hence many in-flight locks) are churned
-/// concurrently. Using a capacity-bounded cache here would be incorrect: it
-/// could evict a key while its builder still holds the mutex, letting a later
-/// miss acquire a different mutex and perform a second sign for the same token.
-#[derive(Debug)]
-struct Inflight {
-    locks: Mutex<HashMap<TokenCacheKey, Arc<AsyncMutex<()>>>>,
-}
-
-impl Inflight {
-    fn new() -> Self {
-        Self {
-            locks: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Acquire the per-key serialization lock, registering `key` so concurrent
-    /// callers share the same mutex. The returned guard removes the map entry
-    /// when the last waiter for `key` drops it.
-    async fn lock(self: &Arc<Self>, key: &TokenCacheKey) -> InflightGuard {
-        let arc = {
-            let mut locks = self.locks.lock().unwrap();
-            locks
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-                .clone()
-        };
-        let guard = arc.clone().lock_owned().await;
-        InflightGuard {
-            inflight: Arc::clone(self),
-            key: key.clone(),
-            guard,
-        }
-    }
-}
-
-/// RAII guard that releases a per-key single-flight lock and reclaims the map
-/// entry once this is the last waiter for the key.
-struct InflightGuard {
-    inflight: Arc<Inflight>,
-    key: TokenCacheKey,
-    guard: tokio::sync::OwnedMutexGuard<()>,
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        // `guard` owns one strong reference to the lock's Arc; the map entry
-        // owns another while present. If this guard is the only holder besides
-        // the map entry (strong_count == 2), no other waiter is using the lock,
-        // so remove the entry to reclaim memory. New waiters clone the Arc
-        // while holding the map lock, so they are accounted for here and never
-        // observe a half-reclaimed entry.
-        if Arc::strong_count(OwnedMutexGuard::<()>::mutex(&self.guard)) == 2 {
-            let mut locks = self.inflight.locks.lock().unwrap();
-            if let Some(entry) = locks.get(&self.key)
-                && Arc::ptr_eq(entry, OwnedMutexGuard::<()>::mutex(&self.guard))
-            {
-                locks.remove(&self.key);
-            }
-        }
-    }
 }
 
 impl TokenBytesCache {
@@ -202,8 +123,7 @@ impl TokenBytesCache {
             .time_to_live(Duration::from_secs(ttl_secs))
             .max_capacity(max_capacity)
             .build();
-        let inflight = Arc::new(Inflight::new());
-        Self { inner, inflight }
+        Self { inner }
     }
 
     /// Return cached bytes for `key`, only for an entry whose anchored window
@@ -211,10 +131,12 @@ impl TokenBytesCache {
     /// bound the bytes are expired and must be re-signed.
     ///
     /// Unlike a plain lookup, a miss is not simply reported: `init` is invoked
-    /// to build the token, deduplicated through a per-key in-flight lock so at
-    /// most one builder runs per `key` under concurrency (the "single sign per
-    /// window per replica" guarantee). Callers that are not interested in
-    /// building should use `get` instead.
+    /// to build the token, deduplicated through moka's `try_get_with_by_ref`
+    /// coalescing so at most one builder runs per `key` under concurrency (the
+    /// "single sign per window per replica" guarantee). Concurrent misses for
+    /// the same `key` share the single in-flight build — and its result, success
+    /// or error — regardless of whether the cache evicts the entry mid-build.
+    /// Callers that are not interested in building should use `get` instead.
     ///
     /// Returns `Ok(None)` when the window is already closed (the bytes are not
     /// cached and `init` is *not* called); the caller must re-sign with a fresh
@@ -231,6 +153,7 @@ impl TokenBytesCache {
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<CachedToken, E>>,
+        E: Clone + Send + Sync + 'static,
     {
         // Guard the window bound explicitly so a closed window never serves
         // bytes beyond their `exp` even before moka's own TTL fires.
@@ -251,26 +174,29 @@ impl TokenBytesCache {
             return Ok(Some(cached));
         }
 
-        // Slow path: serialize re-signs for this key so concurrent misses build
-        // exactly once. The per-key lock is retained until the last waiter has
-        // left, so it can never be reclaimed mid-build (see [`Inflight`]).
-        let _guard = self.inflight.lock(key).await;
+        // Slow path: delegate to moka's `try_get_with_by_ref`, which coalesces
+        // concurrent misses for the same key onto a single initializer. Even if
+        // the entry is evicted from the data cache while a build is in flight,
+        // every waiter that already joined that key shares the same in-flight
+        // build, so at most one sign runs per `(list, window, format)`.
+        let value = self
+            .inner
+            .try_get_with_by_ref(key, {
+                let init = init;
+                async move { init().await }
+            })
+            .await
+            .map_err(|err| match Arc::try_unwrap(err) {
+                Ok(err) => err,
+                Err(shared) => (*shared).clone(),
+            })?;
 
-        // Double-checked lookup: another caller may have built the token while
-        // we waited for the lock.
-        if let Some(cached) = self.inner.get(key).await {
-            metrics
-                .hits
-                .add(1, &[KeyValue::new("cache", "token_bytes")]);
-            return Ok(Some(cached));
-        }
-
-        // We are the elected builder.
+        // This caller observed a miss (no cached value at arrival), so count it
+        // as one. Coalesced waiters that joined an in-flight build are still
+        // genuine misses — they did not find cached bytes when they arrived.
         metrics
             .misses
             .add(1, &[KeyValue::new("cache", "token_bytes")]);
-        let value = init().await?;
-        self.inner.insert(key.clone(), value.clone()).await;
         Ok(Some(value))
     }
 
@@ -411,46 +337,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn get_or_build_single_flights_under_lock_churn() {
-        // Regression guard for the lock-registry design: with a capacity-bounded
-        // cache as the lock registry, many distinct keys (each miss holding its
-        // own in-flight lock) could evict the lock for another key that is still
-        // mid-build, letting a later miss create a second mutex and run a second
-        // build for the same key. The ref-counted registry must retain each
-        // key's lock until its last waiter leaves, so a target key is still
-        // built exactly once even while the map is churned by unrelated keys.
-        let cache = TokenBytesCache::new(300, 100);
+    async fn get_or_build_coalesces_waiters_when_entry_evicted_mid_build() {
+        // Regression guard for single-flight coalescing under eviction. The data
+        // cache is capacity 1, so any unrelated insert evicts the previous entry.
+        // While the target's build is in flight, churn keys keep filling and
+        // evicting the single slot. Every waiter that joined the target's
+        // in-flight build must still share that one build — even though the entry
+        // would be evicted from the data cache before it could be served. This is
+        // the interleaving a capacity-bounded lock registry could not survive: it
+        // could evict the target's lock while a waiter still held it, letting a
+        // later waiter create a fresh lock and sign a second time.
+        let cache = TokenBytesCache::new(300, 1);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        // One target key whose single-build guarantee we must preserve.
         let target_key = TokenCacheKey {
             list_id: "target-list".to_string(),
             ..base_key(1000)
         };
 
-        // Many distinct keys whose concurrent misses churn the lock registry
-        // and the data cache simultaneously with the target's own concurrent
-        // misses.
-        let target_clones: Vec<_> = (0..16)
-            .map(|_| (cache.clone(), target_key.clone()))
-            .collect();
-        let churn_keys: Vec<_> = (0..64)
-            .map(|i| TokenCacheKey {
-                list_id: format!("list-{i}"),
-                ..base_key(1000)
-            })
-            .collect();
+        // Barrier so every target waiter reaches `get_or_build` at the same
+        // instant, guaranteeing they all observe a miss and join the single
+        // in-flight build.
+        const N_WAITERS: usize = 16;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(N_WAITERS));
 
         let mut handles = Vec::new();
-
-        for (cache, k) in target_clones {
+        for _ in 0..N_WAITERS {
+            let cache = cache.clone();
+            let key = target_key.clone();
+            let barrier = barrier.clone();
             let builds = builds.clone();
             handles.push(tokio::spawn(async move {
+                barrier.wait().await;
                 let out = cache
-                    .get_or_build(&k, 1000, 900, 1400, || {
+                    .get_or_build(&key, 1000, 900, 1400, || {
                         let builds = builds.clone();
                         async move {
+                            // Hold the build open long enough for the churn keys
+                            // to occupy and evict the single data slot.
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             Ok::<_, std::convert::Infallible>(CachedToken {
                                 bytes: Bytes::from(vec![7u8, 8, 9]),
@@ -464,11 +390,17 @@ mod tests {
             }));
         }
 
-        for k in churn_keys {
+        // Churn the single-slot data cache while the target's build is in flight.
+        for i in 0..64 {
             let cache = cache.clone();
             handles.push(tokio::spawn(async move {
+                let k = TokenCacheKey {
+                    list_id: format!("churn-{i}"),
+                    ..base_key(1000)
+                };
                 let out = cache
                     .get_or_build(&k, 1000, 900, 1400, || async {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                         Ok::<_, std::convert::Infallible>(CachedToken {
                             bytes: Bytes::from(vec![1u8, 2, 3]),
                             encoding: None,
@@ -487,7 +419,8 @@ mod tests {
         assert_eq!(
             builds.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "the target key must be built exactly once even while other keys churn the lock registry"
+            "all waiters for the target key must coalesce onto the single in-flight \
+             build even when the data entry is evicted mid-build"
         );
     }
 

@@ -16,7 +16,7 @@ pub struct ErrorResponse {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: StatusCode,
     pub error: Cow<'static, str>,
