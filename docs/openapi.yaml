@@ -439,14 +439,19 @@ paths:
           in: header
           required: false
           description: |
-            Desired token format. Defaults to `application/statuslist+jwt` if
-            omitted.
+            Desired token format, negotiated per RFC 9110 §12.5.1. Defaults to
+            `application/statuslist+jwt` when omitted (or when the header is
+            `*/*` / `application/*`). Accepts a comma-separated list of media
+            ranges with optional `q`-values; type/subtype matching is
+            case-insensitive and non-`q` parameters are ignored. The supported
+            types are `application/statuslist+jwt` and
+            `application/statuslist+cwt`; the type with the highest acceptable
+            `q` is served (JWT wins ties). A `406 Not Acceptable` is returned
+            only when no supported type is acceptable (e.g. `q=0` on both, or
+            an unsupported type).
           schema:
             type: string
-            enum:
-              - application/statuslist+jwt
-              - application/statuslist+cwt
-            default: application/statuslist+jwt
+            example: application/statuslist+jwt
         - name: time
           in: query
           required: false
@@ -941,14 +946,18 @@ components:
             error_description: "Status list was not found"
 
     NotAcceptable:
-      description: Requested response format not supported
+      description: |
+        Requested response format not supported. No acceptable media type was
+        advertised in the `Accept` header. Supported types are
+        `application/statuslist+jwt` and `application/statuslist+cwt`; the 406
+        body lists both.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "invalid_accept_header"
-            error_description: "Invalid accept header"
+            error_description: "No acceptable media type. Supported: application/statuslist+jwt, application/statuslist+cwt"
 
     PublishConflict:
       description: |
