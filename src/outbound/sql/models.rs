@@ -1,5 +1,5 @@
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::ActiveValue::Set;
+use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::{FromJsonQueryResult, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,8 @@ pub(crate) mod credentials {
         pub issuer: String,
         #[sea_orm(column_type = "Json")]
         pub public_key: PublicKey,
+        /// Status lists published by this issuer; see `store::reserve_list_slot`.
+        pub list_count: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -64,6 +66,8 @@ impl From<Credentials> for credentials::ActiveModel {
         Self {
             issuer: Set(creds.issuer),
             public_key: Set(PublicKey(creds.public_key)),
+            // NotSet so a credential update never resets the counter.
+            list_count: NotSet,
         }
     }
 }

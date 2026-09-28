@@ -32,6 +32,9 @@ pub enum RepositoryError {
     /// [`DuplicateEntry`]: RepositoryError::DuplicateEntry
     #[error("Write contention ({code}): the transaction lost a lock race and may be retried")]
     Contention { code: &'static str },
+    /// The issuer's `credentials.list_count` already reached the quota.
+    #[error("Status list quota exceeded: issuer holds {count} of {max}")]
+    QuotaExceeded { count: u64, max: u64 },
 }
 
 // There is deliberately no `impl From<sea_orm::DbErr>` for this type, nor for

@@ -1,3 +1,14 @@
+{{/*
+PrometheusRule shipping SLI recording rules and SLO burn-rate / error-budget alerting rules
+(monitoring.coreos.com/v1), gated on statuslist.enabled and prometheusRule.enabled.
+
+Thresholds are injected from .Values.slo. CI (lint-thresholds.mjs) only compares the
+values.yaml slo.* DEFAULTS against deploy/observability/slo/thresholds.json and greps the
+standalone rules - it does NOT re-read this template. Consequently the hard-coded alert
+summary strings (e.g. "300ms", "14.4x over 0.5%", "85%", "10%", "14 days") and the %.3f
+burn-threshold rounding here are NOT covered by CI: changing a threshold moves the alert but
+the summary text stays stale.
+*/}}
 {{- if and .Values.statuslist.enabled .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -225,6 +236,19 @@ spec:
             description: 'namespace {{ `{{ $labels.namespace }}` }}: current cache hit ratio is {{ `{{ $value | humanizePercentage }}` }}'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
+        - alert: RedisCacheErrors
+          expr: sum by (namespace)(rate(status_list_cache_errors_total{otel_scope_name="status-list-server"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warn
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+            sli: cache_hit_ratio
+          annotations:
+            summary: "Redis status-list cache operations are failing"
+            description: 'Redis cache error rate: {{ `{{ $value | humanize }}` }}'
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
+            dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
         - alert: ErrorBudgetCritical
           expr: sli:error_budget:success:30d{namespace="{{ .Release.Namespace }}"} < {{ .Values.slo.errorBudgetCriticalThreshold }}
           for: 5m
@@ -282,4 +306,3 @@ spec:
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
 {{- end }}
-

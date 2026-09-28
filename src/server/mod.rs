@@ -49,6 +49,7 @@ pub struct AppState {
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+    pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
     /// Dependency readiness checks backing the `/health/ready` endpoint.

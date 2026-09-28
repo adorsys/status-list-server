@@ -60,18 +60,22 @@ async fn test_seaorm_store() {
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    list_count: 0,
                 }],
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    list_count: 0,
                 }],
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    list_count: 0,
                 }],
                 vec![credentials::Model {
                     issuer: updated_entity.issuer.clone(),
                     public_key: updated_entity.public_key.clone().into(),
+                    list_count: 0,
                 }],
             ])
             .append_exec_results(vec![
@@ -140,8 +144,12 @@ async fn test_sqlite_negative_paths() {
         "sub-neg-sqlite",
         0,
     );
-    let fk_err = store.insert_one(rec).await;
-    assert!(fk_err.is_err(), "insert with dangling FK should fail");
+    let fk_err = store.insert_one(rec, fixtures::NO_LIST_QUOTA).await;
+    // A missing credential must stay a 500, not look like a full quota.
+    assert!(
+        matches!(fk_err, Err(RepositoryError::InsertError(_))),
+        "insert with dangling FK must be InsertError (500), got {fk_err:?}"
+    );
 
     let missing = store
         .update_one(
@@ -191,8 +199,11 @@ async fn assert_duplicate_insert_maps_to_duplicate_entry(
 
     // Duplicate status list (same list_id primary key).
     let record = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), 0);
-    store.insert_one(record.clone()).await.unwrap();
-    let dup_list = store.insert_one(record).await;
+    store
+        .insert_one(record.clone(), fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+    let dup_list = store.insert_one(record, fixtures::NO_LIST_QUOTA).await;
     assert!(
         matches!(dup_list, Err(RepositoryError::DuplicateEntry)),
         "duplicate status list insert must map to DuplicateEntry, got {dup_list:?}"

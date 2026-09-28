@@ -14,3 +14,8 @@ pub(crate) const TTL: i32 = 65534;
 pub(crate) const STATUS_LIST: i32 = 65533;
 
 pub(crate) const GZIP_HEADER: &str = "gzip";
+
+/// Aggregation page size when the client sends no `limit`
+pub(crate) const AGGREGATION_DEFAULT_LIMIT: usize = 1000;
+/// Largest aggregation page a client may request.
+pub(crate) const AGGREGATION_MAX_LIMIT: usize = 1000;

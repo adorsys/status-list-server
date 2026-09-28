@@ -236,6 +236,16 @@ impl IntoApiError for StatusListError {
                 "index_too_large",
                 format!("status index {index} exceeds configured maximum {max}"),
             ),
+            StatusListError::DuplicateIndex { index } => ApiError::bad_request(
+                "duplicate_index",
+                format!("duplicate status index {index} in statuses array"),
+            ),
+            // Not 429: waiting never frees a slot, so no retry hint. Not 403,
+            // which this API reserves for ownership failures.
+            StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
+                "list_quota_exceeded",
+                format!("issuer already has {count} status lists; the configured maximum is {max}"),
+            ),
             StatusListError::Conflict => ApiError::conflict(
                 "update_conflict",
                 "The status list was modified concurrently",
@@ -342,6 +352,16 @@ mod tests {
                 StatusListError::IndexTooLarge { index: 2, max: 1 },
                 StatusCode::BAD_REQUEST,
                 "index_too_large",
+            ),
+            (
+                StatusListError::DuplicateIndex { index: 3 },
+                StatusCode::BAD_REQUEST,
+                "duplicate_index",
+            ),
+            (
+                StatusListError::QuotaExceeded { count: 2, max: 2 },
+                StatusCode::BAD_REQUEST,
+                "list_quota_exceeded",
             ),
             (
                 StatusListError::Conflict,
@@ -514,6 +534,7 @@ mod tests {
             StatusListError::Conflict,
             StatusListError::NotFound,
             StatusListError::Unavailable,
+            StatusListError::QuotaExceeded { count: 1, max: 1 },
         ] {
             let api_err: ApiError = err.into();
             let error_code = api_err.error.clone();

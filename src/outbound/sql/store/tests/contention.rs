@@ -59,7 +59,10 @@ mod database_implementation {
             sub: "sub-contention".to_string(),
             updated_at: base_timestamp,
         };
-        store_a.insert_one(base_record.clone()).await.unwrap();
+        store_a
+            .insert_one(base_record.clone(), fixtures::NO_LIST_QUOTA)
+            .await
+            .unwrap();
 
         // Channels for coordination (using Instants for happens-before assertions)
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
@@ -244,10 +247,11 @@ mod database_implementation {
         );
     }
 
-    /// The real publish race on two connections: writer B collides with writer
-    /// A's still-uncommitted primary key, blocks until A commits, and must get
-    /// `DuplicateEntry` (409), not a generic error (500), leaving no snapshot
-    /// behind.
+    /// The real publish race on two connections: writer B blocks on writer A's
+    /// uncommitted quota slot (the `credentials` row lock taken first by
+    /// `reserve_list_slot`), then collides with A's committed primary key, and
+    /// must get `DuplicateEntry` (409), not a generic error (500), leaving no
+    /// snapshot behind and giving its quota slot back.
     #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
     async fn assert_concurrent_publish_loser_gets_conflict(
         pool_a: DatabaseConnection,
@@ -316,7 +320,11 @@ mod database_implementation {
         // primary-key entry is still uncommitted.
         let handle_a = tokio::spawn(async move {
             store_a
-                .insert_one_with_snapshot(record("writer-a", 1000), snapshot("snap-race-a", 1000))
+                .insert_one_with_snapshot(
+                    record("writer-a", 1000),
+                    snapshot("snap-race-a", 1000),
+                    fixtures::NO_LIST_QUOTA,
+                )
                 .await
         });
 
@@ -327,7 +335,11 @@ mod database_implementation {
             tx_b_started.send(()).expect("failed to signal B started");
 
             let result = store_b
-                .insert_one_with_snapshot(record("writer-b", 2000), snapshot("snap-race-b", 2000))
+                .insert_one_with_snapshot(
+                    record("writer-b", 2000),
+                    snapshot("snap-race-b", 2000),
+                    fixtures::NO_LIST_QUOTA,
+                )
                 .await;
             // Timestamped the instant the call returns, before any channel work,
             // so nothing downstream can manufacture the ordering.
@@ -399,6 +411,301 @@ mod database_implementation {
             loser_snapshot.is_none(),
             "the losing publisher must not leave a snapshot behind on {backend}"
         );
+
+        assert_eq!(
+            fixtures::list_count(&verify_db, issuer).await,
+            1,
+            "the losing publisher must give its quota slot back on {backend}"
+        );
+    }
+
+    /// Two concurrent publishes for one issuer with different `list_id`s: B
+    /// must queue on A's quota slot and re-check it after A commits, so it is
+    /// refused at quota and never deadlocks.
+    async fn assert_concurrent_publishes_share_quota_exactly(
+        pool_a: DatabaseConnection,
+        pool_b: DatabaseConnection,
+        pool_verify: DatabaseConnection,
+        issuer: &'static str,
+        max_lists_per_issuer: u64,
+        backend: &'static str,
+    ) {
+        use std::time::{Duration, Instant};
+        use tokio::sync::oneshot;
+
+        let store_a = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_a));
+        let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
+        let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
+
+        SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
+            .insert_one(Credentials::new(
+                issuer.to_string(),
+                serde_json::from_str(fixtures::TEST_EC_JWK).unwrap(),
+            ))
+            .await
+            .unwrap();
+        fixtures::enforce_list_quota(&store_verify.db.current()).await;
+
+        let list_a = format!("{issuer}-a");
+        let list_b = format!("{issuer}-b");
+        let record = move |list_id: &str| {
+            fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), 1000)
+        };
+        let snapshot = move |list_id: &str| {
+            fixtures::snapshot(
+                &format!("snap-{list_id}"),
+                list_id,
+                issuer,
+                "initial",
+                &format!("sub-{list_id}"),
+                1000,
+                1900,
+            )
+        };
+
+        let (tx_a_ready, rx_a_ready) = oneshot::channel();
+        let (tx_b_started, rx_b_started) = oneshot::channel();
+        let (tx_a_release, rx_a_release) = oneshot::channel();
+        let (tx_b_done, rx_b_done) = oneshot::channel::<(Result<(), RepositoryError>, Instant)>();
+
+        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+            .install(snapshot_txn_test_hook::Probe {
+                list_id: list_a.clone(),
+                ready: tx_a_ready,
+                release: rx_a_release,
+            })
+            .await;
+
+        // Writer A: paused before COMMIT, holding its slot's row lock.
+        let (record_a, snapshot_a) = (record(&list_a), snapshot(&list_a));
+        let handle_a = tokio::spawn(async move {
+            store_a
+                .insert_one_with_snapshot(record_a, snapshot_a, max_lists_per_issuer)
+                .await
+        });
+
+        // Writer B: a different list, starting only once A holds the slot.
+        let (record_b, snapshot_b) = (record(&list_b), snapshot(&list_b));
+        let handle_b = tokio::spawn(async move {
+            rx_a_ready.await.expect("A never reached its pause point");
+            tx_b_started.send(()).expect("failed to signal B started");
+            let result = store_b
+                .insert_one_with_snapshot(record_b, snapshot_b, max_lists_per_issuer)
+                .await;
+            let b_done = Instant::now();
+            tx_b_done
+                .send((result, b_done))
+                .expect("failed to send B result");
+        });
+
+        rx_b_started.await.expect("B never started");
+        // Give B time to reach the database and block on A's slot.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let a_releasing = Instant::now();
+        tx_a_release.send(()).expect("failed to release A");
+
+        let timeout = Duration::from_secs(30);
+        let (a_join, b_join) = tokio::join!(
+            tokio::time::timeout(timeout, handle_a),
+            tokio::time::timeout(timeout, handle_b)
+        );
+        a_join
+            .unwrap_or_else(|_| panic!("timed out waiting for writer A on {backend}"))
+            .expect("writer A panicked")
+            .unwrap_or_else(|e| panic!("writer A should publish on {backend}: {e:?}"));
+        b_join
+            .unwrap_or_else(|_| panic!("timed out waiting for writer B on {backend}"))
+            .expect("writer B panicked");
+
+        let (b_result, b_done) = rx_b_done.await.expect("failed to receive B result");
+
+        // Had B not queued on A's slot, it would have finished during the sleep.
+        assert!(
+            b_done > a_releasing,
+            "B must block on A's quota slot until A commits on {backend} \
+             (B: {b_done:?}, A releasing: {a_releasing:?})"
+        );
+
+        let verify_db = store_verify.db.current();
+        if max_lists_per_issuer >= 2 {
+            assert!(
+                b_result.is_ok(),
+                "with room for both, B must publish after A on {backend}, got {b_result:?}"
+            );
+            assert_eq!(fixtures::list_count(&verify_db, issuer).await, 2);
+        } else {
+            assert!(
+                matches!(
+                    b_result,
+                    Err(RepositoryError::QuotaExceeded { count: 1, max: 1 })
+                ),
+                "with room for one, B must see A's slot and be refused on {backend}, \
+                 got {b_result:?}"
+            );
+            assert!(
+                store_verify.find_one_by(&list_b).await.unwrap().is_none(),
+                "the refused publish must not be stored on {backend}"
+            );
+            assert_eq!(fixtures::list_count(&verify_db, issuer).await, 1);
+        }
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_mysql_concurrent_publishes_share_quota_exactly() {
+        for (issuer, max) in [
+            ("issuer-quota-race-room-mysql", 2),
+            ("issuer-quota-race-full-mysql", 1),
+        ] {
+            let test_db = mysql_helpers::MysqlTestDb::start().await;
+            assert_concurrent_publishes_share_quota_exactly(
+                mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+                mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+                mysql_helpers::connect_to_test_db(&test_db.url, 2).await,
+                issuer,
+                max,
+                "MySQL",
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_concurrent_publishes_share_quota_exactly() {
+        for (issuer, max) in [
+            ("issuer-quota-race-room-postgres", 2),
+            ("issuer-quota-race-full-postgres", 1),
+        ] {
+            let test_db = postgres_helpers::postgres_connection().await;
+            assert_concurrent_publishes_share_quota_exactly(
+                postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+                postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+                postgres_helpers::connect_to_test_db(&test_db.url, 2).await,
+                issuer,
+                max,
+                "Postgres",
+            )
+            .await;
+        }
+    }
+
+    /// Without waiting, `enable` would miss this list and leave the issuer over the cap.
+    async fn assert_enable_waits_for_in_flight_publish(
+        pool_publish: DatabaseConnection,
+        pool_enable: DatabaseConnection,
+        issuer: &'static str,
+        backend: &'static str,
+    ) {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        use crate::outbound::sql::list_quota::{self, ListQuotaError};
+
+        let pool_enable = Arc::new(pool_enable);
+        let store = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_publish));
+        fixtures::seed_credential(&pool_enable, issuer).await;
+        let publish = |n: u32| {
+            let list_id = format!("{issuer}-{n}");
+            let record =
+                fixtures::record(&list_id, issuer, "initial", &format!("sub-{list_id}"), 1000);
+            let snapshot = fixtures::snapshot(
+                &format!("snap-{list_id}"),
+                &list_id,
+                issuer,
+                "initial",
+                &format!("sub-{list_id}"),
+                1000,
+                1900,
+            );
+            (list_id, record, snapshot)
+        };
+
+        let (_, record, snapshot) = publish(1);
+        store
+            .insert_one_with_snapshot(record, snapshot, 1)
+            .await
+            .unwrap();
+
+        let (list_id, record, snapshot) = publish(2);
+        let (tx_ready, rx_ready) = oneshot::channel();
+        let (tx_release, rx_release) = oneshot::channel();
+        snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+            .install(snapshot_txn_test_hook::Probe {
+                list_id,
+                ready: tx_ready,
+                release: rx_release,
+            })
+            .await;
+        let publisher =
+            tokio::spawn(async move { store.insert_one_with_snapshot(record, snapshot, 1).await });
+        rx_ready
+            .await
+            .expect("the publish never reached its pause point");
+
+        let enabler = {
+            let db = pool_enable.clone();
+            tokio::spawn(async move { list_quota::enable(&db, 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !enabler.is_finished(),
+            "enable must wait for the in-flight publish on {backend}"
+        );
+
+        tx_release.send(()).expect("failed to release the publish");
+        let timeout = Duration::from_secs(30);
+        tokio::time::timeout(timeout, publisher)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for the publish on {backend}"))
+            .expect("the publish panicked")
+            .unwrap_or_else(|e| panic!("an unenforced quota must not refuse on {backend}: {e:?}"));
+        let enabled = tokio::time::timeout(timeout, enabler)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for enable on {backend}"))
+            .expect("enable panicked");
+
+        match enabled {
+            Err(ListQuotaError::Refused { over_quota, .. }) => {
+                assert_eq!(over_quota.len(), 1, "on {backend}: {over_quota:?}");
+                assert_eq!(over_quota[0].issuer, issuer, "on {backend}");
+                assert_eq!(over_quota[0].actual, 2, "on {backend}");
+            }
+            other => panic!(
+                "enable must see the publish it waited for and refuse on {backend}, got {other:?}"
+            ),
+        }
+        assert!(
+            !list_quota::is_enforced(&pool_enable).await.unwrap(),
+            "on {backend}"
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_mysql_enable_waits_for_in_flight_publish() {
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        assert_enable_waits_for_in_flight_publish(
+            mysql_helpers::connect_to_test_db(&test_db.url, 1).await,
+            mysql_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-enable-race-mysql",
+            "MySQL",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_postgres_enable_waits_for_in_flight_publish() {
+        let test_db = postgres_helpers::postgres_connection().await;
+        assert_enable_waits_for_in_flight_publish(
+            postgres_helpers::connect_to_test_db(&test_db.url, 1).await,
+            postgres_helpers::connect_to_test_db(&test_db.url, 2).await,
+            "issuer-enable-race-postgres",
+            "Postgres",
+        )
+        .await;
     }
 
     /// The publish race on MySQL, whose driver reports duplicate keys as `1062`.
@@ -506,7 +813,7 @@ mod database_implementation {
         let list_id = "list-lockwait-mysql";
         let base = fixtures::record(list_id, issuer, "initial", "sub-lockwait-mysql", v);
         SeaOrmStore::<StatusListRecord>::from_handle(cred_store.db.clone())
-            .insert_one(base.clone())
+            .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
             .await
             .unwrap();
 
@@ -633,7 +940,7 @@ mod database_implementation {
         let snapshot_id = "snap-deadlock";
         let base = fixtures::record(list_id, issuer, "initial", "sub-deadlock", v);
         SeaOrmStore::<StatusListRecord>::new(test_db.db.clone())
-            .insert_one(base.clone())
+            .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
             .await
             .unwrap();
 
@@ -751,7 +1058,7 @@ mod database_implementation {
             let list_id = "pinned-row";
             let base = fixtures::record(list_id, issuer, "initial", "sub-pinned", v);
             SeaOrmStore::<StatusListRecord>::new(test_db.db.clone())
-                .insert_one(base.clone())
+                .insert_one(base.clone(), fixtures::NO_LIST_QUOTA)
                 .await
                 .unwrap();
 

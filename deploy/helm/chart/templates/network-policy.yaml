@@ -1,9 +1,40 @@
+{{/*
+Opt-in NetworkPolicy (statuslist.networkPolicy.enabled, default OFF).
+
+Ingress: a port-only rule for the service targetPort. With an EMPTY statuslist.networkPolicy.ingress
+this allows ANY source in the cluster; you MUST restrict sources to your ingress controller.
+
+Egress:
+- Database rule: scoped to the database port, `to:` = statuslist.networkPolicy.databaseEgress
+  if set, otherwise the in-cluster postgres pod selector. statuslist.networkPolicy.egressInternal
+  entries are appended to THIS rule, so each inherits the database port - they are NOT general
+  outbound destinations.
+- Ports 443/53 are always allowed with NO `to:` entry, i.e. open to 0.0.0.0/0. This policy
+  does NOT constrain outbound exfiltration.
+- When the opentelemetry-collector is enabled, OTLP ports 4317/4318 are scoped to the
+  collector pods only.
+*/}}
 {{- if .Values.statuslist.networkPolicy.enabled }}
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}
 {{- $backend := include "status-list-server-chart.dbBackend" . -}}
 {{- $databaseEgress := .Values.statuslist.networkPolicy.databaseEgress | default list -}}
+{{- $cacheEgress := .Values.statuslist.networkPolicy.cacheEgress | default list -}}
+{{- $env := .Values.statuslist.env | default dict -}}
+{{- $cacheBackend := (get $env "APP_CACHE__BACKEND" | default "memory" | toString | trim | lower) -}}
+{{- $cachePortValue := (get $env "APP_CACHE__PORT" | default "" | toString | trim) -}}
+{{- $cacheTls := (get $env "APP_CACHE__TLS" | default "false" | toString | trim | lower) -}}
+{{- $cachePort := 6379 -}}
+{{- if eq $cacheTls "true" -}}
+{{- $cachePort = 6380 -}}
+{{- end -}}
+{{- if ne $cachePortValue "" -}}
+{{- $cachePort = $cachePortValue | int -}}
+{{- end -}}
 {{- if and (eq $backend "mysql") (empty $databaseEgress) }}
 {{- fail "statuslist.networkPolicy.databaseEgress must be set when NetworkPolicy is enabled with APP_DATABASE__BACKEND=mysql because this chart does not deploy the database" }}
+{{- end }}
+{{- if and (eq $cacheBackend "redis") (empty $cacheEgress) }}
+{{- fail "statuslist.networkPolicy.cacheEgress must be set when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis because this chart does not deploy Redis" }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -43,6 +74,13 @@ spec:
         {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+    {{- if not (empty $cacheEgress) }}
+    - ports:
+        - port: {{ $cachePort }}
+          protocol: TCP
+      to:
+        {{- toYaml $cacheEgress | nindent 8 }}
+    {{- end }}
     - ports:
         - port: 443
           protocol: TCP

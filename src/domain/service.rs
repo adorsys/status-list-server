@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
+    StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -84,7 +85,11 @@ impl Service {
         self.snapshot_repo.is_some()
     }
 
-    /// Create and publish a new status list record, enforcing uniqueness and size invariants.
+    /// Create and publish a new status list record, enforcing uniqueness, size
+    /// invariants and the per-issuer list quota.
+    ///
+    /// The quota is checked by the repository inside the insert, since a
+    /// count-then-insert here would race concurrent publishes.
     #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
         &self,
@@ -96,21 +101,9 @@ impl Service {
         max_status_index: i32,
         max_statuses_per_request: usize,
         max_serialized_list_size: usize,
+        max_lists_per_issuer: u64,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
-        }
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
+        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
 
         let record = StatusListRecord {
             list_id,
@@ -127,15 +120,28 @@ impl Service {
         if self.snapshots_enabled() {
             let snapshot = build_snapshot(&record, token_exp_secs);
             self.status_list_repo
-                .insert_with_snapshot(record.clone(), snapshot)
+                .insert_with_snapshot(record.clone(), snapshot, max_lists_per_issuer)
                 .await?;
         } else {
-            self.status_list_repo.insert(record.clone()).await?;
+            self.status_list_repo
+                .insert(record.clone(), max_lists_per_issuer)
+                .await?;
         }
         Ok(record)
     }
 
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
+    ///
+    /// Request-shape validation (count bound, index bound, duplicate indices)
+    /// runs before any storage access so a malformed request is rejected with
+    /// `400` consistently and without a wasted `find` or write. The
+    /// duplicate-index invariant is re-enforced in the domain model as defense
+    /// in depth in case this service boundary is bypassed.
+    ///
+    /// An update that leaves the list unchanged — including a literal empty
+    /// `statuses` payload and a non-empty payload that re-sets every affected
+    /// index to its current value — is a successful no-op: the list version and
+    /// history are untouched and no redundant snapshot is written.
     #[allow(clippy::too_many_arguments)]
     pub async fn update_statuses(
         &self,
@@ -147,20 +153,8 @@ impl Service {
         max_statuses_per_request: usize,
         max_serialized_list_size: usize,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
-        }
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
+        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
+        validate_unique_indices(&statuses)?;
 
         let mut existing = self
             .status_list_repo
@@ -172,7 +166,16 @@ impl Service {
             return Err(StatusListError::IssuerMismatch);
         }
 
+        let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
+
+        // A request that does not change the list is a successful no-op. It must
+        // not bump `updated_at` or insert a redundant history snapshot, which
+        // would bloat history with a duplicate entry for an unchanged state.
+        if existing.status_list == current_status_list {
+            return Ok(existing);
+        }
+
         if existing.status_list.lst.len() > max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
@@ -195,7 +198,7 @@ impl Service {
             return Err(StatusListError::Conflict);
         }
 
-        invalidate_after_commit(self.status_list_cache.as_ref(), &existing.list_id).await;
+        invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
         Ok(existing)
     }
 
@@ -220,9 +223,13 @@ impl Service {
         Ok(record)
     }
 
-    /// List all published status list URIs.
-    pub async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
-        self.status_list_repo.list_uris().await
+    /// List one page of published status list URIs, starting after `after`.
+    pub async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo.list_uris(after, limit).await
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -307,6 +314,29 @@ pub fn next_updated_at(previous: i64, now: i64) -> i64 {
     now.max(previous + 1)
 }
 
+/// Enforce the request-level count and index bounds shared by publish and update.
+fn validate_request_shape(
+    statuses: &[StatusEntry],
+    max_status_index: i32,
+    max_statuses_per_request: usize,
+) -> Result<(), StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+    for entry in statuses {
+        if entry.index > max_status_index {
+            return Err(StatusListError::IndexTooLarge {
+                index: entry.index,
+                max: max_status_index,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
     let iat = record.updated_at;
     StatusListSnapshot {
@@ -320,14 +350,17 @@ fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListS
     }
 }
 
-async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    match cache.invalidate(list_id).await {
+async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
+    match cache
+        .invalidate_after_update(&record.list_id, record.updated_at)
+        .await
+    {
         Ok(()) => {
-            tracing::debug!(list_id = %list_id, "invalidated cache entry after commit");
+            tracing::debug!(list_id = %record.list_id, "invalidated cache entry after commit");
         }
         Err(error) => {
             tracing::warn!(
-                list_id = %list_id,
+                list_id = %record.list_id,
                 error = ?error,
                 "status list write committed, but cache invalidation failed; \
                  reads may be stale until the cache entry expires"

@@ -29,6 +29,18 @@ pub enum CredentialError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issuer(pub String);
 
+impl From<String> for Issuer {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Issuer {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 /// Validated JSON Web Key document bytes representing an issuer's public key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicJwk(pub Vec<u8>);

@@ -1,5 +1,7 @@
 [default]
 extend-ignore-identifiers-re = []
+# Base64url aggregation cursors (`v1:` encodes to `djE6`).
+extend-ignore-re = ["djE6[A-Za-z0-9_-]+"]
 
 [default.extend-words]
 Cose = "Cose"

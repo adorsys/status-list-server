@@ -1,6 +1,7 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
 mod error;
+pub mod list_quota;
 mod migrations;
 mod models;
 mod store;
@@ -10,7 +11,7 @@ mod store;
 pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
-pub use migrations::Migrator;
+pub use migrations::{Migrator, run_migrations};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};
 pub use models::*;
@@ -19,7 +20,9 @@ pub use store::{SeaOrmStore, SwappableDatabaseConnection};
 use async_trait::async_trait;
 
 use crate::domain::models::credential::{Credential, CredentialError, Issuer, PublicJwk};
-use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
+use crate::domain::models::status_list::{
+    StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+};
 use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
 
 /// SQL relational adapter implementing `StatusListRepo`.
@@ -94,9 +97,13 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
+    async fn insert(
+        &self,
+        record: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
         self.store
-            .insert_one(record.into())
+            .insert_one(record.into(), max_lists_per_issuer)
             .await
             .map_err(Into::into)
     }
@@ -130,18 +137,24 @@ impl StatusListRepo for SqlStatusListRepo {
         &self,
         record: StatusListRecord,
         snapshot: StatusListSnapshot,
+        max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError> {
         self.store
-            .insert_one_with_snapshot(record.into(), snapshot.into())
+            .insert_one_with_snapshot(record.into(), snapshot.into(), max_lists_per_issuer)
             .await
             .map_err(Into::into)
     }
 
-    async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
-        self.store
-            .find_all_status_list_uris()
-            .await
-            .map_err(Into::into)
+    async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        let rows = self
+            .store
+            .find_status_list_uris_after(after, (limit as u64).saturating_add(1))
+            .await?;
+        Ok(StatusListUriPage::from_rows(rows, limit))
     }
 }
 
@@ -253,6 +266,9 @@ impl From<RepositoryError> for StatusListError {
         match value {
             RepositoryError::DuplicateEntry => StatusListError::AlreadyExists,
             RepositoryError::Contention { code } => StatusListError::Contention { code },
+            RepositoryError::QuotaExceeded { count, max } => {
+                StatusListError::QuotaExceeded { count, max }
+            }
             other => StatusListError::Backend(Box::new(other)),
         }
     }
@@ -300,6 +316,16 @@ mod tests {
             credential.into_api_error().error,
             "credentials_already_exist"
         );
+    }
+
+    #[test]
+    fn quota_exceeded_reaches_the_client_as_400_list_quota_exceeded() {
+        let status_list: StatusListError =
+            RepositoryError::QuotaExceeded { count: 3, max: 3 }.into();
+        let api = status_list.into_api_error();
+        assert_eq!(api.status, StatusCode::BAD_REQUEST);
+        assert_eq!(api.error, "list_quota_exceeded");
+        assert!(api.retry_after_secs.is_none());
     }
 
     /// The classification carves out contention; it must not soften every
