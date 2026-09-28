@@ -28,8 +28,8 @@ use testcontainers_modules::hashicorp_vault::HashicorpVault;
 use testcontainers_modules::{
     localstack::LocalStack,
     testcontainers::{
-        ContainerAsync, GenericImage, ImageExt,
-        core::{IntoContainerPort, WaitFor},
+        ContainerAsync, GenericImage, ImageExt, TestcontainersError,
+        core::{IntoContainerPort, WaitFor, error::ClientError},
         runners::AsyncRunner,
     },
 };
@@ -60,6 +60,49 @@ struct TestInfra {
     pebble_acme_port: u16,
     challtestsrv_port: u16,
     localstack_port: u16,
+}
+
+/// True when the container error is a transient Docker image-pull failure
+/// (e.g. `bytes remaining on stream` from a truncated registry response).
+/// These are retried because they usually succeed once the registry recovers.
+fn is_image_pull_error(err: &TestcontainersError) -> bool {
+    matches!(
+        err,
+        TestcontainersError::Client(ClientError::PullImage { .. })
+    )
+}
+
+/// Start LocalStack, retrying transient Docker image-pull failures.
+///
+/// Pulling the relatively large LocalStack image occasionally fails with a
+/// truncated registry response (`bytes remaining on stream`). A bounded retry
+/// lets the pull succeed once the registry recovers, following the retry-loop
+/// pattern used elsewhere in the codebase. Non-pull errors are returned
+/// immediately rather than retried.
+async fn start_localstack() -> Result<ContainerAsync<LocalStack>, TestcontainersError> {
+    const MAX_ATTEMPTS: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+    let mut last_err: Option<TestcontainersError> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match LocalStack::default()
+            .with_tag("4.14")
+            .with_env_var("SERVICES", "secretsmanager")
+            .start()
+            .await
+        {
+            Ok(container) => return Ok(container),
+            Err(err) if is_image_pull_error(&err) => {
+                eprintln!(
+                    "LocalStack image pull failed (attempt {attempt}/{MAX_ATTEMPTS}): {err}; retrying..."
+                );
+                last_err = Some(err);
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.expect("at least one attempt was made"))
 }
 
 impl TestInfra {
@@ -104,10 +147,7 @@ impl TestInfra {
             .await
             .expect("Failed to start Pebble");
 
-        let localstack = LocalStack::default()
-            .with_tag("4.14")
-            .with_env_var("SERVICES", "secretsmanager")
-            .start()
+        let localstack = start_localstack()
             .await
             .expect("Failed to start LocalStack");
 
