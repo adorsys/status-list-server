@@ -35,7 +35,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
-              description: "namespace ns1: 1h error rate is 10% (>=14.4x budget)"
+              description: "1h error rate is 10% (>=14.4x budget)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -49,7 +49,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              description: "namespace ns1: 6h error rate is 10% (>=6x budget)"
+              description: "6h error rate is 10% (>=6x budget)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       # Alerts that depend on missing series (histograms / token / cache) must not fire.
@@ -117,7 +117,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "5xx error rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              description: "namespace ns1: 6h error rate is 5% (>=6x budget)"
+              description: "6h error rate is 5% (>=6x budget)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-rate.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -194,7 +194,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Request latency P95 sustainably above 300ms (>300ms on the 1h window)"
-              description: "namespace ns1: request latency P95 is 750ms on the 1h window (threshold 300ms)"
+              description: "request latency P95 is 750ms on the 1h window (threshold 300ms)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -208,7 +208,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Request latency P95 sustained above 300ms on the 6h window"
-              description: "namespace ns1: request latency P95 is 750ms on the 6h window (threshold 300ms)"
+              description: "request latency P95 is 750ms on the 6h window (threshold 300ms)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/request-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -222,7 +222,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "DB query latency P95 sustainably above 50ms (>50ms on the 1h window)"
-              description: "namespace ns1: DB query latency P95 is 550ms on the 1h window (threshold 50ms)"
+              description: "DB query latency P95 is 550ms on the 1h window (threshold 50ms)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/db-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -236,7 +236,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "DB query latency P95 sustained above 50ms on the 6h window"
-              description: "namespace ns1: DB query latency P95 is 550ms on the 6h window (threshold 50ms)"
+              description: "DB query latency P95 is 550ms on the 6h window (threshold 50ms)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/db-latency.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -250,7 +250,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Token-generation failures burning the error budget fast (>=14.4x over 0.5% budget on the 1h window)"
-              description: "namespace ns1: 1h token-generation failure rate is 10% (>=14.4x budget)"
+              description: "1h token-generation failure rate is 10% (>=14.4x budget)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -264,7 +264,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Token-generation failure rate burning the error budget slowly (>=6x over 0.5% budget on the 6h window)"
-              description: "namespace ns1: 6h token-generation failure rate is 10% (>=6x budget)"
+              description: "6h token-generation failure rate is 10% (>=6x budget)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -278,7 +278,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Status-list cache hit ratio below 85% for 15m (degradation, not outage)"
-              description: "namespace ns1: current cache hit ratio is 60%"
+              description: "current cache hit ratio is 60%"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 400m
@@ -293,7 +293,7 @@ tests:
               otel_scope_name: "status-list-server"
             exp_annotations:
               summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
-              description: "namespace ns1: time to expiry is 600000s"
+              description: "time to expiry is 600000s"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       # Same gauge value is also <= 7d, so the imminent-expiry page fires too.
@@ -309,7 +309,7 @@ tests:
               otel_scope_name: "status-list-server"
             exp_annotations:
               summary: "Certificate expires within 7 days (imminent expiry)"
-              description: "namespace ns1: time to expiry is 600000s"
+              description: "time to expiry is 600000s"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -372,7 +372,7 @@ tests:
               team: "statuslist"
             exp_annotations:
               summary: "status-list-server metrics absent for 5m (target down or not scraped)"
-              description: "namespace : Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
+              description: "Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
       - eval_time: 10m
@@ -408,7 +408,7 @@ tests:
               team: "statuslist"
             exp_annotations:
               summary: "status-list-server metrics absent for 5m (target down or not scraped)"
-              description: "namespace : Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
+              description: "Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -447,7 +447,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Error budget is below 10% for the 30d window"
-              description: "namespace ns1: remaining error budget is 0%"
+              description: "remaining error budget is 0%"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/error-budget.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 
@@ -472,7 +472,7 @@ tests:
               namespace: "ns1"
             exp_annotations:
               summary: "Token generation error budget below 10% for the 30d window"
-              description: "namespace ns1: remaining token generation error budget is 0%"
+              description: "remaining token generation error budget is 0%"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/token-generation.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
 

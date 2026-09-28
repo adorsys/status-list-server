@@ -350,6 +350,8 @@ jobs:
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
@@ -920,18 +922,26 @@ jobs:
                           alert['exp_labels'].pop('instance', None)
                           alert['exp_labels'].pop('otel_scope_name', None)
                           alert['exp_labels']['namespace'] = 'ns1'
-                          d = alert.get('exp_annotations', {}).get('description', '')
-                          alert['exp_annotations']['description'] = d.replace(
-                              'namespace : ', 'namespace ns1: ', 1)
                       elif at['alertname'] == 'Watchdog':
                           alert['exp_labels']['namespace'] = 'ns1'
+                      # The deployed Helm rules keep namespace context in their
+                      # descriptions (namespace {{ $labels.namespace }}: ...),
+                      # while the standalone descriptions no longer carry the
+                      # empty-namespace prefix. Prepend the ns1 namespace to
+                      # every deployed description except RedisCacheErrors, whose
+                      # description has no namespace prefix in either copy.
+                      if at['alertname'] not in ('Watchdog', 'RedisCacheErrors'):
+                          d = alert.get('exp_annotations', {}).get('description', '')
+                          alert['exp_annotations']['description'] = 'namespace ns1: ' + d
 
           # Behavioral cross-namespace isolation (the reviewer-requested outcome
           # test, not just substring greps). The ns1 rule copy must never consume
           # ns2 series, and loss of the expected ns1 scrape target must not be
-          # masked by a healthy ns2 target. Feed ONLY ns2 data (firing 5xx series
-          # and a healthy ns2 `up`) and assert (a) ns1 SLO alerts stay silent and
-          # (b) ns1's own absence still pages despite ns2 being healthy.
+          # masked by a healthy ns2 target. Feed ONLY ns2 data (firing 5xx series,
+          # Redis cache errors, and a healthy ns2 `up`) and assert (a) ns1 SLO
+          # alerts stay silent, (b) ns1's own absence still pages despite ns2
+          # being healthy, and (c) the ns1 RedisCacheErrors alert does not fire
+          # from ns2's Redis error series.
           ns2_up = 'up{namespace="ns2",service="status-list-server-service"}'
           test['tests'].append({
               'interval': '1m',
@@ -940,12 +950,16 @@ jobs:
                    'values': '0+100x400'},
                   {'series': 'http_server_requests_total{otel_scope_name="status-list-server",namespace="ns2",method="GET",route="/x",status_class="2xx"}',
                    'values': '0+900x400'},
+                  {'series': 'status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns2",cache="status_list",backend="redis",operation="get"}',
+                   'values': '0+60x10'},
                   {'series': ns2_up, 'values': '1x410'},
               ],
               'alert_rule_test': [
                   {'eval_time': '400m', 'alertname': 'ErrorRateFastBurn',
                    'exp_alerts': []},
                   {'eval_time': '400m', 'alertname': 'ErrorRateSlowBurn',
+                   'exp_alerts': []},
+                  {'eval_time': '10m', 'alertname': 'RedisCacheErrors',
                    'exp_alerts': []},
                   {'eval_time': '10m', 'alertname': 'StatusListMetricsAbsent',
                    'exp_alerts': [{'exp_labels': {

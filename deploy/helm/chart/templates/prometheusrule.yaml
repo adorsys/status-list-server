@@ -237,7 +237,7 @@ spec:
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
         - alert: RedisCacheErrors
-          expr: sum by (namespace)(rate(status_list_cache_errors_total{otel_scope_name="status-list-server"}[5m])) > 0
+          expr: sum by (namespace)(rate(status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) > 0
           for: 5m
           labels:
             severity: warn
