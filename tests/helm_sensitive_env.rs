@@ -912,27 +912,31 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 #[test]
 fn rendered_chart_rejects_zero_string_token_lifetime() {
     // The schema `minimum` only applies to numeric instances; a quoted `"0"`
-    // previously slipped through as a string. Regression: reject it via `--set-string`.
-    let Some(output) =
-        render_helm_failure(&["--set-string", "statuslist.statusList.tokenExpSecs=0"])
-    else {
+    // previously slipped through as a string via the canonical
+    // `statuslist.env.APP_STATUS_LIST__TOKEN_*` route. Regression: reject it via
+    // `--set-string`.
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0",
+    ]) else {
         return;
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("tokenExpSecs") && stderr.contains("pattern"),
-        "helm should reject string tokenExpSecs=0, stderr: {stderr}"
+        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
     );
 
-    let Some(output) =
-        render_helm_failure(&["--set-string", "statuslist.statusList.tokenTtlSecs=0"])
-    else {
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=0",
+    ]) else {
         return;
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("tokenTtlSecs") && stderr.contains("pattern"),
-        "helm should reject string tokenTtlSecs=0, stderr: {stderr}"
+        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
     );
 }
 
@@ -940,9 +944,9 @@ fn rendered_chart_rejects_zero_string_token_lifetime() {
 fn rendered_chart_accepts_string_token_lifetime() {
     let Some(rendered) = render_helm(&[
         "--set-string",
-        "statuslist.statusList.tokenExpSecs=1800",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=1800",
         "--set-string",
-        "statuslist.statusList.tokenTtlSecs=600",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=600",
     ]) else {
         return;
     };
