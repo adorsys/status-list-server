@@ -1217,12 +1217,14 @@ impl TokenBytesCacheConfig {
     /// Reject a TTL that would let cached signed bytes expire in the middle of a
     /// token validity window. `0` disables the cache; any other value must cover
     /// at least the full window, otherwise the cache re-signs unchanged tokens
-    /// before they expire.
+    /// before they expire. The error names the env var (rather than only the
+    /// dotted config path) so an operator knows which knob to fix.
     fn validate(&self, token_exp_secs: u64) -> Result<(), ConfigError> {
         if self.ttl != 0 && self.ttl < token_exp_secs {
             return Err(ConfigError::Message(format!(
-                "token_bytes_cache.ttl ({}) must be 0 (cache disabled) or at least \
-                 status_list.token_exp_secs ({}) so cached signed bytes never expire mid-window",
+                "token_bytes_cache.ttl (APP_TOKEN_BYTES_CACHE__TTL, {}) must be 0 (cache disabled) \
+                 or at least status_list.token_exp_secs (APP_STATUS_LIST__TOKEN_EXP_SECS, {}) so \
+                 cached signed bytes never expire mid-window",
                 self.ttl, token_exp_secs
             )));
         }
@@ -1936,9 +1938,14 @@ mod tests {
             ("status_list.token_exp_secs", "900"),
         ])
         .expect_err("ttl between 0 and token_exp_secs must be rejected");
+        let mid_window_msg = mid_window.to_string();
         assert!(
-            mid_window.to_string().contains("token_bytes_cache.ttl"),
-            "unexpected error: {mid_window}"
+            mid_window_msg.contains("APP_TOKEN_BYTES_CACHE__TTL"),
+            "the refusal must name the APP_TOKEN_BYTES_CACHE__TTL env var: {mid_window_msg}"
+        );
+        assert!(
+            mid_window_msg.contains("token_bytes_cache.ttl"),
+            "unexpected error: {mid_window_msg}"
         );
 
         // 3. Database backend overrides (MySQL & SQLite)
