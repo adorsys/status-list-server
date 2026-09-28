@@ -124,6 +124,7 @@ pub(crate) mod status_list_history {
 
 pub(crate) type StatusListHistoryRecord = status_list_history::Model;
 
+#[allow(unreachable_pub)]
 pub(crate) mod status_list_allocations {
     use super::*;
 
