@@ -124,10 +124,10 @@ async fn build_status_list_token_inner(
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let cert_components = state
+    let signing_material = state
         .service
         .cert_provider()
-        .get_active_certificate()
+        .signing_material()
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?;
 
@@ -144,12 +144,10 @@ async fn build_status_list_token_inner(
     tokio::task::spawn_blocking(move || {
         let token_bytes = match accept.as_str() {
             ACCEPT_STATUS_LISTS_HEADER_CWT => {
-                let x5chain = cert_components
-                    .x5chain
-                    .ok_or(StatusListError::Unavailable)?;
+                let x5chain = cached_x5chain(signing_material.certificate_chain.as_deref())?;
                 issue_cwt(
                     &status_record,
-                    cert_components.signing_key,
+                    signing_material.signing_key,
                     x5chain,
                     aggregation_uri,
                     validity_window.0,
@@ -158,12 +156,12 @@ async fn build_status_list_token_inner(
                 )?
             }
             _ => {
-                let cert_chain = cert_components
+                let cert_chain = signing_material
                     .certificate_chain
                     .ok_or(StatusListError::Unavailable)?;
                 issue_jwt(
                     &status_record,
-                    cert_components.signing_key,
+                    signing_material.signing_key,
                     cert_chain,
                     aggregation_uri,
                     validity_window.0,
@@ -189,6 +187,51 @@ async fn build_status_list_token_inner(
     })
     .await
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
+}
+
+/// Decode a base64 DER certificate chain and build the CBOR `x5chain`
+/// protected-header value, following the status-list spec: a single certificate
+/// maps to a `ByteString`, multiple certificates to an `Array` of `ByteString`s.
+fn x5chain_value(chain: &[String]) -> Result<CborValue, StatusListError> {
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
+
+    let certs_der: Vec<Vec<u8>> = chain
+        .iter()
+        .map(|b64| {
+            BASE64_STANDARD
+                .decode(b64)
+                .map_err(|err| StatusListError::Backend(Box::new(err)))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let value = if certs_der.len() == 1 {
+        CborValue::Bytes(certs_der[0].clone())
+    } else {
+        CborValue::Array(certs_der.into_iter().map(CborValue::Bytes).collect())
+    };
+    Ok(value)
+}
+
+/// Return the CBOR `x5chain` value for the active certificate chain, decoding
+/// base64 at most once per distinct chain. Certificate chains change only on
+/// renewal, so a single-entry cache keeps the CWT hot path from re-decoding the
+/// (unchanged) chain on every request.
+fn cached_x5chain(chain: Option<&[String]>) -> Result<CborValue, StatusListError> {
+    let chain = chain.ok_or(StatusListError::Unavailable)?;
+
+    static CACHE: Mutex<Option<(Vec<String>, CborValue)>> = Mutex::new(None);
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((cached_chain, value)) = guard.as_ref()
+        && cached_chain == chain
+    {
+        return Ok(value.clone());
+    }
+
+    let value = x5chain_value(chain)?;
+    *guard = Some((chain.to_vec(), value.clone()));
+    Ok(value)
 }
 
 fn issue_cwt(
@@ -440,12 +483,13 @@ mod tests {
             let signer: Arc<dyn TokenSigner> =
                 Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
             let material =
-                crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer);
-            let components = material.into_certificate_components();
-            let x5chain = components.x5chain.expect("pre-built x5chain");
+                crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer)
+                    .expect("material");
+            let x5chain = x5chain_value(material.certificate_chain.as_deref().expect("chain"))
+                .expect("x5chain");
             let cwt_bytes = issue_cwt(
                 &record,
-                components.signing_key,
+                material.signing_key,
                 x5chain,
                 None,
                 1000,
@@ -481,59 +525,5 @@ mod tests {
                 })
                 .expect("CWT signature verifies with its public key");
         }
-    }
-
-    /// Hot-path CWT signing throughput benchmark.
-    ///
-    /// Skipped by default (`cargo test`); run explicitly with
-    /// `cargo test --lib -- --ignored server::handlers::status_list::utils::token::tests::benchmark_cwt_throughput`.
-    ///
-    /// Exercises `issue_cwt` with a pre-parsed x5chain (the zero-decode hot
-    /// path) across a fixed number of iterations and reports tokens/second. Run
-    /// against an earlier revision to compare before/after throughput.
-    #[test]
-    #[ignore]
-    fn benchmark_cwt_throughput() {
-        use std::time::Instant;
-
-        const ITERATIONS: usize = 20_000;
-
-        let record = sample_record();
-        let cert_chain = vec![base64::prelude::BASE64_STANDARD.encode(b"dummy-cert-der")];
-        let signer: Arc<dyn crate::domain::ports::TokenSigner> =
-            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap());
-        let material = crate::domain::ports::SigningMaterial::new(Some(cert_chain), signer);
-        let components = material.into_certificate_components();
-        let x5chain = components.x5chain.expect("pre-built x5chain");
-
-        let start = Instant::now();
-        let mut checksum = 0usize;
-        for _ in 0..ITERATIONS {
-            let bytes = issue_cwt(
-                &record,
-                components.signing_key.clone(),
-                x5chain.clone(),
-                None,
-                1000,
-                2000,
-                300,
-            )
-            .expect("issue_cwt succeeds");
-            checksum = checksum.wrapping_add(bytes.len());
-        }
-        let elapsed = start.elapsed();
-        let per_sec = ITERATIONS as f64 / elapsed.as_secs_f64();
-
-        // A sanity floor (tokens/second) that real hardware comfortably clears
-        // but a regression to per-request base64 re-decoding would not.
-        assert!(
-            per_sec > 1_000.0,
-            "CWT throughput unexpectedly low: {per_sec:.0} tokens/sec"
-        );
-        eprintln!(
-            "CWT signing throughput: {per_sec:.0} tokens/sec over {ITERATIONS} iterations ({} ms)",
-            elapsed.as_millis()
-        );
-        std::hint::black_box(checksum);
     }
 }

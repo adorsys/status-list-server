@@ -1037,7 +1037,7 @@ mod redis_tests {
                         )
                         .expect("generate test signing key"),
                     ),
-                ))
+                )?)
             }
         }
 
@@ -1142,7 +1142,7 @@ mod redis_tests {
                         )
                         .expect("generate test signing key"),
                     ),
-                ))
+                )?)
             }
         }
 

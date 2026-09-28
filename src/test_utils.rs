@@ -141,7 +141,7 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
         Ok(crate::domain::ports::SigningMaterial::new(
             Some(self.cert_chain.clone()),
             Arc::new(signing_key),
-        ))
+        )?)
     }
 }
 

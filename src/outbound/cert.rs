@@ -97,7 +97,7 @@ impl InlineCertificateProvider {
             material: Arc::new(SigningMaterial::new(
                 Some(certificate_chain),
                 Arc::new(signing_key),
-            )),
+            )?),
         })
     }
 }
@@ -123,10 +123,7 @@ async fn load_and_validate_signing_material(
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
-    Ok(SigningMaterial::new(
-        Some(certificate_chain),
-        Arc::new(signing_key),
-    ))
+    SigningMaterial::new(Some(certificate_chain), Arc::new(signing_key))
 }
 
 #[cfg(not(feature = "acme"))]

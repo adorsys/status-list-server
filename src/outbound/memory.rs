@@ -301,7 +301,7 @@ mod tests {
             Ok(crate::domain::ports::SigningMaterial::new(
                 None,
                 std::sync::Arc::new(key),
-            ))
+            )?)
         }
     }
 
