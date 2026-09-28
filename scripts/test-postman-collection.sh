@@ -8,6 +8,7 @@ API_ENDPOINT="${API_ENDPOINT:-http://localhost:8000}"
 POSTMAN_COLLECTION="${POSTMAN_COLLECTION:-postman/status-list-server.postman_collection.json}"
 POSTMAN_ENVIRONMENT="${POSTMAN_ENVIRONMENT:-postman/status-list-server.postman_environment.json}"
 NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
+NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 
 tmp_dir=""
 cleanup() {
@@ -25,7 +26,7 @@ require_command() {
 }
 
 wait_for_api() {
-  local deadline=$((SECONDS + 60))
+  local deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
   until curl -fsS "$API_ENDPOINT/health/live" >/dev/null 2>&1; do
     if (( SECONDS >= deadline )); then
       echo "Timed out waiting for status-list-server at $API_ENDPOINT" >&2
@@ -118,7 +119,13 @@ NODE
 
 require_command node
 require_command curl
-require_command newman
+
+if [[ -x "$ROOT_DIR/node_modules/.bin/newman" ]]; then
+  NEWMAN_COMMAND="$ROOT_DIR/node_modules/.bin/newman"
+else
+  require_command newman
+  NEWMAN_COMMAND="newman"
+fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/status-list-newman.XXXXXX")"
 collection_artifact="$tmp_dir/status-list-server.postman_collection.json"
@@ -127,7 +134,7 @@ environment_artifact="$tmp_dir/status-list-server.postman_environment.json"
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 wait_for_api
 
-newman run "$collection_artifact" \
+"$NEWMAN_COMMAND" run "$collection_artifact" \
   --environment "$environment_artifact" \
   --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
   --color off

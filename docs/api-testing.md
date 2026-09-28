@@ -50,6 +50,9 @@ The Postman/Newman and Microcks runners expect these host tools:
 Start the API first:
 
 ```bash
+APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
 cargo run
 ```
 
@@ -70,6 +73,9 @@ environment is written into the repository.
 Start the API first:
 
 ```bash
+APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
 cargo run
 ```
 
@@ -107,6 +113,7 @@ Useful environment overrides:
 | `API_NAME_VERSION`             | `Status List Server:0.1.0`                          | Microcks service reference, matching OpenAPI title and version.                                    |
 | `STATUS_LIST_AUTH_TOKEN`       | generated                                           | Existing management JWT to use instead of generating one.                                          |
 | `MICROCKS_OPERATIONS_HEADERS`  | generated Authorization header                      | Full Microcks operations headers JSON override.                                                    |
+| `NEWMAN_API_READY_TIMEOUT`     | `180`                                               | Maximum seconds to wait for the live API before running Newman.                                    |
 | `MICROCKS_READY_TIMEOUT`       | `180s`                                              | Maximum time to wait for the ephemeral Microcks container to start.                                |
 | `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                          |
 | `RUN_POSTMAN_CONFORMANCE`      | `false`                                             | Set to `true` to additionally try Microcks' Postman runner. The collection is imported either way. |

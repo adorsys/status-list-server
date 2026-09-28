@@ -419,14 +419,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake golang-go
-          npm install -g newman@6.2.1
+          npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Start in-memory server and run collection
         if: steps.api-changes.outputs.changed == 'true'
         run: |
           set -euo pipefail
 
-          cargo run --no-default-features --features memory > /tmp/status-list-server.log 2>&1 &
+          cargo build --no-default-features --features memory
+          APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+            APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
+            APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
+            target/debug/status-list-server > /tmp/status-list-server.log 2>&1 &
           server_pid=$!
           cleanup() {
             kill "$server_pid" >/dev/null 2>&1 || true

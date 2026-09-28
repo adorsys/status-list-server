@@ -92,7 +92,16 @@ publication, JWT/CWT retrieval, historical resolution, status updates, and
 aggregation, with scripts that assert status codes, schemas, and response
 headers.
 
-To run the Postman collection from the command line, start the server and run:
+To run the Postman collection from the command line, start the server with local static signing material:
+
+```bash
+APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
+cargo run
+```
+
+Then run the collection in another terminal:
 
 ```bash
 ./scripts/test-postman-collection.sh
