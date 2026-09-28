@@ -87,7 +87,7 @@ pub(crate) struct TokenCacheKey {
 
 /// An in-memory cache of fully signed, serialised status-list token bytes.
 ///
-/// Entries are keyed by [`TokenCacheKey`] and are valid for exactly the anchored
+/// Entries are keyed by `TokenCacheKey` and are valid for exactly the anchored
 /// token window `[window_start, window_start + exp_secs)`. Because `iat` is
 /// anchored to `window_start`, the bytes are identical for every request in the
 /// same window, so the cache lets a fresh `200` reuse a single sign per
