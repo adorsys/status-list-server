@@ -138,10 +138,19 @@ async fn build_status_list_token_inner(
     let accept = accept.to_string();
     let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
-    let validity_window = validity_window.unwrap_or_else(|| {
-        let iat = OffsetDateTime::now_utc().unix_timestamp();
-        (iat, iat + state.token_exp_secs as i64)
-    });
+    let validity_window = match validity_window {
+        Some(window) => window,
+        None => {
+            let iat = OffsetDateTime::now_utc().unix_timestamp();
+            let exp = iat
+                .checked_add(state.token_exp_secs as i64)
+                .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+                    iat,
+                    token_exp_secs: state.token_exp_secs,
+                })?;
+            (iat, exp)
+        }
+    };
     let token_ttl_secs = state.token_ttl_secs;
     let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
 
@@ -466,5 +475,30 @@ mod tests {
                 })
                 .expect("CWT signature verifies with its public key");
         }
+    }
+
+    #[tokio::test]
+    async fn default_validity_window_rejects_iat_plus_exp_overflow() {
+        // Synthetic issuance-time boundary: with a real (positive) `now`, an
+        // `APP_STATUS_LIST__TOKEN_EXP_SECS` of `i64::MAX` makes `iat + token_exp_secs`
+        // overflow the instant the default validity window is computed. The
+        // `checked_add` guard must fail closed instead of wrapping `exp` negative.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = i64::MAX as u64;
+
+        let err = build_status_list_token(
+            &state,
+            ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+        )
+        .await
+        .expect_err("a positive iat plus i64::MAX token_exp_secs must overflow and be rejected");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
     }
 }

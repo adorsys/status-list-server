@@ -260,6 +260,9 @@ impl IntoApiError for StatusListError {
                 Some("the service is currently unavailable. Please try again later".into()),
             ),
             StatusListError::Backend(err) => ApiError::internal(err),
+            StatusListError::TokenExpiryOverflow { .. } => ApiError::internal(
+                "token exp overflowed the configured token lifetime; check APP_STATUS_LIST__TOKEN_EXP_SECS",
+            ),
         }
     }
 }

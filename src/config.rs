@@ -1213,21 +1213,18 @@ pub struct StatusListConfig {
 
 impl StatusListConfig {
     /// Rejects token-lifetime values the spec forbids.
+    ///
+    /// This enforces only static, representation-level invariants: positive
+    /// values that fit in `i64`, and `ttl < exp`. It deliberately does NOT
+    /// compare `token_exp_secs` against the wall clock at startup: configuration
+    /// acceptance must not depend on the instant the process started, so an
+    /// otherwise-valid value would silently change behaviour one second later.
+    /// Overflow of `iat + token_exp_secs` at issuance time is instead guarded by
+    /// `checked_add` at every expiry construction, which fails closed instead of
+    /// wrapping `exp` negative (see `build_snapshot` and the token validity window).
     fn validate(&self) -> Result<(), ConfigError> {
         validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
         validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
-        // The exp claim is `iat + token_exp_secs`; a value at or near i64::MAX would
-        // overflow that addition (wrapping exp negative in release, panicking in debug).
-        // Reject values that cannot be safely added to the current issuance timestamp.
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        if self.token_exp_secs as i64 > i64::MAX - now {
-            return Err(ConfigError::Message(format!(
-                "APP_STATUS_LIST__TOKEN_EXP_SECS ({}) is too large: it cannot be safely added \
-                 to the current issuance timestamp without overflowing i64 (i64::MAX = {})",
-                self.token_exp_secs,
-                i64::MAX
-            )));
-        }
         if self.token_ttl_secs >= self.token_exp_secs {
             return Err(ConfigError::Message(format!(
                 "APP_STATUS_LIST__TOKEN_TTL_SECS ({}) must be less than \
@@ -2158,24 +2155,18 @@ mod tests {
             "token_ttl_secs above i64::MAX should fail config loading"
         );
 
-        // Exact i64::MAX still overflows `iat + token_exp_secs` for any positive iat,
-        // so it must be rejected too (regression for the overflow-on-issuance bug).
+        // Exact i64::MAX is a valid representation (it fits in i64 and ttl < exp),
+        // so config loading accepts it. Overflow of `iat + token_exp_secs` is not a
+        // startup concern: it must not depend on the clock, and is instead caught by
+        // `checked_add` at every expiry construction (see the issuance-time boundary
+        // regression tests in the token and snapshot code). This asserts we do not
+        // reintroduce a wall-clock-dependent rejection here.
         let exact_i64_max_exp =
             Config::load_from_overrides(&[("status_list.token_exp_secs", "9223372036854775807")]);
         assert!(
-            exact_i64_max_exp.is_err(),
-            "token_exp_secs == i64::MAX should fail config loading"
-        );
-
-        // A realistic upper bound (e.g. 10 years of seconds) must still load cleanly
-        // alongside a valid ttl, ensuring the overflow guard does not reject sane values.
-        let large_but_safe = Config::load_from_overrides(&[
-            ("status_list.token_exp_secs", "315360000"),
-            ("status_list.token_ttl_secs", "86400"),
-        ]);
-        assert!(
-            large_but_safe.is_ok(),
-            "a large-but-safe token_exp_secs should load without error"
+            exact_i64_max_exp.is_ok(),
+            "token_exp_secs == i64::MAX is a valid representation and should load; \
+             overflow is guarded at issuance time, not config load"
         );
 
         // token_ttl_secs >= token_exp_secs leaves no usable token lifetime.

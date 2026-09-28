@@ -57,6 +57,12 @@ pub enum StatusListError {
     Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// `iat + token_exp_secs` overflows `i64`; the configured token lifetime
+    /// cannot be added to the issuance timestamp without wrapping `exp` negative.
+    #[error(
+        "token exp ({iat} + {token_exp_secs}) overflows i64; configured token lifetime is too large for the issuance timestamp"
+    )]
+    TokenExpiryOverflow { iat: i64, token_exp_secs: u64 },
 }
 
 /// Represents the status of a specific index in a status list.
