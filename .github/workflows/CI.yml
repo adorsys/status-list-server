@@ -757,7 +757,7 @@ jobs:
       - name: Validate Compose Collector config
         run: |
           docker run --rm \
-            -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
+            -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
             otel/opentelemetry-collector-contrib:0.158.0 \
             validate --config /etc/otelcol/config.yaml
 
