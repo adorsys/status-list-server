@@ -1,7 +1,8 @@
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use axum::{
+    body::Bytes,
     extract::rejection::QueryRejection,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -24,8 +25,9 @@ use super::utils::{
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{content_hash, generate_historical_etag, generate_token_etag},
     token::build_status_list_token,
-    token_cache::{CachedToken, TokenEncoding, signer_fingerprint, token_bytes_cache_key},
+    token_cache::signer_fingerprint,
 };
+use crate::server::cache::{CachedToken, TokenCacheKey, TokenEncoding};
 
 /// Conditional-revalidation SLI counter. Cached after first use (the same
 /// pattern as `token.rs`): the global meter provider is installed by
@@ -180,7 +182,7 @@ async fn get_status_list_at(
                 .total
                 .add(1, &[KeyValue::new("outcome", "modified")]);
             Ok(build_ok_response(
-                &token_bytes,
+                token_bytes,
                 token_encoding,
                 &accept_type,
                 &current_etag,
@@ -211,7 +213,7 @@ async fn get_or_build_live_token(
     window_start: i64,
     now: i64,
     client_accepts_gzip: bool,
-) -> Result<(Arc<Vec<u8>>, Option<&'static str>, String), ApiError> {
+) -> Result<(Bytes, Option<&'static str>, String), ApiError> {
     let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
         "cwt"
     } else {
@@ -231,17 +233,17 @@ async fn get_or_build_live_token(
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
     let signer = signer_fingerprint(&signing_material);
     let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
-    let key = token_bytes_cache_key(
-        list_id,
-        &hash,
-        &signer,
+    let key = TokenCacheKey {
+        list_id: list_id.to_string(),
+        content_hash: hash,
+        signer_fingerprint: signer,
         window_start,
-        format,
+        format: format.to_string(),
         encoding,
-        aggregation_uri,
-        state.token_ttl_secs,
-        state.token_exp_secs,
-    );
+        aggregation_uri: aggregation_uri.to_string(),
+        token_ttl_secs: state.token_ttl_secs,
+        token_exp_secs: state.token_exp_secs,
+    };
     let exp_secs = state.token_exp_secs as i64;
     let validity_window = (window_start, window_start.saturating_add(exp_secs));
 
@@ -260,7 +262,7 @@ async fn get_or_build_live_token(
                 )
                 .await?;
                 Ok::<CachedToken, ApiError>(CachedToken {
-                    bytes: Arc::new(bytes),
+                    bytes: Bytes::from(bytes),
                     encoding: enc,
                 })
             }
@@ -282,7 +284,7 @@ async fn get_or_build_live_token(
                 signing_material,
             )
             .await?;
-            (Arc::new(bytes), enc)
+            (Bytes::from(bytes), enc)
         }
     };
     let etag = generate_token_etag(&bytes);
@@ -291,14 +293,14 @@ async fn get_or_build_live_token(
 
 /// Build a `200 OK` status-list token response from already-signed bytes.
 fn build_ok_response(
-    token_bytes: &Arc<Vec<u8>>,
+    token_bytes: Bytes,
     token_encoding: Option<&'static str>,
     accept_type: &str,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
 ) -> Response {
-    let mut response = Response::new((**token_bytes).clone().into());
+    let mut response = Response::new(axum::body::Body::from(token_bytes));
     *response.status_mut() = StatusCode::OK;
     let h = response.headers_mut();
     h.insert(

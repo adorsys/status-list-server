@@ -1,12 +1,12 @@
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
-/// Strong ETag for the *live* representation, derived from the actual signed
+/// Strong ETag for the live representation, derived from the actual signed
 /// token bytes that the server serves.
 ///
 /// Because the bytes for a given `(list, window_start, format, encoding)` are
 /// identical across the whole anchored window (the token's `iat` is pinned to
-/// `window_start`), the strong ETag *proves which token the client holds*: a
+/// `window_start`), the strong ETag proves which token the client holds: a
 /// matching `If-None-Match` guarantees the client's cached token is byte-for-byte
 /// the same as the current one, and since that token expires at
 /// `window_start + exp_secs` (which lies strictly after the window), a 304 never
