@@ -82,6 +82,7 @@ tests:
               severity: "warn"
               sli: "cache_hit_ratio"
               namespace: "ns1"
+              team: "statuslist"
             exp_annotations:
               summary: "Redis status-list cache operations are failing"
               description: "Redis cache error rate: 1"
