@@ -461,8 +461,7 @@ mod tests {
         for key in &test_keys {
             let signer: Arc<dyn TokenSigner> =
                 Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
-            let token =
-                issue_jwt(&record, signer, &cert_chain, None, 1000, 2000, 300).unwrap();
+            let token = issue_jwt(&record, signer, &cert_chain, None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
             assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));

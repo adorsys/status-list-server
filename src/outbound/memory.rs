@@ -293,7 +293,8 @@ mod tests {
     impl CertificateProvider for DummyCertProvider {
         async fn signing_material(
             &self,
-        ) -> Result<std::sync::Arc<crate::domain::ports::SigningMaterial>, StatusListError> {
+        ) -> Result<std::sync::Arc<crate::domain::ports::SigningMaterial>, StatusListError>
+        {
             let key = crate::utils::crypto::SigningKey::generate(
                 crate::domain::models::token::SigningAlgorithm::Es256,
             )

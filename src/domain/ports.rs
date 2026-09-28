@@ -234,4 +234,3 @@ mod tests {
         assert!(SigningMaterial::new(Some(chain), signer()).is_ok());
     }
 }
-
