@@ -6,7 +6,8 @@ global:
 
 # Optional annotations merged onto the Pod template metadata (top-level, distinct from
 # statuslist.podLabels which are merged into the pod LABELS). Consumed by deployment.yaml.
-# The chart always emits its own prometheus.io/scrape annotations; these are merged on top.
+# The prometheus.io/scrape annotations are emitted separately, and only when
+# statuslist.prometheusAnnotations is enabled; these are merged on top of them.
 # Defaults to an empty map; overlays supply the annotations.
 # Values may be strings, booleans, integers, or numbers.
 podAnnotations: {}

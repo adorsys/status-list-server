@@ -14,10 +14,11 @@ Guard rails enforced at render time:
   (APP_DATABASE__PASSWORD_FILE). secretMounts fileEnv is validated against mounted items.
 
 Replicas are omitted when autoscaling.enabled=true so the HPA controls the count.
-Pod annotations are always emitted with prometheus.io/scrape hints (for annotation-based
-scrape discovery) plus optional TOP-LEVEL .Values.podAnnotations (a documented empty-by-default
-map - note it is distinct from statuslist.podLabels, which are merged into the pod template
-LABELS).
+The prometheus.io/scrape + port + path Pod annotations are emitted only when
+statuslist.prometheusAnnotations is true (they are OFF by default: kube-prometheus-stack
+discovers targets via the ServiceMonitor, not annotations). These merge with the optional
+TOP-LEVEL .Values.podAnnotations (a documented empty-by-default map - note it is distinct
+from statuslist.podLabels, which are merged into the pod template LABELS).
 */}}
 {{- if .Values.statuslist.enabled }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}

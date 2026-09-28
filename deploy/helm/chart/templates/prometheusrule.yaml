@@ -77,17 +77,16 @@ spec:
 
     - name: status-list-server-slo-alerts
       rules:
-        - alert: Watchdog
-          expr: vector(1)
-          labels:
-            severity: none
-            team: statuslist
-            service: status-list-server
-            namespace: {{ .Release.Namespace | quote }}
-          annotations:
-            summary: "Prometheus alerting pipeline is healthy (Watchdog)"
-            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md"
-            dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
+        # NOTE: this deployed rule intentionally ships NO Watchdog alert. The shared
+        # kube-prometheus-stack 91.4.0 already deploys its own always-firing Watchdog;
+        # a per-release copy would duplicate it, and because production leaves the
+        # optional app AlertmanagerConfig disabled, the merged platform's matcher-free
+        # fallback would receive this app's Watchdog as a normal notification instead
+        # of the dead-man's-switch receiver. Application scrape health is covered by
+        # StatusListMetricsAbsent below. The standalone Docker rules
+        # (deploy/observability/prometheus/rules/alerting.rules.yml) retain their own
+        # Watchdog for the self-hosted pipeline. CI's drift guard documents this
+        # intentional difference.
         - alert: StatusListMetricsAbsent
           # Alert on the scrape-generated `up` series, not the request histogram:
           # /metrics and health routes are excluded from the HTTP metrics

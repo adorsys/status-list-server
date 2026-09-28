@@ -19,7 +19,7 @@
     "podAnnotations": {
       "type": "object",
       "title": "Pod annotations",
-      "description": "Optional annotations merged onto the Pod template metadata (top-level, distinct from statuslist.podLabels which go into the pod labels). Consumed by deployment.yaml on top of the always-emitted prometheus.io/scrape annotations. Defaults to an empty map; overlays supply the annotations. Values may be strings or booleans.",
+      "description": "Optional annotations merged onto the Pod template metadata (top-level, distinct from statuslist.podLabels which go into the pod labels). Consumed by deployment.yaml in addition to the prometheus.io/scrape annotations, which are emitted only when statuslist.prometheusAnnotations is enabled. Defaults to an empty map; overlays supply the annotations. Values may be strings or booleans.",
       "additionalProperties": {
         "type": ["string", "boolean", "integer", "number"]
       }
@@ -80,6 +80,11 @@
           "title": "Pod labels",
           "description": "Extra labels merged onto the Pod template metadata. For Azure Workload Identity, azure.workload.identity/use must be a quoted string, e.g. \"true\", not a boolean.",
           "additionalProperties": { "type": "string" }
+        },
+        "prometheusAnnotations": {
+          "type": "boolean",
+          "title": "Emit prometheus.io/scrape pod annotations",
+          "description": "When true, deployment.yaml adds prometheus.io/scrape + port + path Pod annotations. Defaults to false on purpose: kube-prometheus-stack does NOT scrape arbitrary annotation-marked Pods (the ServiceMonitor is the authoritative discovery method). Enable only for a separately configured scraper that relies on these annotations."
         },
         "image": {
           "type": "object",
@@ -748,6 +753,20 @@
           "type": "object",
           "title": "PrometheusRule labels",
           "description": "Selector labels required by your Prometheus RuleSelector, e.g. release: kube-prometheus-stack."
+        }
+      }
+    },
+    "grafanaDashboard": {
+      "type": "object",
+      "title": "Grafana dashboard provisioning",
+      "description": "Grafana dashboard provisioning for the central (shared) Grafana. When enabled, renders the generated SLO dashboard as a ConfigMap labelled grafana_dashboard: \"1\" (override via labels). The central Grafana sidecar auto-discovers it and provisions the dashboard.",
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Render the dashboard ConfigMap" },
+        "labels": {
+          "type": "object",
+          "title": "Dashboard ConfigMap labels",
+          "description": "Additional labels required by your Grafana dashboards sidecar, e.g. grafana_dashboard: \"1\" + release: kube-prometheus-stack.",
+          "additionalProperties": { "type": "string" }
         }
       }
     },
