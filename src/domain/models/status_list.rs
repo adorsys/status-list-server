@@ -2,6 +2,7 @@
 
 use crate::domain::models::credential::Issuer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 
 /// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
@@ -33,6 +34,8 @@ pub enum StatusListError {
     TooManyStatuses { count: usize, max: usize },
     #[error("status index {index} exceeds configured maximum {max}")]
     IndexTooLarge { index: i32, max: i32 },
+    #[error("duplicate status index {index} in statuses array")]
+    DuplicateIndex { index: i32 },
     /// The issuer already holds its configured maximum number of status lists.
     #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
     QuotaExceeded { count: u64, max: u64 },
@@ -133,6 +136,7 @@ impl StatusList {
             });
         }
 
+        validate_unique_indices(&status_updates)?;
         let bits = determine_bits(&status_updates, None)?;
         let len = calculate_array_size(&status_updates, bits)?;
         let mut status_array = vec![0u8; len];
@@ -148,6 +152,7 @@ impl StatusList {
             return Ok(self.clone());
         }
 
+        validate_unique_indices(&status_updates)?;
         let old_bits = self.bits as usize;
         // Draft-21 only permits 1, 2, 4, or 8. Older rows with wider values
         // are repacked when their stored values are still representable.
@@ -167,6 +172,10 @@ impl StatusList {
                     status,
                 })
                 .collect();
+            // The pre-existing entries are re-emitted first and the caller's
+            // updates appended after them: an index present in both must end up
+            // with the *update's* value, so this widening path relies on
+            // [`apply_updates`] letting the last write win for any given index.
             full_statuses.extend(status_updates);
             return Self::create_with_bits(full_statuses, new_bits);
         }
@@ -255,6 +264,24 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
             unsupported_status_value_message(*value),
         )),
     }
+}
+
+/// Reject duplicate indices within a single update payload.
+///
+/// Only the caller-supplied entries are validated, never the entries a widening
+/// [`StatusList::update`] re-derives from the existing list: overlapping an
+/// already-set index is a legitimate "change that position", so this check is
+/// scoped to the request itself.
+pub(crate) fn validate_unique_indices(
+    status_updates: &[StatusEntry],
+) -> Result<(), StatusListError> {
+    let mut seen_indices: HashSet<i32> = HashSet::new();
+    for entry in status_updates {
+        if !seen_indices.insert(entry.index) {
+            return Err(StatusListError::DuplicateIndex { index: entry.index });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn is_application_specific_status_value(value: u32) -> bool {
@@ -983,6 +1010,85 @@ mod tests {
             list.update(vec![entry(-5, Status::Invalid)]),
             Err(StatusListError::InvalidIndex)
         ));
+    }
+
+    #[test]
+    fn create_rejects_duplicate_indices() {
+        let updates = vec![entry(0, Status::Valid), entry(0, Status::Invalid)];
+        assert!(matches!(
+            StatusList::create(updates),
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn update_rejects_duplicate_indices() {
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = list.update(vec![entry(1, Status::Invalid), entry(1, Status::Suspended)]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 1 })
+        ));
+    }
+
+    /// Duplicate detection runs before the negative-index check, so a payload
+    /// whose duplicate is also negative must report `DuplicateIndex`, never
+    /// `InvalidIndex`. This pins that ordering in both create and update.
+    #[test]
+    fn duplicate_negative_index_reports_duplicate_before_invalid() {
+        let duplicates = vec![entry(-1, Status::Valid), entry(-1, Status::Invalid)];
+
+        assert!(matches!(
+            StatusList::create(duplicates.clone()),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        assert!(matches!(
+            list.update(duplicates),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+    }
+
+    /// Duplicate detection must not depend on the duplicates being adjacent:
+    /// a duplicate with other distinct indices in between is still rejected.
+    #[test]
+    fn create_rejects_non_adjacent_duplicate_indices() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+            entry(0, Status::Valid),
+        ]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    /// Re-sending the current value on a legacy-width row must still repack the
+    /// list to a supported width, so the result differs from the input. This
+    /// keeps the service's no-op guard (which compares whole lists) from
+    /// swallowing that one-time normalisation write.
+    #[test]
+    fn update_value_identical_on_legacy_width_repacks() {
+        let legacy = from_raw(&[8, 0], 3);
+        let updated = legacy
+            .update(vec![entry(1, Status::Invalid)])
+            .expect("re-sending the current value on a legacy row must succeed");
+
+        assert_eq!(
+            updated.bits, 1,
+            "the legacy 3-bit row must be repacked to a supported 1-bit row"
+        );
+        assert_eq!(
+            decompress(&updated.lst),
+            vec![0b0000_0010],
+            "index 1 = Invalid must survive the repack at 1 bit"
+        );
+        assert_ne!(
+            updated, legacy,
+            "the repacked row must differ from the legacy input so a write happens"
+        );
     }
 
     #[test]

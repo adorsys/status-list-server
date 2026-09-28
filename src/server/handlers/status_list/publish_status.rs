@@ -514,6 +514,39 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "index_too_large");
+    }
+
+    #[tokio::test]
+    async fn test_publish_status_rejects_duplicate_indices() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        let result = publish_status(
+            State(app_state),
+            authenticated_issuer("issuer"),
+            Path(token_id),
+            Json(StatusesRequest {
+                statuses: vec![
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::INVALID,
+                    },
+                    RequestStatusEntry {
+                        index: 0,
+                        status: RequestStatus::SUSPENDED,
+                    },
+                ],
+            }),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected duplicate index update to be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "duplicate_index");
     }
 
     #[tokio::test]

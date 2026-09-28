@@ -448,7 +448,10 @@ mod tests {
             .update_statuses(
                 &Issuer("other-issuer".into()),
                 "id",
-                Vec::new(),
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Invalid,
+                }],
                 900,
                 100_000,
                 5000,
@@ -457,6 +460,413 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
+    }
+
+    /// An empty PATCH is a successful no-op: it must not advance the status
+    /// list version (`updated_at`) and must not insert a duplicate history
+    /// snapshot. Re-submitting the current value at an existing index behaves
+    /// the same way (see `noop_update_with_identical_values`).
+    #[tokio::test]
+    async fn empty_update_is_noop_without_version_advance_or_snapshot() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        // Keep a handle to the same backing map the service will share with the
+        // lists repo, so we can count snapshots after the no-op update.
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let published = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await;
+
+        let landed = result.expect("an empty update must succeed as a no-op");
+
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.updated_at, published.updated_at,
+            "an empty update must not advance the status list version"
+        );
+        assert_eq!(
+            landed.updated_at, published.updated_at,
+            "the returned record must carry the unchanged version"
+        );
+        assert_eq!(
+            snapshots.read().await.len(),
+            1,
+            "only the publish snapshot may exist; an empty update must not insert a duplicate"
+        );
+    }
+
+    /// The redundant-write guard must catch value-identical updates too, not
+    /// just the literal empty array: re-submitting the current status at an
+    /// existing index must be a successful no-op and must not insert a snapshot.
+    #[tokio::test]
+    async fn noop_update_with_identical_values() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let before = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Re-submitting index 0 = VALID, which is already its current value.
+        service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .expect("an identical update must succeed as a no-op");
+
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.updated_at, before.updated_at,
+            "re-submitting identical values must not advance the version"
+        );
+        assert_eq!(after.status_list, before.status_list);
+        assert_eq!(
+            snapshots.read().await.len(),
+            1,
+            "an identical update must not insert a redundant snapshot"
+        );
+    }
+
+    /// The redundant-write guard must only swallow updates that leave the list
+    /// byte-for-byte identical. A mixed payload — one entry unchanged, one
+    /// changed — must still land: `updated_at` advances and a second snapshot is
+    /// written. This pins the behaviour so a later "optimisation" that skips the
+    /// write when *any* entry is unchanged would fail.
+    #[tokio::test]
+    async fn mixed_update_advances_version_and_writes_snapshot() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Valid,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::Valid,
+                    },
+                ],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let before = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Keep index 0 = VALID but change index 1 to INVALID.
+        service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Valid,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::Invalid,
+                    },
+                ],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .expect("a mixed update that changes the list must land");
+
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.updated_at > before.updated_at,
+            "a mixed update that changes the list must advance the version"
+        );
+        assert_ne!(after.status_list, before.status_list);
+        assert_eq!(
+            snapshots.read().await.len(),
+            2,
+            "the publish snapshot plus the changed update must both be retained"
+        );
+    }
+
+    /// Patching an index past the end of the list with VALID grows the list, so
+    /// the write must land and the version must bump. Readers treat an index
+    /// outside the list differently from an index whose value is 0, so this must
+    /// not collapse into a no-op even though the new slot's value is 0.
+    #[tokio::test]
+    async fn patch_past_end_grows_list_and_bumps_version() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let snapshot_repo = MemoryStatusListSnapshotRepo::default();
+        let snapshots = snapshot_repo.values.clone();
+        let lists = repo.clone().with_snapshot(&snapshot_repo);
+        let service = create_test_service(lists, cache, Some(snapshot_repo));
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                vec![StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let before = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+
+        service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![StatusEntry {
+                    index: 100,
+                    status: Status::Valid,
+                }],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await
+            .expect("growing the list with a padding write must land");
+
+        let after = service
+            .status_list_repo()
+            .find("id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.updated_at > before.updated_at,
+            "growing the list must advance the version, not become a no-op"
+        );
+        assert_ne!(after.status_list, before.status_list, "the list must grow");
+        assert_eq!(
+            snapshots.read().await.len(),
+            2,
+            "the growth write must produce a second snapshot"
+        );
+    }
+
+    /// Duplicate indices in a single update payload must be rejected outright.
+    #[tokio::test]
+    async fn update_rejects_duplicate_indices() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let result = service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Invalid,
+                    },
+                    StatusEntry {
+                        index: 0,
+                        status: Status::Suspended,
+                    },
+                ],
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    /// The request-shape bound (index bound) is checked before duplicate indices
+    /// in `update_statuses`, so a payload that is both over `max_status_index`
+    /// and internally duplicated must surface `index_too_large`, never
+    /// `duplicate_index`. This pins the ordering so reordering those two calls
+    /// becomes a deliberate, test-breaking change.
+    #[tokio::test]
+    async fn update_reorders_duplicate_after_index_bound() {
+        let repo = MemoryStatusLists::default();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        service
+            .publish_status_list(
+                "id".into(),
+                Issuer("issuer".into()),
+                "https://example/id".into(),
+                Vec::new(),
+                900,
+                100_000,
+                5_000,
+                usize::MAX,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let result = service
+            .update_statuses(
+                &Issuer("issuer".into()),
+                "id",
+                vec![
+                    StatusEntry {
+                        index: 999_999,
+                        status: Status::Valid,
+                    },
+                    StatusEntry {
+                        index: 999_999,
+                        status: Status::Invalid,
+                    },
+                ],
+                900,
+                10, // max_status_index
+                5_000,
+                usize::MAX,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(StatusListError::IndexTooLarge {
+                index: 999_999,
+                max: 10
+            })
+        ));
     }
 
     fn list_record(list_id: &str, issuer: &str) -> StatusListRecord {

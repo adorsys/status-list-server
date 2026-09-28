@@ -18,8 +18,23 @@ Egress:
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}
 {{- $backend := include "status-list-server-chart.dbBackend" . -}}
 {{- $databaseEgress := .Values.statuslist.networkPolicy.databaseEgress | default list -}}
+{{- $cacheEgress := .Values.statuslist.networkPolicy.cacheEgress | default list -}}
+{{- $env := .Values.statuslist.env | default dict -}}
+{{- $cacheBackend := (get $env "APP_CACHE__BACKEND" | default "memory" | toString | trim | lower) -}}
+{{- $cachePortValue := (get $env "APP_CACHE__PORT" | default "" | toString | trim) -}}
+{{- $cacheTls := (get $env "APP_CACHE__TLS" | default "false" | toString | trim | lower) -}}
+{{- $cachePort := 6379 -}}
+{{- if eq $cacheTls "true" -}}
+{{- $cachePort = 6380 -}}
+{{- end -}}
+{{- if ne $cachePortValue "" -}}
+{{- $cachePort = $cachePortValue | int -}}
+{{- end -}}
 {{- if and (eq $backend "mysql") (empty $databaseEgress) }}
 {{- fail "statuslist.networkPolicy.databaseEgress must be set when NetworkPolicy is enabled with APP_DATABASE__BACKEND=mysql because this chart does not deploy the database" }}
+{{- end }}
+{{- if and (eq $cacheBackend "redis") (empty $cacheEgress) }}
+{{- fail "statuslist.networkPolicy.cacheEgress must be set when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis because this chart does not deploy Redis" }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -59,6 +74,13 @@ spec:
         {{- with .Values.statuslist.networkPolicy.egressInternal }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+    {{- if not (empty $cacheEgress) }}
+    - ports:
+        - port: {{ $cachePort }}
+          protocol: TCP
+      to:
+        {{- toYaml $cacheEgress | nindent 8 }}
+    {{- end }}
     - ports:
         - port: 443
           protocol: TCP

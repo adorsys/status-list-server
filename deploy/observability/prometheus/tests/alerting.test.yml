@@ -62,6 +62,28 @@ tests:
         alertname: CacheHitRatioLow
         exp_alerts: []
 
+  # Redis-backed pods continue serving with lazy reconnect after cache
+  # failures, and should expose sustained Redis cache errors directly.
+  - interval: 1m
+    input_series:
+      - series: >-
+          status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns1",cache="status_list",backend="redis",operation="get"}
+        values: '0+60x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RedisCacheErrors
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              sli: "cache_hit_ratio"
+              namespace: "ns1"
+            exp_annotations:
+              summary: "Redis status-list cache operations are failing"
+              description: "Redis cache error rate: 1"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cache-hit-ratio.md"
+              dashboard_url: "http://localhost:3000/d/status-list-slo"
+
   # Burn-rate model correctness: a MODERATE sustained error rate (0.05) is above
   # the slow-burn 6x threshold (0.030) but below the fast-burn 14.4x threshold
   # (0.072) on every window. It must fire ONLY the slow-burn WARN, and the
@@ -404,4 +426,3 @@ tests:
       - eval_time: 400m
         alertname: CertRenewalErrorBudgetCritical
         exp_alerts: []
-

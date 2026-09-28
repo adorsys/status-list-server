@@ -56,6 +56,20 @@ services:
     networks:
       - status-list-network
 
+  redis:
+    image: redis:8.10-alpine
+    restart: always
+    container_name: status-list-redis
+    profiles:
+      - redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - status-list-network
+
   challtestsrv:
     image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10
     command: -http01 "" -https01 "" -tlsalpn01 ""
@@ -83,7 +97,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws}
+        FEATURES: ${FEATURES:-postgres,aws,redis}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -99,6 +113,9 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
+      APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
+      APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
+      APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
       - 8000:8000
     depends_on:
