@@ -244,6 +244,18 @@ impl IntoApiError for StatusListError {
                 "index_out_of_range",
                 format!("status index {index} is outside the fixed status list size {size}"),
             ),
+            StatusListError::InvalidSize { size, max } => ApiError::bad_request(
+                "invalid_size",
+                format!("status list size {size} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::InvalidAllocationCount { count, max } => ApiError::bad_request(
+                "invalid_count",
+                format!("allocation count {count} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::IndexNotAllocated { index } => ApiError::conflict(
+                "index_not_allocated",
+                format!("status index {index} has not been allocated"),
+            ),
             StatusListError::AllocationExhausted => ApiError::bad_request(
                 "allocation_exhausted",
                 "status list does not have enough unallocated indices",

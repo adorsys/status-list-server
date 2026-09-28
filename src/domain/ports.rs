@@ -48,6 +48,15 @@ pub trait StatusListRepo: Send + Sync + 'static {
         max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError>;
 
+    /// Insert a new status list and atomically reserve any initial indices that
+    /// were set by the publish request.
+    async fn insert_with_allocations(
+        &self,
+        status_list: StatusListRecord,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError>;
+
     /// Concurrently update an existing status list record matching `expected_updated_at`.
     async fn update(
         &self,
@@ -72,6 +81,16 @@ pub trait StatusListRepo: Send + Sync + 'static {
         max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError>;
 
+    /// Insert a new status list, atomically record its initial snapshot, and
+    /// reserve any initial indices set by the publish request.
+    async fn insert_with_snapshot_and_allocations(
+        &self,
+        status_list: StatusListRecord,
+        snapshot: StatusListSnapshot,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError>;
+
     /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
     /// starting strictly after `after`.
     async fn list_uris(
@@ -86,8 +105,15 @@ pub trait StatusListRepo: Send + Sync + 'static {
         &self,
         list_id: &str,
         count: u32,
-        size: Option<u32>,
+        limit: u32,
     ) -> Result<Vec<i32>, StatusListError>;
+
+    /// Return the first requested index that has not been allocated, if any.
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError>;
 
     /// Record already-chosen indices as allocated for a newly published list.
     async fn record_allocated_indices(

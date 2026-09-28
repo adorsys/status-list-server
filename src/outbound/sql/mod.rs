@@ -108,6 +108,18 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
+    async fn insert_with_allocations(
+        &self,
+        record: StatusListRecord,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        self.store
+            .insert_one_with_allocations(record.into(), allocated_indices, max_lists_per_issuer)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn update(
         &self,
         record: StatusListRecord,
@@ -145,6 +157,24 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
+    async fn insert_with_snapshot_and_allocations(
+        &self,
+        record: StatusListRecord,
+        snapshot: StatusListSnapshot,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        self.store
+            .insert_one_with_snapshot_and_allocations(
+                record.into(),
+                snapshot.into(),
+                allocated_indices,
+                max_lists_per_issuer,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
     async fn list_uris(
         &self,
         after: Option<&str>,
@@ -161,10 +191,21 @@ impl StatusListRepo for SqlStatusListRepo {
         &self,
         list_id: &str,
         count: u32,
-        size: Option<u32>,
+        limit: u32,
     ) -> Result<Vec<i32>, StatusListError> {
         self.store
-            .allocate_indices(list_id, count, size)
+            .allocate_indices(list_id, count, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError> {
+        self.store
+            .first_unallocated_index(list_id, indices)
             .await
             .map_err(Into::into)
     }

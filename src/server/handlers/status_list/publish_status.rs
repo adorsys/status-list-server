@@ -262,6 +262,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_route_rejects_zero_size_before_building_list() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/statuses/",
+                put(publish_status_route),
+            )
+            .with_state(app_state);
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!("/status-lists/{token_id}/statuses/"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"statuses":[],"size":0}"#.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_size");
+    }
+
+    #[tokio::test]
+    async fn publish_route_rejects_size_above_configured_index_limit() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        app_state.max_status_index = 7;
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/statuses/",
+                put(publish_status_route),
+            )
+            .with_state(app_state);
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!("/status-lists/{token_id}/statuses/"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"statuses":[],"size":9}"#.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_size");
+    }
+
+    #[tokio::test]
+    async fn fixed_size_update_rejects_unallocated_index() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        app_state
+            .service
+            .publish_status_list_with_options(
+                token_id.clone(),
+                Issuer("issuer".to_string()),
+                format!("https://example.test/{token_id}"),
+                vec![],
+                Some(8),
+                None,
+                app_state.token_exp_secs,
+                app_state.max_status_index,
+                app_state.max_statuses_per_request,
+                app_state.max_serialized_list_size,
+                app_state.max_lists_per_issuer,
+            )
+            .await
+            .unwrap();
+
+        let err = app_state
+            .service
+            .update_statuses(
+                &Issuer("issuer".to_string()),
+                &token_id,
+                vec![crate::domain::models::status_list::StatusEntry {
+                    index: 0,
+                    status: crate::domain::models::status_list::Status::Invalid,
+                }],
+                app_state.token_exp_secs,
+                app_state.max_status_index,
+                app_state.max_statuses_per_request,
+                app_state.max_serialized_list_size,
+            )
+            .await
+            .unwrap_err();
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.error, "index_not_allocated");
+    }
+
+    #[tokio::test]
     async fn test_token_conflict() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;

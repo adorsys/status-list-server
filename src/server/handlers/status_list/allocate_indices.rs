@@ -36,7 +36,13 @@ pub async fn allocate_indices(
     let issuer = principal.into();
     let indices = appstate
         .service
-        .allocate_indices(&issuer, &list_id, payload.count)
+        .allocate_indices(
+            &issuer,
+            &list_id,
+            payload.count,
+            appstate.max_status_index,
+            appstate.max_statuses_per_request,
+        )
         .await?;
 
     Ok((StatusCode::CREATED, Json(AllocationResponse { indices })).into_response())
@@ -129,5 +135,53 @@ mod tests {
         let body = to_bytes(exhausted.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "allocation_exhausted");
+    }
+
+    #[tokio::test]
+    async fn allocation_route_rejects_zero_and_over_limit_counts() {
+        let list_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        app_state.max_statuses_per_request = 2;
+        app_state
+            .service
+            .status_list_repo()
+            .insert(
+                StatusListRecord {
+                    list_id: list_id.clone(),
+                    issuer: Issuer("issuer".to_string()),
+                    status_list: StatusList::create_with_options(vec![], Some(8), Status::Valid)
+                        .unwrap(),
+                    sub: format!("https://example.test/{list_id}"),
+                    updated_at: 1,
+                },
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/allocations",
+                post(allocate_indices_route),
+            )
+            .with_state(app_state);
+
+        for count in [0, 3] {
+            let mut request = axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(format!("/status-lists/{list_id}/allocations"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"count":{count}}}"#)))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(authenticated_issuer("issuer"));
+
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "invalid_count");
+        }
     }
 }

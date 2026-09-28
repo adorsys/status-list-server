@@ -2,7 +2,7 @@
 
 use crate::domain::models::credential::Issuer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 
 /// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
@@ -38,6 +38,12 @@ pub enum StatusListError {
     DuplicateIndex { index: i32 },
     #[error("status index {index} is outside the fixed status list size {size}")]
     IndexOutOfRange { index: i32, size: u32 },
+    #[error("invalid status list size {size}; expected 1..={max}")]
+    InvalidSize { size: u32, max: u32 },
+    #[error("invalid allocation count {count}; expected 1..={max}")]
+    InvalidAllocationCount { count: u32, max: usize },
+    #[error("status index {index} has not been allocated")]
+    IndexNotAllocated { index: i32 },
     #[error("status list does not have enough unallocated indices")]
     AllocationExhausted,
     /// The issuer already holds its configured maximum number of status lists.
@@ -200,6 +206,16 @@ impl StatusList {
         })
     }
 
+    pub(crate) fn validate_updates_within_size(
+        &self,
+        status_updates: &[StatusEntry],
+    ) -> Result<(), StatusListError> {
+        if let Some(size) = self.size {
+            validate_within_size(status_updates, size)?;
+        }
+        Ok(())
+    }
+
     pub fn update(&self, status_updates: Vec<StatusEntry>) -> Result<Self, StatusListError> {
         if status_updates.is_empty() {
             return Ok(self.clone());
@@ -277,6 +293,42 @@ impl StatusList {
             size,
             default_status,
         })
+    }
+
+    pub(crate) fn rounded_size_for_options(
+        status_updates: &[StatusEntry],
+        size: u32,
+        default_status: &Status,
+    ) -> Result<u32, StatusListError> {
+        let bits = if status_updates.is_empty() {
+            determine_bits_for_values(std::slice::from_ref(default_status), None)?
+        } else {
+            determine_bits_with_default(status_updates, Some(default_status), None)?
+        };
+        round_size_to_byte_boundary(size, bits)
+    }
+
+    pub(crate) fn validate_size_limit(
+        status_updates: &[StatusEntry],
+        size: u32,
+        default_status: &Status,
+        max_status_index: i32,
+    ) -> Result<(), StatusListError> {
+        let max_size = allocation_limit_from_max_index(max_status_index)?;
+        if size == 0 {
+            return Err(StatusListError::InvalidSize {
+                size,
+                max: max_size,
+            });
+        }
+        let rounded_size = Self::rounded_size_for_options(status_updates, size, default_status)?;
+        if rounded_size > max_size {
+            return Err(StatusListError::InvalidSize {
+                size: rounded_size,
+                max: max_size,
+            });
+        }
+        Ok(())
     }
 
     /// The `lst` as it must appear in a token: the stored value, or a valid
@@ -459,6 +511,39 @@ fn validate_within_size(status_updates: &[StatusEntry], size: u32) -> Result<(),
     Ok(())
 }
 
+pub(crate) fn allocation_limit_from_max_index(
+    max_status_index: i32,
+) -> Result<u32, StatusListError> {
+    let max = u32::try_from(max_status_index).map_err(|_| {
+        StatusListError::InvalidStatusList(
+            "max_status_index must be greater than or equal to 0".to_string(),
+        )
+    })?;
+    max.checked_add(1).ok_or_else(|| {
+        StatusListError::InvalidStatusList("max_status_index is too large".to_string())
+    })
+}
+
+pub(crate) fn choose_unallocated_indices(
+    allocated: &BTreeSet<i32>,
+    count: usize,
+    limit: u32,
+) -> Result<Vec<i32>, StatusListError> {
+    let mut result = Vec::with_capacity(count);
+    for candidate in 0..limit {
+        let candidate = i32::try_from(candidate).map_err(|_| {
+            StatusListError::InvalidStatusList("allocation index exceeds i32".to_string())
+        })?;
+        if !allocated.contains(&candidate) {
+            result.push(candidate);
+            if result.len() == count {
+                return Ok(result);
+            }
+        }
+    }
+    Err(StatusListError::AllocationExhausted)
+}
+
 fn calculate_array_size(
     status_updates: &[StatusEntry],
     bits: usize,
@@ -492,13 +577,18 @@ fn fill_status_array(
     if entries == 0 {
         return Ok(());
     }
-    let updates = (0..entries)
-        .map(|index| StatusEntry {
-            index: index as i32,
-            status: status.clone(),
-        })
-        .collect::<Vec<_>>();
-    apply_updates(status_array, &updates, bits)
+    let value = status_value(status)?;
+    if value == 0 {
+        return Ok(());
+    }
+
+    let entries_per_byte = 8 / bits;
+    let mut byte = 0u8;
+    for offset in 0..entries_per_byte {
+        byte |= (value as u8) << (offset * bits);
+    }
+    status_array.fill(byte);
+    Ok(())
 }
 
 fn apply_updates(

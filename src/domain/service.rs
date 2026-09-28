@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     Status, StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
-    StatusListUriPage, validate_unique_indices,
+    StatusListUriPage, allocation_limit_from_max_index, validate_unique_indices,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -135,16 +135,16 @@ impl Service {
         max_lists_per_issuer: u64,
     ) -> Result<StatusListRecord, StatusListError> {
         validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
+        let default_status = default_status.unwrap_or(Status::Valid);
+        if let Some(size) = size {
+            StatusList::validate_size_limit(&statuses, size, &default_status, max_status_index)?;
+        }
         let initially_allocated = statuses.iter().map(|entry| entry.index).collect::<Vec<_>>();
 
         let record = StatusListRecord {
             list_id,
             issuer,
-            status_list: StatusList::create_with_options(
-                statuses,
-                size,
-                default_status.unwrap_or(Status::Valid),
-            )?,
+            status_list: StatusList::create_with_options(statuses, size, default_status)?,
             sub,
             updated_at: current_unix_timestamp(),
         };
@@ -156,17 +156,19 @@ impl Service {
         if self.snapshots_enabled() {
             let snapshot = build_snapshot(&record, token_exp_secs);
             self.status_list_repo
-                .insert_with_snapshot(record.clone(), snapshot, max_lists_per_issuer)
+                .insert_with_snapshot_and_allocations(
+                    record.clone(),
+                    snapshot,
+                    &initially_allocated,
+                    max_lists_per_issuer,
+                )
                 .await?;
         } else {
             self.status_list_repo
-                .insert(record.clone(), max_lists_per_issuer)
+                .insert_with_allocations(record.clone(), &initially_allocated, max_lists_per_issuer)
                 .await?;
         }
 
-        self.status_list_repo
-            .record_allocated_indices(&record.list_id, &initially_allocated)
-            .await?;
         Ok(record)
     }
 
@@ -204,6 +206,20 @@ impl Service {
 
         if &existing.issuer != issuer {
             return Err(StatusListError::IssuerMismatch);
+        }
+
+        existing
+            .status_list
+            .validate_updates_within_size(&statuses)?;
+        if existing.status_list.size.is_some() {
+            let update_indices = statuses.iter().map(|entry| entry.index).collect::<Vec<_>>();
+            if let Some(index) = self
+                .status_list_repo
+                .first_unallocated_index(list_id, &update_indices)
+                .await?
+            {
+                return Err(StatusListError::IndexNotAllocated { index });
+            }
         }
 
         let current_status_list = existing.status_list.clone();
@@ -247,6 +263,8 @@ impl Service {
         issuer: &Issuer,
         list_id: &str,
         count: u32,
+        max_status_index: i32,
+        max_statuses_per_request: usize,
     ) -> Result<Vec<i32>, StatusListError> {
         let existing = self
             .status_list_repo
@@ -258,8 +276,19 @@ impl Service {
             return Err(StatusListError::IssuerMismatch);
         }
 
+        if count == 0 || count as usize > max_statuses_per_request {
+            return Err(StatusListError::InvalidAllocationCount {
+                count,
+                max: max_statuses_per_request,
+            });
+        }
+
+        let limit = existing
+            .status_list
+            .size
+            .unwrap_or(allocation_limit_from_max_index(max_status_index)?);
         self.status_list_repo
-            .allocate_indices(list_id, count, existing.status_list.size)
+            .allocate_indices(list_id, count, limit)
             .await
     }
 

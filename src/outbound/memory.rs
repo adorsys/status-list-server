@@ -11,6 +11,7 @@ use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{Credential, CredentialError};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+    choose_unallocated_indices,
 };
 use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -91,6 +92,48 @@ impl StatusListRepo for MemoryStatusLists {
             .try_insert(record, max_lists_per_issuer)
     }
 
+    async fn insert_with_allocations(
+        &self,
+        record: StatusListRecord,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        let mut values = self.values.write().await;
+        if values.by_id.contains_key(&record.list_id) {
+            return Err(StatusListError::AlreadyExists);
+        }
+        let issuer_count = values
+            .per_issuer
+            .get(&record.issuer.0)
+            .copied()
+            .unwrap_or_default();
+        if issuer_count >= max_lists_per_issuer {
+            return Err(StatusListError::QuotaExceeded {
+                count: issuer_count,
+                max: max_lists_per_issuer,
+            });
+        }
+        let mut allocations = self.allocations.write().await;
+        let allocated = allocations.entry(record.list_id.clone()).or_default();
+        let mut inserted = Vec::with_capacity(allocated_indices.len());
+        for index in allocated_indices {
+            if !allocated.insert(*index) {
+                for inserted_index in inserted {
+                    allocated.remove(&inserted_index);
+                }
+                return Err(StatusListError::DuplicateIndex { index: *index });
+            }
+            inserted.push(*index);
+        }
+        if let Err(error) = values.try_insert(record, max_lists_per_issuer) {
+            for inserted_index in inserted {
+                allocated.remove(&inserted_index);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     async fn update(
         &self,
         record: StatusListRecord,
@@ -140,6 +183,54 @@ impl StatusListRepo for MemoryStatusLists {
         Ok(())
     }
 
+    async fn insert_with_snapshot_and_allocations(
+        &self,
+        record: StatusListRecord,
+        snapshot: StatusListSnapshot,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        let snapshot_store = self.require_snapshot()?;
+        let mut values = self.values.write().await;
+        if values.by_id.contains_key(&record.list_id) {
+            return Err(StatusListError::AlreadyExists);
+        }
+        let issuer_count = values
+            .per_issuer
+            .get(&record.issuer.0)
+            .copied()
+            .unwrap_or_default();
+        if issuer_count >= max_lists_per_issuer {
+            return Err(StatusListError::QuotaExceeded {
+                count: issuer_count,
+                max: max_lists_per_issuer,
+            });
+        }
+        let mut allocations = self.allocations.write().await;
+        let allocated = allocations.entry(record.list_id.clone()).or_default();
+        let mut inserted = Vec::with_capacity(allocated_indices.len());
+        for index in allocated_indices {
+            if !allocated.insert(*index) {
+                for inserted_index in inserted {
+                    allocated.remove(&inserted_index);
+                }
+                return Err(StatusListError::DuplicateIndex { index: *index });
+            }
+            inserted.push(*index);
+        }
+        if let Err(error) = values.try_insert(record, max_lists_per_issuer) {
+            for inserted_index in inserted {
+                allocated.remove(&inserted_index);
+            }
+            return Err(error);
+        }
+        snapshot_store
+            .write()
+            .await
+            .insert(snapshot.snapshot_id.clone(), snapshot);
+        Ok(())
+    }
+
     async fn list_uris(
         &self,
         after: Option<&str>,
@@ -160,33 +251,28 @@ impl StatusListRepo for MemoryStatusLists {
         &self,
         list_id: &str,
         count: u32,
-        size: Option<u32>,
+        limit: u32,
     ) -> Result<Vec<i32>, StatusListError> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-
         let mut allocations = self.allocations.write().await;
         let allocated = allocations.entry(list_id.to_string()).or_default();
-        let mut result = Vec::with_capacity(count as usize);
-        let limit = size.unwrap_or(u32::MAX);
+        let result = choose_unallocated_indices(allocated, count as usize, limit)?;
+        allocated.extend(result.iter().copied());
+        Ok(result)
+    }
 
-        for candidate in 0..limit {
-            let candidate = i32::try_from(candidate).map_err(|_| {
-                StatusListError::InvalidStatusList("allocation index exceeds i32".to_string())
-            })?;
-            if allocated.insert(candidate) {
-                result.push(candidate);
-                if result.len() == count as usize {
-                    return Ok(result);
-                }
-            }
-        }
-
-        for index in &result {
-            allocated.remove(index);
-        }
-        Err(StatusListError::AllocationExhausted)
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError> {
+        let allocations = self.allocations.read().await;
+        let Some(allocated) = allocations.get(list_id) else {
+            return Ok(indices.first().copied());
+        };
+        Ok(indices
+            .iter()
+            .copied()
+            .find(|index| !allocated.contains(index)))
     }
 
     async fn record_allocated_indices(
