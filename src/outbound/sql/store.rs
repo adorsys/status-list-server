@@ -645,7 +645,7 @@ impl SeaOrmStore<StatusListRecord> {
             let lock_result = status_lists::Entity::update_many()
                 .col_expr(
                     status_lists::Column::UpdatedAt,
-                    Expr::col(status_lists::Column::UpdatedAt),
+                    Expr::col(status_lists::Column::UpdatedAt).into(),
                 )
                 .filter(status_lists::Column::ListId.eq(list_id))
                 .exec(&txn)
