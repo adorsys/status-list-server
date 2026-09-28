@@ -224,6 +224,7 @@ groups:
         for: 5m
         labels:
           severity: warn
+          team: statuslist
           service: status-list-server
           sli: cache_hit_ratio
         annotations:
