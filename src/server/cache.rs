@@ -87,8 +87,17 @@ pub(crate) struct TokenCacheKey {
 /// Entries are keyed by `TokenCacheKey` and are valid for exactly the anchored
 /// token window `[window_start, window_start + exp_secs)`. Because `iat` is
 /// anchored to `window_start`, the bytes are identical for every request in the
-/// same window, so the cache lets a fresh `200` reuse a single sign per
-/// `(list, window, format)` per replica.
+/// same window, so the cache lets a fresh `200` reuse the result of a single
+/// sign for `(list, window, format)` per replica.
+///
+/// The single-flight guarantee is deliberately scoped to *concurrent misses*:
+/// `get_or_build` coalesces simultaneous misses for the same key onto one
+/// in-flight build (see below). It is **not** a guarantee that a given token is
+/// signed at most once per window. The data cache is bounded by
+/// `max_capacity`; under capacity pressure an unchanged, still-valid entry can
+/// be evicted and then re-signed on a later request in the same window. This is
+/// the accepted tradeoff for bounding memory — `max_capacity` exists precisely
+/// to cap memory for large lists — and it is documented rather than hidden.
 ///
 /// Content changes and list identity are covered by the key: a changed list has
 /// a different content hash (immediate miss), and `list_id` keeps otherwise
@@ -132,11 +141,14 @@ impl TokenBytesCache {
     ///
     /// Unlike a plain lookup, a miss is not simply reported: `init` is invoked
     /// to build the token, deduplicated through moka's `try_get_with_by_ref`
-    /// coalescing so at most one builder runs per `key` under concurrency (the
-    /// "single sign per window per replica" guarantee). Concurrent misses for
-    /// the same `key` share the single in-flight build — and its result, success
-    /// or error — regardless of whether the cache evicts the entry mid-build.
-    /// Callers that are not interested in building should use `get` instead.
+    /// coalescing so that *concurrent misses* for the same `key` run at most one
+    /// builder. Concurrent misses for the same `key` share the single in-flight
+    /// build — and its result, success or error — regardless of whether the
+    /// cache evicts the entry mid-build. This is the single-flight guarantee; it
+    /// covers simultaneous misses, not every request in a window. A request that
+    /// arrives *after* the completed entry was evicted by capacity pressure is a
+    /// fresh miss and re-runs `init` (see the struct docs). Callers that are not
+    /// interested in building should use `get` instead.
     ///
     /// Returns `Ok(None)` when the window is already closed (the bytes are not
     /// cached and `init` is *not* called); the caller must re-sign with a fresh
@@ -178,7 +190,8 @@ impl TokenBytesCache {
         // concurrent misses for the same key onto a single initializer. Even if
         // the entry is evicted from the data cache while a build is in flight,
         // every waiter that already joined that key shares the same in-flight
-        // build, so at most one sign runs per `(list, window, format)`.
+        // build, so concurrent misses run at most one sign for
+        // `(list, window, format)`.
         let value = self
             .inner
             .try_get_with_by_ref(key, {
@@ -346,7 +359,10 @@ mod tests {
         // would be evicted from the data cache before it could be served. This is
         // the interleaving a capacity-bounded lock registry could not survive: it
         // could evict the target's lock while a waiter still held it, letting a
-        // later waiter create a fresh lock and sign a second time.
+        // later waiter create a fresh lock and sign a second time. The single-
+        // flight guarantee covers these *concurrent* misses joining one build;
+        // it does not cover a request that arrives after the completed entry has
+        // been evicted (see `sequential_request_re_signs_after_capacity_eviction`).
         let cache = TokenBytesCache::new(300, 1);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -421,6 +437,93 @@ mod tests {
             1,
             "all waiters for the target key must coalesce onto the single in-flight \
              build even when the data entry is evicted mid-build"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sequential_request_re_signs_after_capacity_eviction() {
+        // Documents the accepted contract rather than asserting single-flight
+        // across a whole window. The single-flight guarantee covers *concurrent*
+        // misses; it does not promise one sign per key per window. Moka enforces
+        // `max_capacity` amortized, not synchronously on each insert, so drive
+        // the target key out of a capacity-1 cache with enough churn, confirm it
+        // was evicted, then request it again in the same open window: it is a
+        // fresh miss and re-runs the builder. This is the deliberate tradeoff of
+        // bounding memory with `max_capacity`: capacity pressure can re-sign an
+        // unchanged, still-valid token. Operators can avoid it by sizing
+        // `max_capacity` above the number of live windows.
+        let cache = TokenBytesCache::new(300, 1);
+        let key_a = TokenCacheKey {
+            list_id: "list-a".to_string(),
+            ..base_key(1000)
+        };
+
+        let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // A: miss, runs builder (build #1), caches under capacity-1 slot.
+        let a1 = cache
+            .get_or_build(&key_a, 1000, 900, 1400, {
+                let builds = builds.clone();
+                || async move {
+                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken {
+                        bytes: Bytes::from(vec![1u8]),
+                        encoding: None,
+                    })
+                }
+            })
+            .await
+            .expect("infallible")
+            .expect("window open");
+        assert_eq!(*a1.bytes, vec![1]);
+
+        // Churn many distinct keys through the single slot to force A's eviction.
+        // Moka evicts amortized, so enough inserts reliably drive A out.
+        for i in 0..512 {
+            let key = TokenCacheKey {
+                list_id: format!("churn-{i}"),
+                ..base_key(1000)
+            };
+            cache
+                .get_or_build(&key, 1000, 900, 1400, || async {
+                    Ok::<_, std::convert::Infallible>(CachedToken {
+                        bytes: Bytes::from(vec![9u8]),
+                        encoding: None,
+                    })
+                })
+                .await
+                .expect("infallible")
+                .expect("window open");
+        }
+
+        // A must have been evicted by capacity pressure, so it is now a miss.
+        assert!(
+            cache.get(&key_a, 1000, 900, 1400).await.is_none(),
+            "capacity pressure must have evicted the still-valid A entry"
+        );
+
+        // A again in the same open window: fresh miss, runs the builder again.
+        let a2 = cache
+            .get_or_build(&key_a, 1000, 900, 1400, {
+                let builds = builds.clone();
+                || async move {
+                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken {
+                        bytes: Bytes::from(vec![3u8]),
+                        encoding: None,
+                    })
+                }
+            })
+            .await
+            .expect("infallible")
+            .expect("window open");
+        assert_eq!(*a2.bytes, vec![3]);
+
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "capacity eviction re-signs an unchanged token on a later request; \
+             the single-flight guarantee covers concurrent misses only"
         );
     }
 

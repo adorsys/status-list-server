@@ -55,7 +55,9 @@ pub struct AppState {
     pub management_auth: ManagementAuthConfig,
     /// Per-replica cache of fully signed status-list token bytes, keyed by
     /// `(list, content, window, format, encoding)` so an unchanged list reuses
-    /// a single sign per window instead of re-signing on every request.
+    /// a single sign for concurrent misses instead of re-signing on every
+    /// request. Capacity eviction can still re-sign unchanged bytes mid-window
+    /// (see `TokenBytesCache`).
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
