@@ -2168,7 +2168,7 @@ mod tests {
             // Just above the one-year ceiling is rejected.
             (
                 vec![("status_list.token_exp_secs", &above_ceiling)],
-                "APP_STATUS_LIST__TOKEN_EXP_SECS",
+                "exceeds the maximum supported token lifetime",
             ),
             // token_ttl_secs == token_exp_secs leaves no usable token lifetime.
             (
@@ -2185,8 +2185,10 @@ mod tests {
             ),
         ];
         for (overrides, expected) in rejects {
-            let err = Config::load_from_overrides(&overrides)
-                .expect_err("overrides {overrides:?} should fail config loading");
+            let err = match Config::load_from_overrides(&overrides) {
+                Ok(_) => panic!("overrides {overrides:?} should fail config loading"),
+                Err(e) => e,
+            };
             assert!(
                 err.to_string().contains(expected),
                 "expected error to mention {expected:?}, got: {err}"
