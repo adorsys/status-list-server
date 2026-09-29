@@ -198,8 +198,10 @@ async fn get_status_list_at(
 ///
 /// The token is minted with `iat = window_start` and `exp = window_start +
 /// token_exp_secs`, so within a window the bytes are identical across requests
-/// and the cache yields a single sign per `(list, window, format, encoding)`.
-/// The strong ETag is derived from the exact bytes that will be served.
+/// and concurrent misses are coalesced onto a single sign for
+/// `(list, window, format, encoding)`. A request after the cached entry was
+/// evicted by capacity pressure re-signs. The strong ETag is derived from the
+/// exact bytes that will be served.
 ///
 /// The current signing material is fetched once and both (a) fingerprinted into
 /// the cache key and (b) passed to the signer, so rotating the signing key or

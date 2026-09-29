@@ -1207,9 +1207,20 @@ pub struct TokenBytesCacheConfig {
     /// expire mid-window and re-sign unchanged tokens, defeating the feature's
     /// purpose while forcing operators to keep two independently configured
     /// values in sync.
+    ///
+    /// This bounds *time-based* expiry only. `max_capacity` pressure can still
+    /// evict an unchanged, still-valid entry before its TTL, and a later request
+    /// in the same window will then re-sign. That is the accepted tradeoff for
+    /// bounding memory; size `max_capacity` above the number of concurrent live
+    /// windows to keep an entry resident for its whole window.
     pub ttl: u64,
     /// Upper bound on the number of cached signed-token entries, bounding
     /// memory for large lists.
+    ///
+    /// Eviction driven by this bound (rather than by TTL or window expiry) can
+    /// drop a still-valid entry and cause a re-sign of unchanged bytes on a
+    /// later request in the same window. Size it above the number of live
+    /// `(list, window, format)` windows to avoid mid-window re-signs.
     pub max_capacity: u64,
 }
 
