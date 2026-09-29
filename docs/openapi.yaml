@@ -578,6 +578,18 @@ paths:
               schema:
                 type: string
               description: Always `Accept, Accept-Encoding`.
+        "400":
+          description: |
+            `list_id` contains a NUL character (`invalid_list_id`), `time` is
+            not a positive timestamp in the past (`invalid_historical_time`),
+            or the query string could not be parsed (`invalid_query`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_list_id"
+                error_description: "list_id must not contain NUL"
         "404":
           $ref: "#/components/responses/NotFound"
         "406":

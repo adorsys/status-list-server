@@ -82,6 +82,16 @@ async fn get_status_list_at(
     headers: HeaderMap,
     now: i64,
 ) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    // Not a UUID check like publish: lists created before list_id validation
+    // have other IDs, and issued credentials still point at them. NUL alone is
+    // rejected because Postgres refuses it in text, which would be a 500.
+    if list_id.contains('\0') {
+        return Err(ApiError::bad_request(
+            "invalid_list_id",
+            "list_id must not contain NUL",
+        ));
+    }
+
     let query = match query_result {
         Ok(Query(q)) => q,
         Err(e) => {
@@ -373,6 +383,7 @@ fn build_cache_control(token_ttl_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::credential::Issuer;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::update_status::update_status;
     use crate::server::handlers::status_list::utils::request::{
@@ -479,6 +490,58 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_nul_in_list_id() {
+        let app_state = test_app_state(None).await;
+        let past = time::OffsetDateTime::now_utc().unix_timestamp() - 60;
+
+        for time in [None, Some(past)] {
+            let err = get_status_list(
+                State(app_state.clone()),
+                Path("477121aa-b598\0-419e-916f-1e74654ff38b".to_string()),
+                Ok(Query(StatusListQuery { time })),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "time={time:?}");
+            assert_eq!(err.error, "invalid_list_id", "time={time:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_resolves_legacy_non_uuid_list_id() {
+        let app_state = test_app_state(None).await;
+        app_state
+            .service
+            .publish_status_list(
+                "legacy-list".to_string(),
+                Issuer("issuer1".into()),
+                "https://example.com/api/v1/status-lists/legacy-list".to_string(),
+                vec![],
+                900,
+                100_000,
+                5_000,
+                1_048_576,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let response = get_status_list(
+            State(app_state),
+            Path("legacy-list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
