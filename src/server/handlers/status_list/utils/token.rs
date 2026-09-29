@@ -142,18 +142,7 @@ async fn build_status_list_token_inner(
         Some(window) => window,
         None => {
             let iat = OffsetDateTime::now_utc().unix_timestamp();
-            let token_exp = i64::try_from(state.token_exp_secs).map_err(|_| {
-                StatusListError::TokenExpiryOverflow {
-                    iat,
-                    token_exp_secs: state.token_exp_secs,
-                }
-            })?;
-            let exp =
-                iat.checked_add(token_exp)
-                    .ok_or_else(|| StatusListError::TokenExpiryOverflow {
-                        iat,
-                        token_exp_secs: state.token_exp_secs,
-                    })?;
+            let exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
             (iat, exp)
         }
     };
@@ -305,9 +294,10 @@ fn issue_jwt(
     exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let ttl = i64::try_from(token_ttl_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
-        iat,
-        token_exp_secs: token_ttl_secs,
+    let ttl = i64::try_from(token_ttl_secs).map_err(|_| {
+        StatusListError::Backend(Box::new(std::io::Error::other(format!(
+            "token ttl {token_ttl_secs} exceeds the maximum supported i64 lifetime"
+        ))))
     })?;
     let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
@@ -533,6 +523,32 @@ mod tests {
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
             "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_ttl_conversion_rejects_u64_max_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_ttl_secs = u64::MAX`
+        // on an AppState without going through config validation. The TTL is emitted
+        // as an i64 claim, so the conversion must fail closed with a plain internal
+        // (Backend) error rather than silently wrapping negative or misleadingly
+        // reporting a token-exp overflow.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_ttl_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+        )
+        .await
+        .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
+
+        assert!(
+            matches!(err, StatusListError::Backend(_)),
+            "expected Backend error for unrepresentable ttl, got {err:?}"
         );
     }
 }
