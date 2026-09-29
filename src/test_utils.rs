@@ -121,9 +121,8 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
     }
 }
 
-/// An [`AppState`] whose `CertificateProvider` returns material with **no**
-/// certificate chain, so token generation surfaces the missing-chain
-/// misconfiguration (a 500 `Backend` error) instead of encoding a token.
+/// An [`AppState`] whose `CertificateProvider` returns material with no
+/// certificate chain, so token generation surfaces a missing-chain 500.
 pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

@@ -110,36 +110,27 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 
 /// Certificate chain and signing key captured from one provider snapshot.
 ///
-/// This is deliberately transport-agnostic certificate material. The base64 DER
-/// chain is kept for the JWT `x5c` header, and the same chain is decoded once at
-/// construction into format-neutral DER bytes (`certificate_der`) so the CWT hot
-/// path builds its `x5chain` protected header without re-decoding base64 or
-/// taking a global lock on every request. No COSE/coset types live here.
+/// The base64 chain (`certificate_chain`) is kept for the JWT `x5c` header, and
+/// decoded once at construction into DER bytes (`certificate_der`) for the CWT
+/// `x5chain` hot path. Both views are derived from the same source and exposed
+/// through accessors, so they can never fall out of sync.
 #[derive(Clone)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
-    ///
-    /// Private so the two certificate views can never fall out of sync: the
-    /// decoded [`Self::certificate_der`] is derived from this at construction
-    /// and both are exposed through accessors.
     certificate_chain: Option<Vec<String>>,
-    /// DER-encoded x509 certificate chain, decoded once at construction. Kept in
-    /// sync with [`Self::certificate_chain`]; `None` iff that is `None`.
+    /// DER-encoded x509 certificate chain, decoded once at construction.
     certificate_der: Option<Arc<[Box<[u8]>]>>,
-    /// Pre-parsed signer. The material does not retain its PEM/DER encoding
-    /// after a provider has validated and constructed it; private key material
-    /// remains in the signer for its required signing lifetime.
+    /// Pre-parsed signer; retains no PEM/DER encoding.
     pub signing_key: Arc<dyn TokenSigner>,
 }
 
 impl SigningMaterial {
     /// Construct material from a validated, pre-parsed signer.
     ///
-    /// Fails if `certificate_chain` is empty, contains an empty entry, or
-    /// contains a part that is not valid base64, so a malformed chain is
-    /// rejected at certificate load/renewal time rather than surfacing later as
-    /// a missing or empty CWT `x5chain`. The caller is expected to treat this
-    /// as a provisioning error.
+    /// Rejects an empty chain, an empty entry, or a non-base64 entry so a
+    /// malformed chain fails at load/renewal time rather than surfacing later
+    /// as a missing or empty CWT `x5chain`. Callers should treat this as a
+    /// provisioning error.
     pub fn new(
         certificate_chain: Option<Vec<String>>,
         signing_key: Arc<dyn TokenSigner>,
@@ -180,15 +171,12 @@ impl SigningMaterial {
         })
     }
 
-    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c`
-    /// header. `None` when no chain is configured.
+    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c` header.
     pub fn certificate_chain(&self) -> Option<&[String]> {
         self.certificate_chain.as_deref()
     }
 
-    /// DER-encoded x509 certificate chain, decoded once at construction, for
-    /// the CWT `x5chain` header. `None` iff [`Self::certificate_chain`] is
-    /// `None`.
+    /// DER-encoded x509 certificate chain for the CWT `x5chain` header.
     pub fn certificate_der(&self) -> Option<&[Box<[u8]>]> {
         self.certificate_der.as_deref()
     }
