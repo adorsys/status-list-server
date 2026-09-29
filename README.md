@@ -96,8 +96,8 @@ To run the Postman collection from the command line, start the server with local
 
 ```bash
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
-APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
-APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
 cargo run
 ```
 

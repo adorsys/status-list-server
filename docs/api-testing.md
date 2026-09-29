@@ -43,7 +43,8 @@ The Postman/Newman and Microcks runners expect these host tools:
   isolated Python environment use `python3 -m pip install PyYAML`.
 - Docker, unless a local `microcks` or `microcks-cli` binary is already
   installed.
-- Newman, only when running the Postman collection from the command line.
+- Newman or Docker when running the Postman collection from the command line.
+  The CI path uses the pinned Newman container by default.
 
 ## Newman Collection Check
 
@@ -51,8 +52,8 @@ Start the API first:
 
 ```bash
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
-APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
-APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
 cargo run
 ```
 
@@ -66,7 +67,8 @@ The script generates a temporary P-256 issuer key, patches a temporary copy of
 the collection so `POST /api/v1/credentials` registers the matching public JWK,
 and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
 `issuer_id`, `token`, and `historical_time`. No generated collection or
-environment is written into the repository.
+environment is written into the repository. Set `NEWMAN_RUNNER=docker` to use
+the pinned Newman container instead of a locally installed Newman binary.
 
 ## Microcks Contract Conformance
 
@@ -74,8 +76,8 @@ Start the API first:
 
 ```bash
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
-APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/gcloud_test_cert.dummy.pem \
-APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/gcloud_test_key.dummy.pem \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
 cargo run
 ```
 
@@ -103,7 +105,9 @@ container, which is fragile on some Docker hosts.
 The Docker fallback pins both Microcks images by immutable digest. The CLI
 container no longer forces `--user 0:0`, and it receives only the generated
 temporary artifacts through a read-only bind mount; the repository checkout is
-not mounted into the container.
+not mounted into the container. Run `./scripts/check-api-test-images.sh` to
+verify the pinned Microcks and Newman image defaults are pullable before
+changing them.
 
 Useful environment overrides:
 
@@ -114,11 +118,13 @@ Useful environment overrides:
 | `STATUS_LIST_AUTH_TOKEN`       | generated                                           | Existing management JWT to use instead of generating one.                                          |
 | `MICROCKS_OPERATIONS_HEADERS`  | generated Authorization header                      | Full Microcks operations headers JSON override.                                                    |
 | `NEWMAN_API_READY_TIMEOUT`     | `180`                                               | Maximum seconds to wait for the live API before running Newman.                                    |
+| `NEWMAN_RUNNER`                | `auto`                                              | Newman runner selection: `auto`, `local`, or `docker`.                                             |
+| `NEWMAN_DOCKER_IMAGE`          | `postman/newman@sha256:02dc...e04f`                 | Pinned Newman container used by CI and by `NEWMAN_RUNNER=docker`.                                  |
 | `MICROCKS_READY_TIMEOUT`       | `180s`                                              | Maximum time to wait for the ephemeral Microcks container to start.                                |
 | `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                          |
 | `RUN_POSTMAN_CONFORMANCE`      | `false`                                             | Set to `true` to additionally try Microcks' Postman runner. The collection is imported either way. |
 | `MICROCKS_VERBOSE`             | `true`                                              | Set to `false` to suppress Microcks CLI request/response dumps.                                    |
-| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli@sha256:a350...7913`  | Pinned CLI container image used when no local CLI is installed.                                    |
+| `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli@sha256:c638...6cac`  | Pinned CLI container image used when no local CLI is installed.                                    |
 | `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber@sha256:c0da...3d91` | Pinned Microcks server image used by the Docker fallback.                                          |
 | `MICROCKS_MANAGED_PORT`        | `8585`                                              | Host port for the disposable Microcks server.                                                      |
 
