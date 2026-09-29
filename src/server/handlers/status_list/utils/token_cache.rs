@@ -42,16 +42,10 @@ mod tests {
             .unwrap(),
         );
 
-        let material_a = SigningMaterial::new(
-            Some(vec!["Y2VydC1h".to_string()]),
-            Arc::clone(&key_a),
-        )
-        .unwrap();
-        let material_b = SigningMaterial::new(
-            Some(vec!["Y2VydC1h".to_string()]),
-            Arc::clone(&key_b),
-        )
-        .unwrap();
+        let material_a =
+            SigningMaterial::new(Some(vec!["Y2VydC1h".to_string()]), Arc::clone(&key_a)).unwrap();
+        let material_b =
+            SigningMaterial::new(Some(vec!["Y2VydC1h".to_string()]), Arc::clone(&key_b)).unwrap();
         let material_c = SigningMaterial::new(None, Arc::clone(&key_a)).unwrap();
 
         let fp_a = signer_fingerprint(&material_a);
