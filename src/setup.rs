@@ -64,7 +64,7 @@ use crate::domain::{
 ))]
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
-use crate::outbound::azure::kv::AzureKeyVaultClient;
+use crate::outbound::azure::AzureKeyVaultClient;
 #[cfg(feature = "redis")]
 use crate::outbound::cache::RedisStatusListCache;
 use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};

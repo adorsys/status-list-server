@@ -10,32 +10,48 @@ use azure_identity::{
     ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
     WorkloadIdentityCredential,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Chained token credential that evaluates supported ambient Azure identity
 /// sources in order: Environment client secret -> Workload Identity ->
 /// Managed Identity -> Developer Tools.
 #[derive(Debug)]
-pub struct DefaultAzureCredential {
+pub(crate) struct DefaultAzureCredential {
     sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
 }
 
 impl DefaultAzureCredential {
     /// Create a new [`DefaultAzureCredential`] chain with available credential sources.
-    pub fn new() -> azure_core::Result<Arc<Self>> {
+    pub(crate) fn new() -> azure_core::Result<Arc<Self>> {
         let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
 
-        if let (Ok(tenant_id), Ok(client_id), Ok(client_secret)) = (
-            std::env::var("AZURE_TENANT_ID"),
-            std::env::var("AZURE_CLIENT_ID"),
-            std::env::var("AZURE_CLIENT_SECRET"),
-        ) && let Ok(cred) = ClientSecretCredential::new(
-            tenant_id.as_str(),
-            client_id,
-            AzureSecret::new(client_secret),
-            None,
-        ) {
-            sources.push(("EnvironmentClientSecretCredential", cred));
+        let tenant_id = std::env::var("AZURE_TENANT_ID");
+        let client_id = std::env::var("AZURE_CLIENT_ID");
+        let client_secret = std::env::var("AZURE_CLIENT_SECRET");
+        let any_present = tenant_id.is_ok() || client_id.is_ok() || client_secret.is_ok();
+        let all_present = tenant_id.is_ok() && client_id.is_ok() && client_secret.is_ok();
+        if any_present && !all_present {
+            return Err(azure_core::Error::with_message(
+                azure_core::error::ErrorKind::Other,
+                "incomplete Azure service principal configuration: \
+                 AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET must be set together",
+            ));
+        }
+        if let (Ok(tenant_id), Ok(client_id), Ok(client_secret)) =
+            (tenant_id, client_id, client_secret)
+        {
+            match ClientSecretCredential::new(
+                tenant_id.as_str(),
+                client_id,
+                AzureSecret::new(client_secret),
+                None,
+            ) {
+                Ok(cred) => sources.push(("EnvironmentClientSecretCredential", cred)),
+                Err(err) => warn!(
+                    "AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET are set, but the \
+                     ClientSecretCredential could not be constructed: {err}"
+                ),
+            }
         }
         if let Ok(cred) = WorkloadIdentityCredential::new(None) {
             sources.push(("WorkloadIdentityCredential", cred));

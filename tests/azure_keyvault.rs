@@ -9,7 +9,7 @@ use azure_core::error::{ErrorKind, ResultExt as _};
 use azure_core::http::headers::{HeaderName, HeaderValue, Headers};
 use azure_core::http::{AsyncRawResponse, Method};
 use status_list_server::{
-    cert_manager::storage::Storage, outbound::azure::kv::AzureKeyVaultClient,
+    cert_manager::storage::Storage, outbound::azure::AzureKeyVaultClient,
 };
 use testcontainers_modules::testcontainers::{
     GenericImage, ImageExt,
