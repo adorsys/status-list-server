@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -50,12 +50,32 @@ fn token_metrics() -> TokenMetrics {
     })
 }
 
-/// Classify the client's `Accept` header into the bounded `format` label value.
-fn token_format(accept: &str) -> &'static str {
-    if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+/// Token encoding formats.
+///
+/// Matching on the enum (rather than raw strings) makes an unknown or mistyped
+/// format a compile error instead of silently falling through to JWT.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenFormat {
+    Jwt,
+    Cwt,
+}
+
+impl TokenFormat {
+    /// Classify the client's `Accept` header.
+    fn from_accept(accept: &str) -> Self {
+        if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
+            TokenFormat::Cwt
+        } else {
+            TokenFormat::Jwt
+        }
+    }
+
+    /// Bounded value for the `format` metric dimension.
+    fn as_label(self) -> &'static str {
+        match self {
+            TokenFormat::Jwt => "jwt",
+            TokenFormat::Cwt => "cwt",
+        }
     }
 }
 
@@ -97,8 +117,8 @@ pub(crate) async fn build_status_list_token(
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let format = token_format(accept);
-    let attributes = [KeyValue::new("format", format)];
+    let format = TokenFormat::from_accept(accept);
+    let attributes = [KeyValue::new("format", format.as_label())];
     token_metrics().attempts.add(1, &attributes);
     match build_status_list_token_inner(
         state,
@@ -119,7 +139,7 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    format: &'static str,
+    format: TokenFormat,
     status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
@@ -137,15 +157,20 @@ async fn build_status_list_token_inner(
         (iat, iat + state.token_exp_secs as i64)
     });
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && format == "jwt";
+    let should_gzip = client_accepts_gzip && format == TokenFormat::Jwt;
 
     tokio::task::spawn_blocking(move || {
         let token_bytes = match format {
-            "cwt" => {
-                let x5chain = cached_x5chain(signing_material.certificate_chain.as_deref())?;
+            TokenFormat::Cwt => {
+                let x5chain = x5chain_from_der(
+                    signing_material
+                        .certificate_der
+                        .as_deref()
+                        .ok_or_else(missing_chain_error)?,
+                );
                 issue_cwt(
                     &status_record,
-                    Arc::clone(&signing_material.signing_key),
+                    signing_material.signing_key.as_ref(),
                     x5chain,
                     aggregation_uri,
                     validity_window.0,
@@ -153,14 +178,14 @@ async fn build_status_list_token_inner(
                     token_ttl_secs,
                 )?
             }
-            _ => {
+            TokenFormat::Jwt => {
                 let cert_chain = signing_material
                     .certificate_chain
                     .as_deref()
                     .ok_or_else(missing_chain_error)?;
                 issue_jwt(
                     &status_record,
-                    Arc::clone(&signing_material.signing_key),
+                    signing_material.signing_key.as_ref(),
                     cert_chain,
                     aggregation_uri,
                     validity_window.0,
@@ -191,62 +216,34 @@ async fn build_status_list_token_inner(
 /// A missing certificate chain is a misconfiguration that will not recover on
 /// its own, so it is surfaced as a 500 (Backend) rather than a retryable 503.
 fn missing_chain_error() -> StatusListError {
-    let err = std::io::Error::new(
+    StatusListError::Backend(Box::new(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "no active certificate chain is configured",
-    );
-    tracing::error!(error = %err, "token generation aborted: no certificate chain configured");
-    StatusListError::Backend(Box::new(err))
+    )))
 }
 
-/// Decode a base64 DER certificate chain and build the CBOR `x5chain`
-/// protected-header value, following the status-list spec: a single certificate
-/// maps to a `ByteString`, multiple certificates to an `Array` of `ByteString`s.
-fn x5chain_value(chain: &[String]) -> Result<CborValue, StatusListError> {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-
-    let certs_der: Vec<Vec<u8>> = chain
-        .iter()
-        .map(|b64| {
-            BASE64_STANDARD
-                .decode(b64)
-                .map_err(|err| StatusListError::Backend(Box::new(err)))
-        })
-        .collect::<Result<_, _>>()?;
-
-    let value = if certs_der.len() == 1 {
-        CborValue::Bytes(certs_der[0].clone())
+/// Build the CBOR `x5chain` protected-header value from the pre-decoded DER
+/// chain, following the status-list spec: a single certificate maps to a
+/// `ByteString`, multiple certificates to an `Array` of `ByteString`s.
+///
+/// The DER is already decoded and stored on [`SigningMaterial`], so this runs
+/// without a base64 decode, a global lock, or a comparison on every request.
+fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
+    if certs.len() == 1 {
+        CborValue::Bytes(certs[0].to_vec())
     } else {
-        CborValue::Array(certs_der.into_iter().map(CborValue::Bytes).collect())
-    };
-    Ok(value)
-}
-
-/// Return the CBOR `x5chain` value for the active certificate chain, decoding
-/// base64 at most once per distinct chain. Certificate chains change only on
-/// renewal, so a single-entry cache keeps the CWT hot path from re-decoding the
-/// (unchanged) chain on every request.
-fn cached_x5chain(chain: Option<&[String]>) -> Result<CborValue, StatusListError> {
-    let chain = chain.ok_or_else(missing_chain_error)?;
-
-    static CACHE: Mutex<Option<(Vec<String>, CborValue)>> = Mutex::new(None);
-    let mut guard = CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((cached_chain, value)) = guard.as_ref()
-        && cached_chain == chain
-    {
-        return Ok(value.clone());
+        CborValue::Array(
+            certs
+                .iter()
+                .map(|der| CborValue::Bytes(der.to_vec()))
+                .collect(),
+        )
     }
-
-    let value = x5chain_value(chain)?;
-    *guard = Some((chain.to_vec(), value.clone()));
-    Ok(value)
 }
 
 fn issue_cwt(
     status_record: &StatusListRecord,
-    signer: Arc<dyn TokenSigner>,
+    signer: &(impl TokenSigner + ?Sized),
     x5chain: CborValue,
     aggregation_uri: Option<String>,
     iat: i64,
@@ -322,7 +319,7 @@ fn issue_cwt(
 
 fn issue_jwt(
     status_record: &StatusListRecord,
-    signer: Arc<dyn TokenSigner>,
+    signer: &(impl TokenSigner + ?Sized),
     cert_chain: &[String],
     aggregation_uri: Option<String>,
     iat: i64,
@@ -385,6 +382,7 @@ mod tests {
     };
     use coset::TaggedCborSerializable;
     use jsonwebtoken::{DecodingKey, Validation, decode};
+    use std::sync::Arc;
 
     use base64::prelude::Engine as _;
 
@@ -461,7 +459,8 @@ mod tests {
         for key in &test_keys {
             let signer: Arc<dyn TokenSigner> =
                 Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
-            let token = issue_jwt(&record, signer, &cert_chain, None, 1000, 2000, 300).unwrap();
+            let token =
+                issue_jwt(&record, signer.as_ref(), &cert_chain, None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
             assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
@@ -494,11 +493,10 @@ mod tests {
             let material =
                 crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer)
                     .expect("material");
-            let x5chain = x5chain_value(material.certificate_chain.as_deref().expect("chain"))
-                .expect("x5chain");
+            let x5chain = x5chain_from_der(material.certificate_der.as_deref().expect("der chain"));
             let cwt_bytes = issue_cwt(
                 &record,
-                material.signing_key,
+                material.signing_key.as_ref(),
                 x5chain,
                 None,
                 1000,
@@ -518,15 +516,18 @@ mod tests {
                 Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
             );
             let x5chain_label = coset::Label::Int(HeaderParameter::X5Chain.to_i64());
-            let has_x5chain = sign1
+            let x5chain = sign1
                 .protected
                 .header
                 .rest
                 .iter()
-                .any(|(label, _)| *label == x5chain_label);
-            assert!(
-                has_x5chain,
-                "CWT must carry a spec-compliant x5chain protected header"
+                .find(|(label, _)| *label == x5chain_label)
+                .map(|(_, value)| value.clone())
+                .expect("CWT must carry a spec-compliant x5chain protected header");
+            assert_eq!(
+                x5chain,
+                CborValue::Bytes(b"dummy-cert-der".to_vec()),
+                "x5chain must carry the DER bytes of the (single) certificate"
             );
             sign1
                 .verify_signature(&[], |signature, tbs| {
@@ -534,5 +535,37 @@ mod tests {
                 })
                 .expect("CWT signature verifies with its public key");
         }
+    }
+
+    #[test]
+    fn test_x5chain_single_cert_is_byte_string() {
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(vec![base64::prelude::BASE64_STANDARD.encode(b"only-cert")]),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der.as_deref().unwrap());
+        assert_eq!(value, CborValue::Bytes(b"only-cert".to_vec()));
+    }
+
+    #[test]
+    fn test_x5chain_multi_cert_preserves_array_order() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let der = [b"leaf".to_vec(), b"intermediate".to_vec(), b"root".to_vec()];
+        let chain: Vec<String> = der.iter().map(|d| BASE64_STANDARD.encode(d)).collect();
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(chain),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der.as_deref().unwrap());
+        assert_eq!(
+            value,
+            CborValue::Array(vec![
+                CborValue::Bytes(b"leaf".to_vec()),
+                CborValue::Bytes(b"intermediate".to_vec()),
+                CborValue::Bytes(b"root".to_vec()),
+            ])
+        );
     }
 }

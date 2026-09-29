@@ -110,15 +110,18 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 
 /// Certificate chain and signing key captured from one provider snapshot.
 ///
-/// This is deliberately transport-agnostic certificate material: the base64
-/// DER chain (used verbatim for the JWT `x5c` header) and the pre-parsed
-/// signer. Format-specific representations, such as the CBOR `x5chain`
-/// protected-header value for CWT signing, are derived and cached by the token
-/// encoder, never stored on this generic port.
+/// This is deliberately transport-agnostic certificate material. The base64 DER
+/// chain is kept for the JWT `x5c` header, and the same chain is decoded once at
+/// construction into format-neutral DER bytes (`certificate_der`) so the CWT hot
+/// path builds its `x5chain` protected header without re-decoding base64 or
+/// taking a global lock on every request. No COSE/coset types live here.
 #[derive(Clone)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
     pub certificate_chain: Option<Vec<String>>,
+    /// DER-encoded x509 certificate chain, decoded once at construction. Kept in
+    /// sync with [`Self::certificate_chain`]; `None` iff that is `None`.
+    pub certificate_der: Option<Arc<[Box<[u8]>]>>,
     /// Pre-parsed signer. The material does not retain its PEM/DER encoding
     /// after a provider has validated and constructed it; private key material
     /// remains in the signer for its required signing lifetime.
@@ -136,39 +139,48 @@ impl SigningMaterial {
         certificate_chain: Option<Vec<String>>,
         signing_key: Arc<dyn TokenSigner>,
     ) -> Result<Self, StatusListError> {
-        if let Some(parts) = &certificate_chain {
-            if parts.is_empty() {
-                return Err(StatusListError::Backend(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "certificate chain is empty",
-                ))));
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+
+        let certificate_der = match &certificate_chain {
+            Some(parts) => {
+                if parts.is_empty() {
+                    return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "certificate chain is empty",
+                    ))));
+                }
+                let der: Vec<Box<[u8]>> = parts
+                    .iter()
+                    .map(|b64| {
+                        BASE64_STANDARD
+                            .decode(b64)
+                            .map(Vec::into_boxed_slice)
+                            .map_err(|err| StatusListError::Backend(Box::new(err)))
+                    })
+                    .collect::<Result<_, _>>()?;
+                Some(Arc::from(der))
             }
-            validate_cert_chain_base64(parts)?;
-        }
+            None => None,
+        };
         Ok(Self {
             certificate_chain,
+            certificate_der,
             signing_key,
         })
     }
 }
 
-/// Verify that every base64 DER chain part decodes; fails fast on a malformed
-/// chain so the invalid snapshot is rejected at construction time.
-fn validate_cert_chain_base64(cert_chain: &[String]) -> Result<(), StatusListError> {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-
-    for b64 in cert_chain {
-        BASE64_STANDARD
-            .decode(b64)
-            .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    }
-    Ok(())
-}
-
 impl fmt::Debug for SigningMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SigningMaterial")
-            .field("certificate_chain", &self.certificate_chain)
+            .field(
+                "certificate_chain",
+                &self.certificate_chain.as_ref().map(|c| c.len()),
+            )
+            .field(
+                "certificate_der",
+                &self.certificate_der.as_ref().map(|d| d.len()),
+            )
             .field("signing_algorithm", &self.signing_key.algorithm())
             .field("public_key_len", &self.signing_key.public_key_bytes().len())
             .finish()
