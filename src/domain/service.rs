@@ -265,6 +265,13 @@ impl Service {
         count: u32,
         max_statuses_per_request: usize,
     ) -> Result<Vec<i32>, StatusListError> {
+        if count == 0 || count as usize > max_statuses_per_request {
+            return Err(StatusListError::InvalidAllocationCount {
+                count,
+                max: max_statuses_per_request,
+            });
+        }
+
         let existing = self
             .status_list_repo
             .find(list_id)
@@ -273,13 +280,6 @@ impl Service {
 
         if &existing.issuer != issuer {
             return Err(StatusListError::IssuerMismatch);
-        }
-
-        if count == 0 || count as usize > max_statuses_per_request {
-            return Err(StatusListError::InvalidAllocationCount {
-                count,
-                max: max_statuses_per_request,
-            });
         }
 
         let limit = existing

@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(json["indices"], serde_json::json!([1]));
 
         let exhausted = call(1).await.unwrap();
-        assert_eq!(exhausted.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(exhausted.status(), StatusCode::CONFLICT);
         let body = to_bytes(exhausted.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "allocation_exhausted");
@@ -209,10 +209,14 @@ mod tests {
             )
             .with_state(app_state);
 
-        for count in [0, 3] {
+        for (target_list_id, count) in [
+            (list_id.clone(), 0),
+            (list_id.clone(), 3),
+            (uuid::Uuid::new_v4().to_string(), 0),
+        ] {
             let mut request = axum::http::Request::builder()
                 .method(axum::http::Method::POST)
-                .uri(format!("/status-lists/{list_id}/allocations"))
+                .uri(format!("/status-lists/{target_list_id}/allocations"))
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(Body::from(format!(r#"{{"count":{count}}}"#)))
                 .unwrap();

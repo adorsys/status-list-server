@@ -355,6 +355,10 @@ paths:
       responses:
         "201":
           description: Status list created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusPublishResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -758,6 +762,30 @@ components:
             default_status:
               $ref: "#/components/schemas/StatusValue"
 
+    StatusPublishResponse:
+      type: object
+      required:
+        - size
+        - bits
+      properties:
+        size:
+          type:
+            - integer
+            - "null"
+          format: int32
+          minimum: 1
+          maximum: 100001
+          description: |
+            Fixed list size actually stored by the server after byte-alignment
+            rounding, or `null` when the list is caller-managed.
+          example: 100000
+        bits:
+          type: integer
+          format: int32
+          enum: [1, 2, 4, 8]
+          description: Number of bits stored for each status entry.
+          example: 1
+
     AllocationRequest:
       type: object
       required:
@@ -952,7 +980,6 @@ components:
             - invalid_size
             - invalid_count
             - duplicate_index
-            - allocation_exhausted
             - list_quota_exceeded
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
@@ -973,6 +1000,7 @@ components:
             - update_conflict
             - index_not_allocated
             - list_not_fixed_size
+            - allocation_exhausted
             - write_contention
             # 413
             - payload_too_large
@@ -1182,9 +1210,10 @@ components:
 
     UpdateConflict:
       description: |
-        The write was rejected because it raced another writer. Two distinct
-        cases share this status and they require **opposite** client behaviour,
-        so branch on the `error` field rather than on the status code.
+        The request was rejected because of the current status-list state.
+        Branch on the `error` field rather than on the status code: some cases
+        are transient write races, while others are durable request/state
+        mismatches where retrying the same request will not help.
 
         `update_conflict` — optimistic-concurrency conflict. Another writer's
         update landed first between the client's read and this write, so this
@@ -1198,6 +1227,18 @@ components:
         request**; no re-read is required. A `Retry-After` header gives a floor —
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
+
+        `index_not_allocated` — PATCH on a fixed-size list targeted an index
+        that has not been allocated. Retrying the same request will not help;
+        allocate an index first or use one already assigned to the token.
+
+        `list_not_fixed_size` — allocation was requested for a list published
+        without `size`. Retrying the same request will not help; use
+        caller-managed indices for that list or publish a fixed-size list.
+
+        `allocation_exhausted` — the list has fewer unallocated entries
+        remaining than requested. Retrying the same request will not help unless
+        the list is explicitly grown first.
 
         > Note for integrators: 409 is not a status most generic HTTP clients,
         > SDKs or service meshes retry automatically. `write_contention` is
@@ -1227,6 +1268,21 @@ components:
               value:
                 error: "write_contention"
                 error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
+            indexNotAllocated:
+              summary: Fixed-size PATCH used an unallocated index (retry will not help)
+              value:
+                error: "index_not_allocated"
+                error_description: "index 5 has not been allocated for this status list"
+            listNotFixedSize:
+              summary: Allocation requested on a caller-managed list (retry will not help)
+              value:
+                error: "list_not_fixed_size"
+                error_description: "status list must be fixed-size to allocate indices"
+            allocationExhausted:
+              summary: Not enough unallocated entries remain (retry will not help)
+              value:
+                error: "allocation_exhausted"
+                error_description: "not enough unallocated entries remain in this status list"
 
     UpdateInternalServerError:
       description: |

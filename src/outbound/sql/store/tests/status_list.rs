@@ -1057,6 +1057,8 @@ async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
 
     let store_a = SeaOrmStore::<StatusListRecord>::new(db.clone());
     let store_b = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    // SQLite's test pool has one connection, so these serialize there; the
+    // MySQL and Postgres variants exercise the row lock with real concurrency.
     let (first, second) = tokio::join!(
         store_a.allocate_indices(&list_id, 2, 6),
         store_b.allocate_indices(&list_id, 2, 6),

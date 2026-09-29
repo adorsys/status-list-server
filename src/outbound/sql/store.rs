@@ -212,43 +212,8 @@ impl SeaOrmStore<StatusListRecord> {
         entity: StatusListRecord,
         max_lists_per_issuer: u64,
     ) -> Result<(), RepositoryError> {
-        time_query("insert", "status_list", async {
-            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-            if let Err(reserve_err) =
-                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
-            {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "status list slot reservation failed ({reserve_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(reserve_err);
-            }
-
-            let active = status_lists::ActiveModel {
-                list_id: Set(entity.list_id),
-                issuer: Set(entity.issuer),
-                status_list: Set(entity.status_list),
-                sub: Set(entity.sub),
-                updated_at: Set(entity.updated_at),
-            };
-            if let Err(insert_err) = status_lists::Entity::insert(active)
-                .exec_without_returning(&txn)
-                .await
-            {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "status list insert failed ({insert_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_insert_err(insert_err));
-            }
-            txn.commit().await.map_err(map_insert_err)?;
-            Ok(())
-        })
-        .await
+        self.insert_one_with_allocations(entity, &[], max_lists_per_issuer)
+            .await
     }
 
     #[tracing::instrument(skip(self, entity, allocated_indices), fields(db.system = "sea-orm"))]
@@ -313,8 +278,8 @@ impl SeaOrmStore<StatusListRecord> {
     /// Like [`insert_one`](Self::insert_one), but the row `INSERT` and the
     /// `status_list_history` `INSERT` covering its initial state run in one
     /// transaction: both commit or neither does. Without this a publish whose
-    /// snapshot insert fails leaves a list with no snapshot covering it, and —
-    /// unlike an update — no later write repairs that hole.
+    /// snapshot insert fails leaves a list with no snapshot covering it, and -
+    /// unlike an update - no later write repairs that hole.
     ///
     /// A duplicate `list_id` is still reported as
     /// [`RepositoryError::DuplicateEntry`] so the publish conflict keeps mapping
@@ -327,84 +292,8 @@ impl SeaOrmStore<StatusListRecord> {
         snapshot: StatusListHistoryRecord,
         max_lists_per_issuer: u64,
     ) -> Result<(), RepositoryError> {
-        time_query("insert_with_snapshot", "status_list", async {
-            #[cfg(test)]
-            let probed_list_id = entity.list_id.clone();
-
-            if snapshot.list_id != entity.list_id {
-                return Err(RepositoryError::InsertError(format!(
-                    "snapshot list_id ({}) does not match entity list_id ({})",
-                    snapshot.list_id, entity.list_id
-                )));
-            }
-
-            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-
-            if let Err(reserve_err) =
-                reserve_list_slot(&txn, &entity.issuer, &entity.list_id, max_lists_per_issuer).await
-            {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "status list slot reservation failed ({reserve_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(reserve_err);
-            }
-
-            let active = status_lists::ActiveModel {
-                list_id: Set(entity.list_id),
-                issuer: Set(entity.issuer),
-                status_list: Set(entity.status_list),
-                sub: Set(entity.sub),
-                updated_at: Set(entity.updated_at),
-            };
-            if let Err(insert_err) = status_lists::Entity::insert(active)
-                .exec_without_returning(&txn)
-                .await
-            {
-                // `insert_err` is classified after the rollback, not from it: on
-                // Postgres the failed statement poisons the transaction (`25P02`),
-                // so reading the rollback's own error would degrade a duplicate to a
-                // 500. Verified by `assert_duplicate_list_id_is_conflict`.
-                //
-                // Explicit rather than left to `Drop`: MySQL's 1205 rolls back only
-                // the statement (`innodb_rollback_on_timeout` is `OFF`).
-                //
-                // A failed rollback drops the classification and returns 500 — no
-                // 409 can promise "nothing landed" when the write may still land.
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "status list insert failed ({insert_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_insert_err(insert_err));
-            }
-
-            let history_active: status_list_history::ActiveModel = snapshot.into();
-            if let Err(insert_err) = status_list_history::Entity::insert(history_active)
-                .exec_without_returning(&txn)
-                .await
-            {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "history snapshot insert failed ({insert_err}); \
-                         rolling back the status list insert also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_snapshot_insert_err(insert_err));
-            }
-
-            #[cfg(test)]
-            snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
-                .pause(&probed_list_id)
-                .await;
-
-            txn.commit().await.map_err(map_insert_err)?;
-            Ok(())
-        })
-        .await
+        self.insert_one_with_snapshot_and_allocations(entity, snapshot, &[], max_lists_per_issuer)
+            .await
     }
 
     #[tracing::instrument(skip(self, entity, snapshot, allocated_indices))]
@@ -419,6 +308,9 @@ impl SeaOrmStore<StatusListRecord> {
             "insert_with_snapshot_and_allocations",
             "status_list",
             async {
+                #[cfg(test)]
+                let probed_list_id = entity.list_id.clone();
+
                 if snapshot.list_id != entity.list_id {
                     return Err(RepositoryError::InsertError(format!(
                         "snapshot list_id ({}) does not match entity list_id ({})",
@@ -487,6 +379,11 @@ impl SeaOrmStore<StatusListRecord> {
                     })?;
                     return Err(map_snapshot_insert_err(insert_err));
                 }
+
+                #[cfg(test)]
+                snapshot_txn_test_hook::INSERT_BEFORE_COMMIT
+                    .pause(&probed_list_id)
+                    .await;
 
                 txn.commit().await.map_err(map_insert_err)?;
                 Ok(())
@@ -1155,10 +1052,6 @@ where
     C: ConnectionTrait,
 {
     for chunk in indices.chunks(ALLOCATION_INSERT_CHUNK_ROWS) {
-        if chunk.is_empty() {
-            continue;
-        }
-
         let rows = chunk
             .iter()
             .map(|idx| status_list_allocations::ActiveModel {

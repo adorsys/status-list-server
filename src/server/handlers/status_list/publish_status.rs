@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
@@ -15,6 +15,12 @@ pub struct PublishStatusesRequest {
     pub statuses: Vec<StatusEntry>,
     pub size: Option<u32>,
     pub default_status: Option<Status>,
+}
+
+#[derive(Serialize)]
+pub(super) struct PublishStatusesResponse {
+    pub size: Option<u32>,
+    pub bits: u8,
 }
 
 impl From<StatusesRequest> for PublishStatusesRequest {
@@ -75,7 +81,7 @@ async fn publish_status_with_options(
         appstate.server_domain
     );
 
-    appstate
+    let record = appstate
         .service
         .publish_status_list_with_options(
             list_id,
@@ -92,7 +98,14 @@ async fn publish_status_with_options(
         )
         .await?;
 
-    Ok(StatusCode::CREATED.into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(PublishStatusesResponse {
+            size: record.status_list.size,
+            bits: record.status_list.bits,
+        }),
+    )
+        .into_response())
 }
 
 pub async fn publish_status_route(
@@ -235,6 +248,10 @@ mod tests {
 
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["size"], 8);
+        assert_eq!(json["bits"], 1);
 
         let token = app_state.service.get_status_list(&token_id).await.unwrap();
         assert_eq!(token.status_list.size, Some(8));
@@ -360,6 +377,58 @@ mod tests {
         let api: ApiError = err.into();
         assert_eq!(api.status, StatusCode::CONFLICT);
         assert_eq!(api.error, "index_not_allocated");
+    }
+
+    #[tokio::test]
+    async fn fixed_size_update_accepts_allocated_index() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+
+        app_state
+            .service
+            .publish_status_list_with_options(
+                token_id.clone(),
+                Issuer("issuer".to_string()),
+                format!("https://example.test/{token_id}"),
+                vec![],
+                Some(8),
+                None,
+                app_state.token_exp_secs,
+                app_state.max_status_index,
+                app_state.max_statuses_per_request,
+                app_state.max_serialized_list_size,
+                app_state.max_lists_per_issuer,
+            )
+            .await
+            .unwrap();
+
+        let allocated = app_state
+            .service
+            .allocate_indices(
+                &Issuer("issuer".to_string()),
+                &token_id,
+                1,
+                app_state.max_statuses_per_request,
+            )
+            .await
+            .unwrap();
+
+        app_state
+            .service
+            .update_statuses(
+                &Issuer("issuer".to_string()),
+                &token_id,
+                vec![crate::domain::models::status_list::StatusEntry {
+                    index: allocated[0],
+                    status: crate::domain::models::status_list::Status::Invalid,
+                }],
+                app_state.token_exp_secs,
+                app_state.max_status_index,
+                app_state.max_statuses_per_request,
+                app_state.max_serialized_list_size,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

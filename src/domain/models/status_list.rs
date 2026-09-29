@@ -326,7 +326,7 @@ impl StatusList {
         let rounded_size = Self::rounded_size_for_options(status_updates, size, default_status)?;
         if rounded_size > max_size {
             return Err(StatusListError::InvalidSize {
-                size: rounded_size,
+                size,
                 max: max_size,
             });
         }
