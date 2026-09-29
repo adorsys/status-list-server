@@ -910,6 +910,85 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 }
 
 #[test]
+fn rendered_chart_rejects_zero_string_token_lifetime() {
+    // The schema `minimum` only applies to numeric instances; a quoted `"0"`
+    // previously slipped through as a string via the canonical
+    // `statuslist.env.APP_STATUS_LIST__TOKEN_*` route. Regression: reject it via
+    // `--set-string`.
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0",
+    ]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
+    );
+
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=0",
+    ]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_numeric_zero_token_lifetime() {
+    // A numeric `0` (via `--set`, not `--set-string`) must be rejected by the
+    // schema's `minimum: 1` integer constraint. Regression for the numeric path.
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("minimum"),
+        "helm should reject numeric APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
+    );
+
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("minimum"),
+        "helm should reject numeric APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn rendered_chart_accepts_string_token_lifetime() {
+    let Some(rendered) = render_helm(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=1800",
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=600",
+    ]) else {
+        return;
+    };
+    for expected in [
+        "name: APP_STATUS_LIST__TOKEN_EXP_SECS\n              value: \"1800\"",
+        "name: APP_STATUS_LIST__TOKEN_TTL_SECS\n              value: \"600\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing injected token lifetime env var {expected}"
+        );
+    }
+}
+
+#[test]
 fn rendered_chart_supports_gke_workload_identity_dns_example() {
     let Some(rendered) = render_helm(&[
         "--set",
