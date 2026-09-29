@@ -1,4 +1,5 @@
 use color_eyre::eyre::{Context, Result};
+use opentelemetry::metrics::MeterProvider as _;
 #[cfg(any(
     not(feature = "acme"),
     feature = "sqlite",
@@ -14,7 +15,6 @@ use opentelemetry::{KeyValue, metrics::Counter};
     feature = "history"
 ))]
 use opentelemetry::{global, metrics::Gauge};
-use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_prometheus::exporter;
 use opentelemetry_sdk::{
@@ -54,10 +54,7 @@ static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceL
 pub(crate) const TARGET_DATABASE: &str = "database";
 #[cfg(any(
     not(feature = "acme"),
-    all(
-        any(feature = "sqlite", feature = "postgres", feature = "mysql"),
-        test
-    )
+    all(any(feature = "sqlite", feature = "postgres", feature = "mysql"), test)
 ))]
 pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
 

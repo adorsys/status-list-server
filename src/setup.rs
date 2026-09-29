@@ -1021,11 +1021,11 @@ async fn build_dns_challenge_handler(
 mod tests {
     use super::*;
     use crate::cert_manager::challenge::Dns01Handler;
+    #[cfg(feature = "gcp")]
+    use crate::config::GcloudDnsConfig;
     use crate::config::{
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
     };
-    #[cfg(feature = "gcp")]
-    use crate::config::GcloudDnsConfig;
 
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
