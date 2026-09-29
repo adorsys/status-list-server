@@ -1023,8 +1023,9 @@ mod tests {
     use crate::cert_manager::challenge::Dns01Handler;
     use crate::config::{
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
-        GcloudDnsConfig,
     };
+    #[cfg(feature = "gcp")]
+    use crate::config::GcloudDnsConfig;
 
     fn build_dns_challenge_handler(
         provider: DnsProviderKind,
@@ -1080,12 +1081,15 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &domains).is_ok()
         );
 
-        config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
-            project_id: "test-project".into(),
-        });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
-        );
+        #[cfg(feature = "gcp")]
+        {
+            config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
+                project_id: "test-project".into(),
+            });
+            assert!(
+                build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
+            );
+        }
     }
 }
 

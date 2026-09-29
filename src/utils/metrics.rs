@@ -1,8 +1,20 @@
 use color_eyre::eyre::{Context, Result};
-use opentelemetry::{
-    KeyValue, global,
-    metrics::{Counter, Gauge, MeterProvider as _},
-};
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
+use opentelemetry::{KeyValue, metrics::Counter};
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    feature = "history"
+))]
+use opentelemetry::{global, metrics::Gauge};
+use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_prometheus::exporter;
 use opentelemetry_sdk::{
@@ -12,7 +24,14 @@ use opentelemetry_sdk::{
 use prometheus::{Encoder, Registry, TextEncoder};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::TelemetryConfig;
 
@@ -23,13 +42,30 @@ static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// on this so a fresh provider (e.g. every metric test) doesn't keep writing to
 /// a stale, previously-dropped provider.
 static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceLock::new();
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) const TARGET_DATABASE: &str = "database";
-#[cfg(any(not(feature = "acme"), test))]
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
 
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 #[derive(Clone)]
 struct RotationMetrics {
     total: Counter<u64>,
@@ -68,6 +104,12 @@ pub(crate) fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 fn rotation_metrics() -> RotationMetrics {
     cached_instruments(&ROTATION_METRICS, || {
         let meter = global::meter("status-list-server");
@@ -85,6 +127,12 @@ fn rotation_metrics() -> RotationMetrics {
     })
 }
 
+#[cfg(any(
+    not(feature = "acme"),
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql"
+))]
 pub(crate) fn record_rotation(target: &'static str, success: bool) {
     let instruments = rotation_metrics();
     let outcome = if success { "success" } else { "failure" };
@@ -397,6 +445,12 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        not(feature = "acme"),
+        feature = "sqlite",
+        feature = "postgres",
+        feature = "mysql"
+    ))]
     #[test]
     fn rotation_metrics_are_exported_with_target_and_outcome_labels() {
         let _metrics_guard = metrics_test_lock();
