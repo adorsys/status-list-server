@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -16,8 +16,8 @@ use crate::domain::models::token::SigningAlgorithm;
 use crate::domain::ports::{SigningMaterial, TokenSigner};
 
 use super::constants::{
-    ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-    ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    ACCEPT_STATUS_LISTS_HEADER_CWT, CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST,
+    STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
@@ -50,12 +50,32 @@ fn token_metrics() -> TokenMetrics {
     })
 }
 
-/// Classify the client's `Accept` header into the bounded `format` label value.
-fn token_format(accept: &str) -> &'static str {
-    if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+/// Token encoding formats.
+///
+/// Matching on the enum (rather than raw strings) makes an unknown or mistyped
+/// format a compile error instead of silently falling through to JWT.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenFormat {
+    Jwt,
+    Cwt,
+}
+
+impl TokenFormat {
+    /// Classify the client's `Accept` header.
+    fn from_accept(accept: &str) -> Self {
+        if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
+            TokenFormat::Cwt
+        } else {
+            TokenFormat::Jwt
+        }
+    }
+
+    /// Bounded value for the `format` metric dimension.
+    fn as_label(self) -> &'static str {
+        match self {
+            TokenFormat::Jwt => "jwt",
+            TokenFormat::Cwt => "cwt",
+        }
     }
 }
 
@@ -100,14 +120,14 @@ pub(crate) async fn build_status_list_token(
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
-    signing_material: SigningMaterial,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let format = token_format(accept);
-    let attributes = [KeyValue::new("format", format)];
+    let format = TokenFormat::from_accept(accept);
+    let attributes = [KeyValue::new("format", format.as_label())];
     token_metrics().attempts.add(1, &attributes);
     match build_status_list_token_inner(
         state,
-        accept,
+        format,
         status_record,
         validity_window,
         client_accepts_gzip,
@@ -125,49 +145,55 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    accept: &str,
+    format: TokenFormat,
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
-    signing_material: SigningMaterial,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let certs_parts = signing_material
-        .certificate_chain
-        .clone()
-        .ok_or(StatusListError::Unavailable)?;
-    let signing_key = signing_material.signing_key.clone();
-
-    let accept = accept.to_string();
-    let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
     let validity_window = validity_window.unwrap_or_else(|| {
         let iat = OffsetDateTime::now_utc().unix_timestamp();
         (iat, iat + state.token_exp_secs as i64)
     });
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
+    let should_gzip = client_accepts_gzip && format == TokenFormat::Jwt;
+
+    let status_record = status_record.clone();
 
     tokio::task::spawn_blocking(move || {
-        let token_bytes = match accept.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
-                &status_record,
-                &*signing_key,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?,
-            _ => issue_jwt(
-                &status_record,
-                &*signing_key,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?
-            .into_bytes(),
+        let token_bytes = match format {
+            TokenFormat::Cwt => {
+                let x5chain = x5chain_from_der(
+                    signing_material
+                        .certificate_der()
+                        .ok_or_else(missing_chain_error)?,
+                );
+                issue_cwt(
+                    &status_record,
+                    signing_material.signing_key.as_ref(),
+                    x5chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+            }
+            TokenFormat::Jwt => {
+                let cert_chain = signing_material
+                    .certificate_chain()
+                    .ok_or_else(missing_chain_error)?;
+                issue_jwt(
+                    &status_record,
+                    signing_material.signing_key.as_ref(),
+                    cert_chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+                .into_bytes()
+            }
         };
 
         if should_gzip {
@@ -187,11 +213,39 @@ async fn build_status_list_token_inner(
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
 }
 
+/// A missing certificate chain is a misconfiguration that will not recover on
+/// its own, so it is surfaced as a 500 (Backend) rather than a retryable 503.
+fn missing_chain_error() -> StatusListError {
+    StatusListError::Backend(Box::new(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no active certificate chain is configured",
+    )))
+}
+
+/// Build the CBOR `x5chain` protected-header value from the pre-decoded DER
+/// chain, following the status-list spec: a single certificate maps to a
+/// `ByteString`, multiple certificates to an `Array` of `ByteString`s.
+///
+/// The DER is already decoded and stored on [`crate::domain::ports::SigningMaterial`], so this runs
+/// without a base64 decode, a global lock, or a comparison on every request.
+fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
+    if certs.len() == 1 {
+        CborValue::Bytes(certs[0].to_vec())
+    } else {
+        CborValue::Array(
+            certs
+                .iter()
+                .map(|der| CborValue::Bytes(der.to_vec()))
+                .collect(),
+        )
+    }
+}
+
 fn issue_cwt(
     status_record: &StatusListRecord,
     signer: &(impl TokenSigner + ?Sized),
-    cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    x5chain: CborValue,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
@@ -227,7 +281,7 @@ fn issue_cwt(
     if let Some(uri) = aggregation_uri {
         status_list.push((
             CborValue::Text("aggregation_uri".into()),
-            CborValue::Text(uri.clone()),
+            CborValue::Text(uri),
         ));
     }
     claims.push((
@@ -240,10 +294,9 @@ fn issue_cwt(
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
     let cose_alg = cose_algorithm(signer.algorithm())?;
-    let x5chain_value = build_x5chain(cert_chain)?;
     let protected = HeaderBuilder::new()
         .algorithm(cose_alg)
-        .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
+        .value(HeaderParameter::X5Chain.to_i64(), x5chain)
         .value(
             CWT_TYPE,
             CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()),
@@ -264,30 +317,11 @@ fn issue_cwt(
     Ok(cwt_bytes)
 }
 
-fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-
-    let result: Result<Vec<Vec<u8>>, _> = cert_chain
-        .iter()
-        .map(|b64| BASE64_STANDARD.decode(b64))
-        .collect();
-    let certs_der = result.map_err(|err| StatusListError::Backend(Box::new(err)))?;
-
-    let x5chain_value = if certs_der.len() == 1 {
-        CborValue::Bytes(certs_der.into_iter().next().unwrap())
-    } else {
-        let cert_array: Vec<CborValue> = certs_der.into_iter().map(CborValue::Bytes).collect();
-        CborValue::Array(cert_array)
-    };
-
-    Ok(x5chain_value)
-}
-
 fn issue_jwt(
     status_record: &StatusListRecord,
     signer: &(impl TokenSigner + ?Sized),
     cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
@@ -297,7 +331,7 @@ fn issue_jwt(
     let status_list = StatusListClaims {
         bits,
         lst,
-        aggregation_uri: aggregation_uri.clone(),
+        aggregation_uri,
     };
     let claims = StatusListToken {
         exp: Some(exp),
@@ -348,6 +382,7 @@ mod tests {
     };
     use coset::TaggedCborSerializable;
     use jsonwebtoken::{DecodingKey, Validation, decode};
+    use std::sync::Arc;
 
     use base64::prelude::Engine as _;
 
@@ -422,7 +457,10 @@ mod tests {
         ];
 
         for key in &test_keys {
-            let token = issue_jwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let token =
+                issue_jwt(&record, signer.as_ref(), &cert_chain, None, 1000, 2000, 300).unwrap();
             let header = jsonwebtoken::decode_header(&token).unwrap();
             assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
             assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
@@ -450,7 +488,22 @@ mod tests {
         ];
 
         for key in &test_keys {
-            let cwt_bytes = issue_cwt(&record, key, &cert_chain, &None, 1000, 2000, 300).unwrap();
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let material =
+                crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer)
+                    .expect("material");
+            let x5chain = x5chain_from_der(material.certificate_der().expect("der chain"));
+            let cwt_bytes = issue_cwt(
+                &record,
+                material.signing_key.as_ref(),
+                x5chain,
+                None,
+                1000,
+                2000,
+                300,
+            )
+            .unwrap();
             let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
             let expected_alg = match key.algorithm() {
                 SigningAlgorithm::Es256 => Algorithm::ES256,
@@ -462,11 +515,91 @@ mod tests {
                 sign1.protected.header.alg,
                 Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
             );
+            let x5chain_label = coset::Label::Int(HeaderParameter::X5Chain.to_i64());
+            let x5chain = sign1
+                .protected
+                .header
+                .rest
+                .iter()
+                .find(|(label, _)| *label == x5chain_label)
+                .map(|(_, value)| value.clone())
+                .expect("CWT must carry a spec-compliant x5chain protected header");
+            assert_eq!(
+                x5chain,
+                CborValue::Bytes(b"dummy-cert-der".to_vec()),
+                "x5chain must carry the DER bytes of the (single) certificate"
+            );
             sign1
                 .verify_signature(&[], |signature, tbs| {
                     verify_cwt_signature(key, signature, tbs)
                 })
                 .expect("CWT signature verifies with its public key");
+        }
+    }
+
+    #[test]
+    fn test_x5chain_single_cert_is_byte_string() {
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(vec![base64::prelude::BASE64_STANDARD.encode(b"only-cert")]),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der().unwrap());
+        assert_eq!(value, CborValue::Bytes(b"only-cert".to_vec()));
+    }
+
+    #[test]
+    fn test_x5chain_multi_cert_preserves_array_order() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let der = [b"leaf".to_vec(), b"intermediate".to_vec(), b"root".to_vec()];
+        let chain: Vec<String> = der.iter().map(|d| BASE64_STANDARD.encode(d)).collect();
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(chain),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der().unwrap());
+        assert_eq!(
+            value,
+            CborValue::Array(vec![
+                CborValue::Bytes(b"leaf".to_vec()),
+                CborValue::Bytes(b"intermediate".to_vec()),
+                CborValue::Bytes(b"root".to_vec()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_chain_surfaces_as_backend_500_for_cwt_and_jwt() {
+        use crate::domain::models::status_list::StatusListError;
+        use crate::test_utils::test_app_state_without_cert_chain;
+
+        let state = test_app_state_without_cert_chain().await;
+        let record = sample_record();
+        let signing_material = state
+            .service
+            .cert_provider()
+            .signing_material()
+            .await
+            .expect("material");
+
+        for accept in [
+            ACCEPT_STATUS_LISTS_HEADER_CWT,
+            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+        ] {
+            let result = build_status_list_token(
+                &state,
+                accept,
+                &record,
+                None,
+                false,
+                signing_material.clone(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(StatusListError::Backend(_))),
+                "missing chain must surface as a 500 (Backend) for accept `{accept}`, got {result:?}"
+            );
         }
     }
 }

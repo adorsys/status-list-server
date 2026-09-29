@@ -135,7 +135,40 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         None,
         Arc::new(TestCertProvider {
             key_pem: include_str!("../test_data/ec-private.pem").to_string(),
-            cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+            cert_chain: Some(vec!["ZHVtbXlfY2VydA==".into()]),
+        }),
+    ));
+
+    AppState {
+        service,
+        server_domain: "example.com".to_string(),
+        aggregation_uri: None,
+        token_exp_secs: 900,
+        token_ttl_secs: 300,
+        max_status_index: 100_000,
+        max_statuses_per_request: 5_000,
+        max_serialized_list_size: 1_048_576,
+        max_lists_per_issuer: 1_000,
+        snapshot_retention_secs: 0,
+        management_auth: crate::server::ManagementAuthConfig::default(),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(300, 100),
+        readiness: crate::server::health::Readiness::new(Vec::new()),
+    }
+}
+
+/// An [`AppState`] whose `CertificateProvider` returns material with no
+/// certificate chain, so token generation surfaces a missing-chain 500.
+pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let service = Arc::new(Service::from_arcs(
+        Arc::new(MemoryStatusLists::default()),
+        Arc::new(MemoryCredentials::default()),
+        Arc::new(TestStatusListCache::default()),
+        None,
+        Arc::new(TestCertProvider {
+            key_pem: include_str!("../test_data/ec-private.pem").to_string(),
+            cert_chain: None,
         }),
     ));
 
@@ -158,7 +191,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
 
 pub(crate) struct TestCertProvider {
     pub key_pem: String,
-    pub cert_chain: Vec<String>,
+    pub cert_chain: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -166,16 +199,18 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
     async fn signing_material(
         &self,
     ) -> Result<
-        crate::domain::ports::SigningMaterial,
+        std::sync::Arc<crate::domain::ports::SigningMaterial>,
         crate::domain::models::status_list::StatusListError,
     > {
         let signing_key =
             crate::utils::crypto::SigningKey::from_pem(&self.key_pem).map_err(|err| {
                 crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
             })?;
-        Ok(crate::domain::ports::SigningMaterial::new(
-            Some(self.cert_chain.clone()),
-            Arc::new(signing_key),
+        Ok(std::sync::Arc::new(
+            crate::domain::ports::SigningMaterial::new(
+                self.cert_chain.clone(),
+                Arc::new(signing_key),
+            )?,
         ))
     }
 }
@@ -216,7 +251,7 @@ impl crate::domain::ports::CertificateProvider for RotatingCertProvider {
     async fn signing_material(
         &self,
     ) -> Result<
-        crate::domain::ports::SigningMaterial,
+        std::sync::Arc<crate::domain::ports::SigningMaterial>,
         crate::domain::models::status_list::StatusListError,
     > {
         let m = self.inner.lock().expect("cert provider mutex");
@@ -224,9 +259,11 @@ impl crate::domain::ports::CertificateProvider for RotatingCertProvider {
             crate::utils::crypto::SigningKey::from_pem(&m.key_pem).map_err(|err| {
                 crate::domain::models::status_list::StatusListError::Backend(Box::new(err))
             })?;
-        Ok(crate::domain::ports::SigningMaterial::new(
-            Some(m.cert_chain.clone()),
-            Arc::new(signing_key),
+        Ok(std::sync::Arc::new(
+            crate::domain::ports::SigningMaterial::new(
+                Some(m.cert_chain.clone()),
+                Arc::new(signing_key),
+            )?,
         ))
     }
 }
@@ -304,7 +341,7 @@ async fn build_test_app_state(
     let status_list_cache = Arc::new(TestStatusListCache::default());
     let cert_provider = Arc::new(TestCertProvider {
         key_pem,
-        cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+        cert_chain: Some(vec!["ZHVtbXlfY2VydA==".into()]),
     });
 
     let service = Arc::new(Service::from_arcs(

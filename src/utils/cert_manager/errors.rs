@@ -33,8 +33,20 @@ pub enum CertError {
     KeyOp(#[from] KeyOpError),
 
     #[error("Configuration validation error: {0}")]
-    Validation(String),
+    Validation(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("Uncategorized error: {0}")]
     Other(#[source] EyreError),
+}
+
+impl CertError {
+    /// Build a `Validation` error from a plain message. `Box<dyn Error>` is used
+    /// so real error causes can be carried as a `#[source]` instead of being
+    /// flattened to a string, keeping the full error chain intact.
+    pub fn validation(msg: impl Into<String>) -> Self {
+        CertError::Validation(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            msg.into(),
+        )))
+    }
 }
