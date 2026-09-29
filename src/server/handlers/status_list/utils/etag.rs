@@ -1,20 +1,42 @@
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
+use crate::server::cache::{TokenCacheKey, TokenEncoding};
 use sha2::{Digest, Sha256};
 
-/// Strong ETag for the live representation, derived from the actual signed
-/// token bytes that the server serves.
+/// Weak ETag for the live representation, derived from the *representation
+/// identity* rather than the signed bytes themselves.
 ///
-/// Because the bytes for a given `(list, window_start, format, encoding)` are
-/// identical across the whole anchored window (the token's `iat` is pinned to
-/// `window_start`), the strong ETag proves which token the client holds: a
-/// matching `If-None-Match` guarantees the client's cached token is byte-for-byte
-/// the same as the current one, and since that token expires at
-/// `window_start + exp_secs` (which lies strictly after the window), a 304 never
-/// stranding an expired token. This lets the conditional logic drop the separate
-/// expired-token runway handling.
-pub(crate) fn generate_token_etag(token_bytes: &[u8]) -> String {
-    let hash = Sha256::digest(token_bytes);
-    format!("\"{}\"", hex::encode(hash))
+/// A strong ETag must change whenever the bytes change (RFC 9110 §8.8.3.1), but
+/// ES256 signatures are randomized: the signed bytes for a token differ between
+/// requests on a cold cache, across replicas, across restarts, and on capacity
+/// eviction. A digest of the signed bytes would therefore make the ETag only as
+/// stable as this replica's cache — a client holding a valid token would get a
+/// `200` (and a fresh sign) instead of a `304` whenever the entry wasn't cached
+/// here. That defeats the very conditional GET this validator exists to serve.
+///
+/// Instead the ETag is a **weak** validator (`W/"..."`) over the dimensions that
+/// pin the representation identity: `(list_id, content_hash, signer_fingerprint,
+/// window_start, format, encoding)`. That tuple is identical across replicas and
+/// never requires a sign to answer a `304`, and it changes exactly when the
+/// served representation's identity changes (content, signing key, window,
+/// format, or encoding). A matching weak ETag proves the client holds a
+/// current-window token from the current signer for this content — which is the
+/// guarantee the conditional logic needs to certify a `304`.
+pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.list_id.as_bytes());
+    hasher.update(key.content_hash.as_bytes());
+    hasher.update(key.signer_fingerprint.as_bytes());
+    hasher.update(key.window_start.to_string().as_bytes());
+    hasher.update(key.format.as_bytes());
+    hasher.update(encoding_label(key.encoding).as_bytes());
+    format!("W/\"{}\"", hex::encode(hasher.finalize()))
+}
+
+fn encoding_label(encoding: TokenEncoding) -> &'static str {
+    match encoding {
+        TokenEncoding::Identity => "identity",
+        TokenEncoding::Gzip => "gzip",
+    }
 }
 
 /// Content hash over the representation-driving fields of `record`, excluding
@@ -65,30 +87,107 @@ mod tests {
         }
     }
 
+    fn base_key() -> TokenCacheKey {
+        TokenCacheKey {
+            list_id: "list".to_string(),
+            content_hash: "hash".to_string(),
+            signer_fingerprint: "signer".to_string(),
+            window_start: 1000,
+            format: "jwt".to_string(),
+            encoding: TokenEncoding::Identity,
+            aggregation_uri: String::new(),
+            token_ttl_secs: 300,
+            token_exp_secs: 900,
+        }
+    }
+
     #[test]
-    fn test_generate_token_etag_format() {
-        let etag = generate_token_etag(b"token-bytes");
+    fn test_generate_token_etag_is_weak() {
+        let etag = generate_token_etag(&base_key());
         assert!(
-            etag.starts_with('"'),
-            "ETag should be a strong quoted value"
+            etag.starts_with("W/\""),
+            "live ETag must be weak (W/\"...\"), not strong"
         );
         assert!(etag.ends_with('"'), "ETag should end with \"");
-        assert!(
-            !etag.starts_with("W/"),
-            "live ETag must be strong, not weak"
-        );
-
-        let hex_part = &etag[1..etag.len() - 1];
+        let hex_part = &etag[3..etag.len() - 1];
         assert_eq!(hex_part.len(), 64);
         assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn test_generate_token_etag_determinism() {
-        assert_eq!(generate_token_etag(b"same"), generate_token_etag(b"same"));
-        assert_ne!(
-            generate_token_etag(b"same"),
-            generate_token_etag(b"different")
+        assert_eq!(
+            generate_token_etag(&base_key()),
+            generate_token_etag(&base_key())
+        );
+    }
+
+    #[test]
+    fn test_generate_token_etag_changes_with_each_identity_dimension() {
+        let base = base_key();
+        let cases = [
+            (
+                "list_id",
+                TokenCacheKey {
+                    list_id: "other".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "content_hash",
+                TokenCacheKey {
+                    content_hash: "other".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "signer_fingerprint",
+                TokenCacheKey {
+                    signer_fingerprint: "other".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "window_start",
+                TokenCacheKey {
+                    window_start: 1001,
+                    ..base.clone()
+                },
+            ),
+            (
+                "format",
+                TokenCacheKey {
+                    format: "cwt".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "encoding",
+                TokenCacheKey {
+                    encoding: TokenEncoding::Gzip,
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (dim, key) in cases {
+            assert_ne!(
+                generate_token_etag(&base),
+                generate_token_etag(&key),
+                "ETag must change when {dim} changes"
+            );
+        }
+        // Aggregate dimensions that are *not* representation identity must not
+        // change the ETag (they don't alter the bytes served for this window).
+        let same_identity = TokenCacheKey {
+            aggregation_uri: "https://agg".into(),
+            token_ttl_secs: 600,
+            token_exp_secs: 1200,
+            ..base.clone()
+        };
+        assert_eq!(
+            generate_token_etag(&base),
+            generate_token_etag(&same_identity),
+            "ttl/exp/aggregation_uri are not representation identity"
         );
     }
 

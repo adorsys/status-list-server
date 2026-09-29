@@ -1,18 +1,22 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use moka::future::Cache as MokaCache;
+use moka::policy::Expiry;
 use opentelemetry::{
-    metrics::Counter,
+    metrics::{Counter, Gauge},
     {KeyValue, global},
 };
 
 const HIT_METRIC: &str = "token_bytes_cache_hits";
 const MISS_METRIC: &str = "token_bytes_cache_misses";
+const ENTRY_COUNT_METRIC: &str = "token_bytes_cache_entries";
+const TOTAL_BYTES_METRIC: &str = "token_bytes_cache_size";
 
-/// Cache-hit/miss SLI counters for the signed-token bytes cache.
+/// Cache-hit/miss SLI counters plus size gauges for the signed-token bytes
+/// cache.
 ///
 /// Handles are resolved through [`crate::utils::metrics::cached_instruments`]
 /// so a fresh global meter provider (e.g. a re-run of `setup_metrics` in tests)
@@ -22,6 +26,8 @@ const MISS_METRIC: &str = "token_bytes_cache_misses";
 struct TokenCacheMetrics {
     hits: Counter<u64>,
     misses: Counter<u64>,
+    entry_count: Gauge<u64>,
+    total_bytes: Gauge<u64>,
 }
 
 fn token_cache_metrics() -> TokenCacheMetrics {
@@ -37,6 +43,14 @@ fn token_cache_metrics() -> TokenCacheMetrics {
             misses: meter
                 .u64_counter(MISS_METRIC)
                 .with_description("Signed status-list token bytes cache misses")
+                .build(),
+            entry_count: meter
+                .u64_gauge(ENTRY_COUNT_METRIC)
+                .with_description("Number of entries currently resident in the signed-token bytes cache")
+                .build(),
+            total_bytes: meter
+                .u64_gauge(TOTAL_BYTES_METRIC)
+                .with_description("Total weighted size (bytes) currently resident in the signed-token bytes cache")
                 .build(),
         }
     })
@@ -55,10 +69,15 @@ pub(crate) enum TokenEncoding {
 ///
 /// The bytes are stored as [`Bytes`] so a cache hit can be moved straight into
 /// an Axum response body without copying the (potentially large) representation.
+///
+/// `created_at_unix` is the wall-clock second the entry was built. The cache's
+/// per-entry expiry ([`EntryExpiry`]) uses it to expire each entry at the end of
+/// its own validity window, rather than on a fixed TTL.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedToken {
     pub(crate) bytes: Bytes,
     pub(crate) encoding: Option<&'static str>,
+    pub(crate) created_at_unix: i64,
 }
 
 /// The typed identity of a cached signed representation.
@@ -104,35 +123,85 @@ pub(crate) struct TokenCacheKey {
 /// identical `(content, window, format)` values from different lists distinct.
 /// Signing-key rotation and certificate renewal are covered by the signer
 /// fingerprint, so a rotated key immediately misses and re-signs with the new
-/// key. Expiry is covered by the window bound checked at lookup time plus moka's
-/// `time_to_live`, so no eager invalidation is needed.
+/// key. Expiry is covered by the window bound checked at lookup time plus a
+/// per-entry [`EntryExpiry`] that frees each entry at the end of its own window,
+/// so no eager invalidation is needed.
 ///
-/// Per-replica by design: ETag consistency across replicas is out of scope and
-/// would require a shared store.
+/// Per-replica by design: the weak ETag is derived from the representation
+/// identity (not the bytes), so it is identical across replicas; the bytes cache
+/// itself is per-replica.
 #[derive(Clone, Debug)]
 pub struct TokenBytesCache {
     inner: MokaCache<TokenCacheKey, CachedToken>,
 }
 
+/// The byte weight of a cached entry: its raw signed-token byte length. This is
+/// what bounds memory — a count would ignore that lists range from a few hundred
+/// bytes to over 1 MiB.
+fn entry_weight(_key: &TokenCacheKey, value: &CachedToken) -> u32 {
+    value.bytes.len() as u32
+}
+
+/// Per-entry expiry policy: each entry expires at the end of its anchored
+/// validity window `[window_start, window_start + exp_secs)`.
+///
+/// Because the lookup guard already treats past-window entries as misses, this
+/// policy only governs when moka *frees* the entry's memory. Expiring each entry
+/// at the end of its own window (rather than on a fixed TTL) lets a closed
+/// window's entries be reclaimed promptly, instead of lingering for a global
+/// TTL. Reads do not extend the expiry ([`Expiry::expire_after_read`] keeps the
+/// remaining duration), so an entry is always freed at its window end.
+#[derive(Debug, Clone, Copy, Default)]
+struct EntryExpiry;
+
+impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
+    fn expire_after_create(
+        &self,
+        key: &TokenCacheKey,
+        value: &CachedToken,
+        _created_at: Instant,
+    ) -> Option<Duration> {
+        let window_end = key
+            .window_start
+            .saturating_add(i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX));
+        let secs = (window_end - value.created_at_unix).max(1) as u64;
+        Some(Duration::from_secs(secs))
+    }
+}
+
 impl TokenBytesCache {
     /// Build an in-process signed-token bytes cache.
     ///
-    /// `ttl_secs` bounds how long an entry may be retained by moka in addition
-    /// to its window-based validity; `max_capacity` bounds memory for large
-    /// lists. A `ttl_secs` of `0` preserves the "cache disabled" semantics used
-    /// elsewhere in this codebase (`MokaStatusListCache`): entries expire
-    /// immediately and every request re-signs. Configuration validation ensures
-    /// a non-zero `ttl_secs` is at least `token_exp_secs`, so an entry is never
-    /// evicted in the middle of a validity window.
-    pub(crate) fn new(ttl_secs: u64, max_capacity: u64) -> Self {
-        if ttl_secs == 0 {
-            tracing::info!("Signed-token bytes cache disabled (TTL=0)");
+    /// `max_capacity_bytes` bounds the resident memory: entries are weighed by
+    /// their byte size and the total weighted size is capped at this budget
+    /// (see [`MokaCache::builder`]'s weighted-capacity semantics). A `0` budget
+    /// preserves the "cache disabled" semantics used elsewhere in this codebase
+    /// (`MokaStatusListCache`): entries are evicted immediately and every request
+    /// re-signs. Each entry additionally expires at the end of its own validity
+    /// window ([`EntryExpiry`]), independent of the byte budget.
+    pub(crate) fn new(max_capacity_bytes: u64) -> Self {
+        if max_capacity_bytes == 0 {
+            tracing::info!("Signed-token bytes cache disabled (capacity=0)");
         }
         let inner = MokaCache::builder()
-            .time_to_live(Duration::from_secs(ttl_secs))
-            .max_capacity(max_capacity)
+            .weigher(entry_weight)
+            .max_capacity(max_capacity_bytes)
+            .expire_after(EntryExpiry)
             .build();
         Self { inner }
+    }
+
+    /// Push the current resident entry count and total byte size to the gauges.
+    fn update_size_gauges(&self) {
+        let metrics = token_cache_metrics();
+        metrics.entry_count.record(
+            self.inner.entry_count(),
+            &[KeyValue::new("cache", "token_bytes")],
+        );
+        metrics.total_bytes.record(
+            self.inner.weighted_size(),
+            &[KeyValue::new("cache", "token_bytes")],
+        );
     }
 
     /// Return cached bytes for `key`, only for an entry whose anchored window
@@ -210,6 +279,7 @@ impl TokenBytesCache {
         metrics
             .misses
             .add(1, &[KeyValue::new("cache", "token_bytes")]);
+        self.update_size_gauges();
         Ok(Some(value))
     }
 
@@ -249,6 +319,7 @@ impl TokenBytesCache {
     #[cfg(test)]
     pub(crate) async fn insert(&self, key: TokenCacheKey, value: CachedToken) {
         self.inner.insert(key, value).await;
+        self.update_size_gauges();
     }
 }
 
@@ -279,7 +350,7 @@ mod tests {
     }
 
     async fn cached(w: i64) -> (TokenBytesCache, TokenCacheKey) {
-        let cache = TokenBytesCache::new(300, 100);
+        let cache = TokenBytesCache::new(100);
         let key = base_key(w);
         cache
             .insert(
@@ -287,6 +358,7 @@ mod tests {
                 CachedToken {
                     bytes: Bytes::from(vec![1, 2, 3]),
                     encoding: None,
+                    created_at_unix: 0,
                 },
             )
             .await;
@@ -312,7 +384,7 @@ mod tests {
         // At most one signing operation per (list, window, format) per replica.
         // N concurrent misses for the same key must run the builder exactly once
         // and share the resulting bytes.
-        let cache = TokenBytesCache::new(300, 100);
+        let cache = TokenBytesCache::new(100);
         let key = base_key(1000);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -330,6 +402,7 @@ mod tests {
                             Ok::<_, std::convert::Infallible>(CachedToken {
                                 bytes: Bytes::from(vec![7u8, 8, 9]),
                                 encoding: None,
+                                created_at_unix: 0,
                             })
                         }
                     })
@@ -363,7 +436,9 @@ mod tests {
         // flight guarantee covers these *concurrent* misses joining one build;
         // it does not cover a request that arrives after the completed entry has
         // been evicted (see `sequential_request_re_signs_after_capacity_eviction`).
-        let cache = TokenBytesCache::new(300, 1);
+        // The byte budget (3) equals one entry's weight, so the single slot is
+        // occupied by exactly one entry at a time.
+        let cache = TokenBytesCache::new(3);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -397,6 +472,7 @@ mod tests {
                             Ok::<_, std::convert::Infallible>(CachedToken {
                                 bytes: Bytes::from(vec![7u8, 8, 9]),
                                 encoding: None,
+                                created_at_unix: 0,
                             })
                         }
                     })
@@ -420,6 +496,7 @@ mod tests {
                         Ok::<_, std::convert::Infallible>(CachedToken {
                             bytes: Bytes::from(vec![1u8, 2, 3]),
                             encoding: None,
+                            created_at_unix: 0,
                         })
                     })
                     .await
@@ -452,7 +529,7 @@ mod tests {
         // bounding memory with `max_capacity`: capacity pressure can re-sign an
         // unchanged, still-valid token. Operators can avoid it by sizing
         // `max_capacity` above the number of live windows.
-        let cache = TokenBytesCache::new(300, 1);
+        let cache = TokenBytesCache::new(1);
         let key_a = TokenCacheKey {
             list_id: "list-a".to_string(),
             ..base_key(1000)
@@ -469,6 +546,7 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(CachedToken {
                         bytes: Bytes::from(vec![1u8]),
                         encoding: None,
+                        created_at_unix: 0,
                     })
                 }
             })
@@ -489,6 +567,7 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(CachedToken {
                         bytes: Bytes::from(vec![9u8]),
                         encoding: None,
+                        created_at_unix: 0,
                     })
                 })
                 .await
@@ -511,6 +590,7 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(CachedToken {
                         bytes: Bytes::from(vec![3u8]),
                         encoding: None,
+                        created_at_unix: 0,
                     })
                 }
             })
@@ -596,7 +676,7 @@ mod tests {
         )
         .expect("metrics setup");
 
-        let cache = TokenBytesCache::new(300, 100);
+        let cache = TokenBytesCache::new(100);
         let cache_key = TokenCacheKey {
             list_id: "l".to_string(),
             content_hash: "h".to_string(),
@@ -614,6 +694,7 @@ mod tests {
                     CachedToken {
                         bytes: Bytes::from(vec![1]),
                         encoding: None,
+                        created_at_unix: 0,
                     },
                 )
                 .await;
@@ -636,5 +717,90 @@ mod tests {
                 "missing metric series {sample}; body:\n{body}"
             );
         }
+        // Size gauges must be exported too (entry count and resident bytes).
+        for metric in [ENTRY_COUNT_METRIC, TOTAL_BYTES_METRIC] {
+            let sample =
+                format!(r#"{metric}{{cache="token_bytes",otel_scope_name="status-list-server"}}"#);
+            assert!(
+                body.contains(&sample),
+                "missing metric series {sample}; body:\n{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_disabled_capacity_zero_never_serves() {
+        // A zero byte budget preserves the "cache disabled" semantics: entries
+        // are evicted immediately, so every lookup is a miss and every build
+        // runs.
+        let cache = TokenBytesCache::new(0);
+        let key = base_key(1000);
+        let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let out = cache
+                .get_or_build(&key, 1000, 900, 1400, {
+                    let builds = builds.clone();
+                    || async move {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken {
+                            bytes: Bytes::from(vec![7u8, 8, 9]),
+                            encoding: None,
+                            created_at_unix: 1300,
+                        })
+                    }
+                })
+                .await
+                .expect("infallible");
+            assert!(
+                out.is_some(),
+                "capacity-0 cache still returns a freshly built token"
+            );
+        }
+        assert_eq!(
+            builds.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "a capacity-0 cache never reuses an entry; every request re-signs"
+        );
+    }
+
+    #[test]
+    fn entry_weight_is_byte_length() {
+        // The cache's `max_capacity` is a byte budget: each entry is weighed by
+        // its signed-token byte length, so a large list consumes proportionally
+        // more of the budget than a small one.
+        let key = base_key(1000);
+        let small = CachedToken {
+            bytes: Bytes::from(vec![1u8, 2, 3]),
+            encoding: None,
+            created_at_unix: 1000,
+        };
+        assert_eq!(entry_weight(&key, &small), 3);
+
+        let large = CachedToken {
+            bytes: Bytes::from(vec![0u8; 2048]),
+            encoding: None,
+            created_at_unix: 1000,
+        };
+        assert_eq!(entry_weight(&key, &large), 2048);
+    }
+
+    #[test]
+    fn entry_expiry_targets_window_end() {
+        // Each entry expires at the end of its own anchored window
+        // `[window_start, window_start + exp_secs)`, independent of any global TTL.
+        // `base_key(1000)` has `window_start = 1000` and `exp_secs = 900`, so the
+        // window ends at 1900. An entry created at 1200 must therefore live for
+        // exactly 700 seconds.
+        let key = base_key(1000);
+        let value = CachedToken {
+            bytes: Bytes::from(vec![1u8]),
+            encoding: None,
+            created_at_unix: 1200,
+        };
+        let duration = EntryExpiry
+            .expire_after_create(&key, &value, std::time::Instant::now())
+            .expect("a window-end expiry is always set");
+        assert_eq!(duration, Duration::from_secs(700));
     }
 }

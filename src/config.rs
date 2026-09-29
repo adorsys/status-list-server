@@ -1197,50 +1197,24 @@ impl CacheConfig {
 /// This is deliberately separate from [`CacheConfig`] (which governs the cached
 /// *status list items*): a token cache entry must outlive the status-list item
 /// cache so that an unchanged list reuses a single sign for the whole token
-/// window, and its `ttl` semantics are different (see below).
+/// window.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenBytesCacheConfig {
-    /// Time-to-live for cached signed token bytes in seconds.
+    /// Upper bound on the *bytes* of cached signed-token entries resident in
+    /// this replica, bounding memory for large lists.
     ///
-    /// Must be either `0` (cache disabled entirely) or at least
-    /// `status_list.token_exp_secs`. A value in the middle would let the cache
-    /// expire mid-window and re-sign unchanged tokens, defeating the feature's
-    /// purpose while forcing operators to keep two independently configured
-    /// values in sync.
+    /// Entries are weighed by their byte size (a few hundred bytes for a small
+    /// list, up to >1 MiB for a large one), so this is a byte budget rather than
+    /// an entry count. Each entry additionally expires at the end of its own
+    /// validity window, so a closed window's bytes are reclaimed promptly rather
+    /// than lingering for a fixed TTL. Set to `0` to disable the cache entirely
+    /// (every request re-signs).
     ///
-    /// This bounds *time-based* expiry only. `max_capacity` pressure can still
-    /// evict an unchanged, still-valid entry before its TTL, and a later request
-    /// in the same window will then re-sign. That is the accepted tradeoff for
-    /// bounding memory; size `max_capacity` above the number of concurrent live
-    /// windows to keep an entry resident for its whole window.
-    pub ttl: u64,
-    /// Upper bound on the number of cached signed-token entries, bounding
-    /// memory for large lists.
-    ///
-    /// Eviction driven by this bound (rather than by TTL or window expiry) can
-    /// drop a still-valid entry and cause a re-sign of unchanged bytes on a
-    /// later request in the same window. Size it above the number of live
-    /// `(list, window, format)` windows to avoid mid-window re-signs.
+    /// Eviction driven by this bound can drop a still-valid entry and cause a
+    /// re-sign of unchanged bytes on a later request in the same window. Size it
+    /// above the concurrent resident byte total of the live `(list, window,
+    /// format)` windows to avoid mid-window re-signs.
     pub max_capacity: u64,
-}
-
-impl TokenBytesCacheConfig {
-    /// Reject a TTL that would let cached signed bytes expire in the middle of a
-    /// token validity window. `0` disables the cache; any other value must cover
-    /// at least the full window, otherwise the cache re-signs unchanged tokens
-    /// before they expire. The error names the env var (rather than only the
-    /// dotted config path) so an operator knows which knob to fix.
-    fn validate(&self, token_exp_secs: u64) -> Result<(), ConfigError> {
-        if self.ttl != 0 && self.ttl < token_exp_secs {
-            return Err(ConfigError::Message(format!(
-                "token_bytes_cache.ttl (APP_TOKEN_BYTES_CACHE__TTL, {}) must be 0 (cache disabled) \
-                 or at least status_list.token_exp_secs (APP_STATUS_LIST__TOKEN_EXP_SECS, {}) so \
-                 cached signed bytes never expire mid-window",
-                self.ttl, token_exp_secs
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1262,6 +1236,30 @@ pub struct StatusListConfig {
     /// `snapshot_retention_secs` (`APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`).
     #[serde(alias = "history_retention_secs")]
     pub snapshot_retention_secs: u64,
+}
+
+impl StatusListConfig {
+    /// Reject a `token_ttl_secs` that is not strictly smaller than
+    /// `token_exp_secs`.
+    ///
+    /// A `ttl >= exp` leaves no usable token runway: a `304` certifies the
+    /// client's token for `max-age = ttl`, but the token expires `exp` seconds
+    /// after it is minted, so the server would hand out a `304` that outlives the
+    /// token it vouches for (the #482 bug). Rejecting it at startup (rather than
+    /// degrading at runtime) forces operators to configure a sane runway. This
+    /// also rejects `token_exp_secs == 0` (a token born already expired is
+    /// useless), since `ttl >= 0` can never be `< 0`.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.token_ttl_secs >= self.token_exp_secs {
+            return Err(ConfigError::Message(format!(
+                "status_list.token_ttl_secs (APP_STATUS_LIST__TOKEN_TTL_SECS, {}) must be strictly \
+                 less than status_list.token_exp_secs (APP_STATUS_LIST__TOKEN_EXP_SECS, {}) so a \
+                 304 (max-age=ttl) never vouches for a token that expires sooner",
+                self.token_ttl_secs, self.token_exp_secs
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Config {
@@ -1306,9 +1304,7 @@ impl Config {
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.limits.validate()?;
-        config
-            .token_bytes_cache
-            .validate(config.status_list.token_exp_secs)?;
+        config.status_list.validate()?;
         Ok(config)
     }
 }
@@ -1416,7 +1412,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "cache.reconnect_cooldown_ms",
             default_cache_reconnect_cooldown_ms(),
         )?
-        .set_default("token_bytes_cache.ttl", 900)?
         .set_default("token_bytes_cache.max_capacity", 100)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
@@ -1491,7 +1486,6 @@ mod tests {
         assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
         assert_eq!(config.azure_keyvault.vault_url, None);
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
-        assert_eq!(config.token_bytes_cache.ttl, 900);
         assert_eq!(config.token_bytes_cache.max_capacity, 100);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
@@ -1590,7 +1584,6 @@ mod tests {
             ("cache.backend", "redis"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
-            ("token_bytes_cache.ttl", "1800"),
             ("token_bytes_cache.max_capacity", "500"),
             ("cache.host", "redis"),
             ("cache.port", "6380"),
@@ -1654,7 +1647,6 @@ mod tests {
         assert_eq!(overridden.cache.backend, CacheBackend::Redis);
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
-        assert_eq!(overridden.token_bytes_cache.ttl, 1800);
         assert_eq!(overridden.token_bytes_cache.max_capacity, 500);
         assert_eq!(overridden.cache.host.as_deref(), Some("redis"));
         assert_eq!(overridden.cache.port, Some(6380));
@@ -1932,40 +1924,46 @@ mod tests {
         assert!(!missing_db_password.contains("postgres://"));
         assert!(!missing_db_password.contains("status-list"));
 
-        // 3a. token_bytes_cache.ttl must be 0 or >= status_list.token_exp_secs
-        let valid_equal = Config::load_from_overrides(&[
-            ("token_bytes_cache.ttl", "600"),
-            ("status_list.token_exp_secs", "600"),
-        ])
-        .expect("ttl equal to token_exp_secs is valid");
-        assert_eq!(valid_equal.token_bytes_cache.ttl, 600);
-
-        let valid_disabled = Config::load_from_overrides(&[("token_bytes_cache.ttl", "0")])
-            .expect("ttl=0 disables the cache and is valid");
-        assert_eq!(valid_disabled.token_bytes_cache.ttl, 0);
-
-        let mid_window = Config::load_from_overrides(&[
-            ("token_bytes_cache.ttl", "300"),
+        // 3a. status_list.token_ttl_secs must be strictly < token_exp_secs
+        let valid_ttl = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "300"),
             ("status_list.token_exp_secs", "900"),
         ])
-        .expect_err("ttl between 0 and token_exp_secs must be rejected");
-        let mid_window_msg = mid_window.to_string();
+        .expect("ttl < exp is valid");
+        assert_eq!(valid_ttl.status_list.token_ttl_secs, 300);
+
+        let ttl_ge_exp = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "900"),
+            ("status_list.token_exp_secs", "900"),
+        ])
+        .expect_err("ttl == exp must be rejected");
+        let ttl_ge_exp_msg = ttl_ge_exp.to_string();
         assert!(
-            mid_window_msg.contains("APP_TOKEN_BYTES_CACHE__TTL"),
-            "the refusal must name the APP_TOKEN_BYTES_CACHE__TTL env var: {mid_window_msg}"
+            ttl_ge_exp_msg.contains("APP_STATUS_LIST__TOKEN_TTL_SECS"),
+            "the refusal must name the APP_STATUS_LIST__TOKEN_TTL_SECS env var: {ttl_ge_exp_msg}"
         );
         assert!(
-            mid_window_msg.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
-            "the refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {mid_window_msg}"
+            ttl_ge_exp_msg.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
+            "the refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {ttl_ge_exp_msg}"
         );
         assert!(
-            mid_window_msg.contains("token_bytes_cache.ttl"),
-            "unexpected error: {mid_window_msg}"
+            ttl_ge_exp_msg.contains("status_list.token_ttl_secs"),
+            "unexpected error: {ttl_ge_exp_msg}"
         );
-        assert!(
-            mid_window_msg.contains("status_list.token_exp_secs"),
-            "unexpected error: {mid_window_msg}"
-        );
+
+        // ttl > exp must also be rejected.
+        let _ttl_gt_exp = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "600"),
+            ("status_list.token_exp_secs", "300"),
+        ])
+        .expect_err("ttl > exp must be rejected");
+
+        // exp == 0 is unusable (born-expired tokens) and is rejected by the same rule.
+        let _exp_zero = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "0"),
+            ("status_list.token_exp_secs", "0"),
+        ])
+        .expect_err("exp == 0 must be rejected (ttl >= 0 can never be < 0)");
 
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[
@@ -2184,50 +2182,55 @@ mod tests {
     }
 
     #[test]
-    fn test_token_bytes_cache_ttl_validation_boundaries() {
-        // The two valid boundary cases and the single rejected mid-window case
-        // each exercise `TokenBytesCacheConfig::validate` directly, so removing
-        // or loosening the check fails these tests instead of silently passing
-        // through the positive `Config::load_from_overrides` path.
-        let cfg = TokenBytesCacheConfig {
-            ttl: 600,
-            max_capacity: 100,
+    fn test_status_list_ttl_exp_validation_boundaries() {
+        // The valid boundary and the rejected cases each exercise
+        // `StatusListConfig::validate` directly, so removing or loosening the
+        // check fails these tests instead of silently passing through the
+        // positive `Config::load_from_overrides` path.
+        let valid = StatusListConfig {
+            token_exp_secs: 900,
+            token_ttl_secs: 300,
+            snapshot_retention_secs: 7776000,
         };
-        assert!(
-            cfg.validate(600).is_ok(),
-            "ttl == token_exp_secs must be accepted (full-window coverage)"
-        );
-        let disabled = TokenBytesCacheConfig {
-            ttl: 0,
-            max_capacity: 100,
+        assert!(valid.validate().is_ok(), "ttl < exp must be accepted");
+
+        let equal = StatusListConfig {
+            token_exp_secs: 600,
+            token_ttl_secs: 600,
+            snapshot_retention_secs: 7776000,
         };
-        assert!(
-            disabled.validate(900).is_ok(),
-            "ttl == 0 disables the cache and must be accepted"
-        );
-        let mid_window = TokenBytesCacheConfig {
-            ttl: 300,
-            max_capacity: 100,
-        };
-        let err = mid_window
-            .validate(900)
-            .expect_err("0 < ttl < token_exp_secs must be rejected")
+        let err = equal
+            .validate()
+            .expect_err("ttl == exp must be rejected")
             .to_string();
         assert!(
-            err.contains("APP_TOKEN_BYTES_CACHE__TTL"),
-            "refusal must name the APP_TOKEN_BYTES_CACHE__TTL env var: {err}"
+            err.contains("APP_STATUS_LIST__TOKEN_TTL_SECS"),
+            "refusal must name the APP_STATUS_LIST__TOKEN_TTL_SECS env var: {err}"
         );
         assert!(
             err.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
             "refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {err}"
         );
         assert!(
-            err.contains("token_bytes_cache.ttl"),
-            "refusal must name the token_bytes_cache.ttl config path: {err}"
+            err.contains("status_list.token_ttl_secs"),
+            "refusal must name the status_list.token_ttl_secs config path: {err}"
         );
+
+        let gt = StatusListConfig {
+            token_exp_secs: 300,
+            token_ttl_secs: 600,
+            snapshot_retention_secs: 7776000,
+        };
+        assert!(gt.validate().is_err(), "ttl > exp must be rejected");
+
+        let exp_zero = StatusListConfig {
+            token_exp_secs: 0,
+            token_ttl_secs: 0,
+            snapshot_retention_secs: 7776000,
+        };
         assert!(
-            err.contains("status_list.token_exp_secs"),
-            "refusal must name the status_list.token_exp_secs config path: {err}"
+            exp_zero.validate().is_err(),
+            "exp == 0 must be rejected (ttl >= 0 can never be < 0)"
         );
     }
 

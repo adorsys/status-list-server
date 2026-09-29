@@ -768,7 +768,7 @@ fn rendered_chart_rejects_integer_env_values() {
     // be rendered by Helm in scientific notation (e.g. 2592000 -> 2.592e+06)
     // and crash the u64 parse in the application.
     for (env, value) in [
-        ("APP_TOKEN_BYTES_CACHE__TTL", "2592000"),
+        ("APP_TOKEN_BYTES_CACHE__MAX_CAPACITY", "2592000"),
         ("APP_STATUS_LIST__TOKEN_EXP_SECS", "900"),
     ] {
         let arg = format!("statuslist.env.{env}={value}");

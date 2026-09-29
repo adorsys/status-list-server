@@ -462,19 +462,23 @@ paths:
           in: header
           required: false
           description: |
-            Strong conditional validator (an `ETag` previously returned by this
-            endpoint). The validator is a SHA-256 digest of the exact signed
-            token bytes the server serves, so it is stable for the whole token
-            window: live tokens are minted with `iat` anchored to the window
-            start and `exp = iat + (exp - iat)`, and the window rotates every
-            `exp - ttl` seconds. A match therefore proves the client cached the
-            current-window token, still more than `ttl` seconds from `exp`, so
-            the server responds `304 Not Modified`. Once the window rolls over the
-            validator changes and the server returns a freshly signed `200 OK`
+            Conditional validator (a weak `W/"..."` `ETag` previously returned by
+            this endpoint). The validator is a SHA-256 digest of the representation
+            identity — `(list_id, content_hash, signer_fingerprint, window_start,
+            format, encoding)` — not of the signed bytes (ECDSA signatures are
+            randomized, so a bytes digest would change on every cold-cache request,
+            restart, and across replicas). It is stable for the whole token window
+            (capped at `min(exp - ttl, ttl)` seconds) and identical on every
+            replica. A match proves the client cached the current-window token for
+            this content and signer; the server responds `304 Not Modified` only
+            while that token still has more than `ttl` seconds of remaining
+            validity (so the `304`'s `max-age = ttl` never outlives the token it
+            vouches for). Once the window rolls over or the content/signer changes
+            the validator changes and the server returns a freshly signed `200 OK`
             token instead of a body-less `304`.
           schema:
             type: string
-            example: '"9f2d..."'
+            example: 'W/"9f2d..."'
         - name: If-Modified-Since
           in: header
           required: false
@@ -558,11 +562,13 @@ paths:
               schema:
                 type: string
               description: |
-                The current strong validator for the live representation: a
-                SHA-256 digest of the signed token bytes that a `200 OK` would
-                serve. It changes when the token window rolls over or the list
-                content changes, so a stale cached token is no longer validated
-                as current.
+                The current weak validator for the live representation: a
+                SHA-256 digest of the representation identity (list, content hash,
+                signer fingerprint, window start, format, encoding), stable for the
+                whole token window and identical across replicas. It changes when
+                the token window rolls over, the list content changes, or the
+                signing key/certificate changes, so a stale cached token is no
+                longer validated as current.
             Last-Modified:
               schema:
                 type: string

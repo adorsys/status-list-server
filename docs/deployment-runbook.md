@@ -256,6 +256,18 @@ podDisruptionBudget:
 
 `replicaCount` lives under `statuslist:` (the Deployment reads `statuslist.replicaCount`); `autoscaling` and `podDisruptionBudget` are top-level values. When `autoscaling.enabled=true` the Deployment omits `replicas` so the HPA controls the count. Keep `podDisruptionBudget.maxUnavailable` below the replica count (the safe default) so node drains do not get blocked.
 
+### Conditional GETs, ETags and the signed-token cache across replicas
+
+The live `GET /status-lists/{id}` endpoint serves a **weak** ETag (`W/"..."`) derived from the representation *identity* — `(list_id, content_hash, signer_fingerprint, window_start, format, encoding)` — not from the signed bytes. ECDSA signatures are randomized, so an ETag over the bytes would change on every cold-cache request, restart, capacity eviction, and across replicas. Because the weak ETag is identity-derived it is **identical on every replica** for the same list in the same window, so a client can revalidate against any replica (or across a rolling deploy) and correctly receive a `304` while its token is valid — and the server never has to sign just to answer a `304`.
+
+The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
+
+- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. `0` disables the cache (every request re-signs).
+- Each entry expires at the **end of its own validity window**, independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
+- The cache only avoids re-signing *unchanged* tokens within a window on one replica. Under capacity pressure a still-valid entry can be evicted and later re-signed; a content change or signer/certificate rotation always re-signs immediately (both are part of the cache key and the ETag).
+
+`status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = ttl`) vouch for a token that expires sooner.
+
 ## Verification
 
 ```bash
