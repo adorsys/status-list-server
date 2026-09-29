@@ -118,13 +118,13 @@ impl StoreProvisioningStrategy {
             MaterialSource::Filesystem(path) => {
                 let material = fs::read_to_string(path).await.map_err(|e| {
                     if e.kind() == std::io::ErrorKind::InvalidData {
-                        return CertError::Validation(format!(
+                        return CertError::validation(format!(
                             "{label} material must be PEM text; file '{}' is not valid UTF-8 (DER is unsupported; convert it to PEM)",
                             path.display()
                         ));
                     }
 
-                    CertError::Validation(format!(
+                    CertError::validation(format!(
                         "failed to read {label} PEM file '{}': {e}",
                         path.display()
                     ))
@@ -134,7 +134,7 @@ impl StoreProvisioningStrategy {
             MaterialSource::Storage(key) => {
                 let material_storage = manager.crypto_storage()?;
                 let secret = material_storage.load_secret(key).await?.ok_or_else(|| {
-                    CertError::Validation(format!("store {label} key '{key}' was not found"))
+                    CertError::validation(format!("store {label} key '{key}' was not found"))
                 })?;
                 validate_pem_material(secret, label)
             }
@@ -170,7 +170,7 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
         let certificate_data = manager.certificate_data_from_pem(certificate)?;
         validate_signing_material(&certificate_data.certificate, &signing_key_pem)
-            .map_err(|err| CertError::Validation(err.to_string()))?;
+            .map_err(|err| CertError::Validation(Box::new(err)))?;
         let current_certificate = manager.certificate().await?;
         let current_signing_key = manager.signing_key_from_storage().await?;
 
@@ -192,11 +192,11 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
 fn validate_pem_material(value: String, label: &str) -> Result<String, CertError> {
     if value.trim().is_empty() {
-        return Err(CertError::Validation(format!("{label} material is empty")));
+        return Err(CertError::validation(format!("{label} material is empty")));
     }
 
     if !value.contains("-----BEGIN ") {
-        return Err(CertError::Validation(format!(
+        return Err(CertError::validation(format!(
             "{label} material must be PEM text"
         )));
     }
@@ -219,7 +219,7 @@ mod tests {
             .expect_err("base64 DER is outside the supported input contract");
 
         assert!(
-            matches!(error, CertError::Validation(message) if message == "signing key material must be PEM text")
+            matches!(error, CertError::Validation(message) if message.to_string() == "signing key material must be PEM text")
         );
     }
 }
