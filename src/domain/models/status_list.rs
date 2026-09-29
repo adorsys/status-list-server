@@ -575,6 +575,90 @@ mod tests {
     }
 
     #[test]
+    fn test_appendix_c1_spec_vector() {
+        let indices = [
+            0, 1993, 25460, 159495, 495669, 554353, 645645, 723232, 854545, 934534, 1000345,
+        ];
+        let mut updates: Vec<StatusEntry> = indices
+            .into_iter()
+            .map(|index| StatusEntry {
+                index,
+                status: Status::Invalid,
+            })
+            .collect();
+        updates.push(StatusEntry {
+            index: 1_048_575,
+            status: Status::Valid,
+        });
+
+        let result = StatusList::create(updates).unwrap();
+        assert_eq!(result.bits, 1);
+        let expected_lst = "eNrt3AENwCAMAEGogklACtKQPg9LugC9k_ACvreiogEAAKkeCQAAAAAAAAAAAAAAAAAAAIBylgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXG9IAAAAAAAAAPwsJAAAAAAAAAAAAAAAvhsSAAAAAAAAAAAA7KpLAAAAAAAAAAAAAAAAAAAAAJsLCQAAAAAAAAAAADjelAAAAAAAAAAAKjDMAQAAAACAZC8L2AEb";
+        let dec_result = decompress(&result.lst);
+        let dec_expected = decompress(expected_lst);
+        assert_eq!(
+            dec_result, dec_expected,
+            "decompressed byte contents must match"
+        );
+
+        // Test if any compression level produces the exact string
+        let mut matched = false;
+        for level in 0..=9 {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
+            encoder.write_all(&dec_expected).unwrap();
+            let compressed = encoder.finish().unwrap();
+            let b64 = base64url::encode(compressed);
+            if b64 == expected_lst {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            // Assert that decompressed data matches spec vector exactly
+            assert_eq!(dec_result, dec_expected);
+        } else {
+            assert_eq!(result.lst, expected_lst);
+        }
+    }
+
+    #[test]
+    fn test_appendix_c2_spec_vector() {
+        let expected_lst = "eNrt2zENACEQAEEuoaBABP5VIO01fCjIHTMStt9ovGVIAAAAAABAbiEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEB5WwIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAID0ugQAAAAAAAAAAAAAAAAAQG12SgAAAAAAAAAAAAAAAAAAAAAAAAAAAOCSIQEAAAAAAAAAAAAAAAAAAAAAAAD8ExIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwJEuAQAAAAAAAAAAAAAAAAAAAAAAAMB9SwIAAAAAAAAAAAAAAAAAAACoYUoAAAAAAAAAAAAAAEBqH81gAQw";
+        let dec_expected = decompress(expected_lst);
+        let statuses = decode_status_array(&dec_expected, 2).unwrap();
+
+        assert_eq!(statuses[0], Status::Invalid);
+        assert_eq!(statuses.len(), 1_048_576);
+
+        let mut updates: Vec<StatusEntry> = statuses
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| **st != Status::Valid)
+            .map(|(i, st)| StatusEntry {
+                index: i as i32,
+                status: st.clone(),
+            })
+            .collect();
+
+        if !updates.iter().any(|e| e.index == 1_048_575) {
+            updates.push(StatusEntry {
+                index: 1_048_575,
+                status: Status::Valid,
+            });
+        }
+
+        let result = StatusList::create(updates).unwrap();
+        assert_eq!(result.bits, 2);
+        let dec_result = decompress(&result.lst);
+        assert_eq!(
+            dec_result, dec_expected,
+            "decompressed 2-bit status list must match Appendix C.2 spec vector"
+        );
+    }
+
+    #[test]
     fn update_status_list_bumps_bit_width_for_supported_application_specific_values() {
         let original = StatusList::create(vec![StatusEntry {
             index: 0,

@@ -101,7 +101,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         None,
         Arc::new(TestCertProvider {
             key_pem: include_str!("../test_data/ec-private.pem").to_string(),
-            cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+            cert_chain: fixture_cert_chain(),
         }),
     ));
 
@@ -119,6 +119,24 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         management_auth: crate::server::ManagementAuthConfig::default(),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
+}
+
+pub(crate) fn fixture_cert_chain() -> Vec<String> {
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
+    use std::sync::OnceLock;
+
+    static CERT_B64: OnceLock<String> = OnceLock::new();
+    let b64 = CERT_B64.get_or_init(|| {
+        let key_pem = include_str!("../test_data/ec-private.pem");
+        let key_pair = rcgen::KeyPair::from_pem(key_pem).expect("valid ec-private.pem");
+        let params = rcgen::CertificateParams::new(vec!["example.com".to_string()])
+            .expect("valid cert params");
+        let cert = params
+            .self_signed(&key_pair)
+            .expect("self-signed cert generation");
+        BASE64_STANDARD.encode(cert.der())
+    });
+    vec![b64.clone()]
 }
 
 pub(crate) struct TestCertProvider {
@@ -218,7 +236,7 @@ async fn build_test_app_state(
     let status_list_cache = Arc::new(TestStatusListCache::default());
     let cert_provider = Arc::new(TestCertProvider {
         key_pem,
-        cert_chain: vec!["ZHVtbXlfY2VydA==".into()],
+        cert_chain: fixture_cert_chain(),
     });
 
     let service = Arc::new(Service::from_arcs(

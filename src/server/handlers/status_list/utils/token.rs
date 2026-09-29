@@ -185,6 +185,27 @@ async fn build_status_list_token_inner(
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
 }
 
+pub(crate) fn build_cbor_status_list(
+    bits: u8,
+    lst_bytes: Vec<u8>,
+    aggregation_uri: Option<&str>,
+) -> CborValue {
+    let mut status_list = vec![
+        (
+            CborValue::Text("bits".into()),
+            CborValue::Integer(bits.into()),
+        ),
+        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
+    ];
+    if let Some(uri) = aggregation_uri {
+        status_list.push((
+            CborValue::Text("aggregation_uri".into()),
+            CborValue::Text(uri.to_string()),
+        ));
+    }
+    CborValue::Map(status_list)
+}
+
 fn issue_cwt(
     status_record: &StatusListRecord,
     signer: &(impl TokenSigner + ?Sized),
@@ -215,23 +236,8 @@ fn issue_cwt(
 
     let (bits, lst_bytes) = status_record.status_list.token_lst_bytes()?;
 
-    let mut status_list = vec![
-        (
-            CborValue::Text("bits".into()),
-            CborValue::Integer(bits.into()),
-        ),
-        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
-    ];
-    if let Some(uri) = aggregation_uri {
-        status_list.push((
-            CborValue::Text("aggregation_uri".into()),
-            CborValue::Text(uri.clone()),
-        ));
-    }
-    claims.push((
-        CborValue::Integer(STATUS_LIST.into()),
-        CborValue::Map(status_list),
-    ));
+    let status_list_val = build_cbor_status_list(bits, lst_bytes, aggregation_uri.as_deref());
+    claims.push((CborValue::Integer(STATUS_LIST.into()), status_list_val));
 
     let payload = CborValue::Map(claims)
         .to_vec()
@@ -338,7 +344,7 @@ fn cose_algorithm(algorithm: SigningAlgorithm) -> Result<Algorithm, StatusListEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::status_list::StatusList;
+    use crate::domain::models::status_list::{Status, StatusEntry, StatusList};
     use crate::utils::crypto::SigningKey;
     use aws_lc_rs::signature::{
         ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256,
@@ -346,8 +352,9 @@ mod tests {
     };
     use coset::TaggedCborSerializable;
     use jsonwebtoken::{DecodingKey, Validation, decode};
+    use x509_parser::prelude::FromDer;
 
-    use base64::prelude::Engine as _;
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
 
     fn sample_record() -> StatusListRecord {
         StatusListRecord {
@@ -466,5 +473,219 @@ mod tests {
                 })
                 .expect("CWT signature verifies with its public key");
         }
+    }
+
+    #[test]
+    fn test_spec_vector_cbor_status_list_map() {
+        let lst_bytes = hex::decode("78dadbb918000217015d").unwrap();
+        let status_list_val = build_cbor_status_list(1, lst_bytes, None);
+        let cbor_bytes = status_list_val.to_vec().unwrap();
+        assert_eq!(
+            hex::encode(cbor_bytes),
+            "a2646269747301636c73744a78dadbb918000217015d"
+        );
+    }
+
+    #[test]
+    fn test_jwt_spec_conformance() {
+        use std::io::Read;
+
+        let key_pem = include_str!("../../../../../test_data/ec-private.pem");
+        let key = SigningKey::from_pem(key_pem).unwrap();
+        let cert_chain = crate::test_utils::fixture_cert_chain();
+        let status_list = StatusList::create(vec![
+            StatusEntry {
+                index: 0,
+                status: Status::Valid,
+            },
+            StatusEntry {
+                index: 1,
+                status: Status::Invalid,
+            },
+        ])
+        .unwrap();
+        let record = StatusListRecord {
+            list_id: "list-1".into(),
+            issuer: "test-issuer".into(),
+            sub: "https://example.com/status-list/1".into(),
+            status_list,
+            updated_at: 1000,
+        };
+
+        let token = issue_jwt(
+            &record,
+            &key,
+            &cert_chain,
+            &Some("https://example.com/aggregation".into()),
+            1000,
+            1900,
+            300,
+        )
+        .unwrap();
+
+        // 1. Header checks
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::ES256);
+        assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
+        let x5c = header.x5c.expect("x5c header present");
+        assert_eq!(x5c.len(), 1);
+        assert_eq!(x5c[0], cert_chain[0]);
+
+        // Verify signature with key from x5c[0]
+        let cert_der = BASE64_STANDARD.decode(&x5c[0]).unwrap();
+        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&cert_der).unwrap();
+        let pub_key_bytes = cert.public_key().subject_public_key.data.to_vec();
+        let decoding_key = DecodingKey::from_ec_der(&pub_key_bytes);
+
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
+        validation.validate_exp = false;
+        let decoded = decode::<StatusListToken>(&token, &decoding_key, &validation)
+            .expect("JWT signature verifies with key from x5c[0]");
+
+        // 2. Claims checks
+        assert_eq!(decoded.claims.sub, record.sub);
+        assert_eq!(decoded.claims.iat, 1000);
+        assert_eq!(decoded.claims.exp, Some(1900));
+        assert!(decoded.claims.iat < decoded.claims.exp.unwrap());
+        assert_eq!(decoded.claims.ttl, Some(300));
+        assert!(decoded.claims.ttl.unwrap() > 0);
+
+        // 3. Status list checks
+        assert!(matches!(decoded.claims.status_list.bits, 1 | 2 | 4 | 8));
+        assert!(!decoded.claims.status_list.lst.contains('='));
+        let mut raw = Vec::new();
+        let lst_bytes = base64url::decode(&decoded.claims.status_list.lst).unwrap();
+        let mut decompressed = flate2::read::ZlibDecoder::new(&lst_bytes[..]);
+        decompressed.read_to_end(&mut raw).unwrap();
+        assert_eq!(raw, vec![0x02]);
+        assert_eq!(
+            decoded.claims.status_list.aggregation_uri.as_deref(),
+            Some("https://example.com/aggregation")
+        );
+    }
+
+    #[test]
+    fn test_cwt_spec_conformance() {
+        let key_pem = include_str!("../../../../../test_data/ec-private.pem");
+        let key = SigningKey::from_pem(key_pem).unwrap();
+        let cert_chain = crate::test_utils::fixture_cert_chain();
+        let record = sample_record();
+
+        let cwt_bytes = issue_cwt(
+            &record,
+            &key,
+            &cert_chain,
+            &Some("https://example.com/aggregation".into()),
+            1000,
+            1900,
+            300,
+        )
+        .unwrap();
+
+        // 1. Tag 18 (0xd2) and no Tag 61
+        assert_eq!(cwt_bytes[0], 0xd2, "CWT must start with CBOR tag 18 (0xd2)");
+        assert_ne!(
+            &cwt_bytes[..2],
+            &[0xd8, 0x3d],
+            "CWT must not start with CWT tag 61 (0xd83d)"
+        );
+
+        let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).expect("parse CoseSign1");
+
+        // 2. Protected header checks
+        assert_eq!(
+            sign1.protected.header.alg,
+            Some(coset::RegisteredLabelWithPrivate::Assigned(
+                Algorithm::ES256
+            ))
+        );
+
+        let mut found_cwt_type = false;
+        let mut found_x5chain = false;
+        for (param, val) in &sign1.protected.header.rest {
+            match param {
+                coset::Label::Int(16) => {
+                    assert_eq!(val, &CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()));
+                    found_cwt_type = true;
+                }
+                coset::Label::Int(33) => {
+                    let expected_der = BASE64_STANDARD.decode(&cert_chain[0]).unwrap();
+                    assert_eq!(val, &CborValue::Bytes(expected_der));
+                    found_x5chain = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_cwt_type, "Protected header 16 (type) must be present");
+        assert!(
+            found_x5chain,
+            "Protected header 33 (x5chain) must be present"
+        );
+
+        // 3. Claims map checks (literal integer keys 2, 6, 4, 65534, 65533)
+        let payload_bytes = sign1.payload.as_ref().expect("payload present");
+        let payload_val = CborValue::from_slice(payload_bytes).expect("valid CBOR payload");
+        let claims = match payload_val {
+            CborValue::Map(m) => m,
+            _ => panic!("CWT payload must be a CBOR map"),
+        };
+
+        let get_claim = |key_int: i64| {
+            claims
+                .iter()
+                .find(|(k, _)| k == &CborValue::Integer(key_int.into()))
+                .map(|(_, v)| v)
+        };
+
+        let sub_val = get_claim(2).expect("claim 2 (sub) must be present");
+        assert_eq!(sub_val, &CborValue::Text(record.sub.clone()));
+
+        let iat_val = get_claim(6).expect("claim 6 (iat) must be present");
+        assert_eq!(iat_val, &CborValue::Integer(1000.into()));
+
+        let exp_val = get_claim(4).expect("claim 4 (exp) must be present");
+        assert_eq!(exp_val, &CborValue::Integer(1900.into()));
+
+        let ttl_val = get_claim(65534).expect("claim 65534 (ttl) must be present");
+        assert_eq!(ttl_val, &CborValue::Integer(300.into()));
+
+        let sl_val = get_claim(65533).expect("claim 65533 (status_list) must be present");
+        let sl_map = match sl_val {
+            CborValue::Map(m) => m,
+            _ => panic!("claim 65533 must be a CBOR map"),
+        };
+
+        let get_sl_prop = |name: &str| {
+            sl_map
+                .iter()
+                .find(|(k, _)| k == &CborValue::Text(name.into()))
+                .map(|(_, v)| v)
+        };
+
+        let bits_val = get_sl_prop("bits").expect("bits property in status_list");
+        assert!(matches!(
+            bits_val,
+            CborValue::Integer(i) if matches!(i64::try_from(*i).ok(), Some(1 | 2 | 4 | 8))
+        ));
+
+        let lst_val = get_sl_prop("lst").expect("lst property in status_list");
+        assert!(
+            matches!(lst_val, CborValue::Bytes(_)),
+            "lst must be a CBOR byte string (major type 2)"
+        );
+
+        let agg_val =
+            get_sl_prop("aggregation_uri").expect("aggregation_uri property in status_list");
+        assert_eq!(
+            agg_val,
+            &CborValue::Text("https://example.com/aggregation".into())
+        );
+
+        // 4. Verify signature with key from x5chain
+        sign1
+            .verify_signature(&[], |signature, tbs| {
+                verify_cwt_signature(&key, signature, tbs)
+            })
+            .expect("CWT signature verifies");
     }
 }
