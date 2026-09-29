@@ -1,15 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
 use sea_orm::{
-    DatabaseBackend, DatabaseConnection, MockDatabase, MockExecResult, Statement, Transaction,
-    Value,
+    ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, MockDatabase, MockExecResult,
+    QueryFilter, QueryOrder, QuerySelect, Statement, Transaction, Value,
 };
 
 use super::fixtures;
 use crate::outbound::sql::models::{
-    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord, status_lists,
+    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord, status_list_allocations,
+    status_lists,
 };
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
@@ -1012,6 +1013,140 @@ async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
         "issuer-dup-txn-sqlite",
         "list-dup-txn-sqlite",
         "SQLite",
+    )
+    .await;
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn persisted_allocations(db: &Arc<DatabaseConnection>, list_id: &str) -> BTreeSet<i32> {
+    status_list_allocations::Entity::find()
+        .select_only()
+        .column(status_list_allocations::Column::Idx)
+        .filter(status_list_allocations::Column::ListId.eq(list_id))
+        .order_by_asc(status_list_allocations::Column::Idx)
+        .into_tuple::<i32>()
+        .all(&**db)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
+    db: Arc<DatabaseConnection>,
+    issuer: &str,
+    backend: &str,
+) {
+    fixtures::seed_credential(&db, issuer).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+
+    let list_id = format!("list-allocation-{backend}").to_lowercase();
+    let mut record = fixtures::record(
+        &list_id,
+        issuer,
+        "allocation",
+        &format!("sub-{list_id}"),
+        10,
+    );
+    record.status_list.size = Some(6);
+    store
+        .insert_one_with_allocations(record, &[0, 2], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+
+    let store_a = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let store_b = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let (first, second) = tokio::join!(
+        store_a.allocate_indices(&list_id, 2, 6),
+        store_b.allocate_indices(&list_id, 2, 6),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+
+    let mut all = BTreeSet::from([0, 2]);
+    all.extend(first.iter().copied());
+    all.extend(second.iter().copied());
+    assert_eq!(
+        all.len(),
+        6,
+        "initial and concurrently allocated indices must be distinct on {backend}: first={first:?}, second={second:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &list_id).await,
+        all,
+        "every allocated index must be durably recorded on {backend}"
+    );
+
+    let partial_list_id = format!("list-allocation-partial-{backend}").to_lowercase();
+    let mut partial = fixtures::record(
+        &partial_list_id,
+        issuer,
+        "allocation-partial",
+        &format!("sub-{partial_list_id}"),
+        20,
+    );
+    partial.status_list.size = Some(4);
+    store
+        .insert_one_with_allocations(partial, &[0, 1, 2], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+
+    let exhausted = store.allocate_indices(&partial_list_id, 2, 4).await;
+    assert!(
+        matches!(exhausted, Err(RepositoryError::AllocationExhausted)),
+        "exhausted allocation must fail without partial reservation on {backend}, got {exhausted:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &partial_list_id).await,
+        BTreeSet::from([0, 1, 2]),
+        "failed exhausted allocation must leave no partial reservation on {backend}"
+    );
+
+    let last = store
+        .allocate_indices(&partial_list_id, 1, 4)
+        .await
+        .unwrap();
+    assert_eq!(last, vec![3]);
+    assert_eq!(
+        persisted_allocations(&db, &partial_list_id).await,
+        BTreeSet::from([0, 1, 2, 3]),
+        "the remaining index must still be available after the failed request on {backend}"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_allocations_are_distinct_and_rollback_exhausted() {
+    let db = fixtures::sqlite_connection().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        db,
+        "issuer-allocation-sqlite",
+        "SQLite",
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_allocations_are_distinct_and_rollback_exhausted() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        test_db.connection().await,
+        "issuer-allocation-mysql",
+        "MySQL",
+    )
+    .await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_allocations_are_distinct_and_rollback_exhausted() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        test_db.db.clone(),
+        "issuer-allocation-postgres",
+        "Postgres",
     )
     .await;
 }
