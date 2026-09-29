@@ -337,22 +337,33 @@ fn validate_request_shape(
     Ok(())
 }
 
-fn build_snapshot(
-    record: &StatusListRecord,
-    token_exp_secs: u64,
-) -> Result<StatusListSnapshot, StatusListError> {
-    let iat = record.updated_at;
+/// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
+///
+/// Used by every expiry-construction site (`build_snapshot` and the default token
+/// validity window) so the two stay in sync. Configuration validation normally
+/// keeps `token_exp_secs` within `MAX_TOKEN_LIFETIME_SECS`, but a directly
+/// constructed `AppState`/`Service` can bypass it, so this converts through
+/// `i64::try_from` before `checked_add` (a raw `as i64` would turn `u64::MAX`
+/// into `-1` and let the addition "succeed" with a bogus exp).
+pub(crate) fn token_expiry(iat: i64, token_exp_secs: u64) -> Result<i64, StatusListError> {
     let token_exp =
         i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
             iat,
             token_exp_secs,
         })?;
-    let exp = iat
-        .checked_add(token_exp)
+    iat.checked_add(token_exp)
         .ok_or_else(|| StatusListError::TokenExpiryOverflow {
             iat,
             token_exp_secs,
-        })?;
+        })
+}
+
+fn build_snapshot(
+    record: &StatusListRecord,
+    token_exp_secs: u64,
+) -> Result<StatusListSnapshot, StatusListError> {
+    let iat = record.updated_at;
+    let exp = token_expiry(iat, token_exp_secs)?;
     Ok(StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
