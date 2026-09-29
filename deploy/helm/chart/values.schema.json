@@ -233,11 +233,12 @@
           "properties": {
             "APP_STATUS_LIST__TOKEN_EXP_SECS": {
               "title": "Token exp (seconds)",
-              "description": "Seconds added to iat to derive the token exp claim. Must be a positive number (>= 1); the application rejects a value that would overflow the exp claim at issuance. Values below 1 are rejected here.",
+              "description": "Seconds added to iat to derive the token exp claim. Must be a positive number (>= 1) at or below the one-year ceiling (31536000); the application rejects larger values as effectively-never-expiring. Values below 1 are rejected here.",
               "anyOf": [
                 {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 1,
+                  "maximum": 31536000
                 },
                 {
                   "type": "string",
@@ -251,7 +252,8 @@
               "anyOf": [
                 {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 1,
+                  "maximum": 31536000
                 },
                 {
                   "type": "string",
