@@ -256,6 +256,10 @@ impl IntoApiError for StatusListError {
                 "index_not_allocated",
                 format!("status index {index} has not been allocated"),
             ),
+            StatusListError::ListNotFixedSize => ApiError::conflict(
+                "list_not_fixed_size",
+                "status list must be fixed-size to allocate indices",
+            ),
             StatusListError::AllocationExhausted => ApiError::bad_request(
                 "allocation_exhausted",
                 "status list does not have enough unallocated indices",

@@ -114,13 +114,6 @@ pub trait StatusListRepo: Send + Sync + 'static {
         list_id: &str,
         indices: &[i32],
     ) -> Result<Option<i32>, StatusListError>;
-
-    /// Record already-chosen indices as allocated for a newly published list.
-    async fn record_allocated_indices(
-        &self,
-        list_id: &str,
-        indices: &[i32],
-    ) -> Result<(), StatusListError>;
 }
 
 /// Interface for issuer public key credentials.

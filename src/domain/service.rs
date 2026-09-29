@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     Status, StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
-    StatusListUriPage, allocation_limit_from_max_index, validate_unique_indices,
+    StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
     CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -263,7 +263,6 @@ impl Service {
         issuer: &Issuer,
         list_id: &str,
         count: u32,
-        max_status_index: i32,
         max_statuses_per_request: usize,
     ) -> Result<Vec<i32>, StatusListError> {
         let existing = self
@@ -286,7 +285,7 @@ impl Service {
         let limit = existing
             .status_list
             .size
-            .unwrap_or(allocation_limit_from_max_index(max_status_index)?);
+            .ok_or(StatusListError::ListNotFixedSize)?;
         self.status_list_repo
             .allocate_indices(list_id, count, limit)
             .await

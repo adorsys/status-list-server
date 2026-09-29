@@ -44,6 +44,8 @@ pub enum StatusListError {
     InvalidAllocationCount { count: u32, max: usize },
     #[error("status index {index} has not been allocated")]
     IndexNotAllocated { index: i32 },
+    #[error("status list must be fixed-size to allocate indices")]
+    ListNotFixedSize,
     #[error("status list does not have enough unallocated indices")]
     AllocationExhausted,
     /// The issuer already holds its configured maximum number of status lists.

@@ -274,21 +274,6 @@ impl StatusListRepo for MemoryStatusLists {
             .copied()
             .find(|index| !allocated.contains(index)))
     }
-
-    async fn record_allocated_indices(
-        &self,
-        list_id: &str,
-        indices: &[i32],
-    ) -> Result<(), StatusListError> {
-        let mut allocations = self.allocations.write().await;
-        let allocated = allocations.entry(list_id.to_string()).or_default();
-        for index in indices {
-            if !allocated.insert(*index) {
-                return Err(StatusListError::DuplicateIndex { index: *index });
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Default)]

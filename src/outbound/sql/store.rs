@@ -907,42 +907,6 @@ impl SeaOrmStore<StatusListRecord> {
         })
         .await
     }
-
-    #[tracing::instrument(skip(self, indices), fields(db.system = "sea-orm"))]
-    pub async fn record_allocated_indices(
-        &self,
-        list_id: &str,
-        indices: &[i32],
-    ) -> Result<(), RepositoryError> {
-        if indices.is_empty() {
-            return Ok(());
-        }
-
-        time_query("record_allocations", "status_list_allocation", async {
-            let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-            for idx in indices {
-                let active = status_list_allocations::ActiveModel {
-                    list_id: Set(list_id.to_string()),
-                    idx: Set(*idx),
-                };
-                if let Err(insert_err) = status_list_allocations::Entity::insert(active)
-                    .exec_without_returning(&txn)
-                    .await
-                {
-                    txn.rollback().await.map_err(|rollback_err| {
-                        RepositoryError::InsertError(format!(
-                            "allocation record insert failed ({insert_err}); \
-                             rolling the transaction back also failed: {rollback_err}"
-                        ))
-                    })?;
-                    return Err(map_insert_err(insert_err));
-                }
-            }
-            txn.commit().await.map_err(map_insert_err)?;
-            Ok(())
-        })
-        .await
-    }
 }
 
 impl SeaOrmStore<StatusListHistoryRecord> {
@@ -1184,6 +1148,30 @@ fn find_err(e: sea_orm::DbErr) -> RepositoryError {
     RepositoryError::FindError(e.to_string())
 }
 
+const ALLOCATION_INSERT_CHUNK_ROWS: usize = 400;
+
+async fn insert_allocation_rows<C>(conn: &C, list_id: &str, indices: &[i32]) -> Result<(), DbErr>
+where
+    C: ConnectionTrait,
+{
+    for chunk in indices.chunks(ALLOCATION_INSERT_CHUNK_ROWS) {
+        if chunk.is_empty() {
+            continue;
+        }
+
+        let rows = chunk
+            .iter()
+            .map(|idx| status_list_allocations::ActiveModel {
+                list_id: Set(list_id.to_string()),
+                idx: Set(*idx),
+            });
+        status_list_allocations::Entity::insert_many(rows)
+            .exec_without_returning(conn)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Lets a contention test hold a transaction open at a chosen point so a second
 /// writer provably collides with it, rather than with an already-committed row.
 ///
@@ -1191,26 +1179,6 @@ fn find_err(e: sea_orm::DbErr) -> RepositoryError {
 /// already committed by the time the second starts, so the second never blocks
 /// on a lock and the interesting window — one writer holding an uncommitted row
 /// or index entry while another arrives — is never entered.
-async fn insert_allocation_rows<C>(conn: &C, list_id: &str, indices: &[i32]) -> Result<(), DbErr>
-where
-    C: ConnectionTrait,
-{
-    if indices.is_empty() {
-        return Ok(());
-    }
-
-    let rows = indices
-        .iter()
-        .map(|idx| status_list_allocations::ActiveModel {
-            list_id: Set(list_id.to_string()),
-            idx: Set(*idx),
-        });
-    status_list_allocations::Entity::insert_many(rows)
-        .exec_without_returning(conn)
-        .await
-        .map(|_| ())
-}
-
 #[cfg(test)]
 mod snapshot_txn_test_hook {
     use std::sync::OnceLock;

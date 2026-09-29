@@ -209,17 +209,6 @@ impl StatusListRepo for SqlStatusListRepo {
             .await
             .map_err(Into::into)
     }
-
-    async fn record_allocated_indices(
-        &self,
-        list_id: &str,
-        indices: &[i32],
-    ) -> Result<(), StatusListError> {
-        self.store
-            .record_allocated_indices(list_id, indices)
-            .await
-            .map_err(Into::into)
-    }
 }
 
 #[async_trait]

@@ -342,8 +342,10 @@ paths:
 
         `size` may be supplied to create a fixed-size list. The server rounds it
         up so `bits * entries` is byte-aligned and initialises every entry to
-        `default_status` (default `0`). Later writes past that fixed size are
-        refused with `400 index_out_of_range`.
+        `default_status` (default `0`). `size` must be at least 1 and, after
+        rounding, no larger than `limits.max_status_index + 1` (default
+        100001). Later writes past that fixed size are refused with
+        `400 index_out_of_range`.
       requestBody:
         required: true
         content:
@@ -379,6 +381,10 @@ paths:
         neither advances the list version nor records a history snapshot.
         A payload that is empty (`{"statuses": []}`) or that re-sets every
         affected `index` to its current value both qualify.
+
+        On fixed-size lists, PATCH may update only indices previously returned
+        by the allocation endpoint or supplied as initial publish statuses.
+        Updating an unallocated index is refused with `409 index_not_allocated`.
       requestBody:
         required: true
         content:
@@ -422,9 +428,11 @@ paths:
       operationId: allocateStatusListIndices
       summary: Allocate unused status-list indices
       description: |
-        Reserves unused indices for the authenticated issuer's status list and
-        returns them in ascending order. Each reserved `(list_id, index)` pair is
-        recorded so it is not returned by a later allocation request.
+        Reserves unused indices for the authenticated issuer's fixed-size
+        status list and returns them in ascending order. Each reserved
+        `(list_id, index)` pair is recorded so it is not returned by a later
+        allocation request. Lists published without `size` are caller-managed
+        and return `409 list_not_fixed_size` from this endpoint.
       requestBody:
         required: true
         content:
@@ -446,6 +454,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/UpdateConflict"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -737,10 +747,13 @@ components:
             size:
               type: integer
               format: int32
-              minimum: 0
+              minimum: 1
+              maximum: 100001
               description: |
                 Optional fixed number of entries to create. The server rounds
-                this value up so `bits * entries` is a multiple of 8.
+                this value up so `bits * entries` is a multiple of 8. The
+                rounded value must not exceed `limits.max_status_index + 1`
+                (default 100001).
               example: 100000
             default_status:
               $ref: "#/components/schemas/StatusValue"
@@ -753,8 +766,11 @@ components:
         count:
           type: integer
           format: int32
-          minimum: 0
-          description: Number of unused indices to reserve.
+          minimum: 1
+          maximum: 5000
+          description: |
+            Number of unused indices to reserve. The maximum is bounded by
+            `limits.max_statuses_per_request` (default 5000).
           example: 10
 
     AllocationResponse:
@@ -933,6 +949,8 @@ components:
             - too_many_statuses
             - index_too_large
             - index_out_of_range
+            - invalid_size
+            - invalid_count
             - duplicate_index
             - allocation_exhausted
             - list_quota_exceeded
@@ -953,6 +971,8 @@ components:
             - status_list_already_exists
             - credentials_already_exist
             - update_conflict
+            - index_not_allocated
+            - list_not_fixed_size
             - write_contention
             # 413
             - payload_too_large
@@ -986,7 +1006,11 @@ components:
             maximum`; or
           * a payload repeats the same `index` in more than one entry — on
             either `PATCH` or `PUT` — `duplicate status index <n> in statuses
-            array`.
+            array`; or
+          * `size` is `0` or rounds above `limits.max_status_index + 1` —
+            `invalid_size`; or
+          * allocation `count` is `0` or exceeds
+            `limits.max_statuses_per_request` — `invalid_count`.
 
         `list_quota_exceeded` (publish only) is different in kind: the request
         was well-formed, and is refused because the issuer already holds

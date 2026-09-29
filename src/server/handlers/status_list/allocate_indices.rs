@@ -40,7 +40,6 @@ pub async fn allocate_indices(
             &issuer,
             &list_id,
             payload.count,
-            appstate.max_status_index,
             appstate.max_statuses_per_request,
         )
         .await?;
@@ -135,6 +134,50 @@ mod tests {
         let body = to_bytes(exhausted.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "allocation_exhausted");
+    }
+
+    #[tokio::test]
+    async fn allocation_route_rejects_lists_without_fixed_size() {
+        let list_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        app_state
+            .service
+            .status_list_repo()
+            .insert(
+                StatusListRecord {
+                    list_id: list_id.clone(),
+                    issuer: Issuer("issuer".to_string()),
+                    status_list: StatusList::create(vec![]).unwrap(),
+                    sub: format!("https://example.test/{list_id}"),
+                    updated_at: 1,
+                },
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let router = Router::new()
+            .route(
+                "/status-lists/{list_id}/allocations",
+                post(allocate_indices_route),
+            )
+            .with_state(app_state);
+
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/status-lists/{list_id}/allocations"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"count":1}"#.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "list_not_fixed_size");
     }
 
     #[tokio::test]
