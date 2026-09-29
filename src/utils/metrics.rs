@@ -54,9 +54,10 @@ static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceL
 pub(crate) const TARGET_DATABASE: &str = "database";
 #[cfg(any(
     not(feature = "acme"),
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "mysql"
+    all(
+        any(feature = "sqlite", feature = "postgres", feature = "mysql"),
+        test
+    )
 ))]
 pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
 
