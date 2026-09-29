@@ -386,6 +386,14 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
             ),
+            (
+                StatusListError::TokenExpiryOverflow {
+                    iat: 1_000,
+                    token_exp_secs: 900,
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
         ];
 
         for (err, expected_status, expected_code) in cases {

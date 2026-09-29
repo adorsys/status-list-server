@@ -342,12 +342,17 @@ fn build_snapshot(
     token_exp_secs: u64,
 ) -> Result<StatusListSnapshot, StatusListError> {
     let iat = record.updated_at;
-    let exp = iat.checked_add(token_exp_secs as i64).ok_or_else(|| {
-        StatusListError::TokenExpiryOverflow {
+    let token_exp =
+        i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
             iat,
             token_exp_secs,
-        }
-    })?;
+        })?;
+    let exp = iat
+        .checked_add(token_exp)
+        .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+            iat,
+            token_exp_secs,
+        })?;
     Ok(StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
@@ -415,5 +420,22 @@ mod tests {
         let ok = build_snapshot(&record_with_updated_at(1_000), 900)
             .expect("non-overflowing iat + token_exp_secs should build a snapshot");
         assert_eq!(ok.exp, 1_900);
+    }
+
+    #[test]
+    fn snapshot_exp_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: an AppState/Service caller could pass
+        // `token_exp_secs = u64::MAX` without going through config validation.
+        // The guard must convert via `i64::try_from` before `checked_add`, so
+        // `u64::MAX` does NOT silently become `-1` and produce a bogus (lower)
+        // exp. It must fail closed instead.
+        let record = record_with_updated_at(1_000);
+        let err = build_snapshot(&record, u64::MAX)
+            .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { iat, token_exp_secs }
+                if iat == 1_000 && token_exp_secs == u64::MAX),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
     }
 }

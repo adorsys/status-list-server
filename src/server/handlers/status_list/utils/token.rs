@@ -142,12 +142,18 @@ async fn build_status_list_token_inner(
         Some(window) => window,
         None => {
             let iat = OffsetDateTime::now_utc().unix_timestamp();
-            let exp = iat
-                .checked_add(state.token_exp_secs as i64)
-                .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+            let token_exp = i64::try_from(state.token_exp_secs).map_err(|_| {
+                StatusListError::TokenExpiryOverflow {
                     iat,
                     token_exp_secs: state.token_exp_secs,
-                })?;
+                }
+            })?;
+            let exp =
+                iat.checked_add(token_exp)
+                    .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+                        iat,
+                        token_exp_secs: state.token_exp_secs,
+                    })?;
             (iat, exp)
         }
     };
@@ -299,7 +305,10 @@ fn issue_jwt(
     exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let ttl = token_ttl_secs as i64;
+    let ttl = i64::try_from(token_ttl_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
+        iat,
+        token_exp_secs: token_ttl_secs,
+    })?;
     let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
         bits,
@@ -495,6 +504,31 @@ mod tests {
         )
         .await
         .expect_err("a positive iat plus i64::MAX token_exp_secs must overflow and be rejected");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_validity_window_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_exp_secs = u64::MAX`
+        // on an AppState without going through config validation. The guard must
+        // convert via `i64::try_from` before `checked_add`, so `u64::MAX` does NOT
+        // silently become `-1` and produce a bogus (lower) exp. It must fail closed.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+        )
+        .await
+        .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
 
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
