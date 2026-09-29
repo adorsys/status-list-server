@@ -371,8 +371,12 @@ mod tests {
             expected_key.public_key_bytes()
         );
         assert_eq!(
-            material.certificate_chain.as_ref(),
-            Some(&pem_chain_to_base64_der(&second_cert).expect("chain"))
+            material.certificate_chain(),
+            Some(
+                pem_chain_to_base64_der(&second_cert)
+                    .expect("chain")
+                    .as_slice()
+            )
         );
     }
 
@@ -395,8 +399,11 @@ mod tests {
         .await
         .expect("provider");
         let material = provider.signing_material().await.expect("material");
-        let chain = material.certificate_chain.as_ref().expect("chain");
-        assert_eq!(chain, &pem_chain_to_base64_der(&cert).expect("b64 der"));
+        let chain = material.certificate_chain().expect("chain");
+        assert_eq!(
+            chain,
+            pem_chain_to_base64_der(&cert).expect("b64 der").as_slice()
+        );
         assert!(!chain[0].contains("BEGIN CERTIFICATE"));
     }
 
@@ -421,7 +428,10 @@ mod tests {
         let (cert, key) = matching_cert_and_key();
         let provider = InlineCertificateProvider::new(cert.clone(), key).expect("provider");
         let material = provider.signing_material().await.expect("material");
-        let chain = material.certificate_chain.as_ref().expect("chain");
-        assert_eq!(chain, &pem_chain_to_base64_der(&cert).expect("b64 der"));
+        let chain = material.certificate_chain().expect("chain");
+        assert_eq!(
+            chain,
+            pem_chain_to_base64_der(&cert).expect("b64 der").as_slice()
+        );
     }
 }

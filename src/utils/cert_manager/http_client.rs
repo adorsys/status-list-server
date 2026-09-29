@@ -57,7 +57,7 @@ impl ClientInner {
         let tls_config =
             ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
                 .with_safe_default_protocol_versions()
-                .map_err(|e| CertError::validation(e.to_string()))?
+                .map_err(|e| CertError::Validation(Box::new(e)))?
                 .with_root_certificates(root_store)
                 .with_no_client_auth();
         let http_builder = HttpsConnectorBuilder::new()

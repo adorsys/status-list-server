@@ -118,10 +118,14 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct SigningMaterial {
     /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
-    pub certificate_chain: Option<Vec<String>>,
+    ///
+    /// Private so the two certificate views can never fall out of sync: the
+    /// decoded [`Self::certificate_der`] is derived from this at construction
+    /// and both are exposed through accessors.
+    certificate_chain: Option<Vec<String>>,
     /// DER-encoded x509 certificate chain, decoded once at construction. Kept in
     /// sync with [`Self::certificate_chain`]; `None` iff that is `None`.
-    pub certificate_der: Option<Arc<[Box<[u8]>]>>,
+    certificate_der: Option<Arc<[Box<[u8]>]>>,
     /// Pre-parsed signer. The material does not retain its PEM/DER encoding
     /// after a provider has validated and constructed it; private key material
     /// remains in the signer for its required signing lifetime.
@@ -131,10 +135,11 @@ pub struct SigningMaterial {
 impl SigningMaterial {
     /// Construct material from a validated, pre-parsed signer.
     ///
-    /// Fails if `certificate_chain` contains a part that is not valid base64,
-    /// so a malformed chain is rejected at certificate load/renewal time rather
-    /// than surfacing later as a missing CWT `x5chain`. The caller is expected
-    /// to treat this as a provisioning error.
+    /// Fails if `certificate_chain` is empty, contains an empty entry, or
+    /// contains a part that is not valid base64, so a malformed chain is
+    /// rejected at certificate load/renewal time rather than surfacing later as
+    /// a missing or empty CWT `x5chain`. The caller is expected to treat this
+    /// as a provisioning error.
     pub fn new(
         certificate_chain: Option<Vec<String>>,
         signing_key: Arc<dyn TokenSigner>,
@@ -147,6 +152,12 @@ impl SigningMaterial {
                     return Err(StatusListError::Backend(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "certificate chain is empty",
+                    ))));
+                }
+                if parts.iter().any(|b64| b64.is_empty()) {
+                    return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "certificate chain contains an empty entry",
                     ))));
                 }
                 let der: Vec<Box<[u8]>> = parts
@@ -167,6 +178,19 @@ impl SigningMaterial {
             certificate_der,
             signing_key,
         })
+    }
+
+    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c`
+    /// header. `None` when no chain is configured.
+    pub fn certificate_chain(&self) -> Option<&[String]> {
+        self.certificate_chain.as_deref()
+    }
+
+    /// DER-encoded x509 certificate chain, decoded once at construction, for
+    /// the CWT `x5chain` header. `None` iff [`Self::certificate_chain`] is
+    /// `None`.
+    pub fn certificate_der(&self) -> Option<&[Box<[u8]>]> {
+        self.certificate_der.as_deref()
     }
 }
 
@@ -237,6 +261,27 @@ mod tests {
     #[test]
     fn new_rejects_malformed_base64_chain() {
         assert!(SigningMaterial::new(Some(vec!["not-base64!".into()]), signer()).is_err());
+    }
+
+    #[test]
+    fn new_rejects_empty_chain_entry() {
+        assert!(SigningMaterial::new(Some(vec![String::new()]), signer()).is_err());
+    }
+
+    #[test]
+    fn accessors_keep_views_in_sync() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let chain = vec![
+            BASE64_STANDARD.encode(b"leaf"),
+            BASE64_STANDARD.encode(b"root"),
+        ];
+        let material = SigningMaterial::new(Some(chain.clone()), signer()).expect("material");
+        assert_eq!(material.certificate_chain(), Some(chain.as_slice()));
+        assert_eq!(material.certificate_der().map(|d| d.len()), Some(2));
+
+        let no_chain = SigningMaterial::new(None, signer()).expect("material");
+        assert_eq!(no_chain.certificate_chain(), None);
+        assert_eq!(no_chain.certificate_der(), None);
     }
 
     #[test]

@@ -170,7 +170,7 @@ impl CertProvisioningStrategy for StoreProvisioningStrategy {
 
         let certificate_data = manager.certificate_data_from_pem(certificate)?;
         validate_signing_material(&certificate_data.certificate, &signing_key_pem)
-            .map_err(|err| CertError::validation(err.to_string()))?;
+            .map_err(|err| CertError::Validation(Box::new(err)))?;
         let current_certificate = manager.certificate().await?;
         let current_signing_key = manager.signing_key_from_storage().await?;
 

@@ -164,8 +164,7 @@ async fn build_status_list_token_inner(
             TokenFormat::Cwt => {
                 let x5chain = x5chain_from_der(
                     signing_material
-                        .certificate_der
-                        .as_deref()
+                        .certificate_der()
                         .ok_or_else(missing_chain_error)?,
                 );
                 issue_cwt(
@@ -180,8 +179,7 @@ async fn build_status_list_token_inner(
             }
             TokenFormat::Jwt => {
                 let cert_chain = signing_material
-                    .certificate_chain
-                    .as_deref()
+                    .certificate_chain()
                     .ok_or_else(missing_chain_error)?;
                 issue_jwt(
                     &status_record,
@@ -493,7 +491,7 @@ mod tests {
             let material =
                 crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer)
                     .expect("material");
-            let x5chain = x5chain_from_der(material.certificate_der.as_deref().expect("der chain"));
+            let x5chain = x5chain_from_der(material.certificate_der().expect("der chain"));
             let cwt_bytes = issue_cwt(
                 &record,
                 material.signing_key.as_ref(),
@@ -544,7 +542,7 @@ mod tests {
             Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
         )
         .expect("material");
-        let value = x5chain_from_der(material.certificate_der.as_deref().unwrap());
+        let value = x5chain_from_der(material.certificate_der().unwrap());
         assert_eq!(value, CborValue::Bytes(b"only-cert".to_vec()));
     }
 
@@ -558,7 +556,7 @@ mod tests {
             Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
         )
         .expect("material");
-        let value = x5chain_from_der(material.certificate_der.as_deref().unwrap());
+        let value = x5chain_from_der(material.certificate_der().unwrap());
         assert_eq!(
             value,
             CborValue::Array(vec![
@@ -567,5 +565,25 @@ mod tests {
                 CborValue::Bytes(b"root".to_vec()),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn missing_chain_surfaces_as_backend_500_for_cwt_and_jwt() {
+        use crate::domain::models::status_list::StatusListError;
+        use crate::test_utils::test_app_state_without_cert_chain;
+
+        let state = test_app_state_without_cert_chain().await;
+        let record = sample_record();
+
+        for accept in [
+            ACCEPT_STATUS_LISTS_HEADER_CWT,
+            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+        ] {
+            let result = build_status_list_token(&state, accept, record.clone(), None, false).await;
+            assert!(
+                matches!(result, Err(StatusListError::Backend(_))),
+                "missing chain must surface as a 500 (Backend) for accept `{accept}`, got {result:?}"
+            );
+        }
     }
 }
