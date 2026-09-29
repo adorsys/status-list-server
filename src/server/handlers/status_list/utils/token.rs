@@ -226,7 +226,7 @@ fn missing_chain_error() -> StatusListError {
 /// chain, following the status-list spec: a single certificate maps to a
 /// `ByteString`, multiple certificates to an `Array` of `ByteString`s.
 ///
-/// The DER is already decoded and stored on [`SigningMaterial`], so this runs
+/// The DER is already decoded and stored on [`crate::domain::ports::SigningMaterial`], so this runs
 /// without a base64 decode, a global lock, or a comparison on every request.
 fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
     if certs.len() == 1 {
