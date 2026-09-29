@@ -1944,7 +1944,15 @@ mod tests {
             "the refusal must name the APP_TOKEN_BYTES_CACHE__TTL env var: {mid_window_msg}"
         );
         assert!(
+            mid_window_msg.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
+            "the refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {mid_window_msg}"
+        );
+        assert!(
             mid_window_msg.contains("token_bytes_cache.ttl"),
+            "unexpected error: {mid_window_msg}"
+        );
+        assert!(
+            mid_window_msg.contains("status_list.token_exp_secs"),
             "unexpected error: {mid_window_msg}"
         );
 
@@ -2161,6 +2169,54 @@ mod tests {
         assert!(
             zero_quota.is_err(),
             "a zero list quota would refuse every publish and must fail config loading"
+        );
+    }
+
+    #[test]
+    fn test_token_bytes_cache_ttl_validation_boundaries() {
+        // The two valid boundary cases and the single rejected mid-window case
+        // each exercise `TokenBytesCacheConfig::validate` directly, so removing
+        // or loosening the check fails these tests instead of silently passing
+        // through the positive `Config::load_from_overrides` path.
+        let cfg = TokenBytesCacheConfig {
+            ttl: 600,
+            max_capacity: 100,
+        };
+        assert!(
+            cfg.validate(600).is_ok(),
+            "ttl == token_exp_secs must be accepted (full-window coverage)"
+        );
+        let disabled = TokenBytesCacheConfig {
+            ttl: 0,
+            max_capacity: 100,
+        };
+        assert!(
+            disabled.validate(900).is_ok(),
+            "ttl == 0 disables the cache and must be accepted"
+        );
+        let mid_window = TokenBytesCacheConfig {
+            ttl: 300,
+            max_capacity: 100,
+        };
+        let err = mid_window
+            .validate(900)
+            .expect_err("0 < ttl < token_exp_secs must be rejected")
+            .to_string();
+        assert!(
+            err.contains("APP_TOKEN_BYTES_CACHE__TTL"),
+            "refusal must name the APP_TOKEN_BYTES_CACHE__TTL env var: {err}"
+        );
+        assert!(
+            err.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
+            "refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {err}"
+        );
+        assert!(
+            err.contains("token_bytes_cache.ttl"),
+            "refusal must name the token_bytes_cache.ttl config path: {err}"
+        );
+        assert!(
+            err.contains("status_list.token_exp_secs"),
+            "refusal must name the status_list.token_exp_secs config path: {err}"
         );
     }
 
