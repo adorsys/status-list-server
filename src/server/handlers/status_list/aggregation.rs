@@ -94,6 +94,10 @@ fn encode_cursor(list_id: &str) -> String {
 
 /// Deliberately not restricted to UUIDs: rows stored before `list_id` was
 /// validated would otherwise produce a `next_cursor` that strands the walk.
+///
+/// NUL is the one exception: Postgres rejects it in text, so letting it through
+/// is a 500. The trade-off is that a pre-validation `list_id` containing NUL,
+/// storable only on MySQL or SQLite, ends a walk at its page.
 fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
     (cursor.len() <= MAX_CURSOR_LEN)
         .then_some(cursor)
@@ -102,7 +106,7 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
         .and_then(|decoded| {
             decoded
                 .strip_prefix(CURSOR_VERSION)
-                .filter(|list_id| !list_id.is_empty())
+                .filter(|list_id| !list_id.is_empty() && !list_id.contains('\0'))
                 .map(str::to_string)
         })
         .ok_or_else(|| {
@@ -285,6 +289,8 @@ mod tests {
             URL_SAFE_NO_PAD.encode(CURSOR_VERSION).as_str(),
             URL_SAFE_NO_PAD.encode([0xff, 0xfe]).as_str(),
             encode_cursor(&"a".repeat(MAX_CURSOR_LEN)).as_str(),
+            encode_cursor("\0").as_str(),
+            encode_cursor("477121aa-b598\0-419e-916f-1e74654ff38b").as_str(),
         ] {
             let err = get(&state, None, Some(cursor)).await.unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST, "cursor={cursor}");
@@ -316,6 +322,7 @@ mod tests {
             // Stored before list_id had to be a UUID.
             "legacy-list",
             "list with spaces/and?query",
+            "legacy\tlist\n",
         ] {
             let cursor = encode_cursor(list_id);
             assert_eq!(decode_cursor(&cursor).unwrap(), list_id);
