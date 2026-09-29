@@ -51,6 +51,7 @@ The Postman/Newman and Microcks runners expect these host tools:
 Start the API first:
 
 ```bash
+APP_SERVER__HOST=0.0.0.0 \
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
@@ -75,6 +76,7 @@ the pinned Newman container instead of a locally installed Newman binary.
 Start the API first:
 
 ```bash
+APP_SERVER__HOST=0.0.0.0 \
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
