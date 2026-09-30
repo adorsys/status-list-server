@@ -6,8 +6,10 @@ pub mod handlers;
 pub mod health;
 pub mod rate_limit;
 
+use crate::domain::models::credential::AggregationId;
 use crate::domain::service::Service;
 use std::sync::Arc;
+use url::Url;
 
 /// JWT policy for protected management endpoints.
 #[derive(Debug, Clone)]
@@ -43,7 +45,9 @@ pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
     pub server_domain: String,
-    pub aggregation_uri: Option<String>,
+    /// The aggregation endpoint's URL. Tokens and registrations advertise it
+    /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
+    pub aggregation_uri: Option<Url>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
@@ -54,4 +58,16 @@ pub struct AppState {
     pub management_auth: ManagementAuthConfig,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
+}
+
+impl AppState {
+    /// The issuer's aggregation URI, or `None` when aggregation is not
+    /// configured.
+    pub fn aggregation_uri_for(&self, aggregation_id: AggregationId) -> Option<String> {
+        let mut uri = self.aggregation_uri.clone()?;
+        uri.path_segments_mut()
+            .ok()?
+            .push(&aggregation_id.to_string());
+        Some(uri.into())
+    }
 }

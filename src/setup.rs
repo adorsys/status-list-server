@@ -462,7 +462,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 ),
                 StartupState::Transition => tracing::error!(
                     "limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition \
-                     is set. Once no pod of the previous release is left, run \
+                     is set, so an issuer's aggregation may not fit in one page. Once no pod \
+                     of the previous release is left, run \
                      `status-list-server list-quota recount`, then \
                      `status-list-server list-quota enable`, then remove \
                      APP_LIMITS__LIST_QUOTA_TRANSITION."
@@ -736,7 +737,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let state = AppState {
         service,
         server_domain: config.server.domain.clone(),
-        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+        aggregation_uri: config.server.aggregation_uri()?,
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -813,10 +814,6 @@ pub async fn setup_snapshot_cleanup_scheduler(
     scheduler.start().await?;
     info!("Historical snapshot cleanup scheduler started with schedule: {cron_schedule}");
     Ok(())
-}
-
-fn empty_to_none(value: Option<String>) -> Option<String> {
-    value.filter(|v| !v.trim().is_empty())
 }
 
 #[cfg(feature = "acme")]

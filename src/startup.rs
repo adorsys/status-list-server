@@ -28,13 +28,12 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
-
 use crate::config::Config;
 use crate::server::AppState;
 use crate::server::auth::auth;
 use crate::server::handlers::{
-    credential_handler, get_aggregation, get_status_list, publish_status_route, update_status_route,
+    credential_handler, get_aggregation, get_credential, get_issuer_aggregation, get_status_list,
+    publish_status_route, update_status_route,
 };
 use crate::server::health;
 use crate::utils::metrics::metrics_handler;
@@ -96,8 +95,6 @@ impl HttpServer {
             .with_state(state);
 
         router = attach_metrics(router, config, prometheus_registry);
-
-        validate_aggregation_uri(config)?;
 
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
@@ -191,6 +188,7 @@ fn api_v1_routes(
                 .route("/", put(publish_status_route))
                 .route("/", patch(update_status_route)),
         )
+        .route("/credentials", get(get_credential))
         .route_layer(from_fn_with_state(state.clone(), auth))
         .layer(GovernorLayer::new(issuer_governor));
 
@@ -200,6 +198,7 @@ fn api_v1_routes(
 
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
+        .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
         .route("/status-lists/{list_id}", get(get_status_list))
         .layer(GovernorLayer::new(permissive_governor));
 
@@ -266,77 +265,70 @@ fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router
     router
 }
 
-/// Validates that the configured `aggregation_uri` (when set) has a path
-/// matching the actual aggregation route registered on the router.
-///
-/// This prevents operators from shipping tokens with a dead `aggregation_uri`
-/// member that points to a non-existent endpoint.
-fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
-    let Some(uri) = config.server.aggregation_uri.as_deref() else {
-        return Ok(());
-    };
-    let uri = uri.trim();
-    if uri.is_empty() {
-        return Ok(());
-    }
-
-    let parsed = reqwest::Url::parse(uri).wrap_err("Invalid aggregation_uri: not a valid URL")?;
-    let path = parsed.path();
-    if path != AGGREGATION_ROUTE_PATH {
-        return Err(eyre!(
-            "Configured aggregation_uri path '{path}' does not match the actual route '{AGGREGATION_ROUTE_PATH}'"
-        ));
-    }
-
-    tracing::info!("aggregation_uri validated: {uri}");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
-    #[test]
-    fn test_validate_aggregation_uri_accepts_matching_path() {
-        let config = Config::load_from_overrides(&[(
-            "server.aggregation_uri",
-            "https://statuslist.example.com/api/v1/aggregation",
-        )])
-        .unwrap();
-        assert!(validate_aggregation_uri(&config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_aggregation_uri_rejects_mismatched_path() {
-        let config = Config::load_from_overrides(&[(
-            "server.aggregation_uri",
-            "https://statuslist.example.com/statuslists/aggregation",
-        )])
-        .unwrap();
-        let result = validate_aggregation_uri(&config);
-        assert!(
-            result.is_err(),
-            "Should reject mismatched aggregation_uri path"
-        );
-    }
-
-    #[test]
-    fn test_validate_aggregation_uri_passes_when_unset() {
+    /// `/credentials` has a public POST and an authenticated GET, and each must
+    /// keep its own layers once the routers are merged.
+    #[tokio::test]
+    async fn test_api_routes_register_issuers_and_serve_their_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        assert!(validate_aggregation_uri(&config).is_ok());
+        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        let router = api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state);
+        let send = |method: Method, uri: String, body: String| {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )))
+                .body(Body::from(body))
+                .unwrap();
+            router.clone().oneshot(request)
+        };
+
+        let registration = send(
+            Method::POST,
+            "/credentials".into(),
+            format!(
+                r#"{{"issuer":"issuer1","public_key":{}}}"#,
+                crate::test_fixtures::TEST_EC_PUBLIC_JWK
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(registration.status(), StatusCode::ACCEPTED);
+        let registration: serde_json::Value = serde_json::from_slice(
+            &to_bytes(registration.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let aggregation_id = registration["aggregation_id"].as_str().unwrap();
+
+        let unauthenticated = send(Method::GET, "/credentials".into(), String::new())
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let aggregation = send(
+            Method::GET,
+            format!("/aggregation/{aggregation_id}"),
+            String::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aggregation.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn test_validate_aggregation_uri_rejects_invalid_url() {
-        let config =
-            Config::load_from_overrides(&[("server.aggregation_uri", "not a url")]).unwrap();
-        let result = validate_aggregation_uri(&config);
-        assert!(result.is_err(), "Should reject invalid URL");
-    }
     #[tokio::test]
     async fn test_strict_governor_returns_429_when_burst_exceeded() {
         async fn handler() -> impl IntoResponse {

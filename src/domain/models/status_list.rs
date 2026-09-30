@@ -91,6 +91,14 @@ pub struct StatusListRecord {
     pub updated_at: i64,
 }
 
+/// Aggregation page size when the client sends no `limit`, which a draft-21
+/// §9.3 client never does. It also caps `limits.max_lists_per_issuer`, so an
+/// issuer's aggregation always fits in that one page.
+pub const AGGREGATION_DEFAULT_LIMIT: usize = 1000;
+/// Largest aggregation page a client may request.
+pub const AGGREGATION_MAX_LIMIT: usize = 1000;
+const _: () = assert!(AGGREGATION_DEFAULT_LIMIT <= AGGREGATION_MAX_LIMIT);
+
 /// One page of published status list URIs, in `list_id` order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusListUriPage {

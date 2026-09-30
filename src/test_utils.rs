@@ -31,6 +31,38 @@ pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIs
     AuthenticatedIssuer::new(Issuer(issuer.into()))
 }
 
+/// Runs `test` behind a fresh Prometheus registry and returns what it exported.
+/// Creates its own runtime, so call it from a plain `#[test]`.
+pub(crate) fn metrics_after(test: impl std::future::Future<Output = ()>) -> String {
+    use crate::config::{TelemetryConfig, TelemetryEnvironment};
+    use crate::utils::metrics::{metrics_handler, metrics_test_lock, setup_metrics};
+
+    let _guard = metrics_test_lock();
+    let registry = prometheus::Registry::new();
+    let config = TelemetryConfig {
+        environment: TelemetryEnvironment::Development,
+        otlp_endpoint: "http://localhost:4317".to_string(),
+        sampler_ratio: 1.0,
+        enabled: false,
+    };
+    let _meter_provider = setup_metrics(
+        &registry,
+        &config,
+        opentelemetry_sdk::Resource::builder()
+            .with_service_name("status-list-server-test")
+            .build(),
+    )
+    .expect("metrics setup");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(async {
+            test.await;
+            metrics_handler(registry).await
+        })
+}
+
 /// Registers `issuer` and returns the aggregation ID it was given.
 pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> AggregationId {
     service
@@ -254,7 +286,7 @@ impl StatusListCache for TestStatusListCache {
 
 async fn build_test_app_state(
     #[cfg(feature = "history")] db_conn: Option<Arc<sea_orm::DatabaseConnection>>,
-    aggregation_uri: Option<String>,
+    aggregation_uri: Option<url::Url>,
     max_serialized_list_size: usize,
 ) -> AppState {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

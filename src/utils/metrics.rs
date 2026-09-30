@@ -106,8 +106,7 @@ pub(crate) fn record_rotation(target: &'static str, success: bool) {
     }
 }
 
-#[cfg(feature = "history")]
-type InstrumentSlot<T> = OnceLock<Mutex<Option<(u64, T)>>>;
+pub(crate) type InstrumentSlot<T> = OnceLock<Mutex<Option<(u64, T)>>>;
 #[cfg(feature = "history")]
 static LIST_QUOTA_METRICS: InstrumentSlot<Gauge<u64>> = OnceLock::new();
 
