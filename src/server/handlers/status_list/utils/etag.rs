@@ -15,12 +15,13 @@ use sha2::{Digest, Sha256};
 ///
 /// Instead the ETag is a **weak** validator (`W/"..."`) over the dimensions that
 /// pin the representation identity: `(list_id, content_hash, signer_fingerprint,
-/// window_start, format, encoding)`. That tuple is identical across replicas and
-/// never requires a sign to answer a `304`, and it changes exactly when the
-/// served representation's identity changes (content, signing key, window,
-/// format, or encoding). A matching weak ETag proves the client holds a
-/// current-window token from the current signer for this content — which is the
-/// guarantee the conditional logic needs to certify a `304`.
+/// window_start, format, encoding, aggregation_uri, token_ttl_secs,
+/// token_exp_secs)`. That tuple is identical across replicas and never requires
+/// a sign to answer a `304`, and it changes exactly when the served
+/// representation's identity changes (content, signing key, window, format,
+/// encoding, aggregation URI, or token ttl/exp). A matching weak ETag proves the
+/// client holds a current-window token from the current signer for this content
+/// — which is the guarantee the conditional logic needs to certify a `304`.
 pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.list_id.as_bytes());
@@ -29,6 +30,9 @@ pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
     hasher.update(key.window_start.to_string().as_bytes());
     hasher.update(key.format.as_bytes());
     hasher.update(encoding_label(key.encoding).as_bytes());
+    hasher.update(key.aggregation_uri.as_bytes());
+    hasher.update(key.token_ttl_secs.to_string().as_bytes());
+    hasher.update(key.token_exp_secs.to_string().as_bytes());
     format!("W/\"{}\"", hex::encode(hasher.finalize()))
 }
 
@@ -168,6 +172,27 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "aggregation_uri",
+                TokenCacheKey {
+                    aggregation_uri: "https://agg".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "token_ttl_secs",
+                TokenCacheKey {
+                    token_ttl_secs: 600,
+                    ..base.clone()
+                },
+            ),
+            (
+                "token_exp_secs",
+                TokenCacheKey {
+                    token_exp_secs: 1200,
+                    ..base.clone()
+                },
+            ),
         ];
         for (dim, key) in cases {
             assert_ne!(
@@ -176,19 +201,6 @@ mod tests {
                 "ETag must change when {dim} changes"
             );
         }
-        // Aggregate dimensions that are *not* representation identity must not
-        // change the ETag (they don't alter the bytes served for this window).
-        let same_identity = TokenCacheKey {
-            aggregation_uri: "https://agg".into(),
-            token_ttl_secs: 600,
-            token_exp_secs: 1200,
-            ..base.clone()
-        };
-        assert_eq!(
-            generate_token_etag(&base),
-            generate_token_etag(&same_identity),
-            "ttl/exp/aggregation_uri are not representation identity"
-        );
     }
 
     #[test]

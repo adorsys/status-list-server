@@ -785,6 +785,32 @@ mod tests {
         assert_eq!(entry_weight(&key, &large), 2048);
     }
 
+    #[tokio::test]
+    async fn default_config_retains_representative_token() {
+        // The built-in `token_bytes_cache.max_capacity` is a *byte* budget. A
+        // representative signed token is a few hundred bytes, so the default
+        // budget must retain and serve it — otherwise non-Helm deployments
+        // (which use the built-in default) would re-sign every request.
+        let defaults = crate::config::Config::load_from_overrides(&[])
+            .expect("default config should load");
+        let cache = TokenBytesCache::new(defaults.token_bytes_cache.max_capacity);
+        let key = base_key(1000);
+        cache
+            .insert(
+                key.clone(),
+                CachedToken {
+                    bytes: Bytes::from(vec![0u8; 512]),
+                    encoding: None,
+                    created_at_unix: 1000,
+                },
+            )
+            .await;
+        assert!(
+            cache.get(&key, 1000, 900, 1400).await.is_some(),
+            "default byte budget must retain and serve a representative token"
+        );
+    }
+
     #[test]
     fn entry_expiry_targets_window_end() {
         // Each entry expires at the end of its own anchored window
