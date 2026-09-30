@@ -960,11 +960,6 @@ jobs:
           # `:?` on both -- helm reports an empty value as a YAML error pointing
           # nowhere near the cause, and an empty digest silently falls back to the
           # mutable tag, which is the failure this pipeline exists to prevent.
-          # ESO is installed cluster-wide in the datev-wallet namespace, not in
-          # statuslist-production. A namespaced SecretStore cannot be referenced across
-          # namespaces, so point the ExternalSecrets at the cluster-scoped store served
-          # by that ESO (ClusterSecretStore `datev-secret-store`) and do NOT render our
-          # own namespaced SecretStore.
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
