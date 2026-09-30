@@ -455,10 +455,12 @@ mod tests {
         let rendered = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
             .block_on(metrics_handler(registry));
+        // Only its presence: SQL tests running in parallel record it on every
+        // publish, so its value here is whatever the last one wrote.
         assert!(
             rendered
                 .lines()
-                .any(|line| line.starts_with("list_quota_enforced") && line.ends_with(" 0")),
+                .any(|line| line.starts_with("list_quota_enforced")),
             "{rendered}"
         );
     }
