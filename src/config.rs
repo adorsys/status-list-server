@@ -253,7 +253,8 @@ pub struct ServerConfig {
     ///
     /// This is the prefix used to build the status list `sub` URI that is signed
     /// into every issued token and returned to issuers as the `Location` header
-    /// on publish. It MUST be an absolute `https` URL with no query or fragment.
+    /// on publish. It MUST be an absolute `https` URL whose path is exactly the
+    /// API prefix (`/api/v1`), with no trailing slash, query, or fragment.
     ///
     /// When unset, it is derived from [`ServerConfig::domain`] as
     /// `https://{domain}/api/v1`, so existing deployments that only configure
@@ -265,11 +266,24 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// The resolved public base URL, defaulting to `https://{domain}/api/v1`
     /// when `public_base_url` is not configured.
+    ///
+    /// When deriving from `server.domain`, an IPv6 host is bracketed so the
+    /// resulting URL is valid (a bare `2001:db8::1` would be malformed).
     pub fn resolved_public_base_url(&self) -> String {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
-            None => format!("https://{}/api/v1", self.domain),
+            None => format!("https://{}/api/v1", url_authority_host(&self.domain)),
         }
+    }
+}
+
+/// Renders a configured host for use as a URL authority: a bare IPv6 address
+/// is wrapped in brackets, everything else is passed through unchanged.
+fn url_authority_host(domain: &str) -> String {
+    if domain.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{domain}]")
+    } else {
+        domain.to_string()
     }
 }
 
@@ -302,9 +316,16 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validates `server.public_base_url`: an absolute `https` URL with no query
-/// or fragment, since it is embedded verbatim into issued tokens' `sub` and
-/// returned to issuers as the publish `Location`.
+/// The API path prefix under which the status-list routes are mounted. The
+/// published `sub` URI is built as `{public_base_url}/status-lists/{list_id}`,
+/// so `public_base_url` must carry exactly this prefix (no trailing slash) for
+/// the returned URI to resolve to the served `GET /status-lists/{list_id}` route.
+const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
+
+/// Validates `server.public_base_url`: an absolute `https` URL whose path is
+/// exactly the API prefix, with no query or fragment, since it is embedded
+/// verbatim into issued tokens' `sub` and returned to issuers as the publish
+/// `Location`.
 fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(base_url).map_err(|err| {
         ConfigError::Message(format!(
@@ -330,6 +351,18 @@ fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::Message(
             "Invalid server.public_base_url: must not contain a fragment".to_string(),
         ));
+    }
+    if base_url.ends_with('/') {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not end with a trailing slash".to_string(),
+        ));
+    }
+    if parsed.path() != PUBLIC_API_PATH_PREFIX {
+        return Err(ConfigError::Message(format!(
+            "Invalid server.public_base_url: path must be exactly '{PUBLIC_API_PATH_PREFIX}' \
+             so the published status-list URI resolves to the served route; got '{}'",
+            parsed.path()
+        )));
     }
     Ok(())
 }
@@ -1390,9 +1423,9 @@ impl Config {
             validate_database_query(query)?;
         }
         validate_server_domain(&config.server.domain)?;
-        if let Some(base_url) = trim_non_empty(config.server.public_base_url.as_deref()) {
-            validate_public_base_url(base_url)?;
-        }
+        // Validate the *resolved* base URL — whether explicitly set or derived
+        // from `server.domain` — so a broken fallback is caught at startup too.
+        validate_public_base_url(&config.server.resolved_public_base_url())?;
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.status_list.validate()?;
@@ -2333,7 +2366,10 @@ mod tests {
     #[test]
     fn test_public_base_url_rejects_non_https_query_and_fragment() {
         for (value, expected) in [
-            ("http://statuslist.example.com/api/v1", "scheme must be https"),
+            (
+                "http://statuslist.example.com/api/v1",
+                "scheme must be https",
+            ),
             (
                 "https://statuslist.example.com/api/v1?x=1",
                 "must not contain a query",
@@ -2341,6 +2377,22 @@ mod tests {
             (
                 "https://statuslist.example.com/api/v1#frag",
                 "must not contain a fragment",
+            ),
+            (
+                "https://statuslist.example.com/api/v1/",
+                "must not end with a trailing slash",
+            ),
+            (
+                "https://statuslist.example.com",
+                "path must be exactly '/api/v1'",
+            ),
+            (
+                "https://statuslist.example.com/api/v2",
+                "path must be exactly '/api/v1'",
+            ),
+            (
+                "https://statuslist.example.com/api/v1/status-lists/foo",
+                "path must be exactly '/api/v1'",
             ),
             ("not a url", "not a valid URL"),
         ] {
@@ -2351,14 +2403,50 @@ mod tests {
                 "expected {expected:?} in: {err}"
             );
         }
+
+        // A well-formed absolute https URL with exactly the API prefix loads.
+        Config::load_from_overrides(&[(
+            "server.public_base_url",
+            "https://statuslist.example.com/api/v1",
+        )])
+        .expect("a valid public_base_url must load");
+    }
+
+    #[test]
+    fn test_public_base_url_derived_from_ipv6_domain_is_bracketed_and_valid() {
+        // A bare IPv6 `server.domain` must yield a bracket-wrapped, valid
+        // derived base URL rather than a malformed `https://2001:db8::1/api/v1`.
+        let config = Config::load_from_overrides(&[("server.domain", "2001:db8::1")])
+            .expect("a bare IPv6 server.domain should load");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://[2001:db8::1]/api/v1"
+        );
+
+        // An already-bracketed IPv6 domain passes through unchanged.
+        let config = Config::load_from_overrides(&[("server.domain", "[2001:db8::1]")])
+            .expect("a bracketed IPv6 server.domain should load");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://[2001:db8::1]/api/v1"
+        );
     }
 
     #[test]
     fn test_server_domain_must_be_bare_host() {
         for (value, expected) in [
-            ("https://example.com", "scheme, port, path, userinfo, query, or fragment"),
-            ("example.com/path", "scheme, port, path, userinfo, query, or fragment"),
-            ("example.com:443", "scheme, port, path, userinfo, query, or fragment"),
+            (
+                "https://example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com/path",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com:443",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
         ] {
             let err = Config::load_from_overrides(&[("server.domain", value)])
                 .expect_err(&format!("server.domain {value:?} must be rejected"));

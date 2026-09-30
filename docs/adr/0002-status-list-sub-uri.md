@@ -24,9 +24,12 @@ startup.
 
 **`server.public_base_url` is the source of truth for the `sub` prefix.** It
 defaults to `https://{server.domain}/api/v1` so existing deployments that only
-configure `server.domain` keep working. It must be an absolute `https` URL with
-no query or fragment. `server.domain` is validated as a bare host (no scheme,
-port, path, userinfo, query, or fragment).
+configure `server.domain` keep working. It must be an absolute `https` URL whose
+path is exactly `/api/v1`, with no trailing slash, query, or fragment, so the
+published `sub` resolves to the served `GET /status-lists/{list_id}` route.
+`server.domain` is validated as a bare host (no scheme, port, path, userinfo,
+query, or fragment); a bare IPv6 host is bracketed in the derived default. The
+*resolved* base URL (whether explicit or derived) is validated at startup.
 
 **`sub` remains a publish-time artifact: the value stored at publish time is
 what is served forever.** When `public_base_url` changes, existing rows keep

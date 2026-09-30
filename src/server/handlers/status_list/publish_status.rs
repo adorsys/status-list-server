@@ -66,17 +66,19 @@ pub async fn publish_status(
         .await?;
 
     let mut headers = HeaderMap::new();
-    if let Ok(value) = axum::http::HeaderValue::try_from(&uri) {
-        headers.insert(axum::http::header::LOCATION, value);
-    }
+    let location = axum::http::HeaderValue::try_from(&uri).map_err(|err| {
+        tracing::error!(
+            %uri,
+            "publish Location header is not a valid HTTP header value: {err}"
+        );
+        ApiError::internal("generated status list URI cannot be represented as a Location header")
+    })?;
+    headers.insert(axum::http::header::LOCATION, location);
 
     Ok((
         StatusCode::CREATED,
         headers,
-        Json(PublishStatusResponse {
-            uri,
-            list_id,
-        }),
+        Json(PublishStatusResponse { uri, list_id }),
     )
         .into_response())
 }
@@ -162,7 +164,7 @@ mod tests {
                     )
                     .route("/status-lists/{list_id}", get(get_status_list)),
             )
-            .with_state(app_state);
+            .with_state(app_state.clone());
 
         // Publish, capturing the Location header and the body `uri`.
         let mut request = axum::http::Request::builder()
@@ -187,7 +189,10 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["list_id"], token_id);
-        assert_eq!(json["uri"], location, "body `uri` must match the Location header");
+        assert_eq!(
+            json["uri"], location,
+            "body `uri` must match the Location header"
+        );
 
         // The test router is mounted at the root, so request the path of the
         // absolute `Location` URI; the served token's `sub` must still equal the
@@ -238,6 +243,20 @@ mod tests {
             decode_cwt_sub(&cwt_body),
             location,
             "CWT sub must equal the publish Location byte for byte"
+        );
+
+        // The AC additionally requires the *stored* whitelist row's `sub` to
+        // equal the Referenced Token's URI: the row served by the aggregation
+        // endpoint must be the same URI handed to the issuer at publish time.
+        let page = app_state
+            .service
+            .status_list_repo
+            .list_uris(None, 10)
+            .await
+            .expect("stored rows are readable");
+        assert!(
+            page.status_lists.contains(&location),
+            "stored whitelist row `sub` must equal the publish Location, got {page:?}"
         );
     }
 
