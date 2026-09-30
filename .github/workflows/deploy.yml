@@ -967,7 +967,6 @@ jobs:
           # own namespaced SecretStore.
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            --create-namespace \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
             --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
