@@ -125,7 +125,7 @@ Useful environment overrides:
 | `MICROCKS_READY_TIMEOUT`       | `180s`                                              | Maximum time to wait for the ephemeral Microcks container to start.                                |
 | `MICROCKS_WAIT_FOR`            | `30sec`                                             | Maximum wait time for each Microcks test.                                                          |
 | `RUN_POSTMAN_CONFORMANCE`      | `false`                                             | Set to `true` to additionally try Microcks' Postman runner. The collection is imported either way. |
-| `MICROCKS_VERBOSE`             | `true`                                              | Set to `false` to suppress Microcks CLI request/response dumps.                                    |
+| `MICROCKS_VERBOSE`             | `false`                                             | Set to `true` to enable CLI request/response dumps; bearer values are redacted.                      |
 | `MICROCKS_IMAGE`               | `quay.io/microcks/microcks-cli@sha256:7c0e...aa2e`  | Pinned CLI container image used when no local CLI is installed.                                    |
 | `MICROCKS_UBER_IMAGE`          | `quay.io/microcks/microcks-uber@sha256:c0da...3d91` | Pinned Microcks server image used by the Docker fallback.                                          |
 | `MICROCKS_MANAGED_PORT`        | `8585`                                              | Host port for the disposable Microcks server.                                                      |

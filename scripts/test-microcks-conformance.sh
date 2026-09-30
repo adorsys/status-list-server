@@ -15,7 +15,7 @@ MICROCKS_READY_TIMEOUT="${MICROCKS_READY_TIMEOUT:-180s}"
 MICROCKS_UBER_IMAGE="${MICROCKS_UBER_IMAGE:-quay.io/microcks/microcks-uber@sha256:c0daa6b10aefccb68341828dc98d9fd540f8fd5aa4485ed41c2f428582593d91}"
 MICROCKS_MANAGED_PORT="${MICROCKS_MANAGED_PORT:-8585}"
 RUN_POSTMAN_CONFORMANCE="${RUN_POSTMAN_CONFORMANCE:-false}"
-MICROCKS_VERBOSE="${MICROCKS_VERBOSE:-true}"
+MICROCKS_VERBOSE="${MICROCKS_VERBOSE:-false}"
 MICROCKS_MANAGED_CONTAINER=""
 token_data_file=""
 microcks_work_dir=""
@@ -398,6 +398,15 @@ endpoint_for_container() {
   printf '%s\n' "$endpoint"
 }
 
+run_redacted() {
+  local status
+  set +e
+  "$@" 2>&1 | sed -E 's/[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[^[:space:]",}]+/[REDACTED]/g'
+  status=${PIPESTATUS[0]}
+  set -e
+  return "$status"
+}
+
 docker_cli() {
   local verbose_args=()
   if [[ "$MICROCKS_VERBOSE" == "true" ]]; then
@@ -405,7 +414,7 @@ docker_cli() {
   fi
 
   ensure_microcks_work_dir
-  docker run --rm \
+  run_redacted docker run --rm \
     --add-host=host.docker.internal:host-gateway \
     --mount "type=bind,source=${microcks_work_dir},target=/microcks-artifacts,readonly" \
     --workdir /tmp \
@@ -460,8 +469,6 @@ start_managed_microcks() {
 run_microcks_with_managed_server() {
   local runner="$1"
   local operations_headers="$2"
-  local openapi_artifact="$3"
-  local postman_artifact="$4"
   local microcks_url="http://host.docker.internal:${MICROCKS_MANAGED_PORT}/api/"
   local test_endpoint
 
@@ -470,8 +477,8 @@ run_microcks_with_managed_server() {
 
   local docker_openapi_artifact
   local docker_postman_artifact
-  docker_openapi_artifact="$(stage_docker_artifact "$openapi_artifact" openapi.yaml)"
-  docker_postman_artifact="$(stage_docker_artifact "$postman_artifact" postman.json)"
+  docker_openapi_artifact="$(stage_docker_artifact "$MICROCKS_OPENAPI_ARTIFACT" openapi.yaml)"
+  docker_postman_artifact="$(stage_docker_artifact "$MICROCKS_POSTMAN_ARTIFACT" postman.json)"
 
   docker_cli import "${docker_openapi_artifact}:true,${docker_postman_artifact}:false" \
     --microcksURL="$microcks_url" \
@@ -499,7 +506,7 @@ run_microcks() {
   fi
 
   if command -v microcks >/dev/null 2>&1; then
-    microcks "${verbose_args[@]}" test --dry-run \
+    run_redacted microcks "${verbose_args[@]}" test --dry-run \
       --artifact "$artifact" \
       "$API_NAME_VERSION" \
       "$API_ENDPOINT" \
@@ -511,7 +518,7 @@ run_microcks() {
   fi
 
   if command -v microcks-cli >/dev/null 2>&1; then
-    microcks-cli "${verbose_args[@]}" test --dry-run \
+    run_redacted microcks-cli "${verbose_args[@]}" test --dry-run \
       --artifact "$artifact" \
       "$API_NAME_VERSION" \
       "$API_ENDPOINT" \
@@ -522,7 +529,7 @@ run_microcks() {
     return
   fi
 
-  run_microcks_with_managed_server "$runner" "$operations_headers" "$artifact" "$MICROCKS_POSTMAN_ARTIFACT"
+  run_microcks_with_managed_server "$runner" "$operations_headers"
 }
 
 require_command node
@@ -547,7 +554,7 @@ run_microcks "$MICROCKS_OPENAPI_ARTIFACT" "OPEN_API_SCHEMA" "$OPERATIONS_HEADERS
 
 if [[ "$RUN_POSTMAN_CONFORMANCE" == "true" ]]; then
   echo "Running Microcks Postman conformance test against $API_ENDPOINT"
-  run_microcks "$POSTMAN_ARTIFACT" "POSTMAN" "$OPERATIONS_HEADERS"
+  run_microcks "$MICROCKS_POSTMAN_ARTIFACT" "POSTMAN" "$OPERATIONS_HEADERS"
 else
   echo "Skipping Microcks Postman runner (set RUN_POSTMAN_CONFORMANCE=true to enable it); collection is still imported into Microcks."
 fi
