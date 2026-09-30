@@ -217,9 +217,14 @@ async fn build_fresh_200_response(
     cache_control: &str,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
-    let (token_bytes, encoding) =
-        build_status_list_token(state, accept_type, status_record, None, client_accepts_gzip)
-            .await?;
+    let (token_bytes, encoding) = build_status_list_token(
+        state,
+        accept_type,
+        status_record.clone(),
+        None,
+        client_accepts_gzip,
+    )
+    .await?;
 
     let mut response = Response::new(token_bytes.into());
     *response.status_mut() = StatusCode::OK;
@@ -284,7 +289,7 @@ async fn handle_historical_request(
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
-        &status_record,
+        status_record,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
     )

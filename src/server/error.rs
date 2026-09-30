@@ -286,6 +286,9 @@ impl IntoApiError for StatusListError {
                 Some("the service is currently unavailable. Please try again later".into()),
             ),
             StatusListError::Backend(err) => ApiError::internal(err),
+            StatusListError::TokenExpiryOverflow { .. } => ApiError::internal(
+                "token exp overflowed the configured token lifetime; check APP_STATUS_LIST__TOKEN_EXP_SECS",
+            ),
         }
     }
 }
@@ -406,6 +409,14 @@ mod tests {
             ),
             (
                 StatusListError::Backend(Box::new(std::io::Error::other("test"))),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+            (
+                StatusListError::TokenExpiryOverflow {
+                    iat: 1_000,
+                    token_exp_secs: 900,
+                },
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
             ),
