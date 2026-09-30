@@ -258,7 +258,9 @@ podDisruptionBudget:
 
 ### Conditional GETs, ETags and the signed-token cache across replicas
 
-The live `GET /status-lists/{id}` endpoint serves a **weak** ETag (`W/"..."`) derived from the representation *identity* — `(list_id, content_hash, signer_fingerprint, window_start, format, encoding)` — not from the signed bytes. ECDSA signatures are randomized, so an ETag over the bytes would change on every cold-cache request, restart, capacity eviction, and across replicas. Because the weak ETag is identity-derived it is **identical on every replica** for the same list in the same window, so a client can revalidate against any replica (or across a rolling deploy) and correctly receive a `304` while its token is valid — and the server never has to sign just to answer a `304`.
+The live `GET /status-lists/{id}` endpoint serves a **weak** ETag (`W/"..."`) derived from the representation *identity*, not from the signed bytes (ECDSA signatures are randomized, so a bytes-derived ETag would change on every cold-cache request, restart, capacity eviction, and across replicas). Because it is identity-derived it is stable for the whole token window, so a client can revalidate against any replica within the same window and correctly receive a `304` — and the server never has to sign just to answer a `304`.
+
+That cross-replica stability holds **only when replicas serve the same content with the same signing material and token configuration for the same representation and window**. During a rolling certificate or configuration change — or for different `token_ttl`/`token_exp` or aggregation-URI settings — ETags deliberately differ between replicas, so a revalidation against a replica on the other side of the change returns a freshly signed `200`. Coordinate certificate rotation and configuration rollout so the window during which replicas disagree is brief.
 
 The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
 

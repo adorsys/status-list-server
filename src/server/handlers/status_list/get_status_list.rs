@@ -141,16 +141,19 @@ async fn get_status_list_at(
     let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
     let window_start = token_window(now, validity).0;
 
-    let (token_bytes, token_encoding, current_etag) = get_or_build_live_token(
+    // Derive the cache key and weak ETag *before* any signing, so a matching
+    // `If-None-Match` answers 304 without ever minting a token. The key's signer
+    // fingerprint only reads the in-memory signing snapshot; it does not sign.
+    let key = build_token_cache_key(
         &state,
         &accept_type,
         &status_record,
         &list_id,
         window_start,
-        now,
         client_accepts_gzip,
     )
     .await?;
+    let current_etag = generate_token_etag(&key);
 
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
@@ -183,6 +186,15 @@ async fn get_status_list_at(
             revalidation_metrics()
                 .total
                 .add(1, &[KeyValue::new("outcome", "modified")]);
+            let (token_bytes, token_encoding) = get_or_build_live_token(
+                &state,
+                &accept_type,
+                &status_record,
+                &key,
+                now,
+                client_accepts_gzip,
+            )
+            .await?;
             Ok(build_ok_response(
                 token_bytes,
                 token_encoding,
@@ -195,38 +207,20 @@ async fn get_status_list_at(
     }
 }
 
-/// Return the signed token bytes for the current window, serving from the
-/// per-replica signed-bytes cache when possible and re-signing only on a miss.
+/// Build the typed cache key — and hence the weak ETag — for the live token at
+/// `window_start`, without signing.
 ///
-/// The token is minted with `iat = validity_window.0` (anchored to
-/// `max(window_start, updated_at)`) and `exp = iat + token_exp_secs`, so within
-/// a window with unchanged content the bytes are identical across requests and
-/// concurrent misses are coalesced onto a single sign for
-/// `(list, window, format, encoding)`. A request after the cached entry was
-/// evicted by capacity pressure re-signs. The ETag is a weak validator derived
-/// from the representation identity (`list_id, content_hash, signer_fingerprint,
-/// window_start, format, encoding`), so it is stable across replicas and restarts
-/// and never needs a sign to answer a 304.
-///
-/// The current signing material is fetched once and both (a) fingerprinted into
-/// the cache key and (b) passed to the signer, so rotating the signing key or
-/// renewing the certificate immediately invalidates cached bytes and re-signs —
-/// the served token always reflects the current key/certificate.
-async fn get_or_build_live_token(
+/// The signer fingerprint reads the current in-memory signing snapshot, so a
+/// rotated key or renewed certificate immediately changes the key (and the
+/// ETag) even before any token is built.
+async fn build_token_cache_key(
     state: &AppState,
     accept_type: &str,
     status_record: &StatusListRecord,
     list_id: &str,
     window_start: i64,
-    now: i64,
     client_accepts_gzip: bool,
-) -> Result<(Bytes, Option<&'static str>, String), ApiError> {
-    // The token's `iat` is `max(window_start, updated_at)`; `exp = iat + exp`.
-    let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
-    let iat = live_iat(now, status_record.updated_at, validity);
-    let exp_secs = state.token_exp_secs as i64;
-    let validity_window = (iat, iat.saturating_add(exp_secs));
-
+) -> Result<TokenCacheKey, ApiError> {
     let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
         "cwt"
     } else {
@@ -246,7 +240,7 @@ async fn get_or_build_live_token(
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
     let signer = signer_fingerprint(&signing_material);
     let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
-    let key = TokenCacheKey {
+    Ok(TokenCacheKey {
         list_id: list_id.to_string(),
         content_hash: hash,
         signer_fingerprint: signer,
@@ -256,13 +250,46 @@ async fn get_or_build_live_token(
         aggregation_uri: aggregation_uri.to_string(),
         token_ttl_secs: state.token_ttl_secs,
         token_exp_secs: state.token_exp_secs,
-    };
+    })
+}
+
+/// Return the signed token bytes for the current window, serving from the
+/// per-replica signed-bytes cache when possible and re-signing only on a miss.
+///
+/// Only called for a `Modified` response (the conditional check runs before
+/// this), so a matching `If-None-Match` never triggers a sign. The token is
+/// minted with `iat = max(window_start, updated_at)` and `exp = iat +
+/// token_exp_secs`, so within a window with unchanged content the bytes are
+/// identical across requests and concurrent misses coalesce onto a single sign
+/// for `(list, window, format, encoding)`. Capacity eviction can re-sign a
+/// still-valid entry.
+async fn get_or_build_live_token(
+    state: &AppState,
+    accept_type: &str,
+    status_record: &StatusListRecord,
+    key: &TokenCacheKey,
+    now: i64,
+    client_accepts_gzip: bool,
+) -> Result<(Bytes, Option<&'static str>), ApiError> {
+    let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
+    let iat = live_iat(now, status_record.updated_at, validity);
     let exp_secs = state.token_exp_secs as i64;
+    let validity_window = (iat, iat.saturating_add(exp_secs));
+
+    let signing_material = state
+        .service
+        .cert_provider()
+        .signing_material()
+        .await
+        .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
 
     let cached = state
         .token_bytes_cache
-        .get_or_build(&key, window_start, exp_secs, now, || {
+        .get_or_build(key, key.window_start, exp_secs, now, || {
             let signing_material = signing_material.clone();
+            // The record is cloned only when the builder actually runs (a cache
+            // miss); a hit serves cached bytes without touching it.
+            let status_record = status_record.clone();
             async move {
                 let (bytes, enc) = build_status_list_token(
                     state,
@@ -291,7 +318,7 @@ async fn get_or_build_live_token(
             let (bytes, enc) = build_status_list_token(
                 state,
                 accept_type,
-                status_record,
+                status_record.clone(),
                 Some(validity_window),
                 client_accepts_gzip,
                 signing_material,
@@ -300,8 +327,7 @@ async fn get_or_build_live_token(
             (Bytes::from(bytes), enc)
         }
     };
-    let etag = generate_token_etag(&key);
-    Ok((bytes, encoding, etag))
+    Ok((bytes, encoding))
 }
 
 /// Build a `200 OK` status-list token response from already-signed bytes.
@@ -390,7 +416,7 @@ async fn handle_historical_request(
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
-        &status_record,
+        status_record,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
         signing_material,
@@ -498,6 +524,67 @@ mod tests {
     use axum::extract::Json;
     use axum::http::HeaderMap;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    /// A [`TokenSigner`] that counts every `sign` call, so a test can assert how
+    /// many times the server actually signed during a conditional revalidation.
+    struct CountingSigner {
+        inner: Arc<dyn crate::domain::ports::TokenSigner>,
+        signs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::domain::ports::TokenSigner for CountingSigner {
+        fn algorithm(&self) -> crate::domain::models::token::SigningAlgorithm {
+            self.inner.algorithm()
+        }
+        fn sign(&self, data: &[u8]) -> Result<Vec<u8>, crate::domain::ports::TokenSignerError> {
+            self.signs.fetch_add(1, Ordering::SeqCst);
+            self.inner.sign(data)
+        }
+        fn public_key_bytes(&self) -> &[u8] {
+            self.inner.public_key_bytes()
+        }
+    }
+
+    /// A [`CertificateProvider`] returning a stable [`CountingSigner`] on every
+    /// call, so tests can count signing attempts through the full handler path
+    /// without the fingerprint rotating between requests.
+    struct CountingCertProvider {
+        signer: Arc<dyn crate::domain::ports::TokenSigner>,
+    }
+
+    impl CountingCertProvider {
+        fn new(signs: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            let key = crate::utils::crypto::SigningKey::generate(
+                crate::domain::models::token::SigningAlgorithm::Es256,
+            )
+            .expect("generate es256 key");
+            Self {
+                signer: Arc::new(CountingSigner {
+                    inner: Arc::new(key),
+                    signs,
+                }),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::CertificateProvider for CountingCertProvider {
+        async fn signing_material(
+            &self,
+        ) -> Result<
+            Arc<crate::domain::ports::SigningMaterial>,
+            crate::domain::models::status_list::StatusListError,
+        > {
+            Ok(Arc::new(
+                crate::domain::ports::SigningMaterial::new(
+                    Some(vec!["ZHVtbXlfY2VydA==".to_string()]),
+                    self.signer.clone(),
+                )
+                .expect("signing material"),
+            ))
+        }
+    }
 
     /// Decode the JWT payload of a freshly served (uncompressed) token so tests
     /// can assert the `iat`/`exp` claims directly without a verification key.
@@ -2416,6 +2503,77 @@ mod tests {
         assert!(
             etags[0].to_str().unwrap().starts_with("W/"),
             "the live ETag must be weak"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_matching_inm_304_does_not_sign_on_cold_cache() {
+        // Acceptance criterion: a revalidation must do no signing. Even with a
+        // disabled bytes cache (capacity 0, where every 200 re-signs), a matching
+        // If-None-Match within the window must answer 304 without invoking the
+        // signer at all — the key/ETag are derived before any sign and token
+        // bytes are only built for a Modified response.
+        let signs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingCertProvider::new(signs.clone()));
+        let mut app_state = test_app_state_with_cert_provider(provider).await;
+        app_state.token_bytes_cache = crate::server::cache::TokenBytesCache::new(0);
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res1 = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let etag = res1.headers().get(header::ETAG).unwrap().clone();
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            1,
+            "the fetch itself signs exactly once"
+        );
+
+        headers.insert(header::IF_NONE_MATCH, etag);
+        let res2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 60,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(
+            res2.status(),
+            StatusCode::NOT_MODIFIED,
+            "matching If-None-Match within the window must answer 304"
+        );
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            1,
+            "a 304 revalidation must not sign, even on a cold/disabled cache"
         );
     }
 }

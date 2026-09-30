@@ -117,7 +117,7 @@ struct JwtHeader<'a> {
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: &str,
-    status_record: &StatusListRecord,
+    status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
     signing_material: Arc<SigningMaterial>,
@@ -146,7 +146,7 @@ pub(crate) async fn build_status_list_token(
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
     format: TokenFormat,
-    status_record: &StatusListRecord,
+    status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
     signing_material: Arc<SigningMaterial>,
@@ -162,8 +162,6 @@ async fn build_status_list_token_inner(
     };
     let token_ttl_secs = state.token_ttl_secs;
     let should_gzip = client_accepts_gzip && format == TokenFormat::Jwt;
-
-    let status_record = status_record.clone();
 
     tokio::task::spawn_blocking(move || {
         let token_bytes = match format {
@@ -557,7 +555,7 @@ mod tests {
         let err = build_status_list_token(
             &state,
             crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
-            &sample_record(),
+            sample_record(),
             None,
             false,
             state
@@ -620,7 +618,7 @@ mod tests {
         let err = build_status_list_token(
             &state,
             crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
-            &sample_record(),
+            sample_record(),
             None,
             false,
             state
@@ -652,7 +650,7 @@ mod tests {
         let err = build_status_list_token(
             &state,
             crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
-            &sample_record(),
+            sample_record(),
             None,
             false,
             state
@@ -677,7 +675,6 @@ mod tests {
         use crate::test_utils::test_app_state_without_cert_chain;
 
         let state = test_app_state_without_cert_chain().await;
-        let record = sample_record();
         let signing_material = state
             .service
             .cert_provider()
@@ -692,7 +689,7 @@ mod tests {
             let result = build_status_list_token(
                 &state,
                 accept,
-                &record,
+                sample_record(),
                 None,
                 false,
                 signing_material.clone(),

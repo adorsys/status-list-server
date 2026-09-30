@@ -1200,20 +1200,7 @@ impl CacheConfig {
 /// window.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenBytesCacheConfig {
-    /// Upper bound on the *bytes* of cached signed-token entries resident in
-    /// this replica, bounding memory for large lists.
-    ///
-    /// Entries are weighed by their byte size (a few hundred bytes for a small
-    /// list, up to >1 MiB for a large one), so this is a byte budget rather than
-    /// an entry count. Each entry additionally expires at the end of its own
-    /// validity window, so a closed window's bytes are reclaimed promptly rather
-    /// than lingering for a fixed TTL. Set to `0` to disable the cache entirely
-    /// (every request re-signs).
-    ///
-    /// Eviction driven by this bound can drop a still-valid entry and cause a
-    /// re-sign of unchanged bytes on a later request in the same window. Size it
-    /// above the concurrent resident byte total of the live `(list, window,
-    /// format)` windows to avoid mid-window re-signs.
+    /// Byte budget bounding resident signed-token entries; `0` disables the cache.
     pub max_capacity: u64,
 }
 

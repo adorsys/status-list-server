@@ -85,9 +85,7 @@ pub(crate) struct CachedToken {
 /// Every field is a distinct cache-key dimension: the list and its content hash
 /// pin the payload, the signer fingerprint pins the signing material, and the
 /// window/format/encoding/aggregation/ttl/exp dimensions pin the HTTP
-/// representation. Using a hashable value type instead of a delimiter-encoded
-/// string keeps the dimensions typed and lets the cache stay independent of the
-/// signing-material type that produced the fingerprint.
+/// representation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TokenCacheKey {
     pub(crate) list_id: String,
@@ -103,33 +101,14 @@ pub(crate) struct TokenCacheKey {
 
 /// An in-memory cache of fully signed, serialised status-list token bytes.
 ///
-/// Entries are keyed by `TokenCacheKey` and are valid for exactly the anchored
-/// token window `[window_start, window_start + exp_secs)`. Because `iat` is
-/// anchored to `window_start`, the bytes are identical for every request in the
-/// same window, so the cache lets a fresh `200` reuse the result of a single
-/// sign for `(list, window, format)` per replica.
-///
-/// The single-flight guarantee is deliberately scoped to *concurrent misses*:
-/// `get_or_build` coalesces simultaneous misses for the same key onto one
-/// in-flight build (see below). It is **not** a guarantee that a given token is
-/// signed at most once per window. The data cache is bounded by
-/// `max_capacity`; under capacity pressure an unchanged, still-valid entry can
-/// be evicted and then re-signed on a later request in the same window. This is
-/// the accepted tradeoff for bounding memory — `max_capacity` exists precisely
-/// to cap memory for large lists — and it is documented rather than hidden.
-///
-/// Content changes and list identity are covered by the key: a changed list has
-/// a different content hash (immediate miss), and `list_id` keeps otherwise
-/// identical `(content, window, format)` values from different lists distinct.
-/// Signing-key rotation and certificate renewal are covered by the signer
-/// fingerprint, so a rotated key immediately misses and re-signs with the new
-/// key. Expiry is covered by the window bound checked at lookup time plus a
-/// per-entry expiry policy that frees each entry at the end of its own window,
-/// so no eager invalidation is needed.
-///
-/// Per-replica by design: the weak ETag is derived from the representation
-/// identity (not the bytes), so it is identical across replicas; the bytes cache
-/// itself is per-replica.
+/// Per replica and byte-bounded (`max_capacity_bytes`): each entry is weighed by
+/// its byte size. Entries are keyed by [`TokenCacheKey`] and expire at the end of
+/// their anchored window `[window_start, window_start + exp_secs)`, so a fresh
+/// `200` reuses one sign per `(list, window, format, encoding)` per replica.
+/// Concurrent misses for the same key coalesce onto one in-flight build; capacity
+/// eviction can cause another sign of an unchanged, still-valid entry. Content
+/// changes, signer/key rotation, and certificate renewal all change the key and
+/// so immediately miss and re-sign.
 #[derive(Clone, Debug)]
 pub struct TokenBytesCache {
     inner: MokaCache<TokenCacheKey, CachedToken>,
@@ -143,14 +122,10 @@ fn entry_weight(_key: &TokenCacheKey, value: &CachedToken) -> u32 {
 }
 
 /// Per-entry expiry policy: each entry expires at the end of its anchored
-/// validity window `[window_start, window_start + exp_secs)`.
-///
-/// Because the lookup guard already treats past-window entries as misses, this
-/// policy only governs when moka *frees* the entry's memory. Expiring each entry
-/// at the end of its own window (rather than on a fixed TTL) lets a closed
-/// window's entries be reclaimed promptly, instead of lingering for a global
-/// TTL. Reads do not extend the expiry ([`Expiry::expire_after_read`] keeps the
-/// remaining duration), so an entry is always freed at its window end.
+/// validity window `[window_start, window_start + exp_secs)`, independent of any
+/// global TTL. The lookup guard already treats past-window entries as misses;
+/// this policy only governs when moka frees the entry's memory. Reads do not
+/// extend the expiry.
 #[derive(Debug, Clone, Copy, Default)]
 struct EntryExpiry;
 
@@ -173,12 +148,10 @@ impl TokenBytesCache {
     /// Build an in-process signed-token bytes cache.
     ///
     /// `max_capacity_bytes` bounds the resident memory: entries are weighed by
-    /// their byte size and the total weighted size is capped at this budget
-    /// (see [`MokaCache::builder`]'s weighted-capacity semantics). A `0` budget
-    /// preserves the "cache disabled" semantics used elsewhere in this codebase
-    /// (`MokaStatusListCache`): entries are evicted immediately and every request
-    /// re-signs. Each entry additionally expires at the end of its own validity
-    /// window, independent of the byte budget.
+    /// their byte size and the total weighted size is capped at this budget. A
+    /// `0` budget disables the cache (entries are evicted immediately, so every
+    /// request re-signs). Each entry additionally expires at the end of its own
+    /// validity window, independent of the byte budget.
     pub(crate) fn new(max_capacity_bytes: u64) -> Self {
         if max_capacity_bytes == 0 {
             tracing::info!("Signed-token bytes cache disabled (capacity=0)");
@@ -208,20 +181,12 @@ impl TokenBytesCache {
     /// `[window_start, window_start + exp_secs)` still contains `now`. Past that
     /// bound the bytes are expired and must be re-signed.
     ///
-    /// Unlike a plain lookup, a miss is not simply reported: `init` is invoked
-    /// to build the token, deduplicated through moka's `try_get_with_by_ref`
-    /// coalescing so that *concurrent misses* for the same `key` run at most one
-    /// builder. Concurrent misses for the same `key` share the single in-flight
-    /// build — and its result, success or error — regardless of whether the
-    /// cache evicts the entry mid-build. This is the single-flight guarantee; it
-    /// covers simultaneous misses, not every request in a window. A request that
-    /// arrives *after* the completed entry was evicted by capacity pressure is a
-    /// fresh miss and re-runs `init` (see the struct docs). Callers that are not
-    /// interested in building should use `get` instead.
-    ///
-    /// Returns `Ok(None)` when the window is already closed (the bytes are not
-    /// cached and `init` is *not* called); the caller must re-sign with a fresh
-    /// window. Returns `Ok(Some(_))` on a hit or a successful build, and
+    /// On a miss, `init` is invoked to build the token. Concurrent misses for
+    /// the same key coalesce onto a single in-flight build; a request that
+    /// arrives after the completed entry was evicted by capacity pressure is a
+    /// fresh miss and re-runs `init`. Returns `Ok(None)` when the window is
+    /// already closed (`init` is *not* called); the caller must re-sign with a
+    /// fresh window. Returns `Ok(Some(_))` on a hit or a successful build, and
     /// `Err(e)` if `init` fails (nothing is cached on error).
     pub(crate) async fn get_or_build<F, Fut, E>(
         &self,
@@ -247,7 +212,7 @@ impl TokenBytesCache {
 
         let metrics = token_cache_metrics();
 
-        // Lock-free fast path: the value is already cached.
+        // Fast path: already cached.
         if let Some(cached) = self.inner.get(key).await {
             metrics
                 .hits
@@ -255,12 +220,8 @@ impl TokenBytesCache {
             return Ok(Some(cached));
         }
 
-        // Slow path: delegate to moka's `try_get_with_by_ref`, which coalesces
-        // concurrent misses for the same key onto a single initializer. Even if
-        // the entry is evicted from the data cache while a build is in flight,
-        // every waiter that already joined that key shares the same in-flight
-        // build, so concurrent misses run at most one sign for
-        // `(list, window, format)`.
+        // Slow path: build on miss, coalescing concurrent misses for the same
+        // key onto one in-flight build.
         let value = self
             .inner
             .try_get_with_by_ref(key, {
@@ -424,20 +385,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn get_or_build_coalesces_waiters_when_entry_evicted_mid_build() {
-        // Regression guard for single-flight coalescing under eviction. The data
-        // cache is capacity 1, so any unrelated insert evicts the previous entry.
-        // While the target's build is in flight, churn keys keep filling and
-        // evicting the single slot. Every waiter that joined the target's
-        // in-flight build must still share that one build — even though the entry
-        // would be evicted from the data cache before it could be served. This is
-        // the interleaving a capacity-bounded lock registry could not survive: it
-        // could evict the target's lock while a waiter still held it, letting a
-        // later waiter create a fresh lock and sign a second time. The single-
-        // flight guarantee covers these *concurrent* misses joining one build;
-        // it does not cover a request that arrives after the completed entry has
-        // been evicted (see `sequential_request_re_signs_after_capacity_eviction`).
-        // The byte budget (3) equals one entry's weight, so the single slot is
-        // occupied by exactly one entry at a time.
+        // Regression guard: waiters that joined an in-flight build for the
+        // target key must all share that one build even when the data entry is
+        // evicted mid-build. The single-flight guarantee covers *concurrent*
+        // misses joining one build; it does not cover a request that arrives
+        // after the completed entry has been evicted (see
+        // `sequential_request_re_signs_after_capacity_eviction`). The byte
+        // budget (3) equals one entry's weight, so the single slot holds one
+        // entry at a time.
         let cache = TokenBytesCache::new(3);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -519,15 +474,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sequential_request_re_signs_after_capacity_eviction() {
-        // Documents the accepted contract rather than asserting single-flight
-        // across a whole window. The single-flight guarantee covers *concurrent*
-        // misses; it does not promise one sign per key per window. Moka enforces
-        // `max_capacity` amortized, not synchronously on each insert, so drive
-        // the target key out of a capacity-1 cache with enough churn, confirm it
-        // was evicted, then request it again in the same open window: it is a
-        // fresh miss and re-runs the builder. This is the deliberate tradeoff of
-        // bounding memory with `max_capacity`: capacity pressure can re-sign an
-        // unchanged, still-valid token. Operators can avoid it by sizing
+        // The single-flight guarantee covers *concurrent* misses, not one sign
+        // per key per window. Drive the target key out of a capacity-1 cache with
+        // churn, confirm it was evicted, then request it again in the same open
+        // window: it is a fresh miss and re-runs the builder — the accepted
+        // tradeoff of bounding memory. Operators can avoid it by sizing
         // `max_capacity` above the number of live windows.
         let cache = TokenBytesCache::new(1);
         let key_a = TokenCacheKey {
@@ -791,8 +742,8 @@ mod tests {
         // representative signed token is a few hundred bytes, so the default
         // budget must retain and serve it — otherwise non-Helm deployments
         // (which use the built-in default) would re-sign every request.
-        let defaults = crate::config::Config::load_from_overrides(&[])
-            .expect("default config should load");
+        let defaults =
+            crate::config::Config::load_from_overrides(&[]).expect("default config should load");
         let cache = TokenBytesCache::new(defaults.token_bytes_cache.max_capacity);
         let key = base_key(1000);
         cache

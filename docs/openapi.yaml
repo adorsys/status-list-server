@@ -462,20 +462,22 @@ paths:
           in: header
           required: false
           description: |
-            Conditional validator (a weak `W/"..."` `ETag` previously returned by
-            this endpoint). The validator is a SHA-256 digest of the representation
-            identity — `(list_id, content_hash, signer_fingerprint, window_start,
-            format, encoding)` — not of the signed bytes (ECDSA signatures are
-            randomized, so a bytes digest would change on every cold-cache request,
-            restart, and across replicas). It is stable for the whole token window
-            (capped at `min(exp - ttl, ttl)` seconds) and identical on every
-            replica. A match proves the client cached the current-window token for
-            this content and signer; the server responds `304 Not Modified` only
-            while that token still has more than `ttl` seconds of remaining
-            validity (so the `304`'s `max-age = ttl` never outlives the token it
-            vouches for). Once the window rolls over or the content/signer changes
-            the validator changes and the server returns a freshly signed `200 OK`
-            token instead of a body-less `304`.
+            Conditional validator: the weak `W/"..."` `ETag` previously returned by
+            this endpoint. The ETag is opaque to clients — it is derived from the
+            live representation's identity, not from the signed token bytes (ECDSA
+            signatures are randomized, so a bytes-derived validator would change on
+            every cold-cache request, restart, and across replicas). It is stable
+            for the whole token window (capped at `min(exp - ttl, ttl)` seconds)
+            and identical on every replica for the same content, signer and
+            configuration. It changes whenever the live representation or its
+            validity window changes — a content update, key/certificate rotation,
+            a window roll-over, a token-format/encoding change, or a change to the
+            aggregation URI or token lifetime settings. A match tells the server
+            the client holds the current-window token; it responds `304 Not
+            Modified` only while that cached token still has more than `ttl`
+            seconds of remaining validity, so the `304`'s advertised `max-age =
+            ttl` never outlives the token it vouches for. Otherwise it returns a
+            freshly signed `200 OK` token instead of a body-less `304`.
           schema:
             type: string
             example: 'W/"9f2d..."'
@@ -552,23 +554,22 @@ paths:
             from `exp`. The client can continue to use its cached token, so no
             body is sent.
 
-            Because the validator is a digest of the exact signed token bytes,
-            a matching `If-None-Match` proves the client holds the current-window
-            token, which is anchored to expire strictly after the window ends —
-            so a `304` can never strand the relying party with a token that is
-            about to expire or already expired (RFC 9110 §8.8.1).
+            A matching `If-None-Match` proves the client holds the current-window
+            token; the server certifies the `304` only while that token is still
+            valid beyond the advertised `max-age = ttl`, so the `304` never
+            strands the relying party with a token that is about to expire or
+            already expired (RFC 9110 §8.8.1).
           headers:
             ETag:
               schema:
                 type: string
               description: |
-                The current weak validator for the live representation: a
-                SHA-256 digest of the representation identity (list, content hash,
-                signer fingerprint, window start, format, encoding), stable for the
-                whole token window and identical across replicas. It changes when
-                the token window rolls over, the list content changes, or the
-                signing key/certificate changes, so a stale cached token is no
-                longer validated as current.
+                The current weak validator for the live representation. It is
+                stable for the whole token window and identical across replicas
+                serving the same content with the same signer and configuration,
+                and it changes whenever the live representation or its validity
+                window changes (content, key/certificate, window roll-over, format
+                or encoding, aggregation URI, token lifetime settings).
             Last-Modified:
               schema:
                 type: string

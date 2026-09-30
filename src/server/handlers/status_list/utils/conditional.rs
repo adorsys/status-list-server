@@ -144,15 +144,14 @@ pub(crate) fn evaluate_conditional_request(
     validity: TokenValidity,
 ) -> ConditionalResponse {
     if if_none_match.is_some() {
-        // `current_etag` is a weak ETag over the representation identity
-        // `(list_id, content_hash, signer_fingerprint, window_start, format,
-        // encoding)`, so a match proves the client holds the current-window token
-        // for this content and signer. That token has `iat = live_iat(now,
-        // updated_at, validity)` and `exp = iat + exp_secs`. We certify the 304
-        // only while that token still has more than `ttl_secs` of remaining
-        // validity at `now` — the same runway rule as the IMS path — because the
-        // 304 also sends `max-age = ttl_secs`, and a 304 must never hand the
-        // client a token that expires before the freshness window it advertises.
+        // `current_etag` is a weak ETag over the representation identity, so a
+        // match proves the client holds the current-window token for this content
+        // and signer. That token has `iat = live_iat(now, updated_at, validity)`
+        // and `exp = iat + exp_secs`. We certify the 304 only while that token
+        // still has more than `ttl_secs` of remaining validity at `now` — the same
+        // runway rule as the IMS path — because the 304 also sends `max-age =
+        // ttl_secs`, and a 304 must never hand the client a token that expires
+        // before the freshness window it advertises.
         let iat = live_iat(now, updated_at, validity);
         let exp = iat.saturating_add(i64::try_from(validity.exp_secs).unwrap_or(i64::MAX));
         let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);

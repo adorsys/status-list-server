@@ -4,7 +4,7 @@
     "MD022": false,
     "MD024": false,
     "MD032": false,
-    "MD060": { "style": "consistent" }
+    "MD060": { "style": "aligned" }
   },
   "ignores": [
     "CHANGELOG.md",

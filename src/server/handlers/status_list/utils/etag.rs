@@ -16,24 +16,35 @@ use sha2::{Digest, Sha256};
 /// Instead the ETag is a **weak** validator (`W/"..."`) over the dimensions that
 /// pin the representation identity: `(list_id, content_hash, signer_fingerprint,
 /// window_start, format, encoding, aggregation_uri, token_ttl_secs,
-/// token_exp_secs)`. That tuple is identical across replicas and never requires
-/// a sign to answer a `304`, and it changes exactly when the served
-/// representation's identity changes (content, signing key, window, format,
-/// encoding, aggregation URI, or token ttl/exp). A matching weak ETag proves the
-/// client holds a current-window token from the current signer for this content
-/// — which is the guarantee the conditional logic needs to certify a `304`.
+/// token_exp_secs)`. It is identical across replicas, never requires a sign to
+/// answer a `304`, and changes exactly when the served representation's identity
+/// changes (content, signing key, window, format, encoding, aggregation URI, or
+/// token ttl/exp). A matching weak ETag proves the client holds a current-window
+/// token from the current signer for this content — the guarantee the
+/// conditional logic needs to certify a `304`.
 pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(key.list_id.as_bytes());
-    hasher.update(key.content_hash.as_bytes());
-    hasher.update(key.signer_fingerprint.as_bytes());
-    hasher.update(key.window_start.to_string().as_bytes());
-    hasher.update(key.format.as_bytes());
-    hasher.update(encoding_label(key.encoding).as_bytes());
-    hasher.update(key.aggregation_uri.as_bytes());
-    hasher.update(key.token_ttl_secs.to_string().as_bytes());
-    hasher.update(key.token_exp_secs.to_string().as_bytes());
+    // Canonical encoding: strings are length-prefixed and integers are
+    // fixed-width, so a raw concatenation can never collide across distinct
+    // keys (e.g. aggregation_uri="https://a/1", ttl=2, exp=34 vs
+    // aggregation_uri="https://a/", ttl=12, exp=34).
+    write_len_prefixed(&mut hasher, key.list_id.as_bytes());
+    write_len_prefixed(&mut hasher, key.content_hash.as_bytes());
+    write_len_prefixed(&mut hasher, key.signer_fingerprint.as_bytes());
+    hasher.update(key.window_start.to_be_bytes());
+    write_len_prefixed(&mut hasher, key.format.as_bytes());
+    write_len_prefixed(&mut hasher, encoding_label(key.encoding).as_bytes());
+    write_len_prefixed(&mut hasher, key.aggregation_uri.as_bytes());
+    hasher.update(key.token_ttl_secs.to_be_bytes());
+    hasher.update(key.token_exp_secs.to_be_bytes());
     format!("W/\"{}\"", hex::encode(hasher.finalize()))
+}
+
+/// Update the hasher with `bytes` prefixed by their `u64` length, making a
+/// sequence of variable-length fields unambiguous.
+fn write_len_prefixed(hasher: &mut impl Digest, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 fn encoding_label(encoding: TokenEncoding) -> &'static str {
@@ -212,5 +223,33 @@ mod tests {
         let mut changed = create_test_record();
         changed.status_list.lst = "changed".to_string();
         assert_ne!(content_hash(&r1), content_hash(&changed));
+    }
+
+    #[test]
+    fn test_generate_token_etag_canonical_encoding_no_field_boundary_collision() {
+        // The ETag must hash a canonical (length-prefixed) encoding of the key,
+        // not a raw concatenation. With raw concatenation these two distinct
+        // keys feed identical bytes into SHA-256:
+        //   aggregation_uri="https://a/1", ttl=2,  exp=34
+        //   aggregation_uri="https://a/",  ttl=12, exp=34
+        // The canonical encoding must keep them distinct so an ETag never
+        // survives a configuration change and certifies a stale token.
+        let a = TokenCacheKey {
+            aggregation_uri: "https://a/1".to_string(),
+            token_ttl_secs: 2,
+            ..base_key()
+        };
+        let b = TokenCacheKey {
+            aggregation_uri: "https://a/".to_string(),
+            token_ttl_secs: 12,
+            ..base_key()
+        };
+        assert_eq!(a.token_exp_secs, b.token_exp_secs, "same exp=34");
+        assert_ne!(
+            generate_token_etag(&a),
+            generate_token_etag(&b),
+            "canonical encoding must not collide across variable-length field \
+             boundaries"
+        );
     }
 }

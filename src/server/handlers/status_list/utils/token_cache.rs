@@ -2,14 +2,13 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::ports::SigningMaterial;
 
-/// A stable digest of the exact signing material (private key PEM and the
-/// certificate chain) that produced a token's signature.
+/// Stable digest of signer identity and certificate chain; changes on key or
+/// certificate rotation.
 ///
-/// Every provider serves `SigningMaterial` from an in-memory atomic snapshot that
-/// is swapped atomically on rotation/renewal, so computing this on the hot path is
-/// a cheap in-memory hash, not a key-load or network call. It changes whenever the
-/// key or its certificate changes, which is what makes the signed-bytes cache
-/// self-invalidating on rotation.
+/// It hashes the signing algorithm, the public-key bytes, and the certificate
+/// chain (if any). Because the fingerprint keys the signed-bytes cache and the
+/// ETag, rotating the key or renewing the certificate immediately invalidates
+/// both.
 pub(crate) fn signer_fingerprint(material: &SigningMaterial) -> String {
     let mut hasher = Sha256::new();
     hasher.update(material.signing_key.algorithm().to_string().as_bytes());
