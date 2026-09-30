@@ -158,6 +158,31 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 
 The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
 
+### Content negotiation at the edge
+
+The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
+(JWT vs CWT) from the client's `Accept` header per RFC 9110 §12.5.1 and serves
+`Vary: Accept, Accept-Encoding` on every response, including `406 Not
+Acceptable`. Two operational consequences follow:
+
+- **Normalize `Accept` at the CDN/edge.** Most HTTP clients and CDNs send a
+  catch-all `Accept` (e.g. `*/*` or the legacy JDK default) that the server now
+  accepts and answers with the default JWT format instead of a `406`. If you
+  run a caching CDN in front of the service, make sure it keys its cache on
+  `Vary: Accept` and, if you can, normalize or collapse the `Accept` header at
+  the edge (for example strip wildcard-only values down to
+  `application/statuslist+jwt`) so downstream cache-hit ratios stay high and
+  one canonical variant is served per client class.
+- **Plan for signing load.** Because wildcard/absent `Accept` headers now return
+  `200 OK` (previously `406`), clients that were failing will suddenly start
+  receiving freshly signed tokens. Every `200` triggers a token re-sign on the
+  hot path (subject to the conditional-revalidation ETag window), so watch
+  signing throughput and CPU after rollout — a large fleet of previously-`406`
+  clients can add sustained signing work that was not there before. The Redis
+  status-list cache and the conditional-revalidation metrics
+  (`conditional_revalidation_total`) help you confirm the new traffic is being
+  served efficiently rather than re-signing every request.
+
 ### Pinning the image
 
 For a stable, reproducible deploy, pin the exact image:

@@ -16,9 +16,10 @@ use crate::domain::models::token::SigningAlgorithm;
 use crate::domain::ports::TokenSigner;
 
 use super::constants::{
-    ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-    ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE,
+    STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
+use super::negotiation::AcceptType;
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
 const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
@@ -51,11 +52,10 @@ fn token_metrics() -> TokenMetrics {
 }
 
 /// Classify the client's `Accept` header into the bounded `format` label value.
-fn token_format(accept: &str) -> &'static str {
-    if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+fn token_format(accept: AcceptType) -> &'static str {
+    match accept {
+        AcceptType::Cwt => "cwt",
+        AcceptType::Jwt => "jwt",
     }
 }
 
@@ -86,13 +86,13 @@ struct JwtHeader<'a> {
 /// Build a signed status-list token (JWT or CWT) for the given record.
 ///
 /// # Parameters
-/// * `accept` – the `Accept` header value (e.g. `application/statuslist+jwt`)
+/// * `accept` – the negotiated format (`AcceptType::Jwt` or `AcceptType::Cwt`)
 /// * `status_record` – the status list data to encode
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
-    accept: &str,
+    accept: AcceptType,
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
@@ -119,7 +119,7 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    accept: &str,
+    accept: AcceptType,
     status_record: &StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
@@ -135,7 +135,6 @@ async fn build_status_list_token_inner(
         .ok_or(StatusListError::Unavailable)?;
     let signing_key = signing_material.signing_key.clone();
 
-    let accept = accept.to_string();
     let status_record = status_record.clone();
     let aggregation_uri = state.aggregation_uri.clone();
     let validity_window = validity_window.unwrap_or_else(|| {
@@ -143,11 +142,11 @@ async fn build_status_list_token_inner(
         (iat, iat + state.token_exp_secs as i64)
     });
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
+    let should_gzip = client_accepts_gzip && accept == AcceptType::Jwt;
 
     tokio::task::spawn_blocking(move || {
-        let token_bytes = match accept.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
+        let token_bytes = match accept {
+            AcceptType::Cwt => issue_cwt(
                 &status_record,
                 &*signing_key,
                 &certs_parts,
@@ -156,7 +155,7 @@ async fn build_status_list_token_inner(
                 validity_window.1,
                 token_ttl_secs,
             )?,
-            _ => issue_jwt(
+            AcceptType::Jwt => issue_jwt(
                 &status_record,
                 &*signing_key,
                 &certs_parts,

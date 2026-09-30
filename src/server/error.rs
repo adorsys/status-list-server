@@ -170,6 +170,15 @@ impl IntoResponse for ApiError {
             }
         }
         for (name, value) in self.extra_headers {
+            // `insert` overwrites, so a caller must not silently clobber the
+            // managed freshness/retry headers set above. In debug builds, catch
+            // that mistake instead of shipping a response with a mutated
+            // `Cache-Control`/`Retry-After`.
+            debug_assert!(
+                name != axum::http::header::CACHE_CONTROL
+                    && name != axum::http::header::RETRY_AFTER,
+                "with_header must not overwrite the managed Cache-Control/Retry-After headers"
+            );
             headers.insert(name, value);
         }
 

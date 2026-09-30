@@ -23,6 +23,7 @@ use super::utils::{
     },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{generate_etag, generate_historical_etag},
+    negotiation::{AcceptType, client_accepts_gzip, negotiate_accept},
     token::build_status_list_token,
 };
 
@@ -92,24 +93,28 @@ async fn get_status_list_at(
             ));
         }
     };
-    let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
-    let accept_type = match negotiate_accept(accept) {
-        Some(AcceptType::Jwt) => ACCEPT_STATUS_LISTS_HEADER_JWT.to_string(),
-        Some(AcceptType::Cwt) => ACCEPT_STATUS_LISTS_HEADER_CWT.to_string(),
+    // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so read
+    // every line and negotiate the whole set together.
+    let accept_fields: Vec<&str> = headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    let accept_type = match negotiate_accept(accept_fields) {
+        Some(ty) => ty,
         None => {
             // The response varies by `Accept` even when it fails, so a shared
             // cache must not serve this 406 to a client with a different
-            // `Accept` header (RFC 9111 §4.2).
+            // `Accept` header (RFC 9111 §4.1).
             return Err(ApiError::new(
                 StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
-                Some(
-                    "No acceptable media type. Supported: application/statuslist+jwt, \
-                     application/statuslist+cwt"
-                        .into(),
-                ),
+                Some(format!(
+                    "No acceptable media type. Supported: {ACCEPT_STATUS_LISTS_HEADER_JWT}, \
+                     {ACCEPT_STATUS_LISTS_HEADER_CWT}"
+                )),
             )
             .with_header(
                 header::VARY,
@@ -119,14 +124,8 @@ async fn get_status_list_at(
     };
 
     if let Some(time) = query.time {
-        return handle_historical_request(
-            &list_id,
-            time,
-            &accept_type,
-            &state,
-            client_accepts_gzip,
-        )
-        .await;
+        return handle_historical_request(&list_id, time, accept_type, &state, client_accepts_gzip)
+            .await;
     }
 
     let if_none_match = headers
@@ -174,7 +173,7 @@ async fn get_status_list_at(
                 .add(1, &[KeyValue::new("outcome", "modified")]);
             build_fresh_200_response(
                 &state,
-                &accept_type,
+                accept_type,
                 &status_record,
                 &current_etag,
                 &last_modified,
@@ -194,7 +193,7 @@ async fn get_status_list_at(
                 .add(1, &[KeyValue::new("outcome", "expired_token")]);
             build_fresh_200_response(
                 &state,
-                &accept_type,
+                accept_type,
                 &status_record,
                 &current_etag,
                 &last_modified,
@@ -211,7 +210,7 @@ async fn get_status_list_at(
 /// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
 async fn build_fresh_200_response(
     state: &AppState,
-    accept_type: &str,
+    accept_type: AcceptType,
     status_record: &StatusListRecord,
     current_etag: &str,
     last_modified: &str,
@@ -227,7 +226,7 @@ async fn build_fresh_200_response(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type).unwrap(),
+        HeaderValue::from_str(accept_type.media_type()).unwrap(),
     );
     h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
     h.insert(
@@ -252,7 +251,7 @@ async fn build_fresh_200_response(
 async fn handle_historical_request(
     list_id: &str,
     time: i64,
-    accept_type: &str,
+    accept_type: AcceptType,
     state: &AppState,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
@@ -296,7 +295,7 @@ async fn handle_historical_request(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type).unwrap(),
+        HeaderValue::from_str(accept_type.media_type()).unwrap(),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     h.insert(
@@ -334,142 +333,6 @@ async fn fetch_status_record(
         .map_err(Into::into)
 }
 
-/// The status-list token formats this endpoint can serve.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AcceptType {
-    Jwt,
-    Cwt,
-}
-
-/// Parse the `Accept` header per RFC 9110 §12.5.1 and negotiate a supported
-/// status-list media type.
-///
-/// Rules applied:
-/// * the header is a comma-separated list of media ranges, each optionally
-///   carrying `q`-value parameters (`q=0` excludes the range);
-/// * parameters other than `q` are ignored for matching;
-/// * type/subtype matching is case-insensitive;
-/// * `*/*` and `application/*` wildcards match both supported types, but an
-///   explicit (specific) media range takes precedence over a wildcard for its
-///   type — in particular an explicit `q=0` exclusion is never overridden by a
-///   wildcard (RFC 9110 §12.5.1 specificity).
-///
-/// Returns the supported type with the highest effective `q`. On a tie — or a
-/// wildcard range, or an absent header, which the spec treats as `*/*` — JWT
-/// wins. No supported type is acceptable only when every matching range has
-/// `q=0` (or no range matches), which the caller turns into `406 Not
-/// Acceptable`.
-fn negotiate_accept(accept: Option<&str>) -> Option<AcceptType> {
-    // An absent or empty `Accept` header means "accept anything" (RFC 9110
-    // §12.5.1), so treat it like `*/*`: serve the default JWT format.
-    let header = match accept {
-        Some(h) if h.trim().is_empty() => return Some(AcceptType::Jwt),
-        Some(h) => h,
-        None => return Some(AcceptType::Jwt),
-    };
-
-    // The q contributed by an explicit (specific) media range for each
-    // supported type, plus the highest q from a generic wildcard. A specific
-    // range is more specific than a wildcard, so for a given type the specific
-    // q (including an explicit `q=0` exclusion) overrides the wildcard.
-    let mut jwt_specific: Option<f32> = None;
-    let mut cwt_specific: Option<f32> = None;
-    let mut wildcard_q = 0.0f32;
-
-    for range in header.split(',') {
-        let range = range.trim();
-        if range.is_empty() {
-            continue;
-        }
-        let (media_range, params) = range
-            .split_once(';')
-            .map(|(m, p)| (m.trim(), p.trim()))
-            .unwrap_or((range, ""));
-        let q = parse_weight(params);
-
-        let type_subtype = media_range.to_ascii_lowercase();
-        match type_subtype.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_JWT => {
-                jwt_specific = Some(jwt_specific.map_or(q, |cur| cur.max(q)));
-            }
-            ACCEPT_STATUS_LISTS_HEADER_CWT => {
-                cwt_specific = Some(cwt_specific.map_or(q, |cur| cur.max(q)));
-            }
-            "application/*" | "*/*" => wildcard_q = wildcard_q.max(q),
-            _ => {}
-        }
-    }
-
-    // A type's effective q is its specific q when present, otherwise the
-    // wildcard q (0.0 when no wildcard matched).
-    let jwt_q = jwt_specific.unwrap_or(wildcard_q);
-    let cwt_q = cwt_specific.unwrap_or(wildcard_q);
-
-    match jwt_q.partial_cmp(&cwt_q) {
-        // Strictly higher q for CWT wins; every other ordering (higher JWT q,
-        // a tie, or both zero because nothing matched) serves JWT.
-        Some(std::cmp::Ordering::Less) => (cwt_q > 0.0).then_some(AcceptType::Cwt),
-        _ => (jwt_q > 0.0).then_some(AcceptType::Jwt),
-    }
-}
-
-/// Parse a `q`-value from a media-range's parameter list.
-///
-/// The `q` parameter name is case-insensitive and optional whitespace is
-/// permitted around the `=` (RFC 9110 §12.5.1). When no `q` parameter is
-/// present the weight defaults to `1.0`. A present-but-malformed weight is
-/// treated conservatively as `0.0` (the range is excluded) rather than as
-/// maximum preference, and a valid weight is clamped to `[0, 1]`.
-fn parse_weight(params: &str) -> f32 {
-    for param in params.split(';') {
-        let Some((name, value)) = param.split_once('=') else {
-            continue;
-        };
-        if name.trim().eq_ignore_ascii_case("q") {
-            return value
-                .trim()
-                .parse::<f32>()
-                .map(|w| w.clamp(0.0, 1.0))
-                .unwrap_or(0.0);
-        }
-    }
-    1.0
-}
-
-fn client_accepts_gzip(headers: &HeaderMap) -> bool {
-    let mut entries: Vec<(&str, Option<f32>)> = Vec::new();
-    for val in headers.get_all(header::ACCEPT_ENCODING) {
-        let Ok(val) = val.to_str() else { continue };
-        for s in val.split(',') {
-            let s = s.trim();
-            if s.is_empty() {
-                continue;
-            }
-            let (coding, params) = s
-                .split_once(';')
-                .map(|(c, p)| (c.trim(), p.trim()))
-                .unwrap_or((s, ""));
-            let q = params
-                .split(';')
-                .find_map(|p| p.trim().strip_prefix("q=").map(|q| q.trim()))
-                .and_then(|q| q.parse::<f32>().ok());
-            entries.push((coding, q));
-        }
-    }
-
-    match entries
-        .iter()
-        .find(|(c, _)| c.eq_ignore_ascii_case("gzip"))
-        .map(|(_, q)| *q)
-    {
-        Some(None) => true,
-        Some(Some(q)) => q > 0.0,
-        None => entries.iter().any(|(c, q)| {
-            c.eq_ignore_ascii_case("*") && (q.is_none() || q.map(|v| v > 0.0).unwrap_or(false))
-        }),
-    }
-}
-
 fn build_cache_control(token_ttl_secs: u64) -> String {
     // Deliberately no `immutable`: the representation is *not* immutably fixed.
     // The token re-signs and its validator rotates each `E - ttl` window, so
@@ -503,165 +366,6 @@ mod tests {
         serde_json::from_slice(&decoded).expect("JWT payload is valid JSON")
     }
 
-    #[test]
-    fn test_accepts_gzip_simple() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_gzip_with_qvalue() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0.8".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_gzip_q0() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_gzip_q0_with_wildcard_accept() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_via_wildcard_only() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_via_wildcard_q1() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*;q=1".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_wildcard_q0() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_when_header_absent() {
-        let h = HeaderMap::new();
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_multiple_accept_encoding_lines() {
-        let mut h = HeaderMap::new();
-        h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
-        h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_case_insensitive_gzip() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-    #[test]
-    fn test_negotiate_accept_table() {
-        // (accept header, expected outcome)
-        let cases: Vec<(&str, Option<AcceptType>)> = vec![
-            // Current exact-match cases still resolve.
-            (ACCEPT_STATUS_LISTS_HEADER_JWT, Some(AcceptType::Jwt)),
-            (ACCEPT_STATUS_LISTS_HEADER_CWT, Some(AcceptType::Cwt)),
-            // Wildcards: */* and application/* serve JWT.
-            ("*/*", Some(AcceptType::Jwt)),
-            ("application/*", Some(AcceptType::Jwt)),
-            // Comma-separated lists with q values.
-            (
-                "application/statuslist+jwt, application/statuslist+cwt;q=0.5",
-                Some(AcceptType::Jwt),
-            ),
-            (
-                "application/statuslist+cwt;q=0.5, application/statuslist+jwt;q=0.8",
-                Some(AcceptType::Jwt),
-            ),
-            (
-                "application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8",
-                Some(AcceptType::Cwt),
-            ),
-            // q=0 excludes a type.
-            (
-                "application/statuslist+cwt;q=0, application/statuslist+jwt",
-                Some(AcceptType::Jwt),
-            ),
-            (
-                "application/statuslist+jwt;q=0, application/statuslist+cwt;q=0",
-                None,
-            ),
-            // A wildcard must NOT override an explicit q=0 exclusion: an
-            // explicit `application/statuslist+jwt;q=0` excludes JWT even when
-            // `*/*` would otherwise match it, so CWT is served (RFC 9110
-            // §12.5.1 specificity).
-            ("application/statuslist+jwt;q=0, */*", Some(AcceptType::Cwt)),
-            (
-                "application/statuslist+cwt;q=0, application/*",
-                Some(AcceptType::Jwt),
-            ),
-            (
-                "application/statuslist+cwt;q=0, */*;q=0.9",
-                Some(AcceptType::Jwt),
-            ),
-            // Parameters other than q are ignored for matching.
-            (
-                "application/statuslist+jwt; charset=utf-8",
-                Some(AcceptType::Jwt),
-            ),
-            // Case-insensitive type and subtype.
-            ("Application/StatusList+JWT", Some(AcceptType::Jwt)),
-            ("APPLICATION/STATUSLIST+CWT", Some(AcceptType::Cwt)),
-            // The q parameter name is case-insensitive and OWS around `=` is
-            // tolerated (RFC 9110 §12.5.1).
-            (
-                "application/statuslist+cwt;Q=0.5, application/statuslist+jwt",
-                Some(AcceptType::Jwt),
-            ),
-            (
-                "application/statuslist+cwt; q = 0.5 , application/statuslist+jwt",
-                Some(AcceptType::Jwt),
-            ),
-            // A malformed or out-of-range weight is handled conservatively: a
-            // malformed weight excludes its range (nothing acceptable -> 406),
-            // while an out-of-range weight is clamped to 1.0.
-            ("application/statuslist+cwt;q=banana", None),
-            (
-                "application/statuslist+cwt;q=2, application/statuslist+jwt",
-                Some(AcceptType::Jwt),
-            ),
-            // Unsupported types.
-            ("text/html", None),
-            ("application/json", None),
-            // Empty string is treated as an absent header -> JWT.
-            ("", Some(AcceptType::Jwt)),
-        ];
-
-        for (accept, expected) in cases {
-            assert_eq!(
-                negotiate_accept(Some(accept)),
-                expected,
-                "Accept: {accept:?}"
-            );
-        }
-
-        // No header at all -> JWT.
-        assert_eq!(negotiate_accept(None), Some(AcceptType::Jwt));
-    }
-
     #[tokio::test]
     async fn test_get_status_list_not_found() {
         let app_state = test_app_state(None).await;
@@ -679,171 +383,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_status_list_unsupported_accept_header() {
-        let app_state = test_app_state(None).await;
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+    async fn test_get_status_list_negotiates_accept_table() {
+        // (Accept header, expected Content-Type) — the negotiation outcome for
+        // an existing list, exercised end-to-end through the handler.
+        let cases: Vec<(&str, &str)> = vec![
+            // Exact match.
+            (
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ),
+            (
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+            ),
+            // Wildcards serve JWT.
+            ("*/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            ("application/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            // Case-insensitive type/subtype.
+            ("Application/StatusList+JWT", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            ("APPLICATION/STATUSLIST+CWT", ACCEPT_STATUS_LISTS_HEADER_CWT),
+            // Highest acceptable q wins.
+            (
+                "application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8",
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+            ),
+            (
+                "application/statuslist+jwt;q=0.8, application/statuslist+cwt;q=0.5",
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ),
+        ];
 
-        let response = get_status_list(
-            State(app_state),
-            Path(uuid::Uuid::new_v4().to_string()),
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
         )
         .await
-        .unwrap_err()
-        .into_response();
+        .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-        // The 406 body must list both supported media types (scope requirement).
-        assert_eq!(
-            response.headers().get(header::VARY).unwrap(),
-            "Accept, Accept-Encoding",
-            "the 406 must advertise Vary so shared caches do not serve it to a different Accept"
-        );
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        for (accept, expected_content_type) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, accept.parse().unwrap());
+            let response = get_status_list(
+                State(app_state.clone()),
+                Path(token_id.clone()),
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+            )
             .await
-            .unwrap();
-        let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(
-            body.contains("application/statuslist+jwt")
-                && body.contains("application/statuslist+cwt"),
-            "406 body must list both supported types, got: {body}"
-        );
+            .unwrap()
+            .into_response();
+
+            assert_eq!(response.status(), StatusCode::OK, "Accept: {accept:?}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                expected_content_type,
+                "Accept: {accept:?}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_get_status_list_wildcard_accept_serves_jwt() {
-        let token_id = uuid::Uuid::new_v4().to_string();
-        let app_state = test_app_state(None).await;
+    async fn test_get_status_list_406_table() {
+        // (Accept header) — every header with no acceptable supported type must
+        // yield a 406 advertising `Vary` and listing both supported types.
+        let cases: Vec<&str> = vec![
+            "text/html",
+            "application/json",
+            "application/statuslist+jwt;q=0, application/statuslist+cwt;q=0",
+            "*/*;q=0",
+        ];
 
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
+        for accept in cases {
+            let app_state = test_app_state(None).await;
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, accept.parse().unwrap());
 
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "*/*".parse().unwrap());
+            let response = get_status_list(
+                State(app_state),
+                Path(uuid::Uuid::new_v4().to_string()),
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+            )
+            .await
+            .unwrap_err()
+            .into_response();
 
-        let response = get_status_list(
-            State(app_state),
-            Path(token_id),
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
-        )
-        .await
-        .unwrap()
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            ACCEPT_STATUS_LISTS_HEADER_JWT
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_status_list_case_insensitive_accept_serves_jwt() {
-        let token_id = uuid::Uuid::new_v4().to_string();
-        let app_state = test_app_state(None).await;
-
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            "Application/StatusList+JWT".parse().unwrap(),
-        );
-
-        let response = get_status_list(
-            State(app_state),
-            Path(token_id),
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
-        )
-        .await
-        .unwrap()
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            ACCEPT_STATUS_LISTS_HEADER_JWT
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_status_list_mixed_accept_highest_q_serves_cwt() {
-        let token_id = uuid::Uuid::new_v4().to_string();
-        let app_state = test_app_state(None).await;
-
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            "application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8"
-                .parse()
-                .unwrap(),
-        );
-
-        let response = get_status_list(
-            State(app_state),
-            Path(token_id),
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
-        )
-        .await
-        .unwrap()
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            ACCEPT_STATUS_LISTS_HEADER_CWT
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_status_list_no_acceptable_type_returns_406() {
-        let app_state = test_app_state(None).await;
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            "application/statuslist+jwt;q=0, application/statuslist+cwt;q=0"
-                .parse()
-                .unwrap(),
-        );
-
-        let response = get_status_list(
-            State(app_state),
-            Path(uuid::Uuid::new_v4().to_string()),
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
-        )
-        .await
-        .unwrap_err()
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_ACCEPTABLE,
+                "Accept: {accept:?}"
+            );
+            // The 406 must advertise Vary so a shared cache never serves it to
+            // a client with a different Accept (RFC 9111 §4.1).
+            assert_eq!(
+                response.headers().get(header::VARY).unwrap(),
+                "Accept, Accept-Encoding"
+            );
+            // The 406 body must list both supported media types (scope requirement).
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                body.contains(ACCEPT_STATUS_LISTS_HEADER_JWT)
+                    && body.contains(ACCEPT_STATUS_LISTS_HEADER_CWT),
+                "406 body must list both supported types, got: {body}"
+            );
+        }
     }
 
     #[tokio::test]
