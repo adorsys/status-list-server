@@ -154,7 +154,7 @@ impl Service {
         }
 
         if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&record, token_exp_secs);
+            let snapshot = build_snapshot(&record, token_exp_secs)?;
             self.status_list_repo
                 .insert_with_snapshot_and_allocations(
                     record.clone(),
@@ -240,7 +240,7 @@ impl Service {
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&existing, token_exp_secs);
+            let snapshot = build_snapshot(&existing, token_exp_secs)?;
             self.status_list_repo
                 .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
                 .await?
@@ -426,17 +426,42 @@ fn validate_request_shape(
     Ok(())
 }
 
-fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
+/// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
+///
+/// Used by every expiry-construction site (`build_snapshot` and the default token
+/// validity window) so the two stay in sync. Configuration validation normally
+/// keeps `token_exp_secs` within `MAX_TOKEN_LIFETIME_SECS`, but a directly
+/// constructed `AppState`/`Service` can bypass it, so this converts through
+/// `i64::try_from` before `checked_add` (a raw `as i64` would turn `u64::MAX`
+/// into `-1` and let the addition "succeed" with a bogus exp).
+pub(crate) fn token_expiry(iat: i64, token_exp_secs: u64) -> Result<i64, StatusListError> {
+    let token_exp =
+        i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
+            iat,
+            token_exp_secs,
+        })?;
+    iat.checked_add(token_exp)
+        .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+            iat,
+            token_exp_secs,
+        })
+}
+
+fn build_snapshot(
+    record: &StatusListRecord,
+    token_exp_secs: u64,
+) -> Result<StatusListSnapshot, StatusListError> {
     let iat = record.updated_at;
-    StatusListSnapshot {
+    let exp = token_expiry(iat, token_exp_secs)?;
+    Ok(StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
         issuer: record.issuer.clone(),
         status_list: record.status_list.clone(),
         sub: record.sub.clone(),
         iat,
-        exp: iat + token_exp_secs as i64,
-    }
+        exp,
+    })
 }
 
 async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
@@ -455,5 +480,64 @@ async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusLis
                  reads may be stale until the cache entry expires"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::status_list::StatusList;
+
+    fn record_with_updated_at(updated_at: i64) -> StatusListRecord {
+        StatusListRecord {
+            list_id: "list-1".into(),
+            issuer: Issuer("test-issuer".into()),
+            sub: "https://example.com/status-list/1".into(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "AAECAw==".into(),
+                size: None,
+                default_status: None,
+            },
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn snapshot_exp_guards_against_iat_plus_exp_overflow() {
+        // Synthetic issuance-time boundary: an `updated_at` (the iat used for the
+        // exp claim) near i64::MAX with a representable token_exp_secs still overflows
+        // `iat + token_exp_secs`. `checked_add` must fail closed rather than wrap exp
+        // negative (which previously panicked in debug and wrapped in release).
+        let record = record_with_updated_at(i64::MAX - 5);
+        let err = build_snapshot(&record, 10)
+            .expect_err("iat near i64::MAX with token_exp_secs=10 must overflow and be rejected");
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { iat, token_exp_secs }
+                if iat == i64::MAX - 5 && token_exp_secs == 10),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+
+        // A representable value that does not overflow still builds the snapshot.
+        let ok = build_snapshot(&record_with_updated_at(1_000), 900)
+            .expect("non-overflowing iat + token_exp_secs should build a snapshot");
+        assert_eq!(ok.exp, 1_900);
+    }
+
+    #[test]
+    fn snapshot_exp_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: an AppState/Service caller could pass
+        // `token_exp_secs = u64::MAX` without going through config validation.
+        // The guard must convert via `i64::try_from` before `checked_add`, so
+        // `u64::MAX` does NOT silently become `-1` and produce a bogus (lower)
+        // exp. It must fail closed instead.
+        let record = record_with_updated_at(1_000);
+        let err = build_snapshot(&record, u64::MAX)
+            .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { iat, token_exp_secs }
+                if iat == 1_000 && token_exp_secs == u64::MAX),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
     }
 }
