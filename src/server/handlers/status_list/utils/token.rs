@@ -152,10 +152,14 @@ async fn build_status_list_token_inner(
     signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     let aggregation_uri = state.aggregation_uri.clone();
-    let validity_window = validity_window.unwrap_or_else(|| {
-        let iat = OffsetDateTime::now_utc().unix_timestamp();
-        (iat, iat + state.token_exp_secs as i64)
-    });
+    let validity_window = match validity_window {
+        Some(window) => window,
+        None => {
+            let iat = OffsetDateTime::now_utc().unix_timestamp();
+            let exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
+            (iat, exp)
+        }
+    };
     let token_ttl_secs = state.token_ttl_secs;
     let should_gzip = client_accepts_gzip && format == TokenFormat::Jwt;
 
@@ -326,7 +330,11 @@ fn issue_jwt(
     exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let ttl = token_ttl_secs as i64;
+    let ttl = i64::try_from(token_ttl_secs).map_err(|_| {
+        StatusListError::Backend(Box::new(std::io::Error::other(format!(
+            "token ttl {token_ttl_secs} exceeds the maximum supported i64 lifetime"
+        ))))
+    })?;
     let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
         bits,
@@ -537,6 +545,37 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn default_validity_window_rejects_iat_plus_exp_overflow() {
+        // Synthetic issuance-time boundary: with a real (positive) `now`, an
+        // `APP_STATUS_LIST__TOKEN_EXP_SECS` of `i64::MAX` makes `iat + token_exp_secs`
+        // overflow the instant the default validity window is computed. The
+        // `checked_add` guard must fail closed instead of wrapping `exp` negative.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = i64::MAX as u64;
+
+        let err = build_status_list_token(
+            &state,
+            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("a positive iat plus i64::MAX token_exp_secs must overflow and be rejected");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_x5chain_single_cert_is_byte_string() {
         let material = crate::domain::ports::SigningMaterial::new(
@@ -566,6 +605,69 @@ mod tests {
                 CborValue::Bytes(b"intermediate".to_vec()),
                 CborValue::Bytes(b"root".to_vec()),
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn default_validity_window_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_exp_secs = u64::MAX`
+        // on an AppState without going through config validation. The guard must
+        // convert via `i64::try_from` before `checked_add`, so `u64::MAX` does NOT
+        // silently become `-1` and produce a bogus (lower) exp. It must fail closed.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_ttl_conversion_rejects_u64_max_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_ttl_secs = u64::MAX`
+        // on an AppState without going through config validation. The TTL is emitted
+        // as an i64 claim, so the conversion must fail closed with a plain internal
+        // (Backend) error rather than silently wrapping negative or misleadingly
+        // reporting a token-exp overflow.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_ttl_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            &sample_record(),
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
+
+        assert!(
+            matches!(err, StatusListError::Backend(_)),
+            "expected Backend error for unrepresentable ttl, got {err:?}"
         );
     }
 

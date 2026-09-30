@@ -762,29 +762,26 @@ fn rendered_chart_rejects_uppercase_database_backend() {
 
 #[test]
 fn rendered_chart_rejects_integer_env_values() {
-    // The chart's `statuslist.env` block is string-typed (`additionalProperties`
-    // of type string), so an integer passed for any env var is rejected at
-    // render time. Without this guard, a large integer like a seconds TTL would
-    // be rendered by Helm in scientific notation (e.g. 2592000 -> 2.592e+06)
-    // and crash the u64 parse in the application.
-    for (env, value) in [
-        ("APP_TOKEN_BYTES_CACHE__MAX_CAPACITY", "2592000"),
-        ("APP_STATUS_LIST__TOKEN_EXP_SECS", "900"),
-    ] {
-        let arg = format!("statuslist.env.{env}={value}");
-        let Some(output) = render_helm_failure(&["--set", &arg]) else {
-            return;
-        };
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("got number, want string"),
-            "integer {env}={value} must be rejected by the string-typed env schema: {stderr}"
-        );
-        assert!(
-            stderr.contains(&format!("/statuslist/env/{env}")),
-            "the schema error must name the offending env key {env}: {stderr}"
-        );
-    }
+    // Env vars not explicitly typed in the chart schema fall through to
+    // `additionalProperties` of type string, so an integer passed for them is
+    // rejected at render time. Without this guard, a large integer like a byte
+    // budget would be rendered by Helm in scientific notation (e.g. 2592000 ->
+    // 2.592e+06) and crash the u64 parse in the application. (The token-lifetime
+    // vars are deliberately excluded here: the schema whitelists them as
+    // integer-or-string, so valid integers are accepted.)
+    let arg = "statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY=2592000";
+    let Some(output) = render_helm_failure(&["--set", arg]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("got number, want string"),
+        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
+    );
+    assert!(
+        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
+        "the schema error must name the offending env key APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: {stderr}"
+    );
 }
 
 #[test]
@@ -934,6 +931,85 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
         rendered.contains("name: APP_WATCHER__POLL_INTERVAL_SECS\n              value: \"45\""),
         "explicit statuslist.env watcher poll interval should take precedence"
     );
+}
+
+#[test]
+fn rendered_chart_rejects_zero_string_token_lifetime() {
+    // The schema `minimum` only applies to numeric instances; a quoted `"0"`
+    // previously slipped through as a string via the canonical
+    // `statuslist.env.APP_STATUS_LIST__TOKEN_*` route. Regression: reject it via
+    // `--set-string`.
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0",
+    ]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
+    );
+
+    let Some(output) = render_helm_failure(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=0",
+    ]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("pattern"),
+        "helm should reject string APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn rendered_chart_rejects_numeric_zero_token_lifetime() {
+    // A numeric `0` (via `--set`, not `--set-string`) must be rejected by the
+    // schema's `minimum: 1` integer constraint. Regression for the numeric path.
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("minimum"),
+        "helm should reject numeric APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
+    );
+
+    let Some(output) =
+        render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=0"])
+    else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("minimum"),
+        "helm should reject numeric APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
+    );
+}
+
+#[test]
+fn rendered_chart_accepts_string_token_lifetime() {
+    let Some(rendered) = render_helm(&[
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=1800",
+        "--set-string",
+        "statuslist.env.APP_STATUS_LIST__TOKEN_TTL_SECS=600",
+    ]) else {
+        return;
+    };
+    for expected in [
+        "name: APP_STATUS_LIST__TOKEN_EXP_SECS\n              value: \"1800\"",
+        "name: APP_STATUS_LIST__TOKEN_TTL_SECS\n              value: \"600\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "rendered Helm output is missing injected token lifetime env var {expected}"
+        );
+    }
 }
 
 #[test]

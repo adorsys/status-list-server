@@ -67,6 +67,8 @@ statuslist:
     # by their size). "0" disables the cache. Each entry expires at the end of its
     # own validity window, so there is no TTL setting.
     APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "1048576"
+    # Status-list token lifetime (secs). Both must be >= 1 and ttl strictly less
+    # than exp; the application rejects violations at startup.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
