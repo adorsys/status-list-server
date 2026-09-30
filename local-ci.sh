@@ -15,8 +15,11 @@
 
 set -euo pipefail
 
+cd "$(dirname "${BASH_SOURCE[0]}")"
 CHART_DIR="${CHART_DIR:-deploy/helm/chart}"
 TOOLS_ROOT="${LOCAL_CI_TOOLS_ROOT:-$PWD/target/local-ci-tools}"
+mkdir -p "$TOOLS_ROOT"
+TOOLS_ROOT="$(cd "$TOOLS_ROOT" && pwd)"
 TOOLS_BIN="$TOOLS_ROOT/bin"
 RUNNER_TEMP="${RUNNER_TEMP:-$TOOLS_ROOT/tmp}"
 BOOTSTRAP=1
@@ -27,18 +30,22 @@ MACHETE_VERSION="0.9.2"
 VET_VERSION="0.10.2"
 AUDIT_VERSION="0.22.2"
 LLVM_COV_VERSION="0.6.16"
+# Defaults embedded in the pinned GitHub actions (see docs/local-ci.md).
+DENY_VERSION="0.20.2"
+TOMBI_VERSION="1.2.4"
+MARKDOWNLINT_VERSION="0.23.1"
+TRIVY_VERSION="0.70.0"
 TYPOS_VERSION="1.49.0"
 YAMLFMT_VERSION="v0.21.0"
 HELM_VERSION="v4.2.4"
 KUBE_LINTER_VERSION="v0.8.3"
 KUBE_LINTER_SHA256="1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df"
-ZIZMOR_VERSION="1.28.0"
 ZIZMOR_IMAGE="ghcr.io/zizmorcore/zizmor:1.28.0@sha256:8e6b3e4fb74d1aa5d23e83ea369f386c66eced0d1fb944d32cd8b2aac100b00d"
 OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector-contrib:0.158.0"
 PROMETHEUS_IMAGE="prom/prometheus:v3.11.3"
 JAEGER_IMAGE="jaegertracing/jaeger:2.20.0"
 
-export PATH="$TOOLS_BIN:$PATH"
+export PATH="$TOOLS_BIN:$TOOLS_ROOT/node/node_modules/.bin:$TOOLS_ROOT/python/bin:$PATH"
 export CHART_DIR RUNNER_TEMP
 
 usage() {
@@ -55,7 +62,7 @@ Modes:
                 OpenTelemetry/Prometheus validation, and cargo llvm-cov.
 
 Options:
-  --no-bootstrap  Do not install missing user-space CLIs; print install guidance.
+  --no-bootstrap  Require matching installed CLIs; print install guidance otherwise.
   --help          Show this help.
 EOF
 }
@@ -88,46 +95,76 @@ EOF
     exit 127
 }
 
+version_matches() {
+    local bin="$1" expected="${2#v}" output
+    shift 2
+    have "$bin" || return 1
+    if [ "$bin" = cargo-llvm-cov ]; then
+        set -- llvm-cov "$@"
+    fi
+    output=$("$bin" "$@" 2>/dev/null) || return 1
+    # Compare a complete version token, not a prefix (1.2 must not match 1.20).
+    printf '%s\n' "$output" | awk -v expected="$expected" '
+        NR == 1 { for (i = 1; i <= NF; i++) {
+            sub(/^v/, "", $i)
+            if ($i == expected) found = 1
+        }}
+        END { exit !found }'
+}
+
 install_cargo_bin() {
-    local bin="$1" crate="$2" version="${3:-}"
-    have "$bin" && return
+    local bin="$1" crate="$2" version="$3"
+    version_matches "$bin" "$version" --version && return
     if [ "$BOOTSTRAP" -ne 1 ]; then
-        fail_missing "$bin" "Install with: cargo install --locked ${crate}${version:+ --version $version}"
+        fail_missing "$bin $version (missing or wrong version)" "Install with: cargo install --locked --root '$TOOLS_ROOT' $crate --version $version --force"
     fi
-    have cargo || fail_missing "$bin" "Install Rust/Cargo first: https://rustup.rs"
-    log "Installing $bin with cargo"
-    if [ -n "$version" ]; then
-        run cargo install --locked "$crate" --version "$version"
-    else
-        run cargo install --locked "$crate"
-    fi
-    have "$bin" || fail_missing "$bin" "cargo install completed, but $bin is still not on PATH. Ensure ~/.cargo/bin is on PATH."
+    log "Installing $bin $version into $TOOLS_ROOT"
+    run cargo install --locked --root "$TOOLS_ROOT" "$crate" --version "$version" --force
+    hash -r
+    version_matches "$bin" "$version" --version || fail_missing "$bin $version" "Bootstrap did not produce the expected executable in $TOOLS_BIN."
 }
 
 install_go_bin() {
-    local bin="$1" package="$2"
-    have "$bin" && return
-    if [ "$BOOTSTRAP" -ne 1 ]; then
-        fail_missing "$bin" "Install with: go install $package"
-    fi
-    have go || fail_missing "$bin" "Install Go, then run: go install $package"
-    log "Installing $bin with go"
-    run env GOBIN="$TOOLS_BIN" go install "$package"
-}
-
-install_markdownlint() {
-    if have markdownlint-cli2; then return; fi
-    if [ -x "$TOOLS_ROOT/node/node_modules/.bin/markdownlint-cli2" ]; then
-        export PATH="$TOOLS_ROOT/node/node_modules/.bin:$PATH"
+    local bin="$1" package="$2" version="${3:-}"
+    if [ -n "$version" ]; then
+        version_matches "$bin" "$version" -version && return
+    elif have "$bin" && "$bin" --version 2>/dev/null | grep -Eq 'github.com/mikefarah/yq/.*version v4\.'; then
         return
     fi
     if [ "$BOOTSTRAP" -ne 1 ]; then
-        fail_missing "markdownlint-cli2" "Install Node.js and run: npm install --prefix '$TOOLS_ROOT/node' markdownlint-cli2"
+        fail_missing "$bin (missing or wrong version)" "Install with: GOBIN='$TOOLS_BIN' go install $package"
     fi
-    have npm || fail_missing "markdownlint-cli2" "Install Node.js/npm, then re-run this script."
-    log "Installing markdownlint-cli2 with npm"
-    run npm install --prefix "$TOOLS_ROOT/node" --no-audit --no-fund markdownlint-cli2
-    export PATH="$TOOLS_ROOT/node/node_modules/.bin:$PATH"
+    log "Installing $bin with go"
+    run env GOBIN="$TOOLS_BIN" go install "$package"
+    hash -r
+    if [ -n "$version" ]; then
+        version_matches "$bin" "$version" -version || fail_missing "$bin $version" "Check the installation in $TOOLS_BIN."
+    else
+        "$bin" --version | grep -Eq 'github.com/mikefarah/yq/.*version v4\.' || fail_missing "mikefarah yq v4" "Check the installation in $TOOLS_BIN."
+    fi
+}
+
+install_node_bin() {
+    local bin="$1" version="$2"
+    version_matches "$bin" "$version" --version && return
+    if [ "$BOOTSTRAP" -ne 1 ]; then
+        fail_missing "$bin $version (missing or wrong version)" "Install with: npm install --prefix '$TOOLS_ROOT/node' $bin@$version"
+    fi
+    log "Installing $bin $version with npm"
+    run npm install --prefix "$TOOLS_ROOT/node" --no-audit --no-fund --save-exact "$bin@$version"
+    hash -r
+    version_matches "$bin" "$version" --version || fail_missing "$bin $version" "Check Node.js compatibility and npm's installation output."
+}
+
+bootstrap_python() {
+    require_tool python3 "Install Python 3 with venv support."
+    python3 -c 'import yaml' 2>/dev/null && return
+    if [ "$BOOTSTRAP" -ne 1 ]; then
+        fail_missing PyYAML "Install PyYAML in a virtual environment, or re-run without --no-bootstrap."
+    fi
+    run python3 -m venv "$TOOLS_ROOT/python" || fail_missing python3-venv "Install Python venv support (Ubuntu: sudo apt-get install python3-venv)."
+    run "$TOOLS_ROOT/python/bin/python3" -m pip install 'PyYAML==6.0.3'
+    hash -r
 }
 
 install_helm() {
@@ -162,10 +199,14 @@ install_helm() {
     run tar -xzf "$archive" -C "$dir"
     cp "$dir/$os-$arch/helm" "$TOOLS_BIN/helm"
     chmod +x "$TOOLS_BIN/helm"
+    hash -r
 }
 
 install_kube_linter() {
-    have kube-linter && return
+    version_matches kube-linter "$KUBE_LINTER_VERSION" version && return
+    if [ "$(uname -s)/$(uname -m)" != "Linux/x86_64" ]; then
+        fail_missing "kube-linter $KUBE_LINTER_VERSION" "Automatic installation supports Linux x86_64. Install the matching release for your platform manually; full parity requires Linux (see docs/local-ci.md)."
+    fi
     if [ "$BOOTSTRAP" -ne 1 ]; then
         fail_missing "kube-linter" "Install kube-linter $KUBE_LINTER_VERSION or re-run without --no-bootstrap."
     fi
@@ -182,6 +223,8 @@ install_kube_linter() {
     run tar -xzf "$archive" -C "$dir" kube-linter
     cp "$dir/kube-linter" "$TOOLS_BIN/kube-linter"
     chmod +x "$TOOLS_BIN/kube-linter"
+    hash -r
+    version_matches kube-linter "$KUBE_LINTER_VERSION" version || fail_missing "kube-linter $KUBE_LINTER_VERSION" "Check the executable installed in $TOOLS_BIN."
 }
 
 require_tool() {
@@ -211,6 +254,10 @@ bootstrap_default_tools() {
     require_tool rustup "Install rustup first: https://rustup.rs"
     require_tool cmake "Install CMake with your OS package manager. CI uses: sudo apt-get install -y cmake golang-go"
     require_tool go "Install Go with your OS package manager. CI uses: sudo apt-get install -y cmake golang-go"
+    require_tool jq "Install jq (Ubuntu: sudo apt-get install jq)."
+    require_tool docker "Install Docker and start its daemon; the all-feature tests start containers."
+    docker info >/dev/null 2>&1 || fail_missing "Docker daemon" "Start Docker and ensure your user can access it (docker info)."
+    bootstrap_python
     rust_components rustfmt clippy
     install_cargo_bin cargo-nextest cargo-nextest "$NEXT_VERSION"
     install_cargo_bin cargo-machete cargo-machete "$MACHETE_VERSION"
@@ -218,22 +265,24 @@ bootstrap_default_tools() {
 }
 
 bootstrap_full_tools() {
+    [ "$(uname -s)" = Linux ] || fail_missing "Linux execution environment" "Full parity includes host-network container tests. Run on Linux; see docs/local-ci.md."
+    require_tool node "Install Node.js 22 or newer and npm."
+    require_tool npm "Install npm alongside Node.js 22 or newer."
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || fail_missing "Node.js >=22" "Activate Node.js 22 or newer; CI's markdownlint-cli2 requires it."
     bootstrap_default_tools
+    docker compose version >/dev/null 2>&1 || fail_missing "Docker Compose v2" "Install the Docker Compose plugin."
+    prepare_zizmor_auth
     rust_components llvm-tools-preview
     install_cargo_bin cargo-vet cargo-vet "$VET_VERSION"
     install_cargo_bin cargo-audit cargo-audit "$AUDIT_VERSION"
-    install_cargo_bin cargo-deny cargo-deny
+    install_cargo_bin cargo-deny cargo-deny "$DENY_VERSION"
     install_cargo_bin cargo-llvm-cov cargo-llvm-cov "$LLVM_COV_VERSION"
     install_cargo_bin typos typos-cli "$TYPOS_VERSION"
-    install_cargo_bin tombi tombi-cli
-    install_go_bin yamlfmt "github.com/google/yamlfmt/cmd/yamlfmt@$YAMLFMT_VERSION"
+    install_node_bin tombi "$TOMBI_VERSION"
+    install_go_bin yamlfmt "github.com/google/yamlfmt/cmd/yamlfmt@$YAMLFMT_VERSION" "$YAMLFMT_VERSION"
     install_go_bin yq "github.com/mikefarah/yq/v4@latest"
-    install_markdownlint
-    install_helm
+    install_node_bin markdownlint-cli2 "$MARKDOWNLINT_VERSION"
     install_kube_linter
-    require_tool docker "Install Docker with Compose v2 support; CI uses Docker for image, Trivy, OpenTelemetry, and Prometheus checks."
-    require_tool python3 "Install Python 3. CI also requires PyYAML for Helm/observability extraction."
-    require_tool node "Install Node.js/npm for observability dashboard drift checks."
 }
 
 helm_deps() {
@@ -343,14 +392,27 @@ fast_wiring_checks() {
     run bash scripts/attestation-selftest.sh
 }
 
+prepare_zizmor_auth() {
+    # Never put a token in argv or pass it through run(), which logs arguments.
+    ZIZMOR_GITHUB_TOKEN="${ZIZMOR_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+    if [ -z "$ZIZMOR_GITHUB_TOKEN" ] && have gh; then
+        ZIZMOR_GITHUB_TOKEN=$(gh auth token 2>/dev/null) || true
+    fi
+    [ -n "$ZIZMOR_GITHUB_TOKEN" ] || fail_missing "GitHub token for online audits" "Run gh auth login, or export GH_TOKEN with read access to the referenced repositories. Full mode cannot skip online security audits."
+    export ZIZMOR_GITHUB_TOKEN
+}
+
+zizmor_online_scan() {
+    # The action's online-audits input is not a CLI flag. A token enables online
+    # audits. The pinned container also isolates host ZIZMOR_OFFLINE settings.
+    run docker run --rm -e ZIZMOR_GITHUB_TOKEN -v "$PWD:/workspace:ro" -w /workspace "$ZIZMOR_IMAGE" --persona=regular --color=never --format=plain -- .
+}
+
 zizmor_checks() {
     log "Zizmor security check"
-    if have zizmor; then
-        run zizmor --persona=regular --online-audits --color=never --format=plain -- .
-    else
-        require_tool docker "Install Docker, or install zizmor $ZIZMOR_VERSION locally."
-        run docker run --rm -v "$PWD:/workspace:ro" -w /workspace "ghcr.io/zizmorcore/zizmor:${ZIZMOR_VERSION}" --persona=regular --online-audits --color=never --format=plain -- .
-    fi
+    prepare_zizmor_auth
+    # Mirror the action's single retry. A repeated finding still fails the gate.
+    zizmor_online_scan || zizmor_online_scan
     log "Zizmor known-bad fixture self-test"
     local rc out fixture missing rule
     fixture="scripts/testdata/zizmor-selftest-workflow.yml"
@@ -396,7 +458,7 @@ supply_chain_checks() {
     log "Cargo vet"
     run cargo vet --locked
     log "Cargo deny"
-    run cargo deny check
+    run cargo deny --all-features check
     log "Cargo audit"
     run cargo audit
 }
@@ -419,11 +481,11 @@ trivy_and_helm_checks() {
     log "Verify image reference resolution"
     run bash scripts/verify-image-reference.sh
     log "Trivy config scan"
-    if have trivy; then
+    if version_matches trivy "$TRIVY_VERSION" --version; then
         run trivy config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
     else
         require_tool docker "Install Docker or trivy. Docker is used as a no-root local fallback."
-        run docker run --rm -v "$PWD:/workspace:ro" -v /tmp/rendered:/tmp/rendered:ro -w /workspace aquasec/trivy:latest config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
+        run docker run --rm -v "$PWD:/workspace:ro" -v /tmp/rendered:/tmp/rendered:ro -w /workspace "aquasec/trivy:$TRIVY_VERSION" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
     fi
     log "Helm template local values"
     local output_file="/tmp/statuslist-local-rendered.yaml"
@@ -559,7 +621,10 @@ run_full_mode() {
     echo "Full local CI parity checks passed."
 }
 
-case "$MODE" in
-    default) run_default_mode ;;
-    full) run_full_mode ;;
-esac
+# Sourcing exposes helpers for isolated bootstrap/failure regression tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    case "$MODE" in
+        default) run_default_mode ;;
+        full) run_full_mode ;;
+    esac
+fi
