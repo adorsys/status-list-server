@@ -985,3 +985,64 @@ jobs:
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
+
+      - name: Verify ESO secret path reconciles
+        # Gate the release on the newly selected secret path actually reconciling. On an
+        # upgrade, statuslist-secret and aws-credentials-secret can remain from the old
+        # namespaced store, so a Helm and Deployment rollout can succeed even if neither
+        # ExternalSecret can sync from datev-secret-store; production would then run stale
+        # credentials while the release reports success. Wait, with a timeout, for the
+        # ClusterSecretStore and both release ExternalSecrets to report Ready / SecretSynced
+        # for the current generation, and fail otherwise.
+        #
+        # ClusterSecretStore is cluster-scoped and served by the ESO in datev-wallet; the
+        # release ExternalSecrets live in statuslist-production.
+        env:
+          CLUSTER_STORE: datev-secret-store
+          CLUSTER_STORE_NS: datev-wallet
+          PRIMARY_ES: statuslist-external-secret
+          CREDS_ES: statuslist-external-secret-aws-credentials
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          TIMEOUT=180
+
+          await_condition() {
+            local kind="$1" name="$2" ns="$3" jsonpath="$4" expected="$5" label="$6"
+            local i=0
+            while [ "$i" -lt "$TIMEOUT" ]; do
+              local value
+              if [ -n "$ns" ]; then
+                value=$(kubectl get "$kind" "$name" -n "$ns" -o jsonpath="$jsonpath" 2>/dev/null || true)
+              else
+                value=$(kubectl get "$kind" "$name" -o jsonpath="$jsonpath" 2>/dev/null || true)
+              fi
+              if [ "$value" = "$expected" ]; then
+                echo "OK: $label reports $expected"
+                return 0
+              fi
+              sleep 5
+              i=$((i + 5))
+            done
+            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to report $expected (last value: '${value:-<unset>}')"
+            return 1
+          }
+
+          # ClusterSecretStore Ready=True at the current generation (cluster-scoped).
+          await_condition \
+            "clustersecretstore" "$CLUSTER_STORE" "$CLUSTER_STORE_NS" \
+            '{.status.conditions[?(@.type=="Ready")].status}' "True" \
+            "ClusterSecretStore $CLUSTER_STORE ($CLUSTER_STORE_NS)"
+
+          # Primary ExternalSecret syncs from the cluster store (SecretSyncedReady=True).
+          await_condition \
+            "externalsecret" "$PRIMARY_ES" "$NAMESPACE" \
+            '{.status.conditions[?(@.type=="Ready")].status}' "True" \
+            "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
+
+          # The credentials ExternalSecret (aws-credentials-secret) must also sync from the
+          # cluster store so the app's mounted credential volume is fresh.
+          await_condition \
+            "externalsecret" "$CREDS_ES" "$NAMESPACE" \
+            '{.status.conditions[?(@.type=="Ready")].status}' "True" \
+            "ExternalSecret $CREDS_ES ($NAMESPACE)"
