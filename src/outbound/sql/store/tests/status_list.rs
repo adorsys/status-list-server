@@ -1055,6 +1055,49 @@ async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
         .await
         .unwrap();
 
+    let missing_list_id = format!("list-allocation-missing-{backend}").to_lowercase();
+    let missing = store.allocate_indices(&missing_list_id, issuer, 1).await;
+    assert!(
+        matches!(missing, Err(RepositoryError::NotFound)),
+        "allocating from a missing list must return not found on {backend}, got {missing:?}"
+    );
+
+    let wrong_issuer = store
+        .allocate_indices(&list_id, "issuer-allocation-other", 1)
+        .await;
+    assert!(
+        matches!(wrong_issuer, Err(RepositoryError::IssuerMismatch)),
+        "allocating with the wrong issuer must be rejected on {backend}, got {wrong_issuer:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &list_id).await,
+        BTreeSet::from([0, 2]),
+        "failed wrong-issuer allocation must leave no partial reservation on {backend}"
+    );
+
+    let dynamic_list_id = format!("list-allocation-dynamic-{backend}").to_lowercase();
+    let dynamic = fixtures::record(
+        &dynamic_list_id,
+        issuer,
+        "allocation-dynamic",
+        &format!("sub-{dynamic_list_id}"),
+        15,
+    );
+    store
+        .insert_one_with_allocations(dynamic, &[], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+    let dynamic_result = store.allocate_indices(&dynamic_list_id, issuer, 1).await;
+    assert!(
+        matches!(dynamic_result, Err(RepositoryError::ListNotFixedSize)),
+        "allocating from a dynamic list must be rejected on {backend}, got {dynamic_result:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &dynamic_list_id).await,
+        BTreeSet::new(),
+        "failed dynamic-list allocation must leave no partial reservation on {backend}"
+    );
+
     let store_a = SeaOrmStore::<StatusListRecord>::new(db.clone());
     let store_b = SeaOrmStore::<StatusListRecord>::new(db.clone());
     // SQLite's test pool has one connection, so these serialize there; the

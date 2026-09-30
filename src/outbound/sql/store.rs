@@ -274,6 +274,9 @@ impl SeaOrmStore<StatusListRecord> {
                 .exec_without_returning(&txn)
                 .await
             {
+                // Classify the insert error only after rolling back: Postgres
+                // marks the transaction failed after an error (25P02), and
+                // MySQL may hold locks until an explicit rollback (1205).
                 txn.rollback().await.map_err(|rollback_err| {
                     RepositoryError::InsertError(format!(
                         "status list insert failed ({insert_err}); \
@@ -370,6 +373,10 @@ impl SeaOrmStore<StatusListRecord> {
                     .exec_without_returning(&txn)
                     .await
                 {
+                    // Classify the insert error only after rolling back:
+                    // Postgres marks the transaction failed after an error
+                    // (25P02), and MySQL may hold locks until an explicit
+                    // rollback (1205).
                     txn.rollback().await.map_err(|rollback_err| {
                         RepositoryError::InsertError(format!(
                             "status list insert failed ({insert_err}); \
@@ -738,11 +745,26 @@ impl SeaOrmStore<StatusListRecord> {
                 }
             }
 
-            let parent = status_lists::Entity::find_by_id(list_id)
-                .one(&txn)
-                .await
-                .map_err(find_err)?
-                .ok_or(RepositoryError::NotFound)?;
+            let parent = match status_lists::Entity::find_by_id(list_id).one(&txn).await {
+                Ok(Some(parent)) => parent,
+                Ok(None) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::FindError(format!(
+                            "allocation parent-list lookup found no row; rollback failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(RepositoryError::NotFound);
+                }
+                Err(find_error) => {
+                    txn.rollback().await.map_err(|rollback_err| {
+                        RepositoryError::FindError(format!(
+                            "allocation parent-list lookup failed ({find_error}); \
+                             rolling the transaction back also failed: {rollback_err}"
+                        ))
+                    })?;
+                    return Err(find_err(find_error));
+                }
+            };
             if parent.issuer != issuer {
                 txn.rollback().await.map_err(|rollback_err| {
                     RepositoryError::UpdateError(format!(
@@ -751,10 +773,14 @@ impl SeaOrmStore<StatusListRecord> {
                 })?;
                 return Err(RepositoryError::IssuerMismatch);
             }
-            let limit = parent
-                .status_list
-                .size
-                .ok_or(RepositoryError::ListNotFixedSize)?;
+            let Some(limit) = parent.status_list.size else {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::UpdateError(format!(
+                        "allocation fixed-size check failed; rollback failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(RepositoryError::ListNotFixedSize);
+            };
 
             let existing = match status_list_allocations::Entity::find()
                 .select_only()
