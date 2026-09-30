@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map, hash_map},
     ops::Bound,
     sync::Arc,
 };
@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "acme")]
 use crate::cert_manager::storage::StorageError;
-use crate::domain::models::credential::{Credential, CredentialError};
+use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -16,11 +16,12 @@ use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
 
-/// Ordered by `list_id` for range-scanned pages, with per-issuer counts for the quota.
+/// Ordered by `list_id` for range-scanned pages, with each issuer's `list_id`s
+/// for the quota and for issuer-scoped pages.
 #[derive(Default)]
 struct ListStore {
     by_id: BTreeMap<String, StatusListRecord>,
-    per_issuer: HashMap<String, u64>,
+    per_issuer: HashMap<String, BTreeSet<String>>,
 }
 
 impl ListStore {
@@ -30,17 +31,18 @@ impl ListStore {
         record: StatusListRecord,
         max_lists_per_issuer: u64,
     ) -> Result<(), StatusListError> {
-        let Entry::Vacant(slot) = self.by_id.entry(record.list_id.clone()) else {
+        let btree_map::Entry::Vacant(slot) = self.by_id.entry(record.list_id.clone()) else {
             return Err(StatusListError::AlreadyExists);
         };
-        let count = self.per_issuer.entry(record.issuer.0.clone()).or_default();
-        if *count >= max_lists_per_issuer {
+        let lists = self.per_issuer.entry(record.issuer.0.clone()).or_default();
+        let count = lists.len() as u64;
+        if count >= max_lists_per_issuer {
             return Err(StatusListError::QuotaExceeded {
-                count: *count,
+                count,
                 max: max_lists_per_issuer,
             });
         }
-        *count += 1;
+        lists.insert(record.list_id.clone());
         slot.insert(record);
         Ok(())
     }
@@ -141,17 +143,32 @@ impl StatusListRepo for MemoryStatusLists {
 
     async fn list_uris(
         &self,
+        issuer: Option<&str>,
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError> {
         let values = self.values.read().await;
-        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let rows: Vec<(String, String)> = values
-            .by_id
-            .range::<str, _>((start, Bound::Unbounded))
-            .take(limit.saturating_add(1))
-            .map(|(id, r)| (id.clone(), r.sub.clone()))
-            .collect();
+        let range = (
+            after.map_or(Bound::Unbounded, Bound::Excluded),
+            Bound::Unbounded,
+        );
+        let rows: Vec<(String, String)> = match issuer {
+            None => values
+                .by_id
+                .range::<str, _>(range)
+                .take(limit.saturating_add(1))
+                .map(|(id, r)| (id.clone(), r.sub.clone()))
+                .collect(),
+            Some(issuer) => values
+                .per_issuer
+                .get(issuer)
+                .into_iter()
+                .flat_map(|ids| ids.range::<str, _>(range))
+                .filter_map(|id| values.by_id.get(id))
+                .take(limit.saturating_add(1))
+                .map(|r| (r.list_id.clone(), r.sub.clone()))
+                .collect(),
+        };
         Ok(StatusListUriPage::from_rows(rows, limit))
     }
 }
@@ -181,27 +198,62 @@ impl StatusListCache for MemoryStatusListCache {
     }
 }
 
+#[derive(Default)]
+struct CredentialStore {
+    by_issuer: HashMap<String, (Credential, AggregationId)>,
+    issuers_by_aggregation_id: HashMap<AggregationId, Issuer>,
+}
+
 #[derive(Clone, Default)]
 pub struct MemoryCredentials {
-    values: Arc<RwLock<HashMap<String, Credential>>>,
+    values: Arc<RwLock<CredentialStore>>,
 }
 
 #[async_trait]
 impl CredentialRepo for MemoryCredentials {
     async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError> {
-        Ok(self.values.read().await.get(issuer).cloned())
+        let values = self.values.read().await;
+        Ok(values
+            .by_issuer
+            .get(issuer)
+            .map(|(credential, _)| credential.clone()))
     }
 
-    async fn insert(&self, credential: Credential) -> Result<(), CredentialError> {
+    async fn insert(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
         let mut values = self.values.write().await;
-        use std::collections::hash_map::Entry;
-        match values.entry(credential.issuer.0.clone()) {
-            Entry::Occupied(_) => Err(CredentialError::AlreadyExists),
-            Entry::Vacant(e) => {
-                e.insert(credential);
-                Ok(())
-            }
-        }
+        let hash_map::Entry::Vacant(slot) = values.by_issuer.entry(credential.issuer.0.clone())
+        else {
+            return Err(CredentialError::AlreadyExists);
+        };
+        let issuer = credential.issuer.clone();
+        slot.insert((credential, aggregation_id));
+        values
+            .issuers_by_aggregation_id
+            .insert(aggregation_id, issuer);
+        Ok(())
+    }
+
+    async fn find_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        let values = self.values.read().await;
+        Ok(values.by_issuer.get(issuer).map(|(_, id)| *id))
+    }
+
+    async fn find_issuer_by_aggregation_id(
+        &self,
+        aggregation_id: AggregationId,
+    ) -> Result<Option<Issuer>, CredentialError> {
+        let values = self.values.read().await;
+        Ok(values
+            .issuers_by_aggregation_id
+            .get(&aggregation_id)
+            .cloned())
     }
 }
 
@@ -954,7 +1006,7 @@ mod tests {
         let mut page_sizes = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let page = repo.list_uris(after.as_deref(), 2).await.unwrap();
+            let page = repo.list_uris(None, after.as_deref(), 2).await.unwrap();
             page_sizes.push(page.status_lists.len());
             seen.extend(page.status_lists);
             match page.next_after {
@@ -980,7 +1032,7 @@ mod tests {
             .await
             .unwrap();
 
-        let page = repo.list_uris(Some("z"), 10).await.unwrap();
+        let page = repo.list_uris(None, Some("z"), 10).await.unwrap();
         assert!(page.status_lists.is_empty());
         assert_eq!(page.next_after, None);
     }
@@ -994,12 +1046,74 @@ mod tests {
                 .unwrap();
         }
 
-        let page = repo.list_uris(Some("a"), 2).await.unwrap();
+        let page = repo.list_uris(None, Some("a"), 2).await.unwrap();
         assert_eq!(
             page.status_lists,
             ["https://example/b", "https://example/c"]
         );
         assert_eq!(page.next_after.as_deref(), Some("c"));
+    }
+
+    #[tokio::test]
+    async fn list_uris_scoped_to_an_issuer_pages_only_its_lists() {
+        let repo = MemoryStatusLists::default();
+        for (id, issuer) in [("a", "one"), ("b", "two"), ("c", "one"), ("d", "one")] {
+            repo.insert(list_record(id, issuer), u64::MAX)
+                .await
+                .unwrap();
+        }
+
+        let first = repo.list_uris(Some("one"), None, 2).await.unwrap();
+        assert_eq!(
+            first.status_lists,
+            ["https://example/a", "https://example/c"]
+        );
+        assert_eq!(first.next_after.as_deref(), Some("c"));
+
+        let last = repo.list_uris(Some("one"), Some("c"), 2).await.unwrap();
+        assert_eq!(last.status_lists, ["https://example/d"]);
+        assert_eq!(last.next_after, None);
+
+        let unknown = repo.list_uris(Some("nobody"), None, 2).await.unwrap();
+        assert_eq!(unknown, StatusListUriPage::default());
+    }
+
+    #[tokio::test]
+    async fn credential_aggregation_id_resolves_both_ways() {
+        let repo = MemoryCredentials::default();
+        let aggregation_id = AggregationId::generate();
+        let credential = Credential {
+            issuer: Issuer("issuer".into()),
+            public_key: crate::domain::models::credential::PublicJwk::try_new(
+                crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        };
+        repo.insert(credential.clone(), aggregation_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.find_aggregation_id("issuer").await.unwrap(),
+            Some(aggregation_id)
+        );
+        assert_eq!(
+            repo.find_issuer_by_aggregation_id(aggregation_id)
+                .await
+                .unwrap(),
+            Some(credential.issuer.clone())
+        );
+        assert_eq!(repo.find_aggregation_id("nobody").await.unwrap(), None);
+        assert_eq!(
+            repo.find_issuer_by_aggregation_id(AggregationId::generate())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            repo.insert(credential, AggregationId::generate()).await,
+            Err(CredentialError::AlreadyExists)
+        ));
     }
 
     #[tokio::test]

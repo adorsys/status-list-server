@@ -92,7 +92,7 @@ pub struct StatusListRecord {
 }
 
 /// One page of published status list URIs, in `list_id` order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusListUriPage {
     /// `sub` URIs of the lists on this page.
     pub status_lists: Vec<String>,

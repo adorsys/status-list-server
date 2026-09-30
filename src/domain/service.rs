@@ -1,8 +1,11 @@
 //! Service container holding injected outbound adapter ports and domain business operations.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer};
+use moka::future::Cache;
+
+use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
     StatusListUriPage, validate_unique_indices,
@@ -19,6 +22,8 @@ pub struct Service {
     pub(crate) status_list_cache: Arc<dyn StatusListCache>,
     pub(crate) snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
     pub(crate) cert_provider: Arc<dyn CertificateProvider>,
+    /// Looked up for every signed token, so it must not cost a query each time.
+    aggregation_ids: Cache<String, AggregationId>,
 }
 
 impl Service {
@@ -35,6 +40,12 @@ impl Service {
             status_list_cache,
             snapshot_repo,
             cert_provider,
+            // An ID never changes once assigned. The TTL only bounds how long a
+            // credential re-created directly in the database keeps its old one here.
+            aggregation_ids: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(3600))
+                .build(),
         }
     }
 
@@ -51,13 +62,13 @@ impl Service {
         SC: StatusListCache,
         CP: CertificateProvider,
     {
-        Self {
-            status_list_repo: Arc::new(status_list_repo),
-            credential_repo: Arc::new(credential_repo),
-            status_list_cache: Arc::new(status_list_cache),
+        Self::from_arcs(
+            Arc::new(status_list_repo),
+            Arc::new(credential_repo),
+            Arc::new(status_list_cache),
             snapshot_repo,
-            cert_provider: Arc::new(cert_provider),
-        }
+            Arc::new(cert_provider),
+        )
     }
 
     pub fn status_list_repo(&self) -> &dyn StatusListRepo {
@@ -229,7 +240,29 @@ impl Service {
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError> {
-        self.status_list_repo.list_uris(after, limit).await
+        self.status_list_repo.list_uris(None, after, limit).await
+    }
+
+    /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
+    /// `None` when no issuer has it.
+    pub async fn list_issuer_uris(
+        &self,
+        aggregation_id: AggregationId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<StatusListUriPage>, StatusListError> {
+        let Some(issuer) = self
+            .credential_repo
+            .find_issuer_by_aggregation_id(aggregation_id)
+            .await
+            .map_err(|e| StatusListError::Backend(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
+            .map(Some)
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -266,8 +299,34 @@ impl Service {
     /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
     /// `impl From<RepositoryError> for CredentialError` maps it to
     /// `AlreadyExists`, so the 409 is unchanged.
-    pub async fn publish_credential(&self, credential: Credential) -> Result<(), CredentialError> {
-        self.credential_repo.insert(credential).await
+    ///
+    /// Returns the aggregation ID the issuer was registered under.
+    pub async fn publish_credential(
+        &self,
+        credential: Credential,
+    ) -> Result<AggregationId, CredentialError> {
+        let aggregation_id = AggregationId::generate();
+        self.credential_repo
+            .insert(credential, aggregation_id)
+            .await?;
+        Ok(aggregation_id)
+    }
+
+    /// The issuer's aggregation ID, or `None` for an unknown issuer.
+    pub async fn find_aggregation_id(
+        &self,
+        issuer: &Issuer,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        if let Some(aggregation_id) = self.aggregation_ids.get(&issuer.0).await {
+            return Ok(Some(aggregation_id));
+        }
+        let aggregation_id = self.credential_repo.find_aggregation_id(&issuer.0).await?;
+        if let Some(aggregation_id) = aggregation_id {
+            self.aggregation_ids
+                .insert(issuer.0.clone(), aggregation_id)
+                .await;
+        }
+        Ok(aggregation_id)
     }
 
     /// Retrieve credentials by issuer identifier.
@@ -396,8 +455,12 @@ async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusLis
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::domain::models::status_list::StatusList;
+    use crate::outbound::memory::MemoryCredentials;
+    use crate::test_utils::{publish_list, register_issuer, test_app_state};
 
     fn record_with_updated_at(updated_at: i64) -> StatusListRecord {
         StatusListRecord {
@@ -448,5 +511,105 @@ mod tests {
                 if iat == 1_000 && token_exp_secs == u64::MAX),
             "expected TokenExpiryOverflow, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_lists_only_that_issuers_lists() {
+        let state = test_app_state(None).await;
+        let service = &state.service;
+        let one = register_issuer(service, "one").await;
+        register_issuer(service, "two").await;
+        let a = publish_list(service, "one", "a").await;
+        publish_list(service, "two", "b").await;
+
+        let page = service.list_issuer_uris(one, None, 10).await.unwrap();
+        assert_eq!(page.unwrap().status_lists, [a]);
+        assert_eq!(
+            service
+                .list_uris(None, 10)
+                .await
+                .unwrap()
+                .status_lists
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_is_none_for_an_unknown_aggregation_id() {
+        let state = test_app_state(None).await;
+        register_issuer(&state.service, "one").await;
+        publish_list(&state.service, "one", "a").await;
+
+        let page = state
+            .service
+            .list_issuer_uris(AggregationId::generate(), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page, None);
+    }
+
+    #[derive(Default)]
+    struct CountingCredentials {
+        inner: MemoryCredentials,
+        aggregation_id_lookups: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CredentialRepo for CountingCredentials {
+        async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError> {
+            self.inner.find(issuer).await
+        }
+
+        async fn insert(
+            &self,
+            credential: Credential,
+            aggregation_id: AggregationId,
+        ) -> Result<(), CredentialError> {
+            self.inner.insert(credential, aggregation_id).await
+        }
+
+        async fn find_aggregation_id(
+            &self,
+            issuer: &str,
+        ) -> Result<Option<AggregationId>, CredentialError> {
+            self.aggregation_id_lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.find_aggregation_id(issuer).await
+        }
+
+        async fn find_issuer_by_aggregation_id(
+            &self,
+            aggregation_id: AggregationId,
+        ) -> Result<Option<Issuer>, CredentialError> {
+            self.inner
+                .find_issuer_by_aggregation_id(aggregation_id)
+                .await
+        }
+    }
+
+    /// A miss must not be cached: the issuer may be registered, or given an ID,
+    /// right after.
+    #[tokio::test]
+    async fn find_aggregation_id_caches_only_ids_it_found() {
+        let state = test_app_state(None).await;
+        let credentials = Arc::new(CountingCredentials::default());
+        let service = Service::from_arcs(
+            state.service.status_list_repo.clone(),
+            credentials.clone(),
+            state.service.status_list_cache.clone(),
+            None,
+            state.service.cert_provider.clone(),
+        );
+        let issuer = Issuer("issuer1".into());
+
+        assert_eq!(service.find_aggregation_id(&issuer).await.unwrap(), None);
+        let aggregation_id = register_issuer(&service, "issuer1").await;
+        for _ in 0..3 {
+            assert_eq!(
+                service.find_aggregation_id(&issuer).await.unwrap(),
+                Some(aggregation_id)
+            );
+        }
+        assert_eq!(credentials.aggregation_id_lookups.load(Ordering::SeqCst), 2);
     }
 }

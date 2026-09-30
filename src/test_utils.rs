@@ -5,6 +5,7 @@
 //! them. Put plain literals in [`crate::test_fixtures`], which is dependency-
 //! free precisely so that any test module can reach it whatever its own gate.
 
+use crate::domain::models::credential::{AggregationId, Credential, Issuer, PublicJwk};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
 use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
@@ -27,7 +28,51 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
-    AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
+    AuthenticatedIssuer::new(Issuer(issuer.into()))
+}
+
+/// Registers `issuer` and returns the aggregation ID it was given.
+pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> AggregationId {
+    service
+        .publish_credential(Credential {
+            issuer: Issuer(issuer.into()),
+            public_key: PublicJwk::try_new(
+                crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        })
+        .await
+        .unwrap()
+}
+
+/// Publishes an empty list for `issuer` and returns its `sub`.
+pub(crate) async fn publish_list(service: &Service, issuer: &str, list_id: &str) -> String {
+    publish_list_under_quota(service, issuer, list_id, u64::MAX)
+        .await
+        .unwrap()
+}
+
+pub(crate) async fn publish_list_under_quota(
+    service: &Service,
+    issuer: &str,
+    list_id: &str,
+    max_lists_per_issuer: u64,
+) -> Result<String, StatusListError> {
+    let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
+    service
+        .publish_status_list(
+            list_id.into(),
+            Issuer(issuer.into()),
+            sub.clone(),
+            vec![],
+            900,
+            100_000,
+            5_000,
+            1_048_576,
+            max_lists_per_issuer,
+        )
+        .await?;
+    Ok(sub)
 }
 
 /// In-memory SQLite with foreign keys on and the first `steps` migrations

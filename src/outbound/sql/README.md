@@ -13,16 +13,29 @@ backends the equivalent native character type is used.
 
 Stores information about issuers and their cryptographic public keys.
 
-| Column       | Type   | Null | Key | Description                                                      |
-| ------------ | ------ | ---- | --- | ---------------------------------------------------------------- |
-| `issuer`     | TEXT   | NO   | PK  | Unique identifier for the issuer                                 |
-| `public_key` | JSON   | NO   |     | Public key associated with the issuer                            |
-| `list_count` | BIGINT | NO   |     | Status lists published; backs `max_lists_per_issuer` (default 0) |
+| Column           | Type        | Null | Key | Description                                                      |
+| ---------------- | ----------- | ---- | --- | ---------------------------------------------------------------- |
+| `issuer`         | TEXT        | NO   | PK  | Unique identifier for the issuer                                 |
+| `public_key`     | JSON        | NO   |     | Public key associated with the issuer                            |
+| `list_count`     | BIGINT      | NO   |     | Status lists published; backs `max_lists_per_issuer` (default 0) |
+| `aggregation_id` | VARCHAR(36) | YES  | UQ  | Opaque UUID naming the issuer in public aggregation URIs         |
 
 `list_count` is incremented by a guarded `UPDATE` inside the publish
 transaction, before the `status_lists` `INSERT`; see `reserve_list_slot` in
 `store.rs` for why that order matters. The `DEFAULT 0` lets pods on the
 previous release keep registering credentials during a rolling deploy.
+
+`aggregation_id` is set at registration. It is nullable for the same reason:
+pods on the previous release register without one. Such a row gets its ID the
+first time it is looked up (`SqlCredentialRepo::find_aggregation_id`), through
+an `UPDATE` guarded by `aggregation_id IS NULL` so racing pods agree on one.
+The issuer identifier itself never appears in a public URI.
+
+#### Indexes
+
+| Index name                       | Column           |
+| -------------------------------- | ---------------- |
+| `idx_credentials_aggregation_id` | `aggregation_id` |
 
 ### `list_quota`
 
@@ -57,11 +70,18 @@ by its `list_id`, which acts as the primary key.
 
 The following indexes are created on the `status_lists` table to speed up lookups:
 
-| Index name                 | Column    |
-| -------------------------- | --------- |
-| `idx_status_lists_list_id` | `list_id` |
-| `idx_status_lists_issuer`  | `issuer`  |
-| `idx_status_lists_sub`     | `sub`     |
+| Index name                        | Column            |
+| --------------------------------- | ----------------- |
+| `idx_status_lists_list_id`        | `list_id`         |
+| `idx_status_lists_issuer`         | `issuer`          |
+| `idx_status_lists_sub`            | `sub`             |
+| `idx_status_lists_issuer_list_id` | `issuer, list_id` |
+
+`idx_status_lists_issuer_list_id` serves issuer-scoped aggregation pages, which
+are keyset scans on `list_id` within one issuer. It makes
+`idx_status_lists_issuer` redundant. Dropping that is left to a migration of its
+own, because on Postgres `DROP INDEX` blocks reads of `status_lists` while it
+waits for its lock.
 
 ### `status_list_history`
 
@@ -90,6 +110,7 @@ erDiagram
         TEXT issuer PK "Unique identifier for the issuer"
         JSON public_key "Public key associated with the issuer"
         BIGINT list_count "Status lists published by the issuer"
+        VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
