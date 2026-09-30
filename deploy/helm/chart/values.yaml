@@ -165,6 +165,8 @@ statuslist:
     # APP_CACHE__RESPONSE_TIMEOUT_MS: "250"
     # APP_CACHE__CONNECTION_TIMEOUT_MS: "250"
     # APP_CACHE__RECONNECT_COOLDOWN_MS: "250"
+    # Status-list token lifetime (secs). Both must be >= 1 and ttl strictly less
+    # than exp; the application rejects violations at startup.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
