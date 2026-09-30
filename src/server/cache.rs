@@ -102,7 +102,7 @@ pub(crate) struct TokenCacheKey {
 /// An in-memory cache of fully signed, serialised status-list token bytes.
 ///
 /// Per replica and byte-bounded (`max_capacity_bytes`): each entry is weighed by
-/// its byte size. Entries are keyed by [`TokenCacheKey`] and expire at the end of
+/// its byte size. Entries are keyed by `TokenCacheKey` and expire at the end of
 /// their anchored window `[window_start, window_start + exp_secs)`, so a fresh
 /// `200` reuses one sign per `(list, window, format, encoding)` per replica.
 /// Concurrent misses for the same key coalesce onto one in-flight build; capacity
