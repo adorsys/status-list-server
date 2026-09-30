@@ -124,7 +124,7 @@ pub(crate) struct TokenCacheKey {
 /// Signing-key rotation and certificate renewal are covered by the signer
 /// fingerprint, so a rotated key immediately misses and re-signs with the new
 /// key. Expiry is covered by the window bound checked at lookup time plus a
-/// per-entry [`EntryExpiry`] that frees each entry at the end of its own window,
+/// per-entry expiry policy that frees each entry at the end of its own window,
 /// so no eager invalidation is needed.
 ///
 /// Per-replica by design: the weak ETag is derived from the representation
@@ -178,7 +178,7 @@ impl TokenBytesCache {
     /// preserves the "cache disabled" semantics used elsewhere in this codebase
     /// (`MokaStatusListCache`): entries are evicted immediately and every request
     /// re-signs. Each entry additionally expires at the end of its own validity
-    /// window ([`EntryExpiry`]), independent of the byte budget.
+    /// window, independent of the byte budget.
     pub(crate) fn new(max_capacity_bytes: u64) -> Self {
         if max_capacity_bytes == 0 {
             tracing::info!("Signed-token bytes cache disabled (capacity=0)");
