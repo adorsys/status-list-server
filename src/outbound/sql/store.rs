@@ -204,6 +204,31 @@ async fn reserve_list_slot(
 }
 
 impl SeaOrmStore<StatusListRecord> {
+    #[tracing::instrument(skip(self, entity, snapshot, allocated_indices), fields(db.system = "sea-orm"))]
+    pub async fn create_status_list(
+        &self,
+        entity: StatusListRecord,
+        snapshot: Option<StatusListHistoryRecord>,
+        allocated_indices: &[i32],
+        max_lists_per_issuer: u64,
+    ) -> Result<(), RepositoryError> {
+        match snapshot {
+            Some(snapshot) => {
+                self.insert_one_with_snapshot_and_allocations(
+                    entity,
+                    snapshot,
+                    allocated_indices,
+                    max_lists_per_issuer,
+                )
+                .await
+            }
+            None => {
+                self.insert_one_with_allocations(entity, allocated_indices, max_lists_per_issuer)
+                    .await
+            }
+        }
+    }
+
     /// Pinned like `insert_one_with_snapshot`, so a racing publish reports the
     /// same error whichever path `history_retention_secs` selects.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
@@ -678,8 +703,8 @@ impl SeaOrmStore<StatusListRecord> {
     pub async fn allocate_indices(
         &self,
         list_id: &str,
+        issuer: &str,
         count: u32,
-        limit: u32,
     ) -> Result<Vec<i32>, RepositoryError> {
         time_query("allocate", "status_list_allocation", async {
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
@@ -700,9 +725,7 @@ impl SeaOrmStore<StatusListRecord> {
                             "allocation parent-list lock matched no row; rollback failed: {rollback_err}"
                         ))
                     })?;
-                    return Err(RepositoryError::FindError(format!(
-                        "status list {list_id} was not found during allocation"
-                    )));
+                    return Err(RepositoryError::NotFound);
                 }
                 Err(update_err) => {
                     txn.rollback().await.map_err(|rollback_err| {
@@ -714,6 +737,24 @@ impl SeaOrmStore<StatusListRecord> {
                     return Err(map_update_err(update_err));
                 }
             }
+
+            let parent = status_lists::Entity::find_by_id(list_id)
+                .one(&txn)
+                .await
+                .map_err(find_err)?
+                .ok_or(RepositoryError::NotFound)?;
+            if parent.issuer != issuer {
+                txn.rollback().await.map_err(|rollback_err| {
+                    RepositoryError::UpdateError(format!(
+                        "allocation issuer check failed; rollback failed: {rollback_err}"
+                    ))
+                })?;
+                return Err(RepositoryError::IssuerMismatch);
+            }
+            let limit = parent
+                .status_list
+                .size
+                .ok_or(RepositoryError::ListNotFixedSize)?;
 
             let existing = match status_list_allocations::Entity::find()
                 .select_only()

@@ -34,14 +34,10 @@ pub async fn allocate_indices(
     }
 
     let issuer = principal.into();
+    let policy = appstate.status_list_policy();
     let indices = appstate
         .service
-        .allocate_indices(
-            &issuer,
-            &list_id,
-            payload.count,
-            appstate.max_statuses_per_request,
-        )
+        .allocate_indices(&issuer, &list_id, payload.count, &policy)
         .await?;
 
     Ok((StatusCode::CREATED, Json(AllocationResponse { indices })).into_response())
@@ -78,8 +74,8 @@ mod tests {
         app_state
             .service
             .status_list_repo()
-            .insert(
-                StatusListRecord {
+            .create(crate::domain::ports::CreateStatusList {
+                record: StatusListRecord {
                     list_id: list_id.clone(),
                     issuer: Issuer("issuer".to_string()),
                     status_list: StatusList::create_with_options(
@@ -91,8 +87,10 @@ mod tests {
                     sub: format!("https://example.test/{list_id}"),
                     updated_at: 1,
                 },
-                u64::MAX,
-            )
+                initial_snapshot: None,
+                initial_allocations: Vec::new(),
+                max_lists_per_issuer: u64::MAX,
+            })
             .await
             .unwrap();
 
@@ -143,16 +141,18 @@ mod tests {
         app_state
             .service
             .status_list_repo()
-            .insert(
-                StatusListRecord {
+            .create(crate::domain::ports::CreateStatusList {
+                record: StatusListRecord {
                     list_id: list_id.clone(),
                     issuer: Issuer("issuer".to_string()),
                     status_list: StatusList::create(vec![]).unwrap(),
                     sub: format!("https://example.test/{list_id}"),
                     updated_at: 1,
                 },
-                u64::MAX,
-            )
+                initial_snapshot: None,
+                initial_allocations: Vec::new(),
+                max_lists_per_issuer: u64::MAX,
+            })
             .await
             .unwrap();
 
@@ -188,8 +188,8 @@ mod tests {
         app_state
             .service
             .status_list_repo()
-            .insert(
-                StatusListRecord {
+            .create(crate::domain::ports::CreateStatusList {
+                record: StatusListRecord {
                     list_id: list_id.clone(),
                     issuer: Issuer("issuer".to_string()),
                     status_list: StatusList::create_with_options(vec![], Some(8), Status::Valid)
@@ -197,8 +197,10 @@ mod tests {
                     sub: format!("https://example.test/{list_id}"),
                     updated_at: 1,
                 },
-                u64::MAX,
-            )
+                initial_snapshot: None,
+                initial_allocations: Vec::new(),
+                max_lists_per_issuer: u64::MAX,
+            })
             .await
             .unwrap();
 

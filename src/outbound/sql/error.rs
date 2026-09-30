@@ -35,6 +35,12 @@ pub enum RepositoryError {
     /// The issuer's `credentials.list_count` already reached the quota.
     #[error("Status list quota exceeded: issuer holds {count} of {max}")]
     QuotaExceeded { count: u64, max: u64 },
+    #[error("Status list not found")]
+    NotFound,
+    #[error("Issuer mismatch")]
+    IssuerMismatch,
+    #[error("Status list is not fixed-size")]
+    ListNotFixedSize,
     #[error("Status list does not have enough unallocated indices")]
     AllocationExhausted,
 }

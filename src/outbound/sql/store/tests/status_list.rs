@@ -1060,8 +1060,8 @@ async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
     // SQLite's test pool has one connection, so these serialize there; the
     // MySQL and Postgres variants exercise the row lock with real concurrency.
     let (first, second) = tokio::join!(
-        store_a.allocate_indices(&list_id, 2, 6),
-        store_b.allocate_indices(&list_id, 2, 6),
+        store_a.allocate_indices(&list_id, issuer, 2),
+        store_b.allocate_indices(&list_id, issuer, 2),
     );
     let first = first.unwrap();
     let second = second.unwrap();
@@ -1094,7 +1094,7 @@ async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
         .await
         .unwrap();
 
-    let exhausted = store.allocate_indices(&partial_list_id, 2, 4).await;
+    let exhausted = store.allocate_indices(&partial_list_id, issuer, 2).await;
     assert!(
         matches!(exhausted, Err(RepositoryError::AllocationExhausted)),
         "exhausted allocation must fail without partial reservation on {backend}, got {exhausted:?}"
@@ -1106,7 +1106,7 @@ async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
     );
 
     let last = store
-        .allocate_indices(&partial_list_id, 1, 4)
+        .allocate_indices(&partial_list_id, issuer, 1)
         .await
         .unwrap();
     assert_eq!(last, vec![3]);

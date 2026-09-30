@@ -23,7 +23,10 @@ use crate::domain::models::credential::{Credential, CredentialError, Issuer, Pub
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
-use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
+use crate::domain::ports::{
+    AllocateStatusListIndices, CreateStatusList, CredentialRepo, StatusListRepo,
+    StatusListSnapshotRepo,
+};
 
 /// SQL relational adapter implementing `StatusListRepo`.
 #[derive(Clone)]
@@ -97,25 +100,14 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert(
-        &self,
-        record: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
         self.store
-            .insert_one(record.into(), max_lists_per_issuer)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn insert_with_allocations(
-        &self,
-        record: StatusListRecord,
-        allocated_indices: &[i32],
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        self.store
-            .insert_one_with_allocations(record.into(), allocated_indices, max_lists_per_issuer)
+            .create_status_list(
+                command.record.into(),
+                command.initial_snapshot.map(Into::into),
+                &command.initial_allocations,
+                command.max_lists_per_issuer,
+            )
             .await
             .map_err(Into::into)
     }
@@ -145,36 +137,6 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert_with_snapshot(
-        &self,
-        record: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        self.store
-            .insert_one_with_snapshot(record.into(), snapshot.into(), max_lists_per_issuer)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn insert_with_snapshot_and_allocations(
-        &self,
-        record: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        allocated_indices: &[i32],
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        self.store
-            .insert_one_with_snapshot_and_allocations(
-                record.into(),
-                snapshot.into(),
-                allocated_indices,
-                max_lists_per_issuer,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
     async fn list_uris(
         &self,
         after: Option<&str>,
@@ -189,12 +151,10 @@ impl StatusListRepo for SqlStatusListRepo {
 
     async fn allocate_indices(
         &self,
-        list_id: &str,
-        count: u32,
-        limit: u32,
+        command: AllocateStatusListIndices,
     ) -> Result<Vec<i32>, StatusListError> {
         self.store
-            .allocate_indices(list_id, count, limit)
+            .allocate_indices(&command.list_id, &command.issuer.0, command.count)
             .await
             .map_err(Into::into)
     }
@@ -330,6 +290,9 @@ impl From<RepositoryError> for StatusListError {
             RepositoryError::QuotaExceeded { count, max } => {
                 StatusListError::QuotaExceeded { count, max }
             }
+            RepositoryError::NotFound => StatusListError::NotFound,
+            RepositoryError::IssuerMismatch => StatusListError::IssuerMismatch,
+            RepositoryError::ListNotFixedSize => StatusListError::ListNotFixedSize,
             RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,
             other => StatusListError::Backend(Box::new(other)),
         }

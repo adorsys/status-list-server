@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
-use crate::domain::models::credential::{Credential, CredentialError};
+use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -33,29 +33,28 @@ pub trait StatusListCache: Send + Sync + 'static {
 }
 
 /// Interface for managing active status list records.
+#[derive(Debug, Clone)]
+pub struct CreateStatusList {
+    pub record: StatusListRecord,
+    pub initial_snapshot: Option<StatusListSnapshot>,
+    pub initial_allocations: Vec<i32>,
+    pub max_lists_per_issuer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllocateStatusListIndices {
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub count: u32,
+}
+
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Insert a new status list record into persistent storage.
-    ///
-    /// Fails with [`StatusListError::QuotaExceeded`] when the issuer already
-    /// holds `max_lists_per_issuer` lists. The check must be atomic with the insert.
-    async fn insert(
-        &self,
-        status_list: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
-
-    /// Insert a new status list and atomically reserve any initial indices that
-    /// were set by the publish request.
-    async fn insert_with_allocations(
-        &self,
-        status_list: StatusListRecord,
-        allocated_indices: &[i32],
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
+    /// Create a status list and any initial child records atomically.
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
     /// Concurrently update an existing status list record matching `expected_updated_at`.
     async fn update(
@@ -72,25 +71,6 @@ pub trait StatusListRepo: Send + Sync + 'static {
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 
-    /// Insert a new status list record and atomically record its initial historical snapshot.
-    /// Enforces `max_lists_per_issuer` like [`Self::insert`].
-    async fn insert_with_snapshot(
-        &self,
-        status_list: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
-
-    /// Insert a new status list, atomically record its initial snapshot, and
-    /// reserve any initial indices set by the publish request.
-    async fn insert_with_snapshot_and_allocations(
-        &self,
-        status_list: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        allocated_indices: &[i32],
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
-
     /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
     /// starting strictly after `after`.
     async fn list_uris(
@@ -103,9 +83,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// allocated indices in ascending order.
     async fn allocate_indices(
         &self,
-        list_id: &str,
-        count: u32,
-        limit: u32,
+        command: AllocateStatusListIndices,
     ) -> Result<Vec<i32>, StatusListError>;
 
     /// Return the first requested index that has not been allocated, if any.

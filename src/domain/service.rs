@@ -8,8 +8,28 @@ use crate::domain::models::status_list::{
     StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
-    CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
+    AllocateStatusListIndices, CertificateProvider, CreateStatusList, CredentialRepo,
+    StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
+
+#[derive(Debug, Clone)]
+pub struct StatusListPolicy {
+    pub token_exp_secs: u64,
+    pub max_status_index: i32,
+    pub max_statuses_per_request: usize,
+    pub max_serialized_list_size: usize,
+    pub max_lists_per_issuer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishStatusListCommand {
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub sub: String,
+    pub statuses: Vec<StatusEntry>,
+    pub size: Option<u32>,
+    pub default_status: Option<Status>,
+}
 
 /// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
@@ -88,86 +108,63 @@ impl Service {
     /// Create and publish a new status list record, enforcing uniqueness, size
     /// invariants and the per-issuer list quota.
     ///
-    /// The quota is checked by the repository inside the insert, since a
+    /// The quota is checked by the repository inside creation, since a
     /// count-then-insert here would race concurrent publishes.
-    #[allow(clippy::too_many_arguments)]
     pub async fn publish_status_list(
         &self,
-        list_id: String,
-        issuer: Issuer,
-        sub: String,
-        statuses: Vec<StatusEntry>,
-        token_exp_secs: u64,
-        max_status_index: i32,
-        max_statuses_per_request: usize,
-        max_serialized_list_size: usize,
-        max_lists_per_issuer: u64,
+        command: PublishStatusListCommand,
+        policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        self.publish_status_list_with_options(
-            list_id,
-            issuer,
-            sub,
-            statuses,
-            None,
-            None,
-            token_exp_secs,
-            max_status_index,
-            max_statuses_per_request,
-            max_serialized_list_size,
-            max_lists_per_issuer,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn publish_status_list_with_options(
-        &self,
-        list_id: String,
-        issuer: Issuer,
-        sub: String,
-        statuses: Vec<StatusEntry>,
-        size: Option<u32>,
-        default_status: Option<Status>,
-        token_exp_secs: u64,
-        max_status_index: i32,
-        max_statuses_per_request: usize,
-        max_serialized_list_size: usize,
-        max_lists_per_issuer: u64,
-    ) -> Result<StatusListRecord, StatusListError> {
-        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
-        let default_status = default_status.unwrap_or(Status::Valid);
-        if let Some(size) = size {
-            StatusList::validate_size_limit(&statuses, size, &default_status, max_status_index)?;
+        validate_request_shape(
+            &command.statuses,
+            policy.max_status_index,
+            policy.max_statuses_per_request,
+        )?;
+        let default_status = command.default_status.unwrap_or(Status::Valid);
+        if let Some(size) = command.size {
+            StatusList::validate_size_limit(
+                &command.statuses,
+                size,
+                &default_status,
+                policy.max_status_index,
+            )?;
         }
-        let initially_allocated = statuses.iter().map(|entry| entry.index).collect::<Vec<_>>();
+        let initially_allocated = command
+            .statuses
+            .iter()
+            .map(|entry| entry.index)
+            .collect::<Vec<_>>();
 
         let record = StatusListRecord {
-            list_id,
-            issuer,
-            status_list: StatusList::create_with_options(statuses, size, default_status)?,
-            sub,
+            list_id: command.list_id,
+            issuer: command.issuer,
+            status_list: StatusList::create_with_options(
+                command.statuses,
+                command.size,
+                default_status,
+            )?,
+            sub: command.sub,
             updated_at: current_unix_timestamp(),
         };
 
-        if record.status_list.lst.len() > max_serialized_list_size {
+        if record.status_list.lst.len() > policy.max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
 
-        if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&record, token_exp_secs)?;
-            self.status_list_repo
-                .insert_with_snapshot_and_allocations(
-                    record.clone(),
-                    snapshot,
-                    &initially_allocated,
-                    max_lists_per_issuer,
-                )
-                .await?;
+        let initial_snapshot = if self.snapshots_enabled() {
+            Some(build_snapshot(&record, policy.token_exp_secs)?)
         } else {
-            self.status_list_repo
-                .insert_with_allocations(record.clone(), &initially_allocated, max_lists_per_issuer)
-                .await?;
-        }
+            None
+        };
+
+        self.status_list_repo
+            .create(CreateStatusList {
+                record: record.clone(),
+                initial_snapshot,
+                initial_allocations: initially_allocated,
+                max_lists_per_issuer: policy.max_lists_per_issuer,
+            })
+            .await?;
 
         Ok(record)
     }
@@ -184,18 +181,18 @@ impl Service {
     /// `statuses` payload and a non-empty payload that re-sets every affected
     /// index to its current value — is a successful no-op: the list version and
     /// history are untouched and no redundant snapshot is written.
-    #[allow(clippy::too_many_arguments)]
     pub async fn update_statuses(
         &self,
         issuer: &Issuer,
         list_id: &str,
         statuses: Vec<StatusEntry>,
-        token_exp_secs: u64,
-        max_status_index: i32,
-        max_statuses_per_request: usize,
-        max_serialized_list_size: usize,
+        policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        validate_request_shape(&statuses, max_status_index, max_statuses_per_request)?;
+        validate_request_shape(
+            &statuses,
+            policy.max_status_index,
+            policy.max_statuses_per_request,
+        )?;
         validate_unique_indices(&statuses)?;
 
         let mut existing = self
@@ -232,7 +229,7 @@ impl Service {
             return Ok(existing);
         }
 
-        if existing.status_list.lst.len() > max_serialized_list_size {
+        if existing.status_list.lst.len() > policy.max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
 
@@ -240,7 +237,7 @@ impl Service {
         existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&existing, token_exp_secs)?;
+            let snapshot = build_snapshot(&existing, policy.token_exp_secs)?;
             self.status_list_repo
                 .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
                 .await?
@@ -263,31 +260,21 @@ impl Service {
         issuer: &Issuer,
         list_id: &str,
         count: u32,
-        max_statuses_per_request: usize,
+        policy: &StatusListPolicy,
     ) -> Result<Vec<i32>, StatusListError> {
-        if count == 0 || count as usize > max_statuses_per_request {
+        if count == 0 || count as usize > policy.max_statuses_per_request {
             return Err(StatusListError::InvalidAllocationCount {
                 count,
-                max: max_statuses_per_request,
+                max: policy.max_statuses_per_request,
             });
         }
 
-        let existing = self
-            .status_list_repo
-            .find(list_id)
-            .await?
-            .ok_or(StatusListError::NotFound)?;
-
-        if &existing.issuer != issuer {
-            return Err(StatusListError::IssuerMismatch);
-        }
-
-        let limit = existing
-            .status_list
-            .size
-            .ok_or(StatusListError::ListNotFixedSize)?;
         self.status_list_repo
-            .allocate_indices(list_id, count, limit)
+            .allocate_indices(AllocateStatusListIndices {
+                list_id: list_id.to_string(),
+                issuer: issuer.clone(),
+                count,
+            })
             .await
     }
 

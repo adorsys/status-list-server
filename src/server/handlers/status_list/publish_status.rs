@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::domain::service::PublishStatusListCommand;
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
 use super::utils::request::{Status, StatusEntry, StatusesRequest};
@@ -81,20 +82,19 @@ async fn publish_status_with_options(
         appstate.server_domain
     );
 
+    let policy = appstate.status_list_policy();
     let record = appstate
         .service
-        .publish_status_list_with_options(
-            list_id,
-            principal.into(),
-            sub,
-            statuses,
-            payload.size,
-            default_status,
-            appstate.token_exp_secs,
-            appstate.max_status_index,
-            appstate.max_statuses_per_request,
-            appstate.max_serialized_list_size,
-            appstate.max_lists_per_issuer,
+        .publish_status_list(
+            PublishStatusListCommand {
+                list_id,
+                issuer: principal.into(),
+                sub,
+                statuses,
+                size: payload.size,
+                default_status,
+            },
+            &policy,
         )
         .await?;
 
@@ -266,10 +266,7 @@ mod tests {
                     index: 8,
                     status: crate::domain::models::status_list::Status::Valid,
                 }],
-                app_state.token_exp_secs,
-                app_state.max_status_index,
-                app_state.max_statuses_per_request,
-                app_state.max_serialized_list_size,
+                &app_state.status_list_policy(),
             )
             .await
             .unwrap_err();
@@ -340,20 +337,19 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
+        let policy = app_state.status_list_policy();
         app_state
             .service
-            .publish_status_list_with_options(
-                token_id.clone(),
-                Issuer("issuer".to_string()),
-                format!("https://example.test/{token_id}"),
-                vec![],
-                Some(8),
-                None,
-                app_state.token_exp_secs,
-                app_state.max_status_index,
-                app_state.max_statuses_per_request,
-                app_state.max_serialized_list_size,
-                app_state.max_lists_per_issuer,
+            .publish_status_list(
+                PublishStatusListCommand {
+                    list_id: token_id.clone(),
+                    issuer: Issuer("issuer".to_string()),
+                    sub: format!("https://example.test/{token_id}"),
+                    statuses: vec![],
+                    size: Some(8),
+                    default_status: None,
+                },
+                &policy,
             )
             .await
             .unwrap();
@@ -367,10 +363,7 @@ mod tests {
                     index: 0,
                     status: crate::domain::models::status_list::Status::Invalid,
                 }],
-                app_state.token_exp_secs,
-                app_state.max_status_index,
-                app_state.max_statuses_per_request,
-                app_state.max_serialized_list_size,
+                &app_state.status_list_policy(),
             )
             .await
             .unwrap_err();
@@ -384,20 +377,19 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
+        let policy = app_state.status_list_policy();
         app_state
             .service
-            .publish_status_list_with_options(
-                token_id.clone(),
-                Issuer("issuer".to_string()),
-                format!("https://example.test/{token_id}"),
-                vec![],
-                Some(8),
-                None,
-                app_state.token_exp_secs,
-                app_state.max_status_index,
-                app_state.max_statuses_per_request,
-                app_state.max_serialized_list_size,
-                app_state.max_lists_per_issuer,
+            .publish_status_list(
+                PublishStatusListCommand {
+                    list_id: token_id.clone(),
+                    issuer: Issuer("issuer".to_string()),
+                    sub: format!("https://example.test/{token_id}"),
+                    statuses: vec![],
+                    size: Some(8),
+                    default_status: None,
+                },
+                &policy,
             )
             .await
             .unwrap();
@@ -408,7 +400,7 @@ mod tests {
                 &Issuer("issuer".to_string()),
                 &token_id,
                 1,
-                app_state.max_statuses_per_request,
+                &app_state.status_list_policy(),
             )
             .await
             .unwrap();
@@ -422,10 +414,7 @@ mod tests {
                     index: allocated[0],
                     status: crate::domain::models::status_list::Status::Invalid,
                 }],
-                app_state.token_exp_secs,
-                app_state.max_status_index,
-                app_state.max_statuses_per_request,
-                app_state.max_serialized_list_size,
+                &app_state.status_list_policy(),
             )
             .await
             .unwrap();

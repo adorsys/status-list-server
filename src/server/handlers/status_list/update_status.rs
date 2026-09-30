@@ -37,17 +37,10 @@ pub async fn update_status(
         .map(Into::into)
         .collect::<Vec<_>>();
 
+    let policy = appstate.status_list_policy();
     appstate
         .service
-        .update_statuses(
-            principal.as_ref(),
-            &list_id,
-            statuses,
-            appstate.token_exp_secs,
-            appstate.max_status_index,
-            appstate.max_statuses_per_request,
-            appstate.max_serialized_list_size,
-        )
+        .update_statuses(principal.as_ref(), &list_id, statuses, &policy)
         .await?;
 
     Ok(StatusCode::OK.into_response())
