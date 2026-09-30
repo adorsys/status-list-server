@@ -249,6 +249,89 @@ pub struct ServerConfig {
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
+    /// Public base URL of the server, e.g. `https://statuslist.example.com/api/v1`.
+    ///
+    /// This is the prefix used to build the status list `sub` URI that is signed
+    /// into every issued token and returned to issuers as the `Location` header
+    /// on publish. It MUST be an absolute `https` URL with no query or fragment.
+    ///
+    /// When unset, it is derived from [`ServerConfig::domain`] as
+    /// `https://{domain}/api/v1`, so existing deployments that only configure
+    /// `server.domain` keep working unchanged.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+}
+
+impl ServerConfig {
+    /// The resolved public base URL, defaulting to `https://{domain}/api/v1`
+    /// when `public_base_url` is not configured.
+    pub fn resolved_public_base_url(&self) -> String {
+        match trim_non_empty(self.public_base_url.as_deref()) {
+            Some(base) => base.to_string(),
+            None => format!("https://{}/api/v1", self.domain),
+        }
+    }
+}
+
+/// Validates `server.domain`: a bare host name or IP address with no scheme,
+/// path, userinfo, port, query, or fragment.
+fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
+    if database_host_is_ipv6(domain) {
+        return Ok(());
+    }
+
+    let invalid = domain.chars().any(char::is_whitespace)
+        || domain.contains("://")
+        || domain.contains('/')
+        || domain.contains('@')
+        || domain.contains('?')
+        || domain.contains('#')
+        || domain.contains(':')
+        || domain.contains('\\')
+        || domain.starts_with('-')
+        || domain.ends_with('-')
+        || domain.starts_with('.')
+        || domain.trim_end_matches('.').is_empty();
+
+    if invalid {
+        return Err(ConfigError::Message(
+            "Invalid server.domain: expected a bare hostname or IP address without scheme, port, path, userinfo, query, or fragment".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates `server.public_base_url`: an absolute `https` URL with no query
+/// or fragment, since it is embedded verbatim into issued tokens' `sub` and
+/// returned to issuers as the publish `Location`.
+fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(base_url).map_err(|err| {
+        ConfigError::Message(format!(
+            "Invalid server.public_base_url '{base_url}': not a valid URL ({err})"
+        ))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: scheme must be https".to_string(),
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: expected an absolute URL with a host".to_string(),
+        ));
+    }
+    if parsed.query().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain a query".to_string(),
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain a fragment".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1306,6 +1389,10 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        validate_server_domain(&config.server.domain)?;
+        if let Some(base_url) = trim_non_empty(config.server.public_base_url.as_deref()) {
+            validate_public_base_url(base_url)?;
+        }
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.status_list.validate()?;
@@ -2216,6 +2303,70 @@ mod tests {
             zero_quota.is_err(),
             "a zero list quota would refuse every publish and must fail config loading"
         );
+    }
+
+    #[test]
+    fn test_public_base_url_derives_from_domain_by_default() {
+        let config = Config::load_from_overrides(&[("server.domain", "statuslist.example.com")])
+            .expect("config loads");
+        assert_eq!(config.server.public_base_url, None);
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://statuslist.example.com/api/v1"
+        );
+
+        // An explicit public_base_url wins over the derived default.
+        let config = Config::load_from_overrides(&[
+            ("server.domain", "statuslist.example.com"),
+            (
+                "server.public_base_url",
+                "https://status.example.org/api/v1",
+            ),
+        ])
+        .expect("config loads");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://status.example.org/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_public_base_url_rejects_non_https_query_and_fragment() {
+        for (value, expected) in [
+            ("http://statuslist.example.com/api/v1", "scheme must be https"),
+            (
+                "https://statuslist.example.com/api/v1?x=1",
+                "must not contain a query",
+            ),
+            (
+                "https://statuslist.example.com/api/v1#frag",
+                "must not contain a fragment",
+            ),
+            ("not a url", "not a valid URL"),
+        ] {
+            let err = Config::load_from_overrides(&[("server.public_base_url", value)])
+                .expect_err(&format!("public_base_url {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_server_domain_must_be_bare_host() {
+        for (value, expected) in [
+            ("https://example.com", "scheme, port, path, userinfo, query, or fragment"),
+            ("example.com/path", "scheme, port, path, userinfo, query, or fragment"),
+            ("example.com:443", "scheme, port, path, userinfo, query, or fragment"),
+        ] {
+            let err = Config::load_from_overrides(&[("server.domain", value)])
+                .expect_err(&format!("server.domain {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
     }
 
     #[test]

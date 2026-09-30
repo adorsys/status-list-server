@@ -733,9 +733,21 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
+    // A `localhost` domain is only ever valid for local development: tokens
+    // signed with `sub = https://localhost/...` are rejected by every relying
+    // party. Surface it loudly outside a non-production profile instead of
+    // silently shipping unusable tokens.
+    if config.server.domain.trim() == "localhost" && config.telemetry.environment.is_production() {
+        tracing::warn!(
+            "server.domain is 'localhost' in a production profile; status list tokens will be \
+             signed with sub = https://localhost/... and rejected by relying parties. Set \
+             APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) to the public host."
+        );
+    }
+
     let state = AppState {
         service,
-        server_domain: config.server.domain.clone(),
+        public_base_url: config.server.resolved_public_base_url(),
         aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,

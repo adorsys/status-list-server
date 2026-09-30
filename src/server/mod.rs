@@ -42,7 +42,10 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
 pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
-    pub server_domain: String,
+    /// Resolved public base URL (e.g. `https://statuslist.example.com/api/v1`).
+    /// Used to build the `sub` URI signed into issued tokens and returned to
+    /// issuers as the publish `Location`.
+    pub public_base_url: String,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,

@@ -331,6 +331,12 @@ paths:
         derived from the validated JWT Bearer token. The request body defines
         the initial status entries for the list.
 
+        On success the response `Location` header and the `uri` member of the
+        body carry the absolute URI of the created status list. For full spec
+        compliance (§5.1/§5.2/§8.3) the issuer MUST embed that exact URI as the
+        Referenced Token's `sub` when referencing a credential in this list, so
+        relying parties can resolve it.
+
         Each issuer may hold at most `limits.max_lists_per_issuer` status lists
         (default 1000). A publish past that is refused with `400`
         `list_quota_exceeded`; status lists cannot be deleted through the API,
@@ -348,6 +354,23 @@ paths:
       responses:
         "201":
           description: Status list created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                Absolute URI of the newly created status list, e.g.
+                `https://statuslist.example.com/api/v1/status-lists/{list_id}`.
+                This is the value the issuer MUST embed as the Referenced
+                Token's `sub`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishStatusResponse"
+              example:
+                uri: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+                list_id: "477121aa-b598-419e-916f-1e74654ff38b"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -660,6 +683,28 @@ components:
         crv: "P-256"
         x: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
         y: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+
+    PublishStatusResponse:
+      type: object
+      description: |
+        Response body of a successful `PUT /api/v1/status-lists/{list_id}/statuses`.
+        `uri` is the absolute URI of the newly created status list — the value
+        the issuer MUST embed as the Referenced Token's `sub` (spec
+        §5.1/§5.2/§8.3). It is identical to the `Location` header.
+      required:
+        - uri
+        - list_id
+      properties:
+        uri:
+          type: string
+          format: uri
+          description: Absolute URI of the created status list.
+          example: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+        list_id:
+          type: string
+          format: uuid
+          description: The `list_id` the status list was published under.
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
 
     StatusUpdateRequest:
       type: object
