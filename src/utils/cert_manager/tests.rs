@@ -183,7 +183,9 @@ fn test_acme_builder_requires_challenge_handler() {
         Err(err) => err,
     };
 
-    assert!(matches!(err, CertError::Validation(message) if message.contains("challenge handler")));
+    assert!(
+        matches!(err, CertError::Validation(message) if message.to_string().contains("challenge handler"))
+    );
 }
 
 #[test]
@@ -568,7 +570,7 @@ async fn test_store_filesystem_strategy_rejects_der_material() {
         .expect_err("raw DER is outside the supported input contract");
 
     assert!(
-        matches!(error, CertError::Validation(message) if message.starts_with("certificate material must be PEM text; file ") && message.ends_with("is not valid UTF-8 (DER is unsupported; convert it to PEM)"))
+        matches!(error, CertError::Validation(message) if message.to_string().starts_with("certificate material must be PEM text; file ") && message.to_string().ends_with("is not valid UTF-8 (DER is unsupported; convert it to PEM)"))
     );
 }
 
@@ -635,7 +637,7 @@ async fn test_store_storage_strategy_rejects_base64_der_material() {
         .expect_err("base64 DER is outside the supported input contract");
 
     assert!(
-        matches!(error, CertError::Validation(message) if message == "certificate material must be PEM text")
+        matches!(error, CertError::Validation(message) if message.to_string() == "certificate material must be PEM text")
     );
 }
 

@@ -1028,15 +1028,18 @@ mod redis_tests {
         impl CertificateProvider for TestCertProvider {
             async fn signing_material(
                 &self,
-            ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
-                Ok(crate::domain::ports::SigningMaterial::new(
-                    None,
-                    std::sync::Arc::new(
-                        crate::utils::crypto::SigningKey::generate(
-                            crate::domain::models::token::SigningAlgorithm::Es256,
-                        )
-                        .expect("generate test signing key"),
-                    ),
+            ) -> Result<std::sync::Arc<crate::domain::ports::SigningMaterial>, StatusListError>
+            {
+                Ok(std::sync::Arc::new(
+                    crate::domain::ports::SigningMaterial::new(
+                        None,
+                        std::sync::Arc::new(
+                            crate::utils::crypto::SigningKey::generate(
+                                crate::domain::models::token::SigningAlgorithm::Es256,
+                            )
+                            .expect("generate test signing key"),
+                        ),
+                    )?,
                 ))
             }
         }
@@ -1133,15 +1136,18 @@ mod redis_tests {
         impl CertificateProvider for TestCertProvider {
             async fn signing_material(
                 &self,
-            ) -> Result<crate::domain::ports::SigningMaterial, StatusListError> {
-                Ok(crate::domain::ports::SigningMaterial::new(
-                    None,
-                    std::sync::Arc::new(
-                        crate::utils::crypto::SigningKey::generate(
-                            crate::domain::models::token::SigningAlgorithm::Es256,
-                        )
-                        .expect("generate test signing key"),
-                    ),
+            ) -> Result<std::sync::Arc<crate::domain::ports::SigningMaterial>, StatusListError>
+            {
+                Ok(std::sync::Arc::new(
+                    crate::domain::ports::SigningMaterial::new(
+                        None,
+                        std::sync::Arc::new(
+                            crate::utils::crypto::SigningKey::generate(
+                                crate::domain::models::token::SigningAlgorithm::Es256,
+                            )
+                            .expect("generate test signing key"),
+                        ),
+                    )?,
                 ))
             }
         }

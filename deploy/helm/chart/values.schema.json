@@ -234,7 +234,39 @@
         "env": {
           "type": "object",
           "title": "Application environment variables",
-          "description": "Environment for the status-list-server container. APP_DATABASE__BACKEND selects the backend (postgres | mysql). APP_DATABASE__HOST/PORT/USERNAME/NAME default to the active backend's values when omitted. Do NOT set APP_DATABASE__URL or APP_DATABASE__PASSWORD here; the chart rejects them and delivers the password via APP_DATABASE__PASSWORD_FILE / the fallback Secret.",
+          "description": "Environment for the status-list-server container. APP_DATABASE__BACKEND selects the backend (postgres | mysql). APP_DATABASE__HOST/PORT/USERNAME/NAME default to the active backend's values when omitted. Do NOT set APP_DATABASE__URL or APP_DATABASE__PASSWORD here; the chart rejects them and delivers the password via APP_DATABASE__PASSWORD_FILE / the fallback Secret. The status-list token lifetime (APP_STATUS_LIST__TOKEN_EXP_SECS / APP_STATUS_LIST__TOKEN_TTL_SECS) must be positive (>= 1) and ttl strictly less than exp; the application rejects violations at startup.",
+          "properties": {
+            "APP_STATUS_LIST__TOKEN_EXP_SECS": {
+              "title": "Token exp (seconds)",
+              "description": "Seconds added to iat to derive the token exp claim. Must be a positive number (>= 1) at or below the one-year ceiling (31536000); the application rejects larger values as effectively-never-expiring. Values below 1 are rejected here.",
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31536000
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              ]
+            },
+            "APP_STATUS_LIST__TOKEN_TTL_SECS": {
+              "title": "Token ttl (seconds)",
+              "description": "Cache-Control max-age / token ttl claim in seconds. The spec requires ttl to be a positive number (>= 1) and strictly less than exp. Values below 1 are rejected here.",
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31536000
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              ]
+            }
+          },
           "additionalProperties": { "type": "string" }
         },
         "aws": {
