@@ -27,6 +27,7 @@ use super::utils::{
     },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{content_hash, generate_historical_etag, generate_token_etag},
+    negotiation::{AcceptType, client_accepts_gzip, negotiate_accept},
     token::build_status_list_token,
     token_cache::signer_fingerprint,
 };
@@ -96,35 +97,39 @@ async fn get_status_list_at(
             ));
         }
     };
-    let accept = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok());
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
-    let accept_type = match accept {
-        None => ACCEPT_STATUS_LISTS_HEADER_JWT.to_string(),
-        Some(accept)
-            if accept == ACCEPT_STATUS_LISTS_HEADER_JWT
-                || accept == ACCEPT_STATUS_LISTS_HEADER_CWT =>
-        {
-            accept.to_string()
-        }
-        Some(_) => {
+    // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so read
+    // every line and negotiate the whole set together.
+    let accept_fields: Vec<&str> = headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    let accept_type = match negotiate_accept(accept_fields) {
+        Some(ty) => ty,
+        None => {
+            // Advertise that the outcome depends on `Accept`. The 406 is
+            // `no-store` (set by `ApiError`), so a shared cache never stores it
+            // either way; `Vary` just reflects RFC 9110 §12.5.5's SHOULD.
             return Err(ApiError::new(
                 StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
-                Some("Invalid accept header".into()),
+                Some(format!(
+                    "No acceptable media type. Supported: {ACCEPT_STATUS_LISTS_HEADER_JWT}, \
+                     {ACCEPT_STATUS_LISTS_HEADER_CWT}"
+                )),
+            )
+            .with_header(
+                header::VARY,
+                HeaderValue::from_static("Accept, Accept-Encoding"),
             ));
         }
     };
 
     if let Some(time) = query.time {
-        return handle_historical_request(
-            &list_id,
-            time,
-            &accept_type,
-            &state,
-            client_accepts_gzip,
-        )
-        .await;
+        return handle_historical_request(&list_id, time, accept_type, &state, client_accepts_gzip)
+            .await;
     }
 
     let if_none_match = headers
@@ -153,7 +158,7 @@ async fn get_status_list_at(
     // another key's cache entry.
     let (key, signing_material) = build_token_cache_key(
         &state,
-        &accept_type,
+        accept_type,
         &status_record,
         &list_id,
         window_start,
@@ -195,7 +200,7 @@ async fn get_status_list_at(
                 .add(1, &[KeyValue::new("outcome", "modified")]);
             let (token_bytes, token_encoding) = get_or_build_live_token(
                 &state,
-                &accept_type,
+                accept_type,
                 &status_record,
                 &key,
                 &signing_material,
@@ -206,7 +211,37 @@ async fn get_status_list_at(
             Ok(build_ok_response(
                 token_bytes,
                 token_encoding,
-                &accept_type,
+                accept_type,
+                &current_etag,
+                &last_modified,
+                &cache_control,
+            ))
+        }
+        ConditionalResponse::ExpiredToken => {
+            // The list is unchanged but the client's cached token has reached its
+            // `exp`: a 304 would hand the relying party a body-less, expired,
+            // unusable token (RFC 9110 §8.8.1). Track this separately from a true
+            // content change so operators can detect a config regression that
+            // silently turns every conditional GET into a full re-sign. The
+            // window has rolled over, so the cache key misses and fresh bytes are
+            // minted here exactly as on a content change.
+            revalidation_metrics()
+                .total
+                .add(1, &[KeyValue::new("outcome", "expired_token")]);
+            let (token_bytes, token_encoding) = get_or_build_live_token(
+                &state,
+                accept_type,
+                &status_record,
+                &key,
+                &signing_material,
+                now,
+                client_accepts_gzip,
+            )
+            .await?;
+            Ok(build_ok_response(
+                token_bytes,
+                token_encoding,
+                accept_type,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -226,18 +261,17 @@ async fn get_status_list_at(
 /// ETag) even before any token is built.
 async fn build_token_cache_key(
     state: &AppState,
-    accept_type: &str,
+    accept_type: AcceptType,
     status_record: &StatusListRecord,
     list_id: &str,
     window_start: i64,
     client_accepts_gzip: bool,
 ) -> Result<(TokenCacheKey, Arc<SigningMaterial>), ApiError> {
-    let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+    let format = match accept_type {
+        AcceptType::Cwt => "cwt",
+        AcceptType::Jwt => "jwt",
     };
-    let encoding = if client_accepts_gzip && accept_type == ACCEPT_STATUS_LISTS_HEADER_JWT {
+    let encoding = if client_accepts_gzip && accept_type == AcceptType::Jwt {
         TokenEncoding::Gzip
     } else {
         TokenEncoding::Identity
@@ -294,7 +328,7 @@ async fn build_token_cache_key(
 /// by the signer the key claims.
 async fn get_or_build_live_token(
     state: &AppState,
-    accept_type: &str,
+    accept_type: AcceptType,
     status_record: &StatusListRecord,
     key: &TokenCacheKey,
     signing_material: &Arc<SigningMaterial>,
@@ -342,7 +376,7 @@ async fn get_or_build_live_token(
 fn build_ok_response(
     token_bytes: Bytes,
     token_encoding: Option<&'static str>,
-    accept_type: &str,
+    accept_type: AcceptType,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
@@ -352,7 +386,7 @@ fn build_ok_response(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type).unwrap(),
+        HeaderValue::from_static(accept_type.media_type()),
     );
     h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
     h.insert(
@@ -384,7 +418,7 @@ fn build_ok_response(
 async fn handle_historical_request(
     list_id: &str,
     time: i64,
-    accept_type: &str,
+    accept_type: AcceptType,
     state: &AppState,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
@@ -404,12 +438,11 @@ async fn handle_historical_request(
     // The historical ETag is weak and includes format + encoding so JWT vs CWT
     // and gzip vs identity responses (distinct bytes, re-signed per request)
     // never share a validator.
-    let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+    let format = match accept_type {
+        AcceptType::Cwt => "cwt",
+        AcceptType::Jwt => "jwt",
     };
-    let encoding = if client_accepts_gzip && accept_type == ACCEPT_STATUS_LISTS_HEADER_JWT {
+    let encoding = if client_accepts_gzip && accept_type == AcceptType::Jwt {
         TokenEncoding::Gzip
     } else {
         TokenEncoding::Identity
@@ -452,7 +485,7 @@ async fn handle_historical_request(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type).unwrap(),
+        HeaderValue::from_static(accept_type.media_type()),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     h.insert(
@@ -488,40 +521,6 @@ async fn fetch_status_record(
         .get_status_list(list_id)
         .await
         .map_err(Into::into)
-}
-
-fn client_accepts_gzip(headers: &HeaderMap) -> bool {
-    let mut entries: Vec<(&str, Option<f32>)> = Vec::new();
-    for val in headers.get_all(header::ACCEPT_ENCODING) {
-        let Ok(val) = val.to_str() else { continue };
-        for s in val.split(',') {
-            let s = s.trim();
-            if s.is_empty() {
-                continue;
-            }
-            let (coding, params) = s
-                .split_once(';')
-                .map(|(c, p)| (c.trim(), p.trim()))
-                .unwrap_or((s, ""));
-            let q = params
-                .split(';')
-                .find_map(|p| p.trim().strip_prefix("q=").map(|q| q.trim()))
-                .and_then(|q| q.parse::<f32>().ok());
-            entries.push((coding, q));
-        }
-    }
-
-    match entries
-        .iter()
-        .find(|(c, _)| c.eq_ignore_ascii_case("gzip"))
-        .map(|(_, q)| *q)
-    {
-        Some(None) => true,
-        Some(Some(q)) => q > 0.0,
-        None => entries.iter().any(|(c, q)| {
-            c.eq_ignore_ascii_case("*") && (q.is_none() || q.map(|v| v > 0.0).unwrap_or(false))
-        }),
-    }
 }
 
 fn build_cache_control(token_ttl_secs: u64) -> String {
@@ -700,76 +699,6 @@ mod tests {
         key.verify(&signing_input, &signature).is_ok()
     }
 
-    #[test]
-    fn test_accepts_gzip_simple() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_gzip_with_qvalue() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0.8".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_gzip_q0() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_gzip_q0_with_wildcard_accept() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;q=0, *".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_via_wildcard_only() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_accepts_via_wildcard_q1() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*;q=1".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_wildcard_q0() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_rejects_when_header_absent() {
-        let h = HeaderMap::new();
-        assert!(!client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_multiple_accept_encoding_lines() {
-        let mut h = HeaderMap::new();
-        h.append(header::ACCEPT_ENCODING, "deflate".parse().unwrap());
-        h.append(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
-    fn test_case_insensitive_gzip() {
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "GZIP".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
     #[tokio::test]
     async fn test_get_status_list_not_found() {
         let app_state = test_app_state(None).await;
@@ -787,20 +716,157 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_status_list_unsupported_accept_header() {
-        let app_state = test_app_state(None).await;
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+    async fn test_get_status_list_negotiates_accept_table() {
+        // (Accept header, expected Content-Type) — the negotiation outcome for
+        // an existing list, exercised end-to-end through the handler.
+        let cases: Vec<(&str, &str)> = vec![
+            // Exact match.
+            (
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ),
+            (
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+            ),
+            // Wildcards serve JWT.
+            ("*/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            ("application/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            // Case-insensitive type/subtype.
+            ("Application/StatusList+JWT", ACCEPT_STATUS_LISTS_HEADER_JWT),
+            ("APPLICATION/STATUSLIST+CWT", ACCEPT_STATUS_LISTS_HEADER_CWT),
+            // Highest acceptable q wins.
+            (
+                "application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8",
+                ACCEPT_STATUS_LISTS_HEADER_CWT,
+            ),
+            (
+                "application/statuslist+jwt;q=0.8, application/statuslist+cwt;q=0.5",
+                ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ),
+        ];
 
-        let result = get_status_list(
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        for (accept, expected_content_type) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, accept.parse().unwrap());
+            let response = get_status_list(
+                State(app_state.clone()),
+                Path(token_id.clone()),
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+            )
+            .await
+            .unwrap()
+            .into_response();
+
+            assert_eq!(response.status(), StatusCode::OK, "Accept: {accept:?}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                expected_content_type,
+                "Accept: {accept:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_multiline_accept_header() {
+        // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so
+        // the handler must read every line and negotiate the whole set
+        // together, not just the first one (all `HeaderMap::get` returns).
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.append(header::ACCEPT, "text/html".parse().unwrap());
+        headers.append(
+            header::ACCEPT,
+            "application/statuslist+cwt".parse().unwrap(),
+        );
+
+        let response = get_status_list(
             State(app_state),
-            Path(uuid::Uuid::new_v4().to_string()),
+            Path(token_id),
             Ok(Query(StatusListQuery { time: None })),
             headers,
         )
-        .await;
+        .await
+        .unwrap()
+        .into_response();
 
-        assert!(result.is_err());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_406_table() {
+        // (Accept header) — every header with no acceptable supported type must
+        // yield a 406 advertising `Vary` and listing both supported types.
+        let cases: Vec<&str> = vec![
+            "text/html",
+            "application/json",
+            "application/statuslist+jwt;q=0, application/statuslist+cwt;q=0",
+            "*/*;q=0",
+        ];
+
+        for accept in cases {
+            let app_state = test_app_state(None).await;
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT, accept.parse().unwrap());
+
+            let response = get_status_list(
+                State(app_state),
+                Path(uuid::Uuid::new_v4().to_string()),
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+            )
+            .await
+            .unwrap_err()
+            .into_response();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_ACCEPTABLE,
+                "Accept: {accept:?}"
+            );
+            // The 406 advertises Vary (RFC 9110 §12.5.5). It is `no-store`, so
+            // caches never store it either way.
+            assert_eq!(
+                response.headers().get(header::VARY).unwrap(),
+                "Accept, Accept-Encoding"
+            );
+            // The 406 body must list both supported media types (scope requirement).
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                body.contains(ACCEPT_STATUS_LISTS_HEADER_JWT)
+                    && body.contains(ACCEPT_STATUS_LISTS_HEADER_CWT),
+                "406 body must list both supported types, got: {body}"
+            );
+        }
     }
 
     #[tokio::test]

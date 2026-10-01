@@ -16,9 +16,10 @@ use crate::domain::models::token::SigningAlgorithm;
 use crate::domain::ports::{SigningMaterial, TokenSigner};
 
 use super::constants::{
-    ACCEPT_STATUS_LISTS_HEADER_CWT, CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST,
-    STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE,
+    STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
+use super::negotiation::AcceptType;
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
 const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
@@ -50,32 +51,11 @@ fn token_metrics() -> TokenMetrics {
     })
 }
 
-/// Token encoding formats.
-///
-/// Matching on the enum (rather than raw strings) makes an unknown or mistyped
-/// format a compile error instead of silently falling through to JWT.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TokenFormat {
-    Jwt,
-    Cwt,
-}
-
-impl TokenFormat {
-    /// Classify the client's `Accept` header.
-    fn from_accept(accept: &str) -> Self {
-        if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
-            TokenFormat::Cwt
-        } else {
-            TokenFormat::Jwt
-        }
-    }
-
-    /// Bounded value for the `format` metric dimension.
-    fn as_label(self) -> &'static str {
-        match self {
-            TokenFormat::Jwt => "jwt",
-            TokenFormat::Cwt => "cwt",
-        }
+/// Classify the client's negotiated format into the bounded `format` label value.
+fn token_format(accept: AcceptType) -> &'static str {
+    match accept {
+        AcceptType::Cwt => "cwt",
+        AcceptType::Jwt => "jwt",
     }
 }
 
@@ -106,7 +86,7 @@ struct JwtHeader<'a> {
 /// Build a signed status-list token (JWT or CWT) for the given record.
 ///
 /// # Parameters
-/// * `accept` – the `Accept` header value (e.g. `application/statuslist+jwt`)
+/// * `accept` – the negotiated format (`AcceptType::Jwt` or `AcceptType::Cwt`)
 /// * `status_record` – the status list data to encode
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
@@ -116,18 +96,17 @@ struct JwtHeader<'a> {
 ///   a mismatched fingerprint
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
-    accept: &str,
+    accept: AcceptType,
     status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
     signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let format = TokenFormat::from_accept(accept);
-    let attributes = [KeyValue::new("format", format.as_label())];
+    let attributes = [KeyValue::new("format", token_format(accept))];
     token_metrics().attempts.add(1, &attributes);
     match build_status_list_token_inner(
         state,
-        format,
+        accept,
         status_record,
         validity_window,
         client_accepts_gzip,
@@ -145,7 +124,7 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    format: TokenFormat,
+    accept: AcceptType,
     status_record: StatusListRecord,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
@@ -161,11 +140,11 @@ async fn build_status_list_token_inner(
         }
     };
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && format == TokenFormat::Jwt;
+    let should_gzip = client_accepts_gzip && accept == AcceptType::Jwt;
 
     tokio::task::spawn_blocking(move || {
-        let token_bytes = match format {
-            TokenFormat::Cwt => {
+        let token_bytes = match accept {
+            AcceptType::Cwt => {
                 let x5chain = x5chain_from_der(
                     signing_material
                         .certificate_der()
@@ -181,7 +160,7 @@ async fn build_status_list_token_inner(
                     token_ttl_secs,
                 )?
             }
-            TokenFormat::Jwt => {
+            AcceptType::Jwt => {
                 let cert_chain = signing_material
                     .certificate_chain()
                     .ok_or_else(missing_chain_error)?;
@@ -557,7 +536,7 @@ mod tests {
 
         let err = build_status_list_token(
             &state,
-            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            AcceptType::Jwt,
             sample_record(),
             None,
             false,
@@ -620,7 +599,7 @@ mod tests {
 
         let err = build_status_list_token(
             &state,
-            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            AcceptType::Jwt,
             sample_record(),
             None,
             false,
@@ -652,7 +631,7 @@ mod tests {
 
         let err = build_status_list_token(
             &state,
-            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
+            AcceptType::Jwt,
             sample_record(),
             None,
             false,
@@ -685,10 +664,7 @@ mod tests {
             .await
             .expect("material");
 
-        for accept in [
-            ACCEPT_STATUS_LISTS_HEADER_CWT,
-            crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT,
-        ] {
+        for accept in [AcceptType::Cwt, AcceptType::Jwt] {
             let result = build_status_list_token(
                 &state,
                 accept,
@@ -700,7 +676,7 @@ mod tests {
             .await;
             assert!(
                 matches!(result, Err(StatusListError::Backend(_))),
-                "missing chain must surface as a 500 (Backend) for accept `{accept}`, got {result:?}"
+                "missing chain must surface as a 500 (Backend) for accept `{accept:?}`, got {result:?}"
             );
         }
     }

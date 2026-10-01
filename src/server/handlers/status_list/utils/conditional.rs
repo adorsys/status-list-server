@@ -9,6 +9,11 @@ const IMF_FIXDATE: &[time::format_description::BorrowedFormatItem<'static>] = fo
 pub(crate) enum ConditionalResponse {
     NotModified,
     Modified,
+    /// The list is unchanged but the client's cached token has reached (or
+    /// never had) enough remaining validity to certify a `304`: the server must
+    /// re-sign and return a fresh `200` instead of a body-less, expired, unusable
+    /// token.
+    ExpiredToken,
 }
 
 /// Token lifetime policy that shapes the freshness gates below.
@@ -138,7 +143,7 @@ pub(crate) fn evaluate_if_modified_since(
     let earliest_iat = token_window(updated_at, validity).0;
     let guaranteed_valid_until = earliest_iat.saturating_add(exp_secs);
     if guaranteed_valid_until.saturating_sub(now) <= ttl_secs {
-        return ConditionalResponse::Modified;
+        return ConditionalResponse::ExpiredToken;
     }
 
     if updated_at <= client_timestamp {
@@ -169,7 +174,7 @@ pub(crate) fn evaluate_conditional_request(
         let exp = iat.saturating_add(i64::try_from(validity.exp_secs).unwrap_or(i64::MAX));
         let ttl_secs = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
         if exp.saturating_sub(now) <= ttl_secs {
-            return ConditionalResponse::Modified;
+            return ConditionalResponse::ExpiredToken;
         }
         return if evaluate_if_none_match(if_none_match, current_etag)
             == ConditionalResponse::NotModified
@@ -406,7 +411,8 @@ mod tests {
         // Same content (updated_at <= client_time) but `now` has passed the
         // earliest possible expiry of a token anchored to `updated_at`'s window
         // (window_start(updated_at) + exp_secs = 999900 + 900 = 1000800), so the
-        // cached token is expired and a 304 must not be returned.
+        // cached token is expired and the server must not answer 304 — it must
+        // signal an expired-token re-sign instead.
         let updated_at = 1000000;
         let if_modified_since = format_http_date(updated_at);
         // Earliest expiry is 1000800; every probe below is at/past it.
@@ -417,7 +423,7 @@ mod tests {
                 1000800,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
         assert_eq!(
             evaluate_if_modified_since(
@@ -426,7 +432,7 @@ mod tests {
                 updated_at + 901,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
         assert_eq!(
             evaluate_if_modified_since(
@@ -435,7 +441,7 @@ mod tests {
                 updated_at + 900,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
         // With exactly `ttl_secs` of runway left there is no usable margin (<
         // token_ttl_secs), so we still must not certify it with a 304.
@@ -446,7 +452,7 @@ mod tests {
                 1000500,
                 TokenValidity::new(900, 300)
             ),
-            ConditionalResponse::Modified
+            ConditionalResponse::ExpiredToken
         );
     }
 
@@ -548,8 +554,8 @@ mod tests {
             );
             assert_eq!(
                 result,
-                ConditionalResponse::Modified,
-                "(exp={exp}, ttl={ttl}) must not certify a 304"
+                ConditionalResponse::ExpiredToken,
+                "(exp={exp}, ttl={ttl}) must signal an expired-token re-sign, never a 304"
             );
         }
     }
@@ -587,8 +593,8 @@ mod tests {
             TokenValidity::new(900, 300),
         );
         // Earliest token expiry (window-anchored) is far in the past at this
-        // `now`, so the IMS revalidation must force a fresh 200.
-        assert_eq!(result, ConditionalResponse::Modified);
+        // `now`, so the IMS revalidation must signal an expired-token re-sign.
+        assert_eq!(result, ConditionalResponse::ExpiredToken);
     }
 
     #[test]
