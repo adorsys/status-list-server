@@ -34,12 +34,13 @@ Alertmanager reads the platform and credentials from environment variables. It
 **never** reads a webhook URL from a committed file.
 
 Create a local `.env` (already git-ignored) next to `docker-compose.yml`, or
-export the variables in your shell before `docker compose up`:
+export the variables in your shell before starting the Compose profiles:
 
 ```bash
 # .env  (do NOT commit this)
 ALERTMANAGER_PLATFORM=discord
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<ID>/<TOKEN>
+GRAFANA_ADMIN_PASSWORD=choose-a-local-password
 ```
 
 > The Compose `alertmanager` service passes both variables through. When
@@ -52,13 +53,17 @@ If you prefer not to use a `.env`, export them instead:
 ```bash
 export ALERTMANAGER_PLATFORM=discord
 export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<ID>/<TOKEN>
+export GRAFANA_ADMIN_PASSWORD='choose-a-local-password'
 ```
 
 ## 2. Start the observability stack
 
 ```bash
 # from the repository root
-docker compose up -d --build
+FEATURES=postgres,aws,redis APP_DATABASE__BACKEND=postgres \
+  APP_SERVER__CERT__PROVISIONING_STRATEGY=acme APP_TELEMETRY__ENABLED=true \
+  docker compose --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
 ```
 
 The stack brings up (among others):

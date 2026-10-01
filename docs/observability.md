@@ -90,10 +90,21 @@ When `statuslist.networkPolicy.enabled=true` is set:
 
 ### Running the Observability Stack
 
-In local development, Docker Compose provisions an OpenTelemetry Collector, Prometheus, and Jaeger instance alongside the server. The application runs in `development` mode (human-readable stdout logs) with `APP_TELEMETRY__ENABLED=true` exporting OTLP traces to Jaeger:
+In local development, the server starts by default. The `observability`
+profile adds the OpenTelemetry Collector, Prometheus, Jaeger, Alertmanager,
+Grafana, and Pushgateway. Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first:
 
 ```bash
-docker compose up -d
+docker compose --profile observability up -d
+```
+
+To add PostgreSQL, ACME, and AWS services and enable their matching app features:
+
+```bash
+FEATURES=postgres,aws,redis APP_DATABASE__BACKEND=postgres \
+  APP_SERVER__CERT__PROVISIONING_STRATEGY=acme APP_TELEMETRY__ENABLED=true \
+  docker compose --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
 ```
 
 Services provisioned for observability:
