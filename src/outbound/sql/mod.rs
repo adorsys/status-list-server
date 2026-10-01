@@ -23,7 +23,10 @@ use crate::domain::models::credential::{Credential, CredentialError, Issuer, Pub
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
-use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
+use crate::domain::ports::{
+    AllocateStatusListIndices, CreateStatusList, CredentialRepo, StatusListRepo,
+    StatusListSnapshotRepo,
+};
 
 /// SQL relational adapter implementing `StatusListRepo`.
 #[derive(Clone)]
@@ -97,13 +100,14 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert(
-        &self,
-        record: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
         self.store
-            .insert_one(record.into(), max_lists_per_issuer)
+            .create_status_list(
+                command.record.into(),
+                command.initial_snapshot.map(Into::into),
+                &command.initial_allocations,
+                command.max_lists_per_issuer,
+            )
             .await
             .map_err(Into::into)
     }
@@ -133,18 +137,6 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert_with_snapshot(
-        &self,
-        record: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        self.store
-            .insert_one_with_snapshot(record.into(), snapshot.into(), max_lists_per_issuer)
-            .await
-            .map_err(Into::into)
-    }
-
     async fn list_uris(
         &self,
         after: Option<&str>,
@@ -155,6 +147,27 @@ impl StatusListRepo for SqlStatusListRepo {
             .find_status_list_uris_after(after, (limit as u64).saturating_add(1))
             .await?;
         Ok(StatusListUriPage::from_rows(rows, limit))
+    }
+
+    async fn allocate_indices(
+        &self,
+        command: AllocateStatusListIndices,
+    ) -> Result<Vec<i32>, StatusListError> {
+        self.store
+            .allocate_indices(&command.list_id, &command.issuer.0, command.count)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError> {
+        self.store
+            .first_unallocated_index(list_id, indices)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -196,6 +209,8 @@ impl From<models::StatusListRecord> for StatusListRecord {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
         }
@@ -211,6 +226,8 @@ impl From<StatusListRecord> for models::StatusListRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
         }
@@ -226,6 +243,8 @@ impl From<models::StatusListHistoryRecord> for StatusListSnapshot {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
@@ -243,6 +262,8 @@ impl From<StatusListSnapshot> for models::StatusListHistoryRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
@@ -269,6 +290,10 @@ impl From<RepositoryError> for StatusListError {
             RepositoryError::QuotaExceeded { count, max } => {
                 StatusListError::QuotaExceeded { count, max }
             }
+            RepositoryError::NotFound => StatusListError::NotFound,
+            RepositoryError::IssuerMismatch => StatusListError::IssuerMismatch,
+            RepositoryError::ListNotFixedSize => StatusListError::ListNotFixedSize,
+            RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,
             other => StatusListError::Backend(Box::new(other)),
         }
     }

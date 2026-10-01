@@ -114,14 +114,20 @@ impl From<StatusEntry> for crate::domain::models::status_list::StatusEntry {
     fn from(entry: StatusEntry) -> Self {
         Self {
             index: entry.index,
-            status: match entry.status {
-                Status::VALID => crate::domain::models::status_list::Status::Valid,
-                Status::INVALID => crate::domain::models::status_list::Status::Invalid,
-                Status::SUSPENDED => crate::domain::models::status_list::Status::Suspended,
-                Status::ApplicationSpecific(value) => {
-                    crate::domain::models::status_list::Status::ApplicationSpecific(value)
-                }
-            },
+            status: entry.status.into(),
+        }
+    }
+}
+
+impl From<Status> for crate::domain::models::status_list::Status {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::VALID => crate::domain::models::status_list::Status::Valid,
+            Status::INVALID => crate::domain::models::status_list::Status::Invalid,
+            Status::SUSPENDED => crate::domain::models::status_list::Status::Suspended,
+            Status::ApplicationSpecific(value) => {
+                crate::domain::models::status_list::Status::ApplicationSpecific(value)
+            }
         }
     }
 }

@@ -240,6 +240,30 @@ impl IntoApiError for StatusListError {
                 "duplicate_index",
                 format!("duplicate status index {index} in statuses array"),
             ),
+            StatusListError::IndexOutOfRange { index, size } => ApiError::bad_request(
+                "index_out_of_range",
+                format!("status index {index} is outside the fixed status list size {size}"),
+            ),
+            StatusListError::InvalidSize { size, max } => ApiError::bad_request(
+                "invalid_size",
+                format!("status list size {size} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::InvalidAllocationCount { count, max } => ApiError::bad_request(
+                "invalid_count",
+                format!("allocation count {count} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::IndexNotAllocated { index } => ApiError::conflict(
+                "index_not_allocated",
+                format!("status index {index} has not been allocated"),
+            ),
+            StatusListError::ListNotFixedSize => ApiError::conflict(
+                "list_not_fixed_size",
+                "status list must be fixed-size to allocate indices",
+            ),
+            StatusListError::AllocationExhausted => ApiError::conflict(
+                "allocation_exhausted",
+                "status list does not have enough unallocated indices",
+            ),
             // Not 429: waiting never frees a slot, so no retry hint. Not 403,
             // which this API reserves for ownership failures.
             StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
@@ -360,6 +384,16 @@ mod tests {
                 StatusListError::DuplicateIndex { index: 3 },
                 StatusCode::BAD_REQUEST,
                 "duplicate_index",
+            ),
+            (
+                StatusListError::IndexOutOfRange { index: 3, size: 3 },
+                StatusCode::BAD_REQUEST,
+                "index_out_of_range",
+            ),
+            (
+                StatusListError::AllocationExhausted,
+                StatusCode::CONFLICT,
+                "allocation_exhausted",
             ),
             (
                 StatusListError::QuotaExceeded { count: 2, max: 2 },
