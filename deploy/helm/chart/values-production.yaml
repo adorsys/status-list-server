@@ -45,10 +45,26 @@ prometheusRule:
   labels:
     release: kube-prometheus-stack
 
+# Auto-provision the SLO dashboard in the shared Grafana via a labelled ConfigMap
+# (grafana_dashboard: "1") that the central Grafana sidecar discovers.
+grafanaDashboard:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+    grafana_dashboard: "1"
+
 # OpenTelemetry Collector Production Exporter Setup (Guidance):
 # In production, ensure opentelemetry-collector.config exporters are configured
-# to forward to your enterprise backends (e.g. Tempo for traces, Prometheus Remote Write, Loki for logs)
+# to forward to your enterprise backends (e.g. Tempo for traces, Loki for logs)
 # rather than printing debug output to stdout.
+#
+# Metrics: the /metrics endpoint discovered by the ServiceMonitor is the
+# authoritative Prometheus path for SLI metrics (see helm/chart/values.yaml
+# cluster note #4). Do NOT remote-write OTLP metrics back into this same shared
+# Prometheus -- the app exports the same instruments through both its pull reader
+# and its OTLP reader, so that would ingest identical series twice. If you export
+# OTLP metrics, send them to a different backend. Traces and logs are independent
+# and may flow through the configured OTLP exporters above.
 
 # Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
 # Enable this block and set alerting.platform + credentials to receive SLO alert

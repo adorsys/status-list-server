@@ -372,10 +372,16 @@ For local development with a local cluster, use [`chart/values-local.yaml`](char
 
 ## Alerting
 
-The chart ships an `AlertmanagerConfig` CRD (`monitoring.coreos.com/v1beta1`) that wires
+The chart ships an `AlertmanagerConfig` CRD (`monitoring.coreos.com/v1alpha1`) that wires
 SLO alerts into **kube-prometheus-stack**'s Alertmanager. This is the Kubernetes equivalent
 of the Docker Compose `ALERTMANAGER_PLATFORM` + `generate-alertmanager-config.sh` setup — the
 same six platforms are supported and no webhook URL is committed to source control.
+
+> **API version:** the pinned kube-prometheus-stack 91.4.0 AlertmanagerConfig CRD
+> (prometheus-operator v0.94.0) serves only `monitoring.coreos.com/v1alpha1`. The rendered
+> CR (`templates/alertmanagerconfig.yaml`) stays on `v1alpha1`; do **not** bump it to
+> `v1beta1` unless the operator CRD is upgraded to a version that serves it, otherwise this
+> optional route is rejected by the API server on a fresh cluster.
 
 Enable it in `values.yaml` (or `values-production.yaml`):
 
