@@ -136,24 +136,33 @@ impl StatusListRepo for MemoryStatusLists {
             });
         }
 
+        let list_id = command.record.list_id.clone();
         let mut allocations = self.allocations.write().await;
-        let allocated = allocations
-            .entry(command.record.list_id.clone())
-            .or_default();
         let mut inserted = Vec::with_capacity(command.initial_allocations.len());
-        for index in &command.initial_allocations {
-            if !allocated.insert(*index) {
-                for inserted_index in inserted {
-                    allocated.remove(&inserted_index);
+        if !command.initial_allocations.is_empty() {
+            let allocated = allocations.entry(list_id.clone()).or_default();
+            for index in &command.initial_allocations {
+                if !allocated.insert(*index) {
+                    for inserted_index in inserted {
+                        allocated.remove(&inserted_index);
+                    }
+                    if allocated.is_empty() {
+                        allocations.remove(&list_id);
+                    }
+                    return Err(StatusListError::DuplicateIndex { index: *index });
                 }
-                return Err(StatusListError::DuplicateIndex { index: *index });
+                inserted.push(*index);
             }
-            inserted.push(*index);
         }
 
         if let Err(error) = values.try_insert(command.record, command.max_lists_per_issuer) {
-            for inserted_index in inserted {
-                allocated.remove(&inserted_index);
+            if let Some(allocated) = allocations.get_mut(&list_id) {
+                for inserted_index in inserted {
+                    allocated.remove(&inserted_index);
+                }
+                if allocated.is_empty() {
+                    allocations.remove(&list_id);
+                }
             }
             return Err(error);
         }
@@ -481,6 +490,31 @@ mod tests {
 
         let fetched = service.get_status_list("id").await.unwrap();
         assert_eq!(fetched.list_id, "id");
+    }
+
+    #[tokio::test]
+    async fn publish_caller_managed_list_does_not_record_initial_allocations() {
+        let repo = MemoryStatusLists::default();
+        let allocations = repo.allocations.clone();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        publish_for_test(
+            &service,
+            "caller-managed",
+            "issuer",
+            "https://example/caller-managed",
+            vec![StatusEntry {
+                index: 3,
+                status: Status::Invalid,
+            }],
+        )
+        .await;
+
+        assert!(
+            !allocations.read().await.contains_key("caller-managed"),
+            "caller-managed publish must not create unused allocation rows"
+        );
     }
 
     #[tokio::test]

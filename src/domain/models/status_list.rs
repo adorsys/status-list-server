@@ -164,6 +164,12 @@ impl StatusList {
     ) -> Result<Self, StatusListError> {
         validate_unique_indices(&status_updates)?;
         if let Some(size) = size {
+            if size == 0 {
+                return Err(StatusListError::InvalidSize {
+                    size,
+                    max: u32::MAX,
+                });
+            }
             validate_within_size(&status_updates, size)?;
         }
 
@@ -888,6 +894,13 @@ mod tests {
         assert_eq!(result.size, Some(8));
         assert_eq!(result.default_status, Some(Status::Invalid));
         assert_eq!(decompress(&result.lst), vec![0b1111_1111]);
+    }
+
+    #[test]
+    fn create_with_options_rejects_zero_size() {
+        let err = StatusList::create_with_options(vec![], Some(0), Status::Valid).unwrap_err();
+
+        assert!(matches!(err, StatusListError::InvalidSize { size: 0, .. }));
     }
 
     #[test]

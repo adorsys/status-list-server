@@ -129,11 +129,15 @@ impl Service {
                 policy.max_status_index,
             )?;
         }
-        let initially_allocated = command
-            .statuses
-            .iter()
-            .map(|entry| entry.index)
-            .collect::<Vec<_>>();
+        let initially_allocated = if command.size.is_some() {
+            command
+                .statuses
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let record = StatusListRecord {
             list_id: command.list_id,
