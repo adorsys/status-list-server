@@ -8,7 +8,7 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 * [Helm](https://helm.sh/docs/intro/install/) and [`kubectl`](https://kubernetes.io/docs/tasks/tools/).
 * An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS.
 * Access to the public images at `ghcr.io/adorsys/status-list-server`.
-* [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you enable `externalSecret.enabled=true`. With ESO enabled, the cluster CRDs must serve `external-secrets.io/v1` for `ExternalSecret`, `SecretStore`, and any `ClusterSecretStore` references before installing or upgrading this chart.
+* [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you enable `externalSecret.enabled=true`. With ESO enabled, the chart renders `ExternalSecret` and `SecretStore` resources with `apiVersion: external-secrets.io/v1beta1` to match the API version served by the currently-deployed ESO. A `ClusterSecretStore` referenced through `externalSecret.spec.secretStoreRef` is cluster-scoped and must already exist (and serve the same API group) before installing or upgrading this chart.
 * (Optional) The `AlertmanagerConfig` CRD if you use alert configuration. It is provided by [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) or the [standalone Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator).
 
 ## Choose Your Image Variant
@@ -174,7 +174,7 @@ Replace `<HOSTED_ZONE_ID>`, `<REGION>`, and `<ACCOUNT_ID>` with your values, and
 
 External Secret Operator's `SecretStore` is provider-neutral via `secretStore.provider` (`aws` | `vault` | `gcp` | `azure` | `raw`). The shipped default is `aws`. A `SecretStore` is rendered **only** when `externalSecret.enabled=true` **and** `secretStore.enabled=true` — in the no-ESO fallback mode it is never emitted, so a cluster without ESO CRDs accepts the release.
 
-This chart uses the stable ESO API group/version `external-secrets.io/v1`. Before installing with ESO enabled, verify that the installed CRDs serve `v1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, `clustersecretstores.external-secrets.io`, and any cluster-scoped resources you use. Upgrade ESO and its CRDs as one unit; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
+This chart uses the ESO API group/version `external-secrets.io/v1beta1` for the resources it renders (`ExternalSecret`, `SecretStore`). This matches the API version served by current ESO releases (>= 0.11.0 serves `v1beta1`; newer releases serve both `v1` and `v1beta1`). Before installing with ESO enabled, verify that the installed CRDs serve `v1beta1` for `externalsecrets.external-secrets.io`, `secretstores.external-secrets.io`, and `clustersecretstores.external-secrets.io`. Keep the controller and its CRDs in lockstep; mismatched controller/CRD versions can cause Kubernetes to reject the rendered resources or ESO reconciliation to fail.
 
 ```yaml
 secretStore:
