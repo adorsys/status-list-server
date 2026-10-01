@@ -55,8 +55,8 @@ node deploy/observability/slo/lint-thresholds.mjs
 # drift guard asserts it defines exactly the same rule names as these tested
 # standalone files. See `.github/workflows/CI.yml` -> `prometheus-rules-validation`.
 
-# Full stack
-docker compose up -d   # brings up app + otel-collector + prometheus + grafana
+# Server + observability stack (set GRAFANA_ADMIN_PASSWORD first)
+docker compose --profile observability up -d
 ```
 
 Dashboard generation is documented in `dashboards/README.md`.

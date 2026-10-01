@@ -102,11 +102,21 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 ## Compose Profiles
 
-`docker compose up` starts PostgreSQL by default and builds the container with `postgres,aws,redis` features enabled. Add `--profile redis` to start the Redis status-cache service, and set `APP_CACHE__BACKEND=redis` to use it. To run the MySQL service instead:
+`docker compose up --build` starts the server with in-memory storage. The
+`postgres` and `mysql` profiles select one database engine. Set the matching
+Cargo feature and `APP_DATABASE__BACKEND` to use that database:
 
 ```bash
-FEATURES="mysql,aws" docker compose --profile mysql up --build
+FEATURES=postgres APP_DATABASE__BACKEND=postgres \
+  docker compose --profile postgres up --build
+
+# Put the MySQL host, port, username, password, and database name in .env first.
+FEATURES=mysql APP_DATABASE__BACKEND=mysql \
+  docker compose --profile mysql up --build
 ```
+
+The `redis` profile adds Redis. Set `FEATURES=redis` and
+`APP_CACHE__BACKEND=redis` when the server should use that cache.
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.
 
