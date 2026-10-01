@@ -143,7 +143,6 @@ build_operations_headers() {
       { name: 'Accept', values: 'text/plain' }
     ],
     'GET /api/v1/status-lists/{list_id}': [
-      { name: 'Accept', values: 'application/statuslist+jwt' },
       { name: 'Accept-Encoding', values: 'identity' }
     ]
   }));" "$STATUS_LIST_AUTH_TOKEN"
