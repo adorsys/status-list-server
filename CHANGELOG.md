@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 
 ### Upgrade notes
 
+- Fixed-size status-list metadata is stored inside the status-list document. Do not run this release side by side with older pods: an older pod that updates a fixed-size list can write the document back without `size` and `default_status`, turning that list into a caller-managed list. Complete the rollout before sending fixed-size publish or allocation traffic.
 - `limits.max_lists_per_issuer` is new and enforced. Fresh installs enforce it from the first start. When upgrading an existing SQL database, pods refuse to start until it is enabled: deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`, then, once no pod of the previous release is left, run `status-list-server list-quota recount` and `status-list-server list-quota enable`, and remove the setting. See `docs/troubleshooting.md`, "Upgrading to the list quota".
 
 ### Changed

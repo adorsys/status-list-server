@@ -117,6 +117,7 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
 mod tests {
     use super::*;
     use crate::domain::models::credential::Issuer;
+    use crate::domain::service::PublishStatusListCommand;
     use crate::test_utils::test_app_state;
     use axum::body::to_bytes;
     use axum::response::Response;
@@ -126,18 +127,19 @@ mod tests {
     async fn publish(state: &AppState, issuer: &str) -> String {
         let list_id = uuid::Uuid::new_v4().to_string();
         let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
+        let policy = state.status_list_policy();
         state
             .service
             .publish_status_list(
-                list_id,
-                Issuer(issuer.into()),
-                sub.clone(),
-                vec![],
-                900,
-                100_000,
-                5_000,
-                1_048_576,
-                u64::MAX,
+                PublishStatusListCommand {
+                    list_id,
+                    issuer: Issuer(issuer.into()),
+                    sub: sub.clone(),
+                    statuses: vec![],
+                    size: None,
+                    default_status: None,
+                },
+                &policy,
             )
             .await
             .unwrap();
@@ -357,18 +359,19 @@ mod tests {
         let mut expected = BTreeSet::new();
         for list_id in list_ids {
             let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
+            let policy = state.status_list_policy();
             state
                 .service
                 .publish_status_list(
-                    list_id,
-                    Issuer("issuer1".into()),
-                    sub.clone(),
-                    vec![],
-                    900,
-                    100_000,
-                    5_000,
-                    1_048_576,
-                    u64::MAX,
+                    PublishStatusListCommand {
+                        list_id,
+                        issuer: Issuer("issuer1".into()),
+                        sub: sub.clone(),
+                        statuses: vec![],
+                        size: None,
+                        default_status: None,
+                    },
+                    &policy,
                 )
                 .await
                 .unwrap();
@@ -443,18 +446,19 @@ mod tests {
             publish(&state, "issuer1").await,
         ]);
         let legacy_sub = "https://example.com/api/v1/status-lists/legacy-list".to_string();
+        let policy = state.status_list_policy();
         state
             .service
             .publish_status_list(
-                "legacy-list".to_string(),
-                Issuer("issuer1".into()),
-                legacy_sub.clone(),
-                vec![],
-                900,
-                100_000,
-                5_000,
-                1_048_576,
-                u64::MAX,
+                PublishStatusListCommand {
+                    list_id: "legacy-list".to_string(),
+                    issuer: Issuer("issuer1".into()),
+                    sub: legacy_sub.clone(),
+                    statuses: vec![],
+                    size: None,
+                    default_status: None,
+                },
+                &policy,
             )
             .await
             .unwrap();
