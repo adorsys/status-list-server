@@ -100,6 +100,11 @@ const data = {
   issuerId,
   secondaryIssuerId: `${issuerId}-secondary`,
   listId: crypto.randomUUID(),
+  updateListId: crypto.randomUUID(),
+  jwtListId: crypto.randomUUID(),
+  cwtListId: crypto.randomUUID(),
+  historicalListId: crypto.randomUUID(),
+  historicalTime: 0,
   publicKeyJwk: crypto.createPublicKey(publicKey).export({ format: 'jwk' }),
   token: `${signingInput}.${base64url(signature)}`
 };
@@ -173,6 +178,11 @@ for response in doc.get("components", {}).get("responses", {}).values():
 
 paths = doc["paths"]
 list_id = token_data["listId"]
+update_list_id = token_data["updateListId"]
+jwt_list_id = token_data["jwtListId"]
+cwt_list_id = token_data["cwtListId"]
+historical_list_id = token_data["historicalListId"]
+historical_time = token_data["historicalTime"]
 public_key = token_data["publicKeyJwk"]
 secondary_issuer = token_data["secondaryIssuerId"]
 
@@ -207,10 +217,9 @@ ready = paths["/health/ready"]["get"]
 keep_responses(ready, "200")
 text_example(ready, "200", "ready", "READY")
 
-# Metrics may be enabled or disabled by runtime configuration. The Postman
-# collection asserts both accepted outcomes; omit it from the generated
-# OpenAPI schema-runner copy so local config does not make conformance flaky.
-paths.pop("/metrics", None)
+metrics = paths["/metrics"]["get"]
+keep_responses(metrics, "200")
+text_example(metrics, "200", "metrics", "# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.\n")
 
 credentials = paths["/api/v1/credentials"]["post"]
 keep_responses(credentials, "202")
@@ -233,7 +242,7 @@ json_example(aggregation, "200", "aggregation", {"status_lists": []})
 status_path = paths["/api/v1/status-lists/{list_id}/statuses"]
 status_path["parameters"][0]["examples"] = {
     "publishStatusList": {"value": list_id},
-    "updateStatusList": {"value": list_id},
+    "updateStatusList": {"value": update_list_id},
 }
 
 publish = status_path["put"]
@@ -257,7 +266,7 @@ update["requestBody"]["content"]["application/json"]["examples"] = {
     "updateStatusList": {
         "value": {
             "statuses": [
-                {"index": 1, "status": 1},
+                {"index": 1, "status": 2},
             ]
         }
     }
@@ -268,13 +277,33 @@ get_status = paths["/api/v1/status-lists/{list_id}"]["get"]
 keep_responses(get_status, "200")
 for parameter in get_status["parameters"]:
     if parameter["name"] == "list_id":
-        parameter["examples"] = {"statusListJwt": {"value": list_id}}
+        parameter["examples"] = {
+            "statusListJwt": {"value": jwt_list_id},
+            "statusListCwt": {"value": cwt_list_id},
+            "historicalStatusListJwt": {"value": historical_list_id},
+        }
     elif parameter["name"] == "Accept":
-        parameter["examples"] = {"statusListJwt": {"value": "application/statuslist+jwt"}}
+        parameter["examples"] = {
+            "statusListJwt": {"value": "application/statuslist+jwt"},
+            "statusListCwt": {"value": "application/statuslist+cwt"},
+            "historicalStatusListJwt": {"value": "application/statuslist+jwt"},
+        }
+    elif parameter["name"] == "time":
+        parameter["examples"] = {
+            "historicalStatusListJwt": {"value": historical_time},
+        }
     elif parameter["name"] == "Accept-Encoding":
-        parameter["examples"] = {"statusListJwt": {"value": "identity"}}
+        parameter["examples"] = {
+            "statusListJwt": {"value": "identity"},
+            "statusListCwt": {"value": "identity"},
+            "historicalStatusListJwt": {"value": "identity"},
+        }
 get_status["responses"]["200"]["content"]["application/statuslist+jwt"]["examples"] = {
-    "statusListJwt": {"value": "eyJhbGciOiJFUzI1NiJ9.eyJzdGF0dXNfbGlzdCI6e319.signature"}
+    "statusListJwt": {"value": "eyJhbGciOiJFUzI1NiJ9.eyJzdGF0dXNfbGlzdCI6e319.signature"},
+    "historicalStatusListJwt": {"value": "eyJhbGciOiJFUzI1NiJ9.eyJzdGF0dXNfbGlzdCI6e319.historical"},
+}
+get_status["responses"]["200"]["content"]["application/statuslist+cwt"]["examples"] = {
+    "statusListCwt": {"value": "0oRDoQEmoFggWlhleGFtcGxl"}
 }
 
 target.write_text(yaml.safe_dump(doc, sort_keys=False))
@@ -299,7 +328,7 @@ const replacements = new Map([
   ['{{list_id}}', tokenData.listId],
   ['{{issuer_id}}', tokenData.issuerId],
   ['{{token}}', authToken],
-  ['{{historical_time}}', Math.floor(Date.now() / 1000).toString()],
+  ['{{historical_time}}', String(tokenData.historicalTime)],
 ]);
 
 function replaceStrings(value) {
@@ -332,12 +361,58 @@ function visitItems(items, visitor) {
   }
 }
 
+function setRequestListId(item, listId) {
+  const request = item.request;
+  if (!request?.url) return;
+
+  if (typeof request.url.raw === 'string') {
+    request.url.raw = request.url.raw.replace(
+      /\/api\/v1\/status-lists\/[^/?]+/,
+      `/api/v1/status-lists/${listId}`
+    );
+  }
+
+  if (Array.isArray(request.url.path)) {
+    const index = request.url.path.findIndex((part) => part === 'status-lists');
+    if (index >= 0 && request.url.path[index + 1]) {
+      request.url.path[index + 1] = listId;
+    }
+  }
+}
+
+function setHistoricalTime(item) {
+  const request = item.request;
+  if (!request?.url) return;
+  const historicalTime = String(tokenData.historicalTime);
+
+  if (typeof request.url.raw === 'string') {
+    request.url.raw = request.url.raw.replace(/([?&]time=)[^&]+/, `$1${historicalTime}`);
+  }
+
+  for (const query of request.url.query || []) {
+    if (query.key === 'time') query.value = historicalTime;
+  }
+}
+
 visitItems(collection.item, (item) => {
   if (item.name === 'Register issuer credentials' && item.request?.body?.raw) {
     item.request.body.raw = JSON.stringify({
       issuer: tokenData.issuerId,
       public_key: tokenData.publicKeyJwk,
     }, null, 2);
+  }
+  if (item.name === 'Retrieve status list as JWT') {
+    setRequestListId(item, tokenData.jwtListId);
+  }
+  if (item.name === 'Retrieve status list as CWT') {
+    setRequestListId(item, tokenData.cwtListId);
+  }
+  if (item.name === 'Update status list' || item.name === 'Retrieve updated status list as JWT') {
+    setRequestListId(item, tokenData.updateListId);
+  }
+  if (item.name === 'Retrieve historical status list') {
+    setRequestListId(item, tokenData.historicalListId);
+    setHistoricalTime(item);
   }
 });
 
@@ -346,7 +421,7 @@ for (const variable of collection.variable || []) {
   if (variable.key === 'list_id') variable.value = tokenData.listId;
   if (variable.key === 'issuer_id') variable.value = tokenData.issuerId;
   if (variable.key === 'token') variable.value = authToken;
-  if (variable.key === 'historical_time') variable.value = Math.floor(Date.now() / 1000).toString();
+  if (variable.key === 'historical_time') variable.value = String(tokenData.historicalTime);
 }
 
 fs.writeFileSync(targetFile, JSON.stringify(collection, null, 2));
@@ -376,6 +451,101 @@ register_generated_issuer() {
     echo "Issuer registration failed with HTTP $status_code at $API_ENDPOINT/api/v1/credentials" >&2
     exit 1
   fi
+}
+
+curl_status() {
+  local method="$1"
+  local url="$2"
+  local body="$3"
+  local response_file
+  response_file="$(mktemp)"
+
+  if [[ -n "$body" ]]; then
+    curl -sS -o "$response_file" -w '%{http_code}' \
+      -X "$method" \
+      -H "Authorization: Bearer $STATUS_LIST_AUTH_TOKEN" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json' \
+      --data "$body" \
+      "$url"
+  else
+    curl -sS -o "$response_file" -w '%{http_code}' \
+      -X "$method" \
+      -H "Authorization: Bearer $STATUS_LIST_AUTH_TOKEN" \
+      -H 'Accept: application/json' \
+      "$url"
+  fi
+
+  rm -f "$response_file"
+}
+
+expect_status() {
+  local actual="$1"
+  local expected="$2"
+  local action="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$action failed with HTTP $actual (expected $expected)" >&2
+    exit 1
+  fi
+}
+
+seed_microcks_openapi_fixtures() {
+  local token_file="$1"
+  local update_list_id
+  local jwt_list_id
+  local cwt_list_id
+  local historical_list_id
+  local publish_body
+  local update_body
+  local status_code
+  local historical_time
+
+  update_list_id="$(json_field "$token_file" updateListId)"
+  jwt_list_id="$(json_field "$token_file" jwtListId)"
+  cwt_list_id="$(json_field "$token_file" cwtListId)"
+  historical_list_id="$(json_field "$token_file" historicalListId)"
+  publish_body='{"statuses":[{"index":0,"status":0},{"index":1,"status":1},{"index":2,"status":2}]}'
+  update_body='{"statuses":[{"index":1,"status":2}]}'
+
+  for list_id in "$update_list_id" "$jwt_list_id" "$cwt_list_id" "$historical_list_id"; do
+    status_code="$(curl_status PUT "$API_ENDPOINT/api/v1/status-lists/$list_id/statuses" "$publish_body")"
+    expect_status "$status_code" "201" "Seeding status list $list_id"
+  done
+
+  historical_time="$(date +%s)"
+  node -e "const fs = require('fs'); const file = process.argv[1]; const data = JSON.parse(fs.readFileSync(file, 'utf8')); data.historicalTime = Number(process.argv[2]); fs.writeFileSync(file, JSON.stringify(data, null, 2));" "$token_file" "$historical_time"
+
+  while (( $(date +%s) <= historical_time )); do
+    sleep 1
+  done
+
+  status_code="$(curl_status PATCH "$API_ENDPOINT/api/v1/status-lists/$historical_list_id/statuses" "$update_body")"
+  expect_status "$status_code" "200" "Seeding historical update for $historical_list_id"
+}
+
+wait_for_api() {
+  local timeout_secs
+  local deadline
+  timeout_secs="${MICROCKS_API_READY_TIMEOUT:-180}"
+  deadline=$((SECONDS + timeout_secs))
+
+  until curl -fsS "$API_ENDPOINT/health/live" >/dev/null 2>&1; do
+    if [[ -n "${STATUS_LIST_SERVER_PID:-}" ]] \
+      && ! kill -0 "$STATUS_LIST_SERVER_PID" >/dev/null 2>&1 \
+      && [[ -n "${STATUS_LIST_SERVER_LOG:-}" ]]; then
+      echo "status-list-server exited before becoming ready at $API_ENDPOINT" >&2
+      cat "$STATUS_LIST_SERVER_LOG" >&2 || true
+      exit 14
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for status-list-server at $API_ENDPOINT" >&2
+      if [[ -n "${STATUS_LIST_SERVER_LOG:-}" ]]; then
+        cat "$STATUS_LIST_SERVER_LOG" >&2 || true
+      fi
+      exit 14
+    fi
+    sleep 2
+  done
 }
 
 duration_seconds() {
@@ -539,11 +709,13 @@ require_python_yaml
 ensure_microcks_work_dir
 token_data_file="$(mktemp "$microcks_work_dir/token-data.XXXXXX.json")"
 generate_token_data "$token_data_file"
+wait_for_api
 
 if [[ -z "${STATUS_LIST_AUTH_TOKEN:-}" ]]; then
   register_generated_issuer "$token_data_file"
   STATUS_LIST_AUTH_TOKEN="$(json_field "$token_data_file" token)"
 fi
+seed_microcks_openapi_fixtures "$token_data_file"
 
 OPERATIONS_HEADERS="${MICROCKS_OPERATIONS_HEADERS:-$(build_operations_headers)}"
 MICROCKS_OPENAPI_ARTIFACT="${MICROCKS_OPENAPI_ARTIFACT:-$(prepare_microcks_openapi_artifact)}"

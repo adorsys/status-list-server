@@ -47,6 +47,7 @@ jobs:
           git merge-base "$base_ref" HEAD >/dev/null
 
           changed=$(git diff --name-only "$base_ref...HEAD" -- \
+            .github/workflows/api-contract-tests.yml \
             docs/openapi.yaml \
             postman \
             scripts/test-postman-collection.sh \
@@ -95,7 +96,9 @@ jobs:
 
           cargo build --no-default-features --features memory
           APP_SERVER__HOST=0.0.0.0 \
-          APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+            APP_SERVER__ENABLE_METRICS=true \
+            APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \
+            APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
             APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
             APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
             target/debug/status-list-server > /tmp/status-list-server.log 2>&1 &
@@ -191,6 +194,8 @@ jobs:
 
           cargo build --no-default-features --features memory
           APP_SERVER__HOST=0.0.0.0 \
+            APP_SERVER__ENABLE_METRICS=true \
+            APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \
             APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
             APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
             APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
@@ -202,7 +207,11 @@ jobs:
           }
           trap cleanup EXIT
 
-          if ! MICROCKS_VERBOSE=false ./scripts/test-microcks-conformance.sh; then
+          if ! STATUS_LIST_SERVER_PID="$server_pid" \
+            STATUS_LIST_SERVER_LOG=/tmp/status-list-server.log \
+            MICROCKS_VERBOSE=false \
+            RUN_POSTMAN_CONFORMANCE=true \
+            ./scripts/test-microcks-conformance.sh; then
             echo "::group::status-list-server logs"
             cat /tmp/status-list-server.log
             echo "::endgroup::"

@@ -301,7 +301,11 @@
                   "  pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
                   "  pm.expect(pm.response.headers.has('Last-Modified')).to.equal(true);",
                   "  pm.expect(pm.response.headers.get('Vary') || '').to.include('Accept');",
-                  "});"
+                  "});",
+                  "pm.collectionVariables.set('pre_update_etag', pm.response.headers.get('ETag') || '');",
+                  "pm.collectionVariables.set('pre_update_last_modified', pm.response.headers.get('Last-Modified') || '');",
+                  "pm.environment.set('pre_update_etag', pm.response.headers.get('ETag') || '');",
+                  "pm.environment.set('pre_update_last_modified', pm.response.headers.get('Last-Modified') || '');"
                 ]
               }
             }
@@ -356,6 +360,117 @@
           ]
         },
         {
+          "name": "Update status list",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"statuses\": [\n    { \"index\": 1, \"status\": 2 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}",
+                "statuses"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var historicalTime = Number(pm.collectionVariables.get('historical_time') || pm.environment.get('historical_time') || '0');",
+                  "var updateAfter = (historicalTime + 1) * 1000;",
+                  "while (historicalTime > 0 && Date.now() <= updateAfter) {}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('update changes the status list', function () { pm.response.to.have.status(200); });",
+                  "pm.test('successful update returns an empty body', function () { pm.expect(pm.response.text()).to.equal(''); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retrieve updated status list as JWT",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/statuslist+jwt"
+              },
+              {
+                "key": "Accept-Encoding",
+                "value": "identity"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{list_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('updated JWT retrieval succeeds', function () { pm.response.to.have.status(200); });",
+                  "pm.test('updated JWT has fresh validators', function () {",
+                  "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+jwt');",
+                  "  pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
+                  "  pm.expect(pm.response.headers.has('Last-Modified')).to.equal(true);",
+                  "  pm.expect(pm.response.headers.get('ETag')).to.not.equal(pm.collectionVariables.get('pre_update_etag') || pm.environment.get('pre_update_etag'));",
+                  "  pm.expect(pm.response.headers.get('Last-Modified')).to.not.equal(pm.collectionVariables.get('pre_update_last_modified') || pm.environment.get('pre_update_last_modified'));",
+                  "});",
+                  "pm.collectionVariables.set('post_update_etag', pm.response.headers.get('ETag') || '');",
+                  "pm.collectionVariables.set('post_update_last_modified', pm.response.headers.get('Last-Modified') || '');",
+                  "pm.environment.set('post_update_etag', pm.response.headers.get('ETag') || '');",
+                  "pm.environment.set('post_update_last_modified', pm.response.headers.get('Last-Modified') || '');"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Retrieve historical status list",
           "request": {
             "auth": {
@@ -401,54 +516,13 @@
                   "pm.test('historical resolution succeeds', function () { pm.response.to.have.status(200); });",
                   "pm.test('historical success has immutable cache headers', function () {",
                   "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+jwt');",
+                  "  pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
                   "  pm.expect(pm.response.headers.get('Cache-Control') || '').to.include('immutable');",
+                  "});",
+                  "pm.test('historical response keeps the pre-update snapshot timestamp', function () {",
+                  "  pm.expect(pm.response.headers.get('Last-Modified')).to.equal(pm.collectionVariables.get('pre_update_last_modified') || pm.environment.get('pre_update_last_modified'));",
+                  "  pm.expect(pm.response.headers.get('Last-Modified')).to.not.equal(pm.collectionVariables.get('post_update_last_modified') || pm.environment.get('post_update_last_modified'));",
                   "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Update status list",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Accept",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"statuses\": [\n    { \"index\": 1, \"status\": 1 }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "status-lists",
-                "{{list_id}}",
-                "statuses"
-              ]
-            }
-          },
-          "response": [],
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('update succeeds', function () { pm.response.to.have.status(200); });",
-                  "pm.test('successful update returns an empty body', function () { pm.expect(pm.response.text()).to.equal(''); });"
                 ]
               }
             }
