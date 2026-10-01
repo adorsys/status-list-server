@@ -746,12 +746,42 @@ jobs:
           persist-credentials: false
 
       - name: Validate Docker Compose model
-        # docker-compose.yml requires GRAFANA_ADMIN_PASSWORD (no insecure admin
-        # default); supply a placeholder here because this step only validates the
-        # compose model, not the real credential.
-        run: docker compose config
-        env:
-          GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
+        run: docker compose --profile "*" config --quiet
+
+      - name: Validate Docker Compose profile isolation
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          expected = {
+              None: {"app"},
+              "postgres": {"app", "db"},
+              "mysql": {"app", "mysql"},
+              "observability": {"app", "otel-collector", "jaeger", "prometheus", "alertmanager", "grafana", "pushgateway"},
+              "acme": {"app", "pebble", "challtestsrv"},
+              "fscert": {"app", "filesystem-cert"},
+              "aws": {"app", "localstack"},
+              "redis": {"app", "redis"},
+          }
+          for profile, services in expected.items():
+              command = ["docker", "compose"]
+              if profile is not None:
+                  command.extend(["--profile", profile])
+              command.extend(["config", "--services"])
+              actual = set(subprocess.check_output(command, text=True).splitlines())
+              if actual != services:
+                  raise SystemExit(f"{profile or 'default'}: expected {services}, got {actual}")
+          app_config = json.loads(subprocess.check_output(
+              ["docker", "compose", "config", "--format", "json"], text=True
+          ))["services"]["app"]
+          if any(dependency["required"] for dependency in app_config["depends_on"].values()):
+              raise SystemExit("app dependencies must remain optional")
+          if app_config["build"]["args"]["FEATURES"] != "memory":
+              raise SystemExit("default app build must support in-memory startup")
+          if app_config["environment"]["APP_DATABASE__BACKEND"] != "memory":
+              raise SystemExit("default app must use in-memory storage")
+          PY
 
       - name: Verify Jaeger image tag exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
