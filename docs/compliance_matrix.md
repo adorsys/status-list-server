@@ -41,7 +41,6 @@ Status legend:
 | 22 | §10         | X.509 EKU for the signing certificate                                                                                                      | Out of scope (#136)    | Certificate provisioning is a separately shipped component.                                                                                                                                          |
 | 23 | §5.1 / §5.2 | `ttl` MUST be a positive number; lifetimes must be positive (`>= 1`) with `ttl < exp` within the configured maximum token lifetime         | **Fixed**              | Configuration validation now rejects zero, non-positive, inverted, or excessive token lifetimes at startup, and token expiry construction fails closed on overflow.                                  |
 
-
 [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
 [RFC 1950]: https://www.rfc-editor.org/rfc/rfc1950
 [RFC 8392]: https://www.rfc-editor.org/rfc/rfc8392
