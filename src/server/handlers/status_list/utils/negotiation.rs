@@ -198,6 +198,16 @@ fn find_top_level(s: &str, delim: char) -> Option<usize> {
     // A quoted-string can only start a parameter value, i.e. right after `=`.
     let mut prev = None;
     for (i, c) in s.char_indices() {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    // A quoted-string can only start a parameter value, i.e. right after `=`.
+    let mut prev = None;
+    for (i, c) in s.char_indices() {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    // A quoted-string can only start a parameter value, i.e. right after `=`.
+    let mut prev = None;
+    for (i, c) in s.char_indices() {
         if in_quotes {
             if escaped {
                 escaped = false;
@@ -346,6 +356,12 @@ mod tests {
             (
                 &["application/statuslist+jwt;q=0.9, \
                      application/statuslist+cwt;profile=\"a;q=1\";q=0"],
+                Some(AcceptType::Jwt),
+            ),
+            // A stray quote (not a parameter value) must not swallow the rest
+            // of the range: the `,` after it stays a top-level separator.
+            (
+                &["text/\"html, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
             ),
             // Unsupported types.
