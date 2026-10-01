@@ -198,16 +198,6 @@ fn find_top_level(s: &str, delim: char) -> Option<usize> {
     // A quoted-string can only start a parameter value, i.e. right after `=`.
     let mut prev = None;
     for (i, c) in s.char_indices() {
-    let mut in_quotes = false;
-    let mut escaped = false;
-    // A quoted-string can only start a parameter value, i.e. right after `=`.
-    let mut prev = None;
-    for (i, c) in s.char_indices() {
-    let mut in_quotes = false;
-    let mut escaped = false;
-    // A quoted-string can only start a parameter value, i.e. right after `=`.
-    let mut prev = None;
-    for (i, c) in s.char_indices() {
         if in_quotes {
             if escaped {
                 escaped = false;
