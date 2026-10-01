@@ -416,7 +416,10 @@ mod tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         assert!(
-            response.headers().get(axum::http::header::LOCATION).is_some(),
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .is_some(),
             "201 must carry a Location header"
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
