@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
-use crate::domain::models::credential::{Credential, CredentialError};
+use crate::domain::models::credential::{Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -33,20 +33,28 @@ pub trait StatusListCache: Send + Sync + 'static {
 }
 
 /// Interface for managing active status list records.
+#[derive(Debug, Clone)]
+pub struct CreateStatusList {
+    pub record: StatusListRecord,
+    pub initial_snapshot: Option<StatusListSnapshot>,
+    pub initial_allocations: Vec<i32>,
+    pub max_lists_per_issuer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllocateStatusListIndices {
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub count: u32,
+}
+
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Insert a new status list record into persistent storage.
-    ///
-    /// Fails with [`StatusListError::QuotaExceeded`] when the issuer already
-    /// holds `max_lists_per_issuer` lists. The check must be atomic with the insert.
-    async fn insert(
-        &self,
-        status_list: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
+    /// Create a status list and any initial child records atomically.
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
     /// Concurrently update an existing status list record matching `expected_updated_at`.
     async fn update(
@@ -63,15 +71,6 @@ pub trait StatusListRepo: Send + Sync + 'static {
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 
-    /// Insert a new status list record and atomically record its initial historical snapshot.
-    /// Enforces `max_lists_per_issuer` like [`Self::insert`].
-    async fn insert_with_snapshot(
-        &self,
-        status_list: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
-
     /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
     /// starting strictly after `after`.
     async fn list_uris(
@@ -79,6 +78,20 @@ pub trait StatusListRepo: Send + Sync + 'static {
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
+
+    /// Reserve `count` unused indices for `list_id`, returning the newly
+    /// allocated indices in ascending order.
+    async fn allocate_indices(
+        &self,
+        command: AllocateStatusListIndices,
+    ) -> Result<Vec<i32>, StatusListError>;
+
+    /// Return the first requested index that has not been allocated, if any.
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError>;
 }
 
 /// Interface for issuer public key credentials.
@@ -109,31 +122,90 @@ pub trait StatusListSnapshotRepo: Send + Sync + 'static {
 }
 
 /// Certificate chain and signing key captured from one provider snapshot.
+///
+/// The base64 chain (`certificate_chain`) is kept for the JWT `x5c` header, and
+/// decoded once at construction into DER bytes (`certificate_der`) for the CWT
+/// `x5chain` hot path. Both views are derived from the same source and exposed
+/// through accessors, so they can never fall out of sync.
 #[derive(Clone)]
 pub struct SigningMaterial {
-    /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c` and CWT
-    /// `x5chain`.
-    pub certificate_chain: Option<Vec<String>>,
-    /// Pre-parsed signer. The material does not retain its PEM/DER encoding
-    /// after a provider has validated and constructed it; private key material
-    /// remains in the signer for its required signing lifetime.
+    /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
+    certificate_chain: Option<Vec<String>>,
+    /// DER-encoded x509 certificate chain, decoded once at construction.
+    certificate_der: Option<Arc<[Box<[u8]>]>>,
+    /// Pre-parsed signer; retains no PEM/DER encoding.
     pub signing_key: Arc<dyn TokenSigner>,
 }
 
 impl SigningMaterial {
     /// Construct material from a validated, pre-parsed signer.
-    pub fn new(certificate_chain: Option<Vec<String>>, signing_key: Arc<dyn TokenSigner>) -> Self {
-        Self {
+    ///
+    /// Rejects an empty chain, an empty entry, or a non-base64 entry so a
+    /// malformed chain fails at load/renewal time rather than surfacing later
+    /// as a missing or empty CWT `x5chain`. Callers should treat this as a
+    /// provisioning error.
+    pub fn new(
+        certificate_chain: Option<Vec<String>>,
+        signing_key: Arc<dyn TokenSigner>,
+    ) -> Result<Self, StatusListError> {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+
+        let certificate_der = match &certificate_chain {
+            Some(parts) => {
+                if parts.is_empty() {
+                    return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "certificate chain is empty",
+                    ))));
+                }
+                if parts.iter().any(|b64| b64.is_empty()) {
+                    return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "certificate chain contains an empty entry",
+                    ))));
+                }
+                let der: Vec<Box<[u8]>> = parts
+                    .iter()
+                    .map(|b64| {
+                        BASE64_STANDARD
+                            .decode(b64)
+                            .map(Vec::into_boxed_slice)
+                            .map_err(|err| StatusListError::Backend(Box::new(err)))
+                    })
+                    .collect::<Result<_, _>>()?;
+                Some(Arc::from(der))
+            }
+            None => None,
+        };
+        Ok(Self {
             certificate_chain,
+            certificate_der,
             signing_key,
-        }
+        })
+    }
+
+    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c` header.
+    pub fn certificate_chain(&self) -> Option<&[String]> {
+        self.certificate_chain.as_deref()
+    }
+
+    /// DER-encoded x509 certificate chain for the CWT `x5chain` header.
+    pub fn certificate_der(&self) -> Option<&[Box<[u8]>]> {
+        self.certificate_der.as_deref()
     }
 }
 
 impl fmt::Debug for SigningMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SigningMaterial")
-            .field("certificate_chain", &self.certificate_chain)
+            .field(
+                "certificate_chain",
+                &self.certificate_chain.as_ref().map(|c| c.len()),
+            )
+            .field(
+                "certificate_der",
+                &self.certificate_der.as_ref().map(|d| d.len()),
+            )
             .field("signing_algorithm", &self.signing_key.algorithm())
             .field("public_key_len", &self.signing_key.public_key_bytes().len())
             .finish()
@@ -145,7 +217,11 @@ impl fmt::Debug for SigningMaterial {
 pub trait CertificateProvider: Send + Sync + 'static {
     /// Retrieve the current certificate chain and signing key from one
     /// internally consistent snapshot.
-    async fn signing_material(&self) -> Result<SigningMaterial, StatusListError>;
+    ///
+    /// Returns an [`Arc`] so a per-request clone of the chain is avoided; token
+    /// encoders move the cheap `Arc` clone into a blocking task and borrow the
+    /// material inside it.
+    async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError>;
 }
 
 /// Cryptographic port used by token encoders.
@@ -162,4 +238,57 @@ pub trait TokenSigner: Send + Sync {
 
     /// Return raw public-key bytes for X.509 certificate validation.
     fn public_key_bytes(&self) -> &[u8];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::crypto::SigningKey;
+
+    fn signer() -> Arc<dyn TokenSigner> {
+        Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap())
+    }
+
+    #[test]
+    fn new_accepts_none_chain() {
+        assert!(SigningMaterial::new(None, signer()).is_ok());
+    }
+
+    #[test]
+    fn new_rejects_empty_chain() {
+        assert!(SigningMaterial::new(Some(vec![]), signer()).is_err());
+    }
+
+    #[test]
+    fn new_rejects_malformed_base64_chain() {
+        assert!(SigningMaterial::new(Some(vec!["not-base64!".into()]), signer()).is_err());
+    }
+
+    #[test]
+    fn new_rejects_empty_chain_entry() {
+        assert!(SigningMaterial::new(Some(vec![String::new()]), signer()).is_err());
+    }
+
+    #[test]
+    fn accessors_keep_views_in_sync() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let chain = vec![
+            BASE64_STANDARD.encode(b"leaf"),
+            BASE64_STANDARD.encode(b"root"),
+        ];
+        let material = SigningMaterial::new(Some(chain.clone()), signer()).expect("material");
+        assert_eq!(material.certificate_chain(), Some(chain.as_slice()));
+        assert_eq!(material.certificate_der().map(|d| d.len()), Some(2));
+
+        let no_chain = SigningMaterial::new(None, signer()).expect("material");
+        assert_eq!(no_chain.certificate_chain(), None);
+        assert_eq!(no_chain.certificate_der(), None);
+    }
+
+    #[test]
+    fn new_accepts_valid_chain() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let chain = vec![BASE64_STANDARD.encode(b"cert-der")];
+        assert!(SigningMaterial::new(Some(chain), signer()).is_ok());
+    }
 }

@@ -169,7 +169,7 @@ async fn get_status_list_at(
             build_fresh_200_response(
                 &state,
                 &accept_type,
-                &status_record,
+                status_record,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -189,7 +189,7 @@ async fn get_status_list_at(
             build_fresh_200_response(
                 &state,
                 &accept_type,
-                &status_record,
+                status_record,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -206,7 +206,7 @@ async fn get_status_list_at(
 async fn build_fresh_200_response(
     state: &AppState,
     accept_type: &str,
-    status_record: &StatusListRecord,
+    status_record: StatusListRecord,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
@@ -279,7 +279,7 @@ async fn handle_historical_request(
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
-        &status_record,
+        status_record,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
     )
