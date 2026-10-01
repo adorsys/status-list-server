@@ -1009,35 +1009,26 @@ jobs:
             --timeout 2m
 
       - name: Verify ESO secret path reconciles
-        # Gate the release on the newly selected secret path actually reconciling. On an
-        # upgrade, statuslist-secret and aws-credentials-secret can remain from the old
-        # namespaced store, so a Helm and Deployment rollout can succeed even if neither
-        # ExternalSecret can sync from datev-secret-store; production would then run stale
-        # credentials while the release reports success.
+        # On an upgrade the app secrets can remain from the old namespaced store even if the
+        # Helm and Deployment rollout succeeds, so gate the release on the ExternalSecrets
+        # actually syncing from the new cluster store.
         #
-        # We do NOT read ClusterSecretStore here: the production deploy role's EKS access
-        # and Terraform RBAC are namespace-scoped, so a cluster-scoped get would receive
-        # Forbidden and time out on every deployment. Instead we rely on both namespaced
-        # release ExternalSecrets. And Ready=True alone can be stale from before the
-        # upgrade, so we also require each ES's refreshTime to move past the pre-deploy
-        # baseline recorded in the Deploy chart step, proving reconciliation happened for
-        # this deployment. On a fresh install the baseline is empty and only Ready=True is
-        # required.
+        # We don't read ClusterSecretStore here: the deploy role's EKS/RBAC is
+        # namespace-scoped, so a cluster-scoped get returns Forbidden on every deploy. We
+        # rely on the namespaced release ExternalSecrets instead, requiring each one's
+        # refreshTime to move past its pre-deploy baseline (recorded in the Deploy chart
+        # step) because Ready=True alone can be stale from before the upgrade; on a fresh
+        # install the baseline is empty and only Ready=True is required.
         #
-        # Before waiting we force ESO to refresh both ExternalSecrets by annotating them
-        # with a unique external-secrets.io/force-sync value. The chart's refreshInterval is
-        # 30m, so on a later image-only release the ExternalSecret spec is unchanged and ESO
-        # could legitimately keep the old refreshTime for the whole wait window and fail the
-        # deployment; the force-sync annotation triggers an immediate reconcile regardless.
+        # The chart's refreshInterval is 30m, so an image-only release leaves the
+        # ExternalSecret spec unchanged and ESO could keep the old refreshTime for the whole
+        # wait window; we force-sync with a unique external-secrets.io/force-sync annotation
+        # to trigger an immediate reconcile.
         #
-        # This verification runs AFTER helm upgrade --install --rollback-on-failure has
-        # already succeeded, so a failure here alone would mark the workflow failed while
-        # leaving the new (possibly stale-credential) Helm revision live. To keep production
-        # inside the rollback boundary, we explicitly roll back to the pre-deploy revision
-        # recorded in the Deploy chart step when either ExternalSecret fails to reconcile, or
-        # uninstall the release on a fresh install (no previous revision), so a failed
-        # verification leaves the cluster on the last known-good state rather than the broken
-        # new one.
+        # This runs after helm upgrade --install --rollback-on-failure has already
+        # succeeded, so a failure here alone would leave the broken revision live. We
+        # explicitly roll back to the pre-deploy revision (or uninstall on a fresh install)
+        # when either ExternalSecret fails, keeping the cluster on the last known-good state.
         env:
           PRIMARY_ES: statuslist-external-secret
           CREDS_ES: statuslist-external-secret-aws-credentials
