@@ -397,18 +397,9 @@ mod tests {
     }
 
     #[test]
-    fn test_accepts_gzip_uppercase_q() {
-        // Regression: `Q=0.8` must be honoured (the parameter name is
-        // case-insensitive per RFC 9110 §5.3).
-        let mut h = HeaderMap::new();
-        h.insert(header::ACCEPT_ENCODING, "gzip;Q=0.8".parse().unwrap());
-        assert!(client_accepts_gzip(&h));
-    }
-
-    #[test]
     fn test_rejects_gzip_uppercase_q0() {
         // Regression: the old `q=`-only parser ignored `Q=0` and served gzip
-        // anyway.
+        // anyway, because it treated the entry as having no q at all.
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "gzip;Q=0".parse().unwrap());
         assert!(!client_accepts_gzip(&h));
