@@ -16,7 +16,12 @@
 #
 # Credentials are read from the Secret rendered by alerting-secret.yaml (or from
 # alerting.existingSecret when operators manage the Secret externally, e.g. via ESO).
-apiVersion: monitoring.coreos.com/v1beta1
+#
+# apiVersion: the pinned kube-prometheus-stack 91.4.0 AlertmanagerConfig CRD
+# (prometheus-operator v0.94.0) serves only monitoring.coreos.com/v1alpha1, so
+# this must stay on v1alpha1 — v1beta1 is not served and any deployment of it on
+# a fresh cluster is rejected by the API server.
+apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
   name: {{ include "status-list-server-chart.fullname" . }}
