@@ -471,13 +471,15 @@ paths:
             and identical on every replica for the same content, signer and
             configuration. It changes whenever the live representation or its
             validity window changes — a content update, key/certificate rotation,
-            a window roll-over, a token-format/encoding change, or a change to the
-            aggregation URI or token lifetime settings. A match tells the server
-            the client holds the current-window token; it responds `304 Not
-            Modified` only while that cached token still has more than `ttl`
-            seconds of remaining validity, so the `304`'s advertised `max-age =
-            ttl` never outlives the token it vouches for. Otherwise it returns a
-            freshly signed `200 OK` token instead of a body-less `304`.
+            a window roll-over, a token-format/encoding change, a change to the
+            aggregation URI or token lifetime settings, or a mid-window content
+            revert (which changes the token's `iat`, part of the ETag identity). A
+            match tells the server the client holds the current-window token; it
+            responds `304 Not Modified` only while that cached token still has
+            more than `ttl` seconds of remaining validity, so the `304`'s
+            advertised `max-age = ttl` never outlives the token it vouches for.
+            Otherwise it returns a freshly signed `200 OK` token instead of a
+            body-less `304`.
           schema:
             type: string
             example: 'W/"9f2d..."'
@@ -785,10 +787,12 @@ components:
           type: integer
           description: |
             Issued-at timestamp (seconds since Unix epoch). For live tokens it is
-            anchored to the start of the current token window (matching the
-            window by which the ETag and signed-bytes cache rotate) rather than
-            the request time, so it may predate the request by up to one window.
-            Lifetime is governed by `exp` and `ttl`, not by `iat` skew.
+            `max(window_start, updated_at)`: the start of the current token window
+            (matching the window by which the ETag and signed-bytes cache rotate),
+            or the last content change if that is later — so it never predates the
+            list's most recent modification, and is part of the cache key and ETag
+            so a mid-window content revert to an earlier state is a distinct
+            identity. Lifetime is governed by `exp` and `ttl`, not by `iat` skew.
           example: 1752515200
         exp:
           type: integer

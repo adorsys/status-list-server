@@ -124,15 +124,18 @@ pub(crate) struct CachedToken {
 /// The typed identity of a cached signed representation.
 ///
 /// Every field is a distinct cache-key dimension: the list and its content hash
-/// pin the payload, the signer fingerprint pins the signing material, and the
-/// window/format/encoding/aggregation/ttl/exp dimensions pin the HTTP
-/// representation.
+/// pin the payload, the signer fingerprint pins the signing material, `iat` pins
+/// the minted token's issuance time (and so distinguishes a reinstated token
+/// whose content reverted within a window from the earlier identical-content
+/// entry), and the window/format/encoding/aggregation/ttl/exp dimensions pin
+/// the HTTP representation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TokenCacheKey {
     pub(crate) list_id: String,
     pub(crate) content_hash: String,
     pub(crate) signer_fingerprint: String,
     pub(crate) window_start: i64,
+    pub(crate) iat: i64,
     pub(crate) format: String,
     pub(crate) encoding: TokenEncoding,
     pub(crate) aggregation_uri: String,
@@ -342,6 +345,7 @@ mod tests {
             content_hash: "hash".to_string(),
             signer_fingerprint: "signer".to_string(),
             window_start: w,
+            iat: w,
             format: "jwt".to_string(),
             encoding: TokenEncoding::Identity,
             aggregation_uri: String::new(),
@@ -625,6 +629,10 @@ mod tests {
             aggregation_uri: "https://agg".to_string(),
             ..base.clone()
         };
+        let other_iat = TokenCacheKey {
+            iat: 1002,
+            ..base.clone()
+        };
         let other_ttl = TokenCacheKey {
             token_ttl_secs: 600,
             ..base.clone()
@@ -643,6 +651,7 @@ mod tests {
             base, other_aggregation,
             "aggregation_uri must be in the key"
         );
+        assert_ne!(base, other_iat, "iat must be in the key");
         assert_ne!(base, other_ttl, "token_ttl_secs must be in the key");
         assert_ne!(base, other_exp, "token_exp_secs must be in the key");
         assert_eq!(base, base_key(1000));

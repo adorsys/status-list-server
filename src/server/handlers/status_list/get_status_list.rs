@@ -23,7 +23,7 @@ use crate::{
 use super::utils::{
     conditional::{
         ConditionalResponse, TokenValidity, evaluate_conditional_request, format_http_date,
-        live_iat, token_window,
+        token_window,
     },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{content_hash, generate_historical_etag, generate_token_etag},
@@ -251,11 +251,19 @@ async fn build_token_cache_key(
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
     let signer = signer_fingerprint(&signing_material);
     let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
+    // `iat = max(window_start, updated_at)` is the issuance time the token is
+    // minted with (see `live_iat`). Including it in the key (and hence the ETag)
+    // makes a mid-window content revert to an earlier state a distinct identity:
+    // A -> B -> A in one window changes `updated_at` (so `iat`) even though the
+    // content hash returns to A's value, so the reinstated token never reuses the
+    // earlier identical-content entry's cached bytes (which carried the old iat).
+    let iat = window_start.max(status_record.updated_at);
     let key = TokenCacheKey {
         list_id: list_id.to_string(),
         content_hash: hash,
         signer_fingerprint: signer,
         window_start,
+        iat,
         format: format.to_string(),
         encoding,
         aggregation_uri: aggregation_uri.to_string(),
@@ -288,8 +296,7 @@ async fn get_or_build_live_token(
     now: i64,
     client_accepts_gzip: bool,
 ) -> Result<(Bytes, Option<&'static str>), ApiError> {
-    let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
-    let iat = live_iat(now, status_record.updated_at, validity);
+    let iat = key.iat;
     let exp_secs = state.token_exp_secs as i64;
     let validity_window = (iat, iat.saturating_add(exp_secs));
 
@@ -1714,6 +1721,150 @@ mod tests {
         assert_ne!(
             body1, body2,
             "the old ETag must not be honoured after a same-window content change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reinstated_content_within_window_gets_fresh_iat_and_bytes() {
+        // Regression for the A -> B -> A reinstatement hole: if a credential is
+        // suspended (B) and then reinstated (back to A) *within one window*, the
+        // content hash returns to A's value, so an `iat`-less cache key would
+        // collide with the earlier A entry and serve its stale bytes (which carry
+        // the old `iat`, claiming VALID from before the suspension). Because `iat`
+        // is part of the cache key and the ETag, the reinstated token is a
+        // distinct identity: fresh bytes minted with `iat = max(window_start,
+        // updated_at)`, i.e. the reinstate time, and a different ETag.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        // State A: index 0 VALID, index 1 INVALID.
+        update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![
+                    StatusEntry {
+                        index: 0,
+                        status: Status::VALID,
+                    },
+                    StatusEntry {
+                        index: 1,
+                        status: Status::INVALID,
+                    },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // First GET of A within the window -> cached with iat_a.
+        let res_a = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res_a.status(), StatusCode::OK);
+        let etag_a = res_a.headers().get(header::ETAG).unwrap().clone();
+        let body_a = axum::body::to_bytes(res_a.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let iat_a = decode_jwt_claims(&body_a)["iat"].as_i64().unwrap();
+
+        // State B: suspend index 0 (VALID -> SUSPENDED), within the same window.
+        update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![StatusEntry {
+                    index: 0,
+                    status: Status::SUSPENDED,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let res_b = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
+            Ok(Query(StatusListQuery { time: None })),
+            headers.clone(),
+            now0 + 4,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res_b.status(), StatusCode::OK);
+
+        // State A again: reinstate index 0 (SUSPENDED -> VALID) — content reverts.
+        update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![StatusEntry {
+                    index: 0,
+                    status: Status::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let res_a2 = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0 + 8,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res_a2.status(), StatusCode::OK);
+        let etag_a2 = res_a2.headers().get(header::ETAG).unwrap().clone();
+        let body_a2 = axum::body::to_bytes(res_a2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let iat_a2 = decode_jwt_claims(&body_a2)["iat"].as_i64().unwrap();
+
+        assert_ne!(
+            etag_a2, etag_a,
+            "reinstated content must be a distinct identity from the earlier A \
+             entry (iat is part of the key/ETag)"
+        );
+        assert!(
+            iat_a2 > iat_a,
+            "the reinstated token's iat must reflect the reinstate time, not the \
+             earlier A entry's issuance (old iat={iat_a}, reinstated iat={iat_a2})"
+        );
+        assert_ne!(
+            body_a2, body_a,
+            "the reinstated token must be freshly signed, never the stale A bytes \
+             cached before the suspension"
         );
     }
 
