@@ -249,26 +249,15 @@ pub struct ServerConfig {
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
-    /// Public base URL of the server, e.g. `https://statuslist.example.com/api/v1`.
-    ///
-    /// This is the prefix used to build the status list `sub` URI that is signed
-    /// into every issued token and returned to issuers as the `Location` header
-    /// on publish. It MUST be an absolute `https` URL whose path is exactly the
-    /// API prefix (`/api/v1`), with no trailing slash, query, or fragment.
-    ///
-    /// When unset, it is derived from [`ServerConfig::domain`] as
-    /// `https://{domain}/api/v1`, so existing deployments that only configure
-    /// `server.domain` keep working unchanged.
+    /// Defaults to `https://{domain}/api/v1` when unset.
     #[serde(default)]
     pub public_base_url: Option<String>,
 }
 
 impl ServerConfig {
-    /// The resolved public base URL, defaulting to `https://{domain}/api/v1`
-    /// when `public_base_url` is not configured.
+    /// The resolved public base URL, defaulting to `https://{domain}/api/v1`.
     ///
-    /// When deriving from `server.domain`, an IPv6 host is bracketed so the
-    /// resulting URL is valid (a bare `2001:db8::1` would be malformed).
+    /// IPv6 hosts are bracketed so the result is a valid URL.
     pub fn resolved_public_base_url(&self) -> String {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
@@ -316,16 +305,13 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The API path prefix under which the status-list routes are mounted. The
-/// published `sub` URI is built as `{public_base_url}/status-lists/{list_id}`,
-/// so `public_base_url` must carry exactly this prefix (no trailing slash) for
-/// the returned URI to resolve to the served `GET /status-lists/{list_id}` route.
+/// API path prefix under which the status-list routes are mounted. The published
+/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so
+/// `public_base_url` must carry exactly this prefix for it to resolve.
 const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
 
 /// Validates `server.public_base_url`: an absolute `https` URL whose path is
-/// exactly the API prefix, with no query or fragment, since it is embedded
-/// verbatim into issued tokens' `sub` and returned to issuers as the publish
-/// `Location`.
+/// exactly the API prefix, with no query, fragment, or trailing slash.
 fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(base_url).map_err(|err| {
         ConfigError::Message(format!(
@@ -1329,26 +1315,16 @@ pub struct StatusListConfig {
 
 /// Upper bound (in seconds) for the configured token lifetime.
 ///
-/// This is a fixed, clock-independent product ceiling: the spec (§5.1/§5.2)
-/// requires `ttl` to be a positive number and §11.5 asks for reasonable ranges,
-/// so values that would effectively never expire (or push the `exp` claim past
-/// what relying parties can handle) are rejected at configuration load instead
-/// of at issuance. It deliberately does NOT compare against the startup clock,
-/// so configuration acceptance never depends on the instant the process started.
+/// Values above this would effectively never expire, so they are rejected at
+/// config load. Deliberately not compared against the startup clock.
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 3600;
 
 impl StatusListConfig {
     /// Rejects token-lifetime values the spec forbids.
     ///
-    /// This enforces only static, representation-level invariants: positive
-    /// values within `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. It deliberately
-    /// does NOT compare `token_exp_secs` against the wall clock at startup:
-    /// configuration acceptance must not depend on the instant the process
-    /// started, so an otherwise-valid value would silently change behaviour one
-    /// second later. Overflow of `iat + token_exp_secs` at issuance time is
-    /// instead guarded by `checked_add` at every expiry construction, which fails
-    /// closed instead of wrapping `exp` negative (see `build_snapshot` and the
-    /// token validity window).
+    /// Enforces only static invariants: positive values within
+    /// `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. Overflow of `iat + exp` at
+    /// issuance is guarded by `checked_add` at expiry construction instead.
     fn validate(&self) -> Result<(), ConfigError> {
         validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
         validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
@@ -1363,10 +1339,8 @@ impl StatusListConfig {
     }
 }
 
-/// `secs` must be a positive number at or below `MAX_TOKEN_LIFETIME_SECS`;
-/// `0` breaks the spec (ttl MUST be positive) and values above the ceiling would
-/// produce effectively-never-expiring tokens (or an `exp` past year 9999) that
-/// relying parties cannot handle, and let revoked credentials look valid (§11.5).
+/// `secs` must be positive and at or below `MAX_TOKEN_LIFETIME_SECS`; `0` breaks
+/// the spec (ttl MUST be positive) and larger values would never expire.
 fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
     if secs == 0 {
         return Err(ConfigError::Message(format!(

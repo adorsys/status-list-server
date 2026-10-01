@@ -733,10 +733,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
-    // A `localhost` domain is only ever valid for local development: tokens
-    // signed with `sub = https://localhost/...` are rejected by every relying
-    // party. Surface it loudly outside a non-production profile instead of
-    // silently shipping unusable tokens.
+    // A `localhost` domain only makes sense for local development: tokens signed
+    // with `sub = https://localhost/...` are rejected by every relying party.
     if config.server.domain.trim() == "localhost" && config.telemetry.environment.is_production() {
         tracing::warn!(
             "server.domain is 'localhost' in a production profile; status list tokens will be \
