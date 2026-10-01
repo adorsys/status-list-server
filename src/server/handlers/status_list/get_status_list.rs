@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
     body::Bytes,
@@ -13,7 +13,10 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::{
-    domain::models::status_list::{StatusListError, StatusListRecord},
+    domain::{
+        models::status_list::{StatusListError, StatusListRecord},
+        ports::SigningMaterial,
+    },
     server::{AppState, error::ApiError},
 };
 
@@ -144,7 +147,11 @@ async fn get_status_list_at(
     // Derive the cache key and weak ETag *before* any signing, so a matching
     // `If-None-Match` answers 304 without ever minting a token. The key's signer
     // fingerprint only reads the in-memory signing snapshot; it does not sign.
-    let key = build_token_cache_key(
+    // The returned `signing_material` is the *same* snapshot used for the
+    // fingerprint, and is threaded into the token builder so a concurrent
+    // certificate/key reload can never cache bytes signed by one key under
+    // another key's cache entry.
+    let (key, signing_material) = build_token_cache_key(
         &state,
         &accept_type,
         &status_record,
@@ -191,6 +198,7 @@ async fn get_status_list_at(
                 &accept_type,
                 &status_record,
                 &key,
+                &signing_material,
                 now,
                 client_accepts_gzip,
             )
@@ -208,7 +216,10 @@ async fn get_status_list_at(
 }
 
 /// Build the typed cache key — and hence the weak ETag — for the live token at
-/// `window_start`, without signing.
+/// `window_start`, without signing. Also returns the signing snapshot used for
+/// the key's signer fingerprint, so the caller can pass the *same* snapshot into
+/// the token builder and never cache bytes signed by one key under another
+/// key's entry.
 ///
 /// The signer fingerprint reads the current in-memory signing snapshot, so a
 /// rotated key or renewed certificate immediately changes the key (and the
@@ -220,7 +231,7 @@ async fn build_token_cache_key(
     list_id: &str,
     window_start: i64,
     client_accepts_gzip: bool,
-) -> Result<TokenCacheKey, ApiError> {
+) -> Result<(TokenCacheKey, Arc<SigningMaterial>), ApiError> {
     let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
         "cwt"
     } else {
@@ -240,7 +251,7 @@ async fn build_token_cache_key(
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
     let signer = signer_fingerprint(&signing_material);
     let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
-    Ok(TokenCacheKey {
+    let key = TokenCacheKey {
         list_id: list_id.to_string(),
         content_hash: hash,
         signer_fingerprint: signer,
@@ -250,7 +261,8 @@ async fn build_token_cache_key(
         aggregation_uri: aggregation_uri.to_string(),
         token_ttl_secs: state.token_ttl_secs,
         token_exp_secs: state.token_exp_secs,
-    })
+    };
+    Ok((key, signing_material))
 }
 
 /// Return the signed token bytes for the current window, serving from the
@@ -263,11 +275,16 @@ async fn build_token_cache_key(
 /// identical across requests and concurrent misses coalesce onto a single sign
 /// for `(list, window, format, encoding)`. Capacity eviction can re-sign a
 /// still-valid entry.
+///
+/// The `signing_material` passed in is the exact snapshot that produced `key`'s
+/// signer fingerprint, so the signed bytes cached under `key` are always signed
+/// by the signer the key claims.
 async fn get_or_build_live_token(
     state: &AppState,
     accept_type: &str,
     status_record: &StatusListRecord,
     key: &TokenCacheKey,
+    signing_material: &Arc<SigningMaterial>,
     now: i64,
     client_accepts_gzip: bool,
 ) -> Result<(Bytes, Option<&'static str>), ApiError> {
@@ -275,13 +292,6 @@ async fn get_or_build_live_token(
     let iat = live_iat(now, status_record.updated_at, validity);
     let exp_secs = state.token_exp_secs as i64;
     let validity_window = (iat, iat.saturating_add(exp_secs));
-
-    let signing_material = state
-        .service
-        .cert_provider()
-        .signing_material()
-        .await
-        .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
 
     let cached = state
         .token_bytes_cache
@@ -321,7 +331,7 @@ async fn get_or_build_live_token(
                 status_record.clone(),
                 Some(validity_window),
                 client_accepts_gzip,
-                signing_material,
+                signing_material.clone(),
             )
             .await?;
             (Bytes::from(bytes), enc)
@@ -393,7 +403,20 @@ async fn handle_historical_request(
 
     let snapshot = state.service.get_snapshot_at(list_id, time).await?;
 
-    let etag = generate_historical_etag(&snapshot)?;
+    // The historical ETag is weak and includes format + encoding so JWT vs CWT
+    // and gzip vs identity responses (distinct bytes, re-signed per request)
+    // never share a validator.
+    let format = if accept_type == ACCEPT_STATUS_LISTS_HEADER_CWT {
+        "cwt"
+    } else {
+        "jwt"
+    };
+    let encoding = if client_accepts_gzip && accept_type == ACCEPT_STATUS_LISTS_HEADER_JWT {
+        TokenEncoding::Gzip
+    } else {
+        TokenEncoding::Identity
+    };
+    let etag = generate_historical_etag(&snapshot, format, encoding)?;
     let last_modified = format_http_date(snapshot.iat);
     let validity_duration = (snapshot.exp - snapshot.iat) as u64;
     let cache_control = format!("max-age={validity_duration}, immutable");
@@ -586,6 +609,61 @@ mod tests {
         }
     }
 
+    /// A [`CertificateProvider`] that hands out a *different* signing snapshot on
+    /// each call: the first call returns `signer_a`, every later call returns
+    /// `signer_b`. This mimics a concurrent key rotation landing *between* the
+    /// key-derivation fetch and the token-construction fetch that a naive
+    /// handler performs. A correct handler must derive the cache key and sign the
+    /// token from the *same* snapshot, so it issues exactly one `signing_material`
+    /// call per request and the served token verifies under `signer_a`.
+    struct AlternatingCertProvider {
+        signer_a: Arc<dyn crate::domain::ports::TokenSigner>,
+        signer_b: Arc<dyn crate::domain::ports::TokenSigner>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AlternatingCertProvider {
+        fn new() -> Self {
+            let make = || {
+                Arc::new(
+                    crate::utils::crypto::SigningKey::generate(
+                        crate::domain::models::token::SigningAlgorithm::Es256,
+                    )
+                    .expect("generate es256 key"),
+                ) as Arc<dyn crate::domain::ports::TokenSigner>
+            };
+            Self {
+                signer_a: make(),
+                signer_b: make(),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::CertificateProvider for AlternatingCertProvider {
+        async fn signing_material(
+            &self,
+        ) -> Result<
+            Arc<crate::domain::ports::SigningMaterial>,
+            crate::domain::models::status_list::StatusListError,
+        > {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let signer = if call == 0 {
+                &self.signer_a
+            } else {
+                &self.signer_b
+            };
+            Ok(Arc::new(
+                crate::domain::ports::SigningMaterial::new(
+                    Some(vec!["ZHVtbXlfY2VydA==".to_string()]),
+                    Arc::clone(signer),
+                )
+                .expect("signing material"),
+            ))
+        }
+    }
+
     /// Decode the JWT payload of a freshly served (uncompressed) token so tests
     /// can assert the `iat`/`exp` claims directly without a verification key.
     fn decode_jwt_claims(jwt: &[u8]) -> serde_json::Value {
@@ -597,6 +675,28 @@ mod tests {
             .decode(payload)
             .expect("JWT payload is valid base64url");
         serde_json::from_slice(&decoded).expect("JWT payload is valid JSON")
+    }
+
+    /// Verify an uncompressed ES256 JWT against a raw public key, returning
+    /// whether the signature is valid. Used to assert which signer actually
+    /// produced a served token.
+    fn jwt_verifies_under(jwt: &[u8], public_key_bytes: &[u8]) -> bool {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
+        use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
+
+        let jwt = std::str::from_utf8(jwt).expect("JWT body is UTF-8");
+        let mut parts = jwt.split('.');
+        let (Some(header), Some(payload), Some(sig)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let signing_input = format!("{header}.{payload}").into_bytes();
+        let signature = match BASE64_URL_SAFE_NO_PAD.decode(sig) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public_key_bytes);
+        key.verify(&signing_input, &signature).is_ok()
     }
 
     #[test]
@@ -2574,6 +2674,62 @@ mod tests {
             signs.load(Ordering::SeqCst),
             1,
             "a 304 revalidation must not sign, even on a cold/disabled cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signing_material_rotation_between_key_derivation_and_token() {
+        // Regression: the cache key and the signed bytes must be produced from the
+        // *same* signing snapshot. A naive handler fingerprints snapshot A to build
+        // the key, then fetches snapshot B (after a concurrent rotation) to sign,
+        // caching B-signed bytes under A's key and returning an ETag that claims
+        // signer A. `AlternatingCertProvider` returns a different signer on each
+        // `signing_material()` call, so the buggy two-fetch path signs with B; the
+        // correct single-fetch path signs with A.
+        let provider = Arc::new(AlternatingCertProvider::new());
+        let app_state = test_app_state_with_cert_provider(provider.clone()).await;
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let now0 = 1_000_000_000;
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        let res = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            now0,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        assert!(
+            jwt_verifies_under(&body, provider.signer_a.public_key_bytes()),
+            "the served token must be signed by the same snapshot whose fingerprint \
+             keyed the cache entry (signer A), not a later snapshot from a concurrent rotation"
+        );
+        assert!(
+            !jwt_verifies_under(&body, provider.signer_b.public_key_bytes()),
+            "the served token must not be signed by the post-rotation snapshot"
         );
     }
 }

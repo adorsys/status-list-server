@@ -66,8 +66,21 @@ pub(crate) fn content_hash(record: &StatusListRecord) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Weak ETag for the historical representation, derived from the *snapshot
+/// identity* plus the format and encoding the token was served in.
+///
+/// Historical tokens are signed fresh on every request, so ES256 randomized
+/// signatures make the served bytes differ between requests for the very same
+/// snapshot. A strong ETag (RFC 9110 §8.8.3.1 requires it to change whenever
+/// the bytes change) would therefore be wrong and would let a byte-different
+/// response claim a cached validator. This is deliberately a **weak** validator
+/// (`W/"..."`) over the snapshot fields that pin the identity of the replayed
+/// state, together with `format` and `encoding`, so JWT vs CWT and gzip vs
+/// identity responses (which carry distinct bytes) never share a validator.
 pub(crate) fn generate_historical_etag(
     snapshot: &StatusListSnapshot,
+    format: &str,
+    encoding: TokenEncoding,
 ) -> Result<String, StatusListError> {
     let mut hasher = Sha256::new();
     let (bits, lst) = snapshot.status_list.token_lst()?;
@@ -78,9 +91,11 @@ pub(crate) fn generate_historical_etag(
     hasher.update(bits.to_string().as_bytes());
     hasher.update(lst.as_bytes());
     hasher.update(snapshot.issuer.0.as_bytes());
+    hasher.update(format.as_bytes());
+    hasher.update(encoding_label(encoding).as_bytes());
 
     let hash = hasher.finalize();
-    Ok(format!("\"{}\"", hex::encode(hash)))
+    Ok(format!("W/\"{}\"", hex::encode(hash)))
 }
 
 #[cfg(test)]
@@ -250,6 +265,71 @@ mod tests {
             generate_token_etag(&b),
             "canonical encoding must not collide across variable-length field \
              boundaries"
+        );
+    }
+
+    fn base_snapshot() -> StatusListSnapshot {
+        StatusListSnapshot {
+            snapshot_id: "snap-1".to_string(),
+            list_id: "list".to_string(),
+            issuer: Issuer("https://issuer.example".to_string()),
+            status_list: StatusList {
+                bits: 1,
+                lst: "eNrbuRgAAhcBXQ".to_string(),
+            },
+            sub: "https://example.com/credentials/status/3".to_string(),
+            iat: 1000,
+            exp: 1900,
+        }
+    }
+
+    #[test]
+    fn test_generate_historical_etag_is_weak() {
+        let etag = generate_historical_etag(&base_snapshot(), "jwt", TokenEncoding::Identity)
+            .expect("etag");
+        assert!(
+            etag.starts_with("W/\""),
+            "historical ETag must be weak (W/\"...\"), not strong"
+        );
+        assert!(etag.ends_with('"'));
+        let hex_part = &etag[3..etag.len() - 1];
+        assert_eq!(hex_part.len(), 64);
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_generate_historical_etag_is_deterministic() {
+        let a = generate_historical_etag(&base_snapshot(), "jwt", TokenEncoding::Identity).unwrap();
+        let b = generate_historical_etag(&base_snapshot(), "jwt", TokenEncoding::Identity).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_generate_historical_etag_changes_with_format_and_encoding() {
+        // The same snapshot served as JWT vs CWT, or gzip vs identity, carries
+        // distinct bytes, so those representations must not share a validator.
+        let base = base_snapshot();
+        let jwt = generate_historical_etag(&base, "jwt", TokenEncoding::Identity).unwrap();
+        let cwt = generate_historical_etag(&base, "cwt", TokenEncoding::Identity).unwrap();
+        let gzip = generate_historical_etag(&base, "jwt", TokenEncoding::Gzip).unwrap();
+        assert_ne!(jwt, cwt, "JWT and CWT must not share a validator");
+        assert_ne!(jwt, gzip, "identity and gzip must not share a validator");
+        assert_ne!(
+            generate_historical_etag(&base, "cwt", TokenEncoding::Gzip).unwrap(),
+            jwt,
+            "the CWT-gzip combination must differ from JWT-identity"
+        );
+    }
+
+    #[test]
+    fn test_generate_historical_etag_changes_with_snapshot_content() {
+        let base = base_snapshot();
+        let mut changed = base.clone();
+        changed.status_list.lst = "different-content".to_string();
+        assert_ne!(
+            generate_historical_etag(&base, "jwt", TokenEncoding::Identity).unwrap(),
+            generate_historical_etag(&changed, "jwt", TokenEncoding::Identity).unwrap(),
+            "a changed snapshot must change the historical ETag"
         );
     }
 }
