@@ -660,6 +660,8 @@ mod tests {
                 status_list: StatusList {
                     bits: 1,
                     lst: "lst".into(),
+                    size: None,
+                    default_status: None,
                 },
                 sub: "sub".into(),
                 updated_at: 0,
@@ -694,6 +696,8 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "lst".into(),
+                size: None,
+                default_status: None,
             },
             sub: "sub".into(),
             updated_at: 42,
@@ -737,6 +741,8 @@ mod redis_tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "lst".into(),
+                size: None,
+                default_status: None,
             },
             sub: "sub".into(),
             updated_at,
@@ -1190,7 +1196,12 @@ mod redis_tests {
         .expect("create valid status list");
         service_a
             .status_list_repo()
-            .insert(old.clone(), 1_000)
+            .create(crate::domain::ports::CreateStatusList {
+                record: old.clone(),
+                initial_snapshot: None,
+                initial_allocations: Vec::new(),
+                max_lists_per_issuer: 1_000,
+            })
             .await
             .expect("insert backing record");
 
@@ -1210,10 +1221,13 @@ mod redis_tests {
                     index: 0,
                     status: Status::Invalid,
                 }],
-                900,
-                100_000,
-                5_000,
-                1_048_576,
+                &crate::domain::service::StatusListPolicy {
+                    token_exp_secs: 900,
+                    max_status_index: 100_000,
+                    max_statuses_per_request: 5_000,
+                    max_serialized_list_size: 1_048_576,
+                    max_lists_per_issuer: 1_000,
+                },
             )
             .await
             .expect("patch status list");
@@ -1284,7 +1298,12 @@ mod redis_tests {
         let saved = record("service-list");
         service
             .status_list_repo()
-            .insert(saved.clone(), 1_000)
+            .create(crate::domain::ports::CreateStatusList {
+                record: saved.clone(),
+                initial_snapshot: None,
+                initial_allocations: Vec::new(),
+                max_lists_per_issuer: 1_000,
+            })
             .await
             .expect("insert backing record");
 

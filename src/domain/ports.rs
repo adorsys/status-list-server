@@ -33,20 +33,28 @@ pub trait StatusListCache: Send + Sync + 'static {
 }
 
 /// Interface for managing active status list records.
+#[derive(Debug, Clone)]
+pub struct CreateStatusList {
+    pub record: StatusListRecord,
+    pub initial_snapshot: Option<StatusListSnapshot>,
+    pub initial_allocations: Vec<i32>,
+    pub max_lists_per_issuer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllocateStatusListIndices {
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub count: u32,
+}
+
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Insert a new status list record into persistent storage.
-    ///
-    /// Fails with [`StatusListError::QuotaExceeded`] when the issuer already
-    /// holds `max_lists_per_issuer` lists. The check must be atomic with the insert.
-    async fn insert(
-        &self,
-        status_list: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
+    /// Create a status list and any initial child records atomically.
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
     /// Concurrently update an existing status list record matching `expected_updated_at`.
     async fn update(
@@ -63,15 +71,6 @@ pub trait StatusListRepo: Send + Sync + 'static {
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 
-    /// Insert a new status list record and atomically record its initial historical snapshot.
-    /// Enforces `max_lists_per_issuer` like [`Self::insert`].
-    async fn insert_with_snapshot(
-        &self,
-        status_list: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError>;
-
     /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
     /// starting strictly after `after`, from one issuer's lists when `issuer`
     /// is given and from every issuer's otherwise.
@@ -81,6 +80,20 @@ pub trait StatusListRepo: Send + Sync + 'static {
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
+
+    /// Reserve `count` unused indices for `list_id`, returning the newly
+    /// allocated indices in ascending order.
+    async fn allocate_indices(
+        &self,
+        command: AllocateStatusListIndices,
+    ) -> Result<Vec<i32>, StatusListError>;
+
+    /// Return the first requested index that has not been allocated, if any.
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError>;
 }
 
 /// Interface for issuer public key credentials.

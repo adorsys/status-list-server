@@ -401,15 +401,26 @@ paths:
         the quota is full, so retrying a publish that did land is recognisable.
         During the upgrade of an existing SQL deployment to a release with the
         quota, an operator may run it unenforced until it is enabled.
+
+        `size` may be supplied to create a fixed-size list. The server rounds it
+        up so `bits * entries` is byte-aligned and initialises every entry to
+        `default_status` (default `0`). `size` must be at least 1 and, after
+        rounding, no larger than `limits.max_status_index + 1` (default
+        100001). Later writes past that fixed size are refused with
+        `400 index_out_of_range`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/StatusUpdateRequest"
+              $ref: "#/components/schemas/StatusPublishRequest"
       responses:
         "201":
           description: Status list created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusPublishResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -436,6 +447,10 @@ paths:
         neither advances the list version nor records a history snapshot.
         A payload that is empty (`{"statuses": []}`) or that re-sets every
         affected `index` to its current value both qualify.
+
+        On fixed-size lists, PATCH may update only indices previously returned
+        by the allocation endpoint or supplied as initial publish statuses.
+        Updating an unallocated index is refused with `409 index_not_allocated`.
       requestBody:
         required: true
         content:
@@ -463,6 +478,54 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
+
+  /api/v1/status-lists/{list_id}/allocations:
+    parameters:
+      - name: list_id
+        in: path
+        required: true
+        description: UUID of the status list.
+        schema:
+          type: string
+          format: uuid
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
+
+    post:
+      operationId: allocateStatusListIndices
+      summary: Allocate unused status-list indices
+      description: |
+        Reserves unused indices for the authenticated issuer's fixed-size
+        status list and returns them in ascending order. Each reserved
+        `(list_id, index)` pair is recorded so it is not returned by a later
+        allocation request. Lists published without `size` are caller-managed
+        and return `409 list_not_fixed_size` from this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AllocationRequest"
+      responses:
+        "201":
+          description: Indices allocated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AllocationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/UpdateConflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -799,6 +862,76 @@ components:
           items:
             $ref: "#/components/schemas/StatusEntry"
 
+    StatusPublishRequest:
+      allOf:
+        - $ref: "#/components/schemas/StatusUpdateRequest"
+        - type: object
+          properties:
+            size:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 100001
+              description: |
+                Optional fixed number of entries to create. The server rounds
+                this value up so `bits * entries` is a multiple of 8. The
+                rounded value must not exceed `limits.max_status_index + 1`
+                (default 100001).
+              example: 100000
+            default_status:
+              $ref: "#/components/schemas/StatusValue"
+
+    StatusPublishResponse:
+      type: object
+      required:
+        - size
+        - bits
+      properties:
+        size:
+          type:
+            - integer
+            - "null"
+          format: int32
+          minimum: 1
+          maximum: 100001
+          description: |
+            Fixed list size actually stored by the server after byte-alignment
+            rounding, or `null` when the list is caller-managed.
+          example: 100000
+        bits:
+          type: integer
+          format: int32
+          enum: [1, 2, 4, 8]
+          description: Number of bits stored for each status entry.
+          example: 1
+
+    AllocationRequest:
+      type: object
+      required:
+        - count
+      properties:
+        count:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5000
+          description: |
+            Number of unused indices to reserve. The maximum is bounded by
+            `limits.max_statuses_per_request` (default 5000).
+          example: 10
+
+    AllocationResponse:
+      type: object
+      required:
+        - indices
+      properties:
+        indices:
+          type: array
+          items:
+            type: integer
+            format: int32
+          example: [0, 1, 2]
+
     StatusEntry:
       type: object
       required:
@@ -973,6 +1106,9 @@ components:
             - invalid_public_jwk
             - too_many_statuses
             - index_too_large
+            - index_out_of_range
+            - invalid_size
+            - invalid_count
             - duplicate_index
             - list_quota_exceeded
             # 401 — emitted by the authentication middleware
@@ -992,6 +1128,9 @@ components:
             - status_list_already_exists
             - credentials_already_exist
             - update_conflict
+            - index_not_allocated
+            - list_not_fixed_size
+            - allocation_exhausted
             - write_contention
             # 413
             - payload_too_large
@@ -1091,7 +1230,11 @@ components:
             maximum`; or
           * a payload repeats the same `index` in more than one entry — on
             either `PATCH` or `PUT` — `duplicate status index <n> in statuses
-            array`.
+            array`; or
+          * `size` is `0` or rounds above `limits.max_status_index + 1` —
+            `invalid_size`; or
+          * allocation `count` is `0` or exceeds
+            `limits.max_statuses_per_request` — `invalid_count`.
 
         `list_quota_exceeded` (publish only) is different in kind: the request
         was well-formed, and is refused because the issuer already holds
@@ -1263,9 +1406,10 @@ components:
 
     UpdateConflict:
       description: |
-        The write was rejected because it raced another writer. Two distinct
-        cases share this status and they require **opposite** client behaviour,
-        so branch on the `error` field rather than on the status code.
+        The request was rejected because of the current status-list state.
+        Branch on the `error` field rather than on the status code: some cases
+        are transient write races, while others are durable request/state
+        mismatches where retrying the same request will not help.
 
         `update_conflict` — optimistic-concurrency conflict. Another writer's
         update landed first between the client's read and this write, so this
@@ -1279,6 +1423,18 @@ components:
         request**; no re-read is required. A `Retry-After` header gives a floor —
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
+
+        `index_not_allocated` — PATCH on a fixed-size list targeted an index
+        that has not been allocated. Retrying the same request will not help;
+        allocate an index first or use one already assigned to the token.
+
+        `list_not_fixed_size` — allocation was requested for a list published
+        without `size`. Retrying the same request will not help; use
+        caller-managed indices for that list or publish a fixed-size list.
+
+        `allocation_exhausted` — the list has fewer unallocated entries
+        remaining than requested. Retrying the same request will not help unless
+        the list is explicitly grown first.
 
         > Note for integrators: 409 is not a status most generic HTTP clients,
         > SDKs or service meshes retry automatically. `write_contention` is
@@ -1308,6 +1464,21 @@ components:
               value:
                 error: "write_contention"
                 error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
+            indexNotAllocated:
+              summary: Fixed-size PATCH used an unallocated index (retry will not help)
+              value:
+                error: "index_not_allocated"
+                error_description: "index 5 has not been allocated for this status list"
+            listNotFixedSize:
+              summary: Allocation requested on a caller-managed list (retry will not help)
+              value:
+                error: "list_not_fixed_size"
+                error_description: "status list must be fixed-size to allocate indices"
+            allocationExhausted:
+              summary: Not enough unallocated entries remain (retry will not help)
+              value:
+                error: "allocation_exhausted"
+                error_description: "not enough unallocated entries remain in this status list"
 
     UpdateInternalServerError:
       description: |

@@ -10,7 +10,7 @@ use crate::domain::models::status_list::{StatusListError, StatusListRecord};
 use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
-use crate::domain::service::Service;
+use crate::domain::service::{PublishStatusListCommand, Service, StatusListPolicy};
 #[cfg(feature = "memory")]
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -93,15 +93,21 @@ pub(crate) async fn publish_list_under_quota(
     let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
     service
         .publish_status_list(
-            list_id.into(),
-            Issuer(issuer.into()),
-            sub.clone(),
-            vec![],
-            900,
-            100_000,
-            5_000,
-            1_048_576,
-            max_lists_per_issuer,
+            PublishStatusListCommand {
+                list_id: list_id.into(),
+                issuer: Issuer(issuer.into()),
+                sub: sub.clone(),
+                statuses: vec![],
+                size: None,
+                default_status: None,
+            },
+            &StatusListPolicy {
+                token_exp_secs: 900,
+                max_status_index: 100_000,
+                max_statuses_per_request: 5_000,
+                max_serialized_list_size: 1_048_576,
+                max_lists_per_issuer,
+            },
         )
         .await?;
     Ok(sub)

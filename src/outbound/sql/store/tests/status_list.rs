@@ -1,15 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
 use sea_orm::{
-    DatabaseBackend, DatabaseConnection, MockDatabase, MockExecResult, Statement, Transaction,
-    Value,
+    ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, MockDatabase, MockExecResult,
+    QueryFilter, QueryOrder, QuerySelect, Statement, Transaction, Value,
 };
 
 use super::fixtures;
 use crate::outbound::sql::models::{
-    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord, status_lists,
+    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord, status_list_allocations,
+    status_lists,
 };
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
@@ -88,6 +89,8 @@ async fn test_status_list_find_all() {
             status_list: StatusList {
                 bits: 1,
                 lst: "abc".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/statuslists/list1".to_string(),
             updated_at: 0,
@@ -98,6 +101,8 @@ async fn test_status_list_find_all() {
             status_list: StatusList {
                 bits: 8,
                 lst: "xyz".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/statuslists/list2".to_string(),
             updated_at: 0,
@@ -394,6 +399,8 @@ async fn assert_guarded_update_rejects_stale_write(
         status_list: StatusList {
             bits: 1,
             lst: "flip-A".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -402,6 +409,8 @@ async fn assert_guarded_update_rejects_stale_write(
         status_list: StatusList {
             bits: 1,
             lst: "flip-B".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -473,6 +482,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-A".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -481,6 +492,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-B-stale".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: v + 1,
         ..base.clone()
@@ -502,6 +515,8 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
         status_list: StatusList {
             bits: 1,
             lst: "flip-B-retry".to_string(),
+            size: None,
+            default_status: None,
         },
         updated_at: reread.updated_at + 1,
         ..reread.clone()
@@ -724,6 +739,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-1".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 1,
                 ..base.clone()
@@ -767,6 +784,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-2".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 2,
                 ..base.clone()
@@ -811,6 +830,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-3".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 5,
                 ..base.clone()
@@ -1008,6 +1029,185 @@ async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
     .await;
 }
 
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn persisted_allocations(db: &Arc<DatabaseConnection>, list_id: &str) -> BTreeSet<i32> {
+    status_list_allocations::Entity::find()
+        .select_only()
+        .column(status_list_allocations::Column::Idx)
+        .filter(status_list_allocations::Column::ListId.eq(list_id))
+        .order_by_asc(status_list_allocations::Column::Idx)
+        .into_tuple::<i32>()
+        .all(&**db)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
+    db: Arc<DatabaseConnection>,
+    issuer: &str,
+    backend: &str,
+) {
+    fixtures::seed_credential(&db, issuer).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+
+    let list_id = format!("list-allocation-{backend}").to_lowercase();
+    let mut record = fixtures::record(
+        &list_id,
+        issuer,
+        "allocation",
+        &format!("sub-{list_id}"),
+        10,
+    );
+    record.status_list.size = Some(6);
+    store
+        .insert_one_with_allocations(record, &[0, 2], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+
+    let missing_list_id = format!("list-allocation-missing-{backend}").to_lowercase();
+    let missing = store.allocate_indices(&missing_list_id, issuer, 1).await;
+    assert!(
+        matches!(missing, Err(RepositoryError::NotFound)),
+        "allocating from a missing list must return not found on {backend}, got {missing:?}"
+    );
+
+    let wrong_issuer = store
+        .allocate_indices(&list_id, "issuer-allocation-other", 1)
+        .await;
+    assert!(
+        matches!(wrong_issuer, Err(RepositoryError::IssuerMismatch)),
+        "allocating with the wrong issuer must be rejected on {backend}, got {wrong_issuer:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &list_id).await,
+        BTreeSet::from([0, 2]),
+        "failed wrong-issuer allocation must leave no partial reservation on {backend}"
+    );
+
+    let dynamic_list_id = format!("list-allocation-dynamic-{backend}").to_lowercase();
+    let dynamic = fixtures::record(
+        &dynamic_list_id,
+        issuer,
+        "allocation-dynamic",
+        &format!("sub-{dynamic_list_id}"),
+        15,
+    );
+    store
+        .insert_one_with_allocations(dynamic, &[], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+    let dynamic_result = store.allocate_indices(&dynamic_list_id, issuer, 1).await;
+    assert!(
+        matches!(dynamic_result, Err(RepositoryError::ListNotFixedSize)),
+        "allocating from a dynamic list must be rejected on {backend}, got {dynamic_result:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &dynamic_list_id).await,
+        BTreeSet::new(),
+        "failed dynamic-list allocation must leave no partial reservation on {backend}"
+    );
+
+    let store_a = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let store_b = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    // SQLite's test pool has one connection, so these serialize there; the
+    // MySQL and Postgres variants exercise the row lock with real concurrency.
+    let (first, second) = tokio::join!(
+        store_a.allocate_indices(&list_id, issuer, 2),
+        store_b.allocate_indices(&list_id, issuer, 2),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+
+    let mut all = BTreeSet::from([0, 2]);
+    all.extend(first.iter().copied());
+    all.extend(second.iter().copied());
+    assert_eq!(
+        all.len(),
+        6,
+        "initial and concurrently allocated indices must be distinct on {backend}: first={first:?}, second={second:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &list_id).await,
+        all,
+        "every allocated index must be durably recorded on {backend}"
+    );
+
+    let partial_list_id = format!("list-allocation-partial-{backend}").to_lowercase();
+    let mut partial = fixtures::record(
+        &partial_list_id,
+        issuer,
+        "allocation-partial",
+        &format!("sub-{partial_list_id}"),
+        20,
+    );
+    partial.status_list.size = Some(4);
+    store
+        .insert_one_with_allocations(partial, &[0, 1, 2], fixtures::NO_LIST_QUOTA)
+        .await
+        .unwrap();
+
+    let exhausted = store.allocate_indices(&partial_list_id, issuer, 2).await;
+    assert!(
+        matches!(exhausted, Err(RepositoryError::AllocationExhausted)),
+        "exhausted allocation must fail without partial reservation on {backend}, got {exhausted:?}"
+    );
+    assert_eq!(
+        persisted_allocations(&db, &partial_list_id).await,
+        BTreeSet::from([0, 1, 2]),
+        "failed exhausted allocation must leave no partial reservation on {backend}"
+    );
+
+    let last = store
+        .allocate_indices(&partial_list_id, issuer, 1)
+        .await
+        .unwrap();
+    assert_eq!(last, vec![3]);
+    assert_eq!(
+        persisted_allocations(&db, &partial_list_id).await,
+        BTreeSet::from([0, 1, 2, 3]),
+        "the remaining index must still be available after the failed request on {backend}"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_allocations_are_distinct_and_rollback_exhausted() {
+    let db = fixtures::sqlite_connection().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        db,
+        "issuer-allocation-sqlite",
+        "SQLite",
+    )
+    .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_allocations_are_distinct_and_rollback_exhausted() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        test_db.connection().await,
+        "issuer-allocation-mysql",
+        "MySQL",
+    )
+    .await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_allocations_are_distinct_and_rollback_exhausted() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    assert_sql_allocations_are_distinct_and_rollback_exhausted(
+        test_db.db.clone(),
+        "issuer-allocation-postgres",
+        "Postgres",
+    )
+    .await;
+}
+
 /// Publishes `list_id`, then republishes it under a different `snapshot_id`,
 /// asserting the failure is the duplicate `list_id` classified as
 /// `DuplicateEntry`, on both the transactional and non-transactional publish
@@ -1033,6 +1233,8 @@ async fn assert_duplicate_list_id_is_conflict(
         status_list: StatusList {
             bits: 1,
             lst: "initial".to_string(),
+            size: None,
+            default_status: None,
         },
         sub: format!("sub-{list_id}"),
         updated_at,
@@ -1044,6 +1246,8 @@ async fn assert_duplicate_list_id_is_conflict(
         status_list: StatusList {
             bits: 1,
             lst: "initial".to_string(),
+            size: None,
+            default_status: None,
         },
         sub: format!("sub-{list_id}"),
         iat,
@@ -1154,6 +1358,8 @@ async fn assert_update_snapshot_rolls_back(
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-1".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 1,
                 ..base.clone()
@@ -1190,6 +1396,8 @@ async fn assert_update_snapshot_rolls_back(
                 status_list: StatusList {
                     bits: 1,
                     lst: "flip-2".to_string(),
+                    size: None,
+                    default_status: None,
                 },
                 updated_at: v + 2,
                 ..base.clone()

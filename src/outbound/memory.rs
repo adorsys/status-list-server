@@ -11,9 +11,11 @@ use crate::cert_manager::storage::StorageError;
 use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+    choose_unallocated_indices,
 };
 use crate::domain::ports::{
-    CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
+    AllocateStatusListIndices, CreateStatusList, CredentialRepo, StatusListCache, StatusListRepo,
+    StatusListSnapshotRepo,
 };
 
 /// Ordered by `list_id` for range-scanned pages, with each issuer's `list_id`s
@@ -52,12 +54,44 @@ impl ListStore {
 pub struct MemoryStatusLists {
     values: Arc<RwLock<ListStore>>,
     snapshot: Option<Arc<RwLock<HashMap<String, StatusListSnapshot>>>>,
+    allocations: Arc<RwLock<HashMap<String, BTreeSet<i32>>>>,
 }
 
 impl MemoryStatusLists {
     pub fn with_snapshot(mut self, snapshot_repo: &MemoryStatusListSnapshotRepo) -> Self {
         self.snapshot = Some(snapshot_repo.values.clone());
         self
+    }
+
+    #[cfg(test)]
+    async fn insert(
+        &self,
+        record: StatusListRecord,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        self.create(CreateStatusList {
+            record,
+            initial_snapshot: None,
+            initial_allocations: Vec::new(),
+            max_lists_per_issuer,
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    async fn create_with_snapshot(
+        &self,
+        record: StatusListRecord,
+        snapshot: StatusListSnapshot,
+        max_lists_per_issuer: u64,
+    ) -> Result<(), StatusListError> {
+        self.create(CreateStatusList {
+            record,
+            initial_snapshot: Some(snapshot),
+            initial_allocations: Vec::new(),
+            max_lists_per_issuer,
+        })
+        .await
     }
 
     fn require_snapshot(
@@ -81,15 +115,66 @@ impl StatusListRepo for MemoryStatusLists {
         .await
     }
 
-    async fn insert(
-        &self,
-        record: StatusListRecord,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        self.values
-            .write()
-            .await
-            .try_insert(record, max_lists_per_issuer)
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
+        let snapshot_store = if command.initial_snapshot.is_some() {
+            Some(self.require_snapshot()?.clone())
+        } else {
+            None
+        };
+
+        let mut values = self.values.write().await;
+        if values.by_id.contains_key(&command.record.list_id) {
+            return Err(StatusListError::AlreadyExists);
+        }
+        let issuer_count = values
+            .per_issuer
+            .get(&command.record.issuer.0)
+            .map_or(0, |lists| lists.len() as u64);
+        if issuer_count >= command.max_lists_per_issuer {
+            return Err(StatusListError::QuotaExceeded {
+                count: issuer_count,
+                max: command.max_lists_per_issuer,
+            });
+        }
+
+        let list_id = command.record.list_id.clone();
+        let mut allocations = self.allocations.write().await;
+        let mut inserted = Vec::with_capacity(command.initial_allocations.len());
+        if !command.initial_allocations.is_empty() {
+            let allocated = allocations.entry(list_id.clone()).or_default();
+            for index in &command.initial_allocations {
+                if !allocated.insert(*index) {
+                    for inserted_index in inserted {
+                        allocated.remove(&inserted_index);
+                    }
+                    if allocated.is_empty() {
+                        allocations.remove(&list_id);
+                    }
+                    return Err(StatusListError::DuplicateIndex { index: *index });
+                }
+                inserted.push(*index);
+            }
+        }
+
+        if let Err(error) = values.try_insert(command.record, command.max_lists_per_issuer) {
+            if let Some(allocated) = allocations.get_mut(&list_id) {
+                for inserted_index in inserted {
+                    allocated.remove(&inserted_index);
+                }
+                if allocated.is_empty() {
+                    allocations.remove(&list_id);
+                }
+            }
+            return Err(error);
+        }
+
+        if let (Some(snapshot_store), Some(snapshot)) = (snapshot_store, command.initial_snapshot) {
+            snapshot_store
+                .write()
+                .await
+                .insert(snapshot.snapshot_id.clone(), snapshot);
+        }
+        Ok(())
     }
 
     async fn update(
@@ -99,7 +184,6 @@ impl StatusListRepo for MemoryStatusLists {
     ) -> Result<bool, StatusListError> {
         let mut values = self.values.write().await;
         match values.by_id.get_mut(&record.list_id) {
-            // The service rejects issuer changes, so the per-issuer counts hold.
             Some(current) if current.updated_at == expected_updated_at => *current = record,
             _ => return Ok(false),
         }
@@ -123,22 +207,6 @@ impl StatusListRepo for MemoryStatusLists {
             .await
             .insert(snapshot.snapshot_id.clone(), snapshot);
         Ok(true)
-    }
-
-    async fn insert_with_snapshot(
-        &self,
-        record: StatusListRecord,
-        snapshot: StatusListSnapshot,
-        max_lists_per_issuer: u64,
-    ) -> Result<(), StatusListError> {
-        let snapshot_store = self.require_snapshot()?;
-        let mut values = self.values.write().await;
-        values.try_insert(record, max_lists_per_issuer)?;
-        snapshot_store
-            .write()
-            .await
-            .insert(snapshot.snapshot_id.clone(), snapshot);
-        Ok(())
     }
 
     async fn list_uris(
@@ -170,6 +238,45 @@ impl StatusListRepo for MemoryStatusLists {
                 .collect(),
         };
         Ok(StatusListUriPage::from_rows(rows, limit))
+    }
+
+    async fn allocate_indices(
+        &self,
+        command: AllocateStatusListIndices,
+    ) -> Result<Vec<i32>, StatusListError> {
+        let values = self.values.read().await;
+        let record = values
+            .by_id
+            .get(&command.list_id)
+            .ok_or(StatusListError::NotFound)?;
+        if record.issuer != command.issuer {
+            return Err(StatusListError::IssuerMismatch);
+        }
+        let limit = record
+            .status_list
+            .size
+            .ok_or(StatusListError::ListNotFixedSize)?;
+
+        let mut allocations = self.allocations.write().await;
+        let allocated = allocations.entry(command.list_id).or_default();
+        let result = choose_unallocated_indices(allocated, command.count as usize, limit)?;
+        allocated.extend(result.iter().copied());
+        Ok(result)
+    }
+
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError> {
+        let allocations = self.allocations.read().await;
+        let Some(allocated) = allocations.get(list_id) else {
+            return Ok(indices.first().copied());
+        };
+        Ok(indices
+            .iter()
+            .copied()
+            .find(|index| !allocated.contains(index)))
     }
 }
 
@@ -337,7 +444,7 @@ mod tests {
     use crate::domain::models::credential::Issuer;
     use crate::domain::models::status_list::{Status, StatusEntry, StatusListError};
     use crate::domain::ports::CertificateProvider;
-    use crate::domain::service::Service;
+    use crate::domain::service::{PublishStatusListCommand, Service, StatusListPolicy};
 
     struct DummyCertProvider;
 
@@ -355,6 +462,40 @@ mod tests {
                 crate::domain::ports::SigningMaterial::new(None, std::sync::Arc::new(key))?,
             ))
         }
+    }
+
+    fn test_policy() -> StatusListPolicy {
+        StatusListPolicy {
+            token_exp_secs: 900,
+            max_status_index: 100_000,
+            max_statuses_per_request: 5_000,
+            max_serialized_list_size: usize::MAX,
+            max_lists_per_issuer: u64::MAX,
+        }
+    }
+
+    async fn publish_for_test(
+        service: &Service,
+        list_id: &str,
+        issuer: &str,
+        sub: &str,
+        statuses: Vec<StatusEntry>,
+    ) -> StatusListRecord {
+        let policy = test_policy();
+        service
+            .publish_status_list(
+                PublishStatusListCommand {
+                    list_id: list_id.to_string(),
+                    issuer: Issuer(issuer.to_string()),
+                    sub: sub.to_string(),
+                    statuses,
+                    size: None,
+                    default_status: None,
+                },
+                &policy,
+            )
+            .await
+            .unwrap()
     }
 
     fn create_test_service(
@@ -379,33 +520,20 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(&service, "id", "issuer", "https://example/id", Vec::new()).await;
 
         assert!(matches!(
             service
                 .publish_status_list(
-                    "id".into(),
-                    Issuer("issuer".into()),
-                    "https://example/id".into(),
-                    Vec::new(),
-                    900,
-                    100_000,
-                    5_000,
-                    usize::MAX,
-                    u64::MAX,
+                    PublishStatusListCommand {
+                        list_id: "id".into(),
+                        issuer: Issuer("issuer".into()),
+                        sub: "https://example/id".into(),
+                        statuses: Vec::new(),
+                        size: None,
+                        default_status: None,
+                    },
+                    &test_policy(),
                 )
                 .await,
             Err(StatusListError::AlreadyExists)
@@ -413,6 +541,31 @@ mod tests {
 
         let fetched = service.get_status_list("id").await.unwrap();
         assert_eq!(fetched.list_id, "id");
+    }
+
+    #[tokio::test]
+    async fn publish_caller_managed_list_does_not_record_initial_allocations() {
+        let repo = MemoryStatusLists::default();
+        let allocations = repo.allocations.clone();
+        let cache = MemoryStatusListCache::default();
+        let service = create_test_service(repo, cache, None);
+
+        publish_for_test(
+            &service,
+            "caller-managed",
+            "issuer",
+            "https://example/caller-managed",
+            vec![StatusEntry {
+                index: 3,
+                status: Status::Invalid,
+            }],
+        )
+        .await;
+
+        assert!(
+            !allocations.read().await.contains_key("caller-managed"),
+            "caller-managed publish must not create unused allocation rows"
+        );
     }
 
     #[tokio::test]
@@ -424,18 +577,21 @@ mod tests {
         // Test out of bounds index
         let result = service
             .publish_status_list(
-                "id1".into(),
-                Issuer("issuer".into()),
-                "https://example/id1".into(),
-                vec![StatusEntry {
-                    index: 500,
-                    status: Status::Valid,
-                }],
-                900,
-                100, // max_status_index = 100
-                5_000,
-                usize::MAX,
-                u64::MAX,
+                PublishStatusListCommand {
+                    list_id: "id1".into(),
+                    issuer: Issuer("issuer".into()),
+                    sub: "https://example/id1".into(),
+                    statuses: vec![StatusEntry {
+                        index: 500,
+                        status: Status::Valid,
+                    }],
+                    size: None,
+                    default_status: None,
+                },
+                &StatusListPolicy {
+                    max_status_index: 100,
+                    ..test_policy()
+                },
             )
             .await;
         assert!(matches!(
@@ -449,24 +605,27 @@ mod tests {
         // Test too many statuses per request
         let result = service
             .publish_status_list(
-                "id2".into(),
-                Issuer("issuer".into()),
-                "https://example/id2".into(),
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::Valid,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::Valid,
-                    },
-                ],
-                900,
-                100_000,
-                1, // max_statuses_per_request = 1
-                usize::MAX,
-                u64::MAX,
+                PublishStatusListCommand {
+                    list_id: "id2".into(),
+                    issuer: Issuer("issuer".into()),
+                    sub: "https://example/id2".into(),
+                    statuses: vec![
+                        StatusEntry {
+                            index: 0,
+                            status: Status::Valid,
+                        },
+                        StatusEntry {
+                            index: 1,
+                            status: Status::Valid,
+                        },
+                    ],
+                    size: None,
+                    default_status: None,
+                },
+                &StatusListPolicy {
+                    max_statuses_per_request: 1,
+                    ..test_policy()
+                },
             )
             .await;
         assert!(matches!(
@@ -481,20 +640,7 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(&service, "id", "issuer", "https://example/id", Vec::new()).await;
 
         let result = service
             .update_statuses(
@@ -504,10 +650,7 @@ mod tests {
                     index: 0,
                     status: Status::Invalid,
                 }],
-                900,
-                100_000,
-                5000,
-                usize::MAX,
+                &test_policy(),
             )
             .await;
 
@@ -529,20 +672,7 @@ mod tests {
         let lists = repo.clone().with_snapshot(&snapshot_repo);
         let service = create_test_service(lists, cache, Some(snapshot_repo));
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(&service, "id", "issuer", "https://example/id", Vec::new()).await;
 
         let published = service
             .status_list_repo()
@@ -552,15 +682,7 @@ mod tests {
             .unwrap();
 
         let result = service
-            .update_statuses(
-                &Issuer("issuer".into()),
-                "id",
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-            )
+            .update_statuses(&Issuer("issuer".into()), "id", Vec::new(), &test_policy())
             .await;
 
         let landed = result.expect("an empty update must succeed as a no-op");
@@ -598,23 +720,17 @@ mod tests {
         let lists = repo.clone().with_snapshot(&snapshot_repo);
         let service = create_test_service(lists, cache, Some(snapshot_repo));
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::Valid,
-                }],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(
+            &service,
+            "id",
+            "issuer",
+            "https://example/id",
+            vec![StatusEntry {
+                index: 0,
+                status: Status::Valid,
+            }],
+        )
+        .await;
 
         let before = service
             .status_list_repo()
@@ -632,10 +748,7 @@ mod tests {
                     index: 0,
                     status: Status::Valid,
                 }],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
+                &test_policy(),
             )
             .await
             .expect("an identical update must succeed as a no-op");
@@ -672,29 +785,23 @@ mod tests {
         let lists = repo.clone().with_snapshot(&snapshot_repo);
         let service = create_test_service(lists, cache, Some(snapshot_repo));
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::Valid,
-                    },
-                    StatusEntry {
-                        index: 1,
-                        status: Status::Valid,
-                    },
-                ],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(
+            &service,
+            "id",
+            "issuer",
+            "https://example/id",
+            vec![
+                StatusEntry {
+                    index: 0,
+                    status: Status::Valid,
+                },
+                StatusEntry {
+                    index: 1,
+                    status: Status::Valid,
+                },
+            ],
+        )
+        .await;
 
         let before = service
             .status_list_repo()
@@ -718,10 +825,7 @@ mod tests {
                         status: Status::Invalid,
                     },
                 ],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
+                &test_policy(),
             )
             .await
             .expect("a mixed update that changes the list must land");
@@ -757,23 +861,17 @@ mod tests {
         let lists = repo.clone().with_snapshot(&snapshot_repo);
         let service = create_test_service(lists, cache, Some(snapshot_repo));
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                vec![StatusEntry {
-                    index: 0,
-                    status: Status::Valid,
-                }],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(
+            &service,
+            "id",
+            "issuer",
+            "https://example/id",
+            vec![StatusEntry {
+                index: 0,
+                status: Status::Valid,
+            }],
+        )
+        .await;
 
         let before = service
             .status_list_repo()
@@ -790,10 +888,7 @@ mod tests {
                     index: 100,
                     status: Status::Valid,
                 }],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
+                &test_policy(),
             )
             .await
             .expect("growing the list with a padding write must land");
@@ -823,20 +918,7 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(&service, "id", "issuer", "https://example/id", Vec::new()).await;
 
         let result = service
             .update_statuses(
@@ -852,10 +934,7 @@ mod tests {
                         status: Status::Suspended,
                     },
                 ],
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
+                &test_policy(),
             )
             .await;
 
@@ -876,20 +955,7 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        service
-            .publish_status_list(
-                "id".into(),
-                Issuer("issuer".into()),
-                "https://example/id".into(),
-                Vec::new(),
-                900,
-                100_000,
-                5_000,
-                usize::MAX,
-                u64::MAX,
-            )
-            .await
-            .unwrap();
+        publish_for_test(&service, "id", "issuer", "https://example/id", Vec::new()).await;
 
         let result = service
             .update_statuses(
@@ -905,10 +971,10 @@ mod tests {
                         status: Status::Invalid,
                     },
                 ],
-                900,
-                10, // max_status_index
-                5_000,
-                usize::MAX,
+                &StatusListPolicy {
+                    max_status_index: 10,
+                    ..test_policy()
+                },
             )
             .await;
 
@@ -928,6 +994,8 @@ mod tests {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: 1,
                 lst: String::new(),
+                size: None,
+                default_status: None,
             },
             sub: format!("https://example/{list_id}"),
             updated_at: 0,
@@ -960,7 +1028,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_with_snapshot_enforces_quota() {
+    async fn create_with_snapshot_enforces_quota() {
         let snapshots = MemoryStatusListSnapshotRepo::default();
         let repo = MemoryStatusLists::default().with_snapshot(&snapshots);
         let snapshot = |id: &str| StatusListSnapshot {
@@ -970,17 +1038,19 @@ mod tests {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: 1,
                 lst: String::new(),
+                size: None,
+                default_status: None,
             },
             sub: format!("https://example/{id}"),
             iat: 0,
             exp: 900,
         };
 
-        repo.insert_with_snapshot(list_record("l1", "issuer"), snapshot("l1"), 1)
+        repo.create_with_snapshot(list_record("l1", "issuer"), snapshot("l1"), 1)
             .await
             .unwrap();
         assert!(matches!(
-            repo.insert_with_snapshot(list_record("l2", "issuer"), snapshot("l2"), 1)
+            repo.create_with_snapshot(list_record("l2", "issuer"), snapshot("l2"), 1)
                 .await,
             Err(StatusListError::QuotaExceeded { count: 1, max: 1 })
         ));
