@@ -104,6 +104,7 @@ const data = {
   jwtListId: crypto.randomUUID(),
   cwtListId: crypto.randomUUID(),
   historicalListId: crypto.randomUUID(),
+  allocationListId: crypto.randomUUID(),
   historicalTime: 0,
   publicKeyJwk: crypto.createPublicKey(publicKey).export({ format: 'jwk' }),
   token: `${signingInput}.${base64url(signature)}`
@@ -133,6 +134,10 @@ build_operations_headers() {
       { name: 'Content-Type', values: 'application/json' }
     ],
     'PATCH /api/v1/status-lists/{list_id}/statuses': [
+      { name: 'Accept', values: 'application/json' },
+      { name: 'Content-Type', values: 'application/json' }
+    ],
+    'POST /api/v1/status-lists/{list_id}/allocations': [
       { name: 'Accept', values: 'application/json' },
       { name: 'Content-Type', values: 'application/json' }
     ],
@@ -181,6 +186,7 @@ update_list_id = token_data["updateListId"]
 jwt_list_id = token_data["jwtListId"]
 cwt_list_id = token_data["cwtListId"]
 historical_list_id = token_data["historicalListId"]
+allocation_list_id = token_data.get("allocationListId", list_id)
 historical_time = token_data["historicalTime"]
 public_key = token_data["publicKeyJwk"]
 secondary_issuer = token_data["secondaryIssuerId"]
@@ -271,6 +277,55 @@ update["requestBody"]["content"]["application/json"]["examples"] = {
     }
 }
 ref_response(update, "200", "updateStatusList")
+
+allocation_path = paths.get("/api/v1/status-lists/{list_id}/allocations")
+if allocation_path is not None:
+    for parameter in allocation_path.get("parameters", []):
+        if parameter["name"] == "list_id":
+            parameter["examples"] = {"allocateStatusList": {"value": allocation_list_id}}
+
+    allocation = allocation_path.get("post")
+    if allocation is not None:
+        response_status = "201" if "201" in allocation.get("responses", {}) else "200"
+        keep_responses(allocation, response_status)
+
+        request_body = allocation.get("requestBody", {}).get("content", {}).get("application/json")
+        if request_body is not None:
+            schema_ref = request_body.get("schema", {}).get("$ref", "")
+            schema_name = schema_ref.rsplit("/", 1)[-1] if schema_ref else ""
+            schema = doc.get("components", {}).get("schemas", {}).get(schema_name, {})
+
+            example = {}
+            for name, prop in schema.get("properties", {}).items():
+                if "example" in prop:
+                    example[name] = prop["example"]
+                elif prop.get("type") == "integer":
+                    example[name] = prop.get("minimum", 0)
+                elif prop.get("type") == "number":
+                    example[name] = prop.get("minimum", 0)
+                elif prop.get("type") == "boolean":
+                    example[name] = True
+                elif prop.get("type") == "array":
+                    example[name] = []
+                elif prop.get("type") == "object":
+                    example[name] = {}
+                else:
+                    example[name] = "microcks"
+
+            if not example:
+                example = {"count": 1}
+
+            request_body["examples"] = {"allocateStatusList": {"value": example}}
+
+        content = allocation.get("responses", {}).get(response_status, {}).get("content", {})
+        if "application/json" in content:
+            content["application/json"]["examples"] = {
+                "allocateStatusList": {
+                    "value": content["application/json"].get("example", {})
+                }
+            }
+        else:
+            ref_response(allocation, response_status, "allocateStatusList")
 
 get_status = paths["/api/v1/status-lists/{list_id}"]["get"]
 keep_responses(get_status, "200")
@@ -494,6 +549,7 @@ seed_microcks_openapi_fixtures() {
   local jwt_list_id
   local cwt_list_id
   local historical_list_id
+  local allocation_list_id
   local publish_body
   local update_body
   local status_code
@@ -503,10 +559,11 @@ seed_microcks_openapi_fixtures() {
   jwt_list_id="$(json_field "$token_file" jwtListId)"
   cwt_list_id="$(json_field "$token_file" cwtListId)"
   historical_list_id="$(json_field "$token_file" historicalListId)"
+  allocation_list_id="$(json_field "$token_file" allocationListId)"
   publish_body='{"statuses":[{"index":0,"status":0},{"index":1,"status":1},{"index":2,"status":2}]}'
   update_body='{"statuses":[{"index":1,"status":2}]}'
 
-  for list_id in "$update_list_id" "$jwt_list_id" "$cwt_list_id" "$historical_list_id"; do
+  for list_id in "$update_list_id" "$jwt_list_id" "$cwt_list_id" "$historical_list_id" "$allocation_list_id"; do
     status_code="$(curl_status PUT "$API_ENDPOINT/api/v1/status-lists/$list_id/statuses" "$publish_body")"
     expect_status "$status_code" "201" "Seeding status list $list_id"
   done
@@ -641,17 +698,24 @@ for (const operation of operations) {
 
   console.error(`[FAIL] ${operationName}`);
   const messages = operation.testStepResults || operation.messages || operation.errors || operation.failures || [];
+  let printed = false;
   if (Array.isArray(messages)) {
     for (const message of messages) {
       if (typeof message === 'string') {
         console.error(`  ${message}`);
+        printed = true;
       } else if (message && typeof message === 'object') {
         const label = message.name || message.eventMessage || message.message || message.error || message.info || JSON.stringify(message);
         console.error(`  ${label}`);
+        printed = true;
       }
     }
   } else if (messages && typeof messages === 'object') {
     console.error(`  ${JSON.stringify(messages)}`);
+    printed = true;
+  }
+  if (!printed) {
+    console.error(`  ${JSON.stringify(operation)}`);
   }
 }
 NODE
