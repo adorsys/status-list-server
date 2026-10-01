@@ -492,11 +492,34 @@ paths:
         Returns the status list token for the requested `list_id`, encoded as a
         JWT or CWT depending on the `Accept` header.
 
+        **Content negotiation.** The token format is negotiated per RFC 9110
+        §12.5.1. The `Accept` header (absent or empty means "accept anything")
+        is a comma-separated list of media ranges, each optionally carrying a
+        `q`-value (`q=0` excludes a range); type/subtype matching is
+        case-insensitive. Wildcard precedence for each supported type is
+        three-tiered: an exact type beats `application/*`, which beats `*/*`,
+        so an explicit `q=0` exclusion is never overridden by a wildcard. The
+        supported types are `application/statuslist+jwt` and
+        `application/statuslist+cwt`; the type with the highest acceptable `q`
+        is served, and JWT wins ties (including a wildcard match). A `406 Not
+        Acceptable` is returned only when no supported type is acceptable (for
+        example `q=0` on both types, only unsupported types, or a malformed or
+        out-of-range `q` such as `q=2` on the only matching range).
+
+        Media parameters other than `q` (for example `profile=v2`) are ignored
+        for matching — a deliberately parameter-agnostic policy. The server
+        serves exactly two un-parameterized representations, so treating every
+        parameterized range as a match is less surprising than RFC 9110's
+        parameter-equality matching, which would ignore every parameterized
+        range and produce spurious `406`s. Revisit this if a parameterized
+        status-list variant is introduced.
+
         JWT-format responses are gzip-compressed (`Content-Encoding: gzip`)
         only when the client has advertised support via `Accept-Encoding: gzip`
         (see draft-ietf-oauth-status-list-21 §8.2). CWT-format responses are
-        never gzip-compressed. Because the representation varies by
-        `Accept-Encoding`, every response carries `Vary: Accept-Encoding`.
+        never gzip-compressed. Because the representation varies by both `Accept`
+        and `Accept-Encoding`, the `200`, `304` and `406` responses carry
+        `Vary: Accept, Accept-Encoding`.
 
         The decoded token conforms to the
         [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
@@ -521,14 +544,22 @@ paths:
           in: header
           required: false
           description: |
-            Desired token format. Defaults to `application/statuslist+jwt` if
-            omitted.
+            Desired token format, negotiated per RFC 9110 §12.5.1. Defaults to
+            `application/statuslist+jwt` when omitted (or when the header is
+            `*/*` / `application/*`). Accepts a comma-separated list of media
+            ranges with optional `q`-values; type/subtype matching is
+            case-insensitive and non-`q` parameters are ignored (a documented
+            parameter-agnostic policy). For each type an exact range beats
+            `application/*`, which beats `*/*`, so an explicit `q=0` exclusion
+            is never overridden by a wildcard. The supported types are
+            `application/statuslist+jwt` and `application/statuslist+cwt`; the
+            type with the highest acceptable `q` is served (JWT wins ties). A
+            `406 Not Acceptable` is returned only when no supported type is
+            acceptable (e.g. `q=0` on both, an unsupported type, or a malformed
+            or out-of-range `q`).
           schema:
             type: string
-            enum:
-              - application/statuslist+jwt
-              - application/statuslist+cwt
-            default: application/statuslist+jwt
+            example: application/statuslist+jwt
         - name: time
           in: query
           required: false
@@ -619,7 +650,7 @@ paths:
                 the requested token format (`Accept`) and the negotiated content
                 coding (`Accept-Encoding`), which is required so shared caches/CDNs
                 do not serve a gzipped variant to a client that did not request one
-                (RFC 9111 §4.2).
+                (RFC 9111 §4.1).
               example: Accept, Accept-Encoding
         "304":
           description: |
@@ -1125,14 +1156,27 @@ components:
             error_description: "Status list was not found"
 
     NotAcceptable:
-      description: Requested response format not supported
+      description: |
+        Requested response format not supported. No acceptable media type was
+        advertised in the `Accept` header. Supported types are
+        `application/statuslist+jwt` and `application/statuslist+cwt`; the 406
+        body lists both.
+      headers:
+        Vary:
+          schema:
+            type: string
+          description: |
+            Always `Accept, Accept-Encoding`, advertising that the outcome
+            depends on `Accept` (RFC 9110 §12.5.5). The 406 itself is sent with
+            `Cache-Control: no-store`, so caches never store it.
+          example: Accept, Accept-Encoding
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "invalid_accept_header"
-            error_description: "Invalid accept header"
+            error_description: "No acceptable media type. Supported: application/statuslist+jwt, application/statuslist+cwt"
 
     PublishConflict:
       description: |
