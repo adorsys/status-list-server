@@ -6,7 +6,7 @@ use axum::body::Bytes;
 use moka::future::Cache as MokaCache;
 use moka::policy::Expiry;
 use opentelemetry::{
-    metrics::{Counter, Gauge},
+    metrics::{Counter, ObservableGauge},
     {KeyValue, global},
 };
 
@@ -26,8 +26,33 @@ const TOTAL_BYTES_METRIC: &str = "token_bytes_cache_size";
 struct TokenCacheMetrics {
     hits: Counter<u64>,
     misses: Counter<u64>,
-    entry_count: Gauge<u64>,
-    total_bytes: Gauge<u64>,
+    // The observable size gauges are retained only to keep them registered with
+    // the meter; their values are read via their callbacks at scrape time, so
+    // the fields are never dereferenced.
+    #[allow(dead_code)]
+    entry_count: ObservableGauge<u64>,
+    #[allow(dead_code)]
+    total_bytes: ObservableGauge<u64>,
+}
+
+/// The most recently built [`TokenBytesCache`], exposed to the observable size
+/// gauges so they read live `entry_count`/`weighted_size` at scrape time instead
+/// of depending on being refreshed on a request path. Production runs a single
+/// per-replica cache, so one slot is enough; tests that build throwaway caches
+/// simply overwrite it.
+static SIZE_GAUGE_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<TokenBytesCache>>> =
+    std::sync::OnceLock::new();
+
+fn set_size_gauge_cache(cache: TokenBytesCache) {
+    let cell = SIZE_GAUGE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(cache);
+}
+
+fn size_gauge_cache() -> Option<TokenBytesCache> {
+    let cell = SIZE_GAUGE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.clone()
 }
 
 fn token_cache_metrics() -> TokenCacheMetrics {
@@ -45,12 +70,28 @@ fn token_cache_metrics() -> TokenCacheMetrics {
                 .with_description("Signed status-list token bytes cache misses")
                 .build(),
             entry_count: meter
-                .u64_gauge(ENTRY_COUNT_METRIC)
+                .u64_observable_gauge(ENTRY_COUNT_METRIC)
                 .with_description("Number of entries currently resident in the signed-token bytes cache")
+                .with_callback(|observer| {
+                    if let Some(cache) = size_gauge_cache() {
+                        observer.observe(
+                            cache.inner.entry_count(),
+                            &[KeyValue::new("cache", "token_bytes")],
+                        );
+                    }
+                })
                 .build(),
             total_bytes: meter
-                .u64_gauge(TOTAL_BYTES_METRIC)
+                .u64_observable_gauge(TOTAL_BYTES_METRIC)
                 .with_description("Total weighted size (bytes) currently resident in the signed-token bytes cache")
+                .with_callback(|observer| {
+                    if let Some(cache) = size_gauge_cache() {
+                        observer.observe(
+                            cache.inner.weighted_size(),
+                            &[KeyValue::new("cache", "token_bytes")],
+                        );
+                    }
+                })
                 .build(),
         }
     })
@@ -103,8 +144,9 @@ pub(crate) struct TokenCacheKey {
 ///
 /// Per replica and byte-bounded (`max_capacity_bytes`): each entry is weighed by
 /// its byte size. Entries are keyed by `TokenCacheKey` and expire at the end of
-/// their anchored window `[window_start, window_start + exp_secs)`, so a fresh
-/// `200` reuses one sign per `(list, window, format, encoding)` per replica.
+/// their anchored window `[window_start, window_start + width)` where `width =
+/// min(exp_secs - ttl_secs, ttl_secs)`, so a fresh `200` reuses one sign per
+/// `(list, window, format, encoding)` per replica.
 /// Concurrent misses for the same key coalesce onto one in-flight build; capacity
 /// eviction can cause another sign of an unchanged, still-valid entry. Content
 /// changes, signer/key rotation, and certificate renewal all change the key and
@@ -122,10 +164,17 @@ fn entry_weight(_key: &TokenCacheKey, value: &CachedToken) -> u32 {
 }
 
 /// Per-entry expiry policy: each entry expires at the end of its anchored
-/// validity window `[window_start, window_start + exp_secs)`, independent of any
-/// global TTL. The lookup guard already treats past-window entries as misses;
-/// this policy only governs when moka frees the entry's memory. Reads do not
-/// extend the expiry.
+/// validity window, independent of any global TTL. The lookup guard already
+/// treats past-window entries as misses; this policy only governs when moka
+/// frees the entry's memory. Reads do not extend the expiry.
+///
+/// The window end is `window_start + min(exp_secs - ttl_secs, ttl_secs)`, the
+/// same width used by `token_window` (see
+/// `handlers::status_list::utils::conditional::token_window`). A token anchored
+/// to `[window_start, window_start + width)` is never read after the window
+/// rolls at `window_start + width`, so expiring there (rather than at
+/// `window_start + exp_secs`) means a closed window's bytes are freed promptly
+/// instead of lingering for the rest of `exp_secs`.
 #[derive(Debug, Clone, Copy, Default)]
 struct EntryExpiry;
 
@@ -136,9 +185,10 @@ impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
         value: &CachedToken,
         _created_at: Instant,
     ) -> Option<Duration> {
-        let window_end = key
-            .window_start
-            .saturating_add(i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX));
+        let exp = i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX);
+        let ttl = i64::try_from(key.token_ttl_secs).unwrap_or(i64::MAX);
+        let width = exp.saturating_sub(ttl).min(ttl).max(1);
+        let window_end = key.window_start.saturating_add(width);
         let secs = (window_end - value.created_at_unix).max(1) as u64;
         Some(Duration::from_secs(secs))
     }
@@ -161,20 +211,12 @@ impl TokenBytesCache {
             .max_capacity(max_capacity_bytes)
             .expire_after(EntryExpiry)
             .build();
-        Self { inner }
-    }
-
-    /// Push the current resident entry count and total byte size to the gauges.
-    fn update_size_gauges(&self) {
-        let metrics = token_cache_metrics();
-        metrics.entry_count.record(
-            self.inner.entry_count(),
-            &[KeyValue::new("cache", "token_bytes")],
-        );
-        metrics.total_bytes.record(
-            self.inner.weighted_size(),
-            &[KeyValue::new("cache", "token_bytes")],
-        );
+        let cache = Self { inner };
+        // Register the cache so the observable size gauges read live
+        // entry_count/weighted_size at scrape time.
+        token_cache_metrics();
+        set_size_gauge_cache(cache.clone());
+        cache
     }
 
     /// Return cached bytes for `key`, only for an entry whose anchored window
@@ -240,7 +282,6 @@ impl TokenBytesCache {
         metrics
             .misses
             .add(1, &[KeyValue::new("cache", "token_bytes")]);
-        self.update_size_gauges();
         Ok(Some(value))
     }
 
@@ -280,7 +321,6 @@ impl TokenBytesCache {
     #[cfg(test)]
     pub(crate) async fn insert(&self, key: TokenCacheKey, value: CachedToken) {
         self.inner.insert(key, value).await;
-        self.update_size_gauges();
     }
 }
 
@@ -764,11 +804,12 @@ mod tests {
 
     #[test]
     fn entry_expiry_targets_window_end() {
-        // Each entry expires at the end of its own anchored window
-        // `[window_start, window_start + exp_secs)`, independent of any global TTL.
-        // `base_key(1000)` has `window_start = 1000` and `exp_secs = 900`, so the
-        // window ends at 1900. An entry created at 1200 must therefore live for
-        // exactly 700 seconds.
+        // Each entry expires at the end of its own anchored validity window,
+        // independent of any global TTL. The window width is
+        // `min(exp - ttl, ttl)`: `base_key(1000)` has `exp_secs = 900` and
+        // `ttl_secs = 300`, so the width is `min(600, 300) = 300` and the window
+        // `[1000, 1300)`. An entry created at 1200 must therefore live for
+        // exactly 100 seconds, not the full `exp_secs` runway.
         let key = base_key(1000);
         let value = CachedToken {
             bytes: Bytes::from(vec![1u8]),
@@ -778,6 +819,24 @@ mod tests {
         let duration = EntryExpiry
             .expire_after_create(&key, &value, std::time::Instant::now())
             .expect("a window-end expiry is always set");
-        assert_eq!(duration, Duration::from_secs(700));
+        assert_eq!(duration, Duration::from_secs(100));
+
+        // A different ttl/exp pairing yields a different width and thus a
+        // different expiry: exp=1200, ttl=600 -> width = min(600, 600) = 600,
+        // window [1000, 1600), so an entry created at 1200 lives 400s.
+        let key = TokenCacheKey {
+            token_ttl_secs: 600,
+            token_exp_secs: 1200,
+            ..base_key(1000)
+        };
+        let value = CachedToken {
+            bytes: Bytes::from(vec![1u8]),
+            encoding: None,
+            created_at_unix: 1200,
+        };
+        let duration = EntryExpiry
+            .expire_after_create(&key, &value, std::time::Instant::now())
+            .expect("a window-end expiry is always set");
+        assert_eq!(duration, Duration::from_secs(400));
     }
 }

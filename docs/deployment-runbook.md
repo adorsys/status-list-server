@@ -264,8 +264,8 @@ That cross-replica stability holds **only when replicas serve the same content w
 
 The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
 
-- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. `0` disables the cache (every request re-signs).
-- Each entry expires at the **end of its own validity window**, independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
+- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. The default (64 MiB) is sized to hold several maximum-permitted lists (each near 1 MiB once wrapped in JWT/base64) plus many small ones. `0` disables the cache (every request re-signs).
+- Each entry expires at the **end of its own validity window** (window width is `min(exp - ttl, ttl)`), independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
 - The cache only avoids re-signing *unchanged* tokens within a window on one replica. Under capacity pressure a still-valid entry can be evicted and later re-signed; a content change or signer/certificate rotation always re-signs immediately (both are part of the cache key and the ETag).
 
 `status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = ttl`) vouch for a token that expires sooner.

@@ -1432,7 +1432,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "cache.reconnect_cooldown_ms",
             default_cache_reconnect_cooldown_ms(),
         )?
-        .set_default("token_bytes_cache.max_capacity", 1048576)?
+        .set_default("token_bytes_cache.max_capacity", 67108864)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
         assert_eq!(config.azure_keyvault.vault_url, None);
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
-        assert_eq!(config.token_bytes_cache.max_capacity, 1048576);
+        assert_eq!(config.token_bytes_cache.max_capacity, 67108864);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.management_auth.leeway_secs, 60);

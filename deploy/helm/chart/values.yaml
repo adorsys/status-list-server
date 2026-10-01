@@ -165,9 +165,11 @@ statuslist:
     # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
     # Signed status-list token bytes cache: a *byte* budget (entries are weighed
-    # by their size). "0" disables the cache (every request re-signs). Each entry
-    # expires at the end of its own validity window, so there is no TTL setting.
-    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "1048576"
+    # by their size). Default 64 MiB holds several maximum-permitted lists (each
+    # near 1 MiB once wrapped in JWT/base64) plus many small ones. "0" disables
+    # the cache (every request re-signs). Each entry expires at the end of its own
+    # validity window, so there is no TTL setting.
+    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "67108864"
     APP_CACHE__TLS: "false"
     # Optional Redis settings when APP_CACHE__BACKEND=redis. Prefer secretEnv or
     # secretMounts for passwords. Use a dedicated Redis ACL user scoped to
