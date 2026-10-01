@@ -974,6 +974,19 @@ jobs:
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
           done
 
+          # Record the last deployed Helm revision so the post-deploy ESO verification can
+          # explicitly roll back if the new release does not reconcile. --rollback-on-failure
+          # on the upgrade below only covers failures during the upgrade itself; a release that
+          # deploys but whose ExternalSecrets cannot sync from the cluster store needs an
+          # explicit rollback to keep production off stale credentials. Empty on a fresh install
+          # (no previous revision to roll back to), in which case the verify step uninstalls.
+          PREV_REVISION=""
+          if helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" --max 1 >/dev/null 2>&1; then
+            PREV_REVISION=$(helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" \
+              --output json | jq -r 'max_by(.revision) | .revision' 2>/dev/null || true)
+          fi
+          printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
+
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
@@ -1010,14 +1023,63 @@ jobs:
         # baseline recorded in the Deploy chart step, proving reconciliation happened for
         # this deployment. On a fresh install the baseline is empty and only Ready=True is
         # required.
+        #
+        # Before waiting we force ESO to refresh both ExternalSecrets by annotating them
+        # with a unique external-secrets.io/force-sync value. The chart's refreshInterval is
+        # 30m, so on a later image-only release the ExternalSecret spec is unchanged and ESO
+        # could legitimately keep the old refreshTime for the whole wait window and fail the
+        # deployment; the force-sync annotation triggers an immediate reconcile regardless.
+        #
+        # This verification runs AFTER helm upgrade --install --rollback-on-failure has
+        # already succeeded, so a failure here alone would mark the workflow failed while
+        # leaving the new (possibly stale-credential) Helm revision live. To keep production
+        # inside the rollback boundary, we explicitly roll back to the pre-deploy revision
+        # recorded in the Deploy chart step when either ExternalSecret fails to reconcile, or
+        # uninstall the release on a fresh install (no previous revision), so a failed
+        # verification leaves the cluster on the last known-good state rather than the broken
+        # new one.
         env:
           PRIMARY_ES: statuslist-external-secret
           CREDS_ES: statuslist-external-secret-aws-credentials
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          RELEASE="${{ env.HELM_RELEASE_NAME }}"
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
+          PREV_REVISION_FILE="$RUNNER_TEMP/eso-prev-revision"
+          FORCE_SYNC="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           TIMEOUT=180
+          rollback_done=0
+
+          cleanup_on_failure() {
+            if [ "$rollback_done" -eq 1 ]; then
+              return 0
+            fi
+            rollback_done=1
+            local prev_rev=""
+            if [ -f "$PREV_REVISION_FILE" ]; then
+              prev_rev=$(cat "$PREV_REVISION_FILE")
+            fi
+            echo "::warning::ESO verification failed; restoring the previous release state"
+            if [ -n "$prev_rev" ]; then
+              helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m || \
+                echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
+            else
+              # Fresh install: nothing to roll back to, so remove the release entirely.
+              helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 5m || \
+                echo "::warning::helm uninstall of fresh release failed; manual intervention required"
+            fi
+          }
+          trap cleanup_on_failure EXIT
+
+          # Force ESO to reconcile both release ExternalSecrets immediately, regardless of
+          # the 30m refreshInterval, so an image-only release cannot leave a stale
+          # refreshTime for the whole wait window.
+          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+            kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
+              "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
+              echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
+          done
 
           await_synced() {
             local es="$1" label="$2"
@@ -1048,3 +1110,5 @@ jobs:
           # The credentials ExternalSecret (aws-credentials-secret) must also sync from the
           # cluster store so the app's mounted credential volume is fresh.
           await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+
+          rollback_done=1
