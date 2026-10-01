@@ -7,7 +7,7 @@ pub mod handlers;
 pub mod health;
 pub mod rate_limit;
 
-use crate::domain::service::Service;
+use crate::domain::service::{Service, StatusListPolicy};
 use std::sync::Arc;
 
 /// JWT policy for protected management endpoints.
@@ -57,4 +57,16 @@ pub struct AppState {
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
+}
+
+impl AppState {
+    pub fn status_list_policy(&self) -> StatusListPolicy {
+        StatusListPolicy {
+            token_exp_secs: self.token_exp_secs,
+            max_status_index: self.max_status_index,
+            max_statuses_per_request: self.max_statuses_per_request,
+            max_serialized_list_size: self.max_serialized_list_size,
+            max_lists_per_issuer: self.max_lists_per_issuer,
+        }
+    }
 }

@@ -112,6 +112,8 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "eNrbuRgAAhcBXQ".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/credentials/status/3".to_string(),
             updated_at: 1234567890,
@@ -285,6 +287,8 @@ mod tests {
             status_list: StatusList {
                 bits: 1,
                 lst: "eNrbuRgAAhcBXQ".to_string(),
+                size: None,
+                default_status: None,
             },
             sub: "https://example.com/credentials/status/3".to_string(),
             iat: 1000,
