@@ -617,6 +617,47 @@ wait_for_managed_microcks() {
   done
 }
 
+print_managed_test_result() {
+  local test_id="$1"
+  local result_file
+  result_file="$(mktemp "$microcks_work_dir/microcks-result.XXXXXX.json")"
+
+  if ! curl -fsS "http://localhost:${MICROCKS_MANAGED_PORT}/api/tests/${test_id}" > "$result_file"; then
+    echo "Unable to fetch Microcks test result ${test_id}" >&2
+    return
+  fi
+
+  node - "$result_file" <<'NODE'
+const fs = require('fs');
+const result = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+
+console.error(`Microcks test ${result.id || result.testNumber || ''} result details:`);
+console.error(`  success: ${result.success}`);
+
+const operations = result.testCaseResults || result.operations || result.results || [];
+for (const operation of operations) {
+  const operationName = operation.operationName || operation.operation || operation.name || operation.requestName || 'operation';
+  const success = operation.success ?? operation.status;
+  if (success === true || success === 'SUCCESS') continue;
+
+  console.error(`[FAIL] ${operationName}`);
+  const messages = operation.testStepResults || operation.messages || operation.errors || operation.failures || [];
+  if (Array.isArray(messages)) {
+    for (const message of messages) {
+      if (typeof message === 'string') {
+        console.error(`  ${message}`);
+      } else if (message && typeof message === 'object') {
+        const label = message.name || message.eventMessage || message.message || message.error || message.info || JSON.stringify(message);
+        console.error(`  ${label}`);
+      }
+    }
+  } else if (messages && typeof messages === 'object') {
+    console.error(`  ${JSON.stringify(messages)}`);
+  }
+}
+NODE
+}
+
 start_managed_microcks() {
   require_command docker
   require_command curl
@@ -641,6 +682,9 @@ run_microcks_with_managed_server() {
   local operations_headers="$2"
   local microcks_url="http://host.docker.internal:${MICROCKS_MANAGED_PORT}/api/"
   local test_endpoint
+  local output_file
+  local status
+  local test_id
 
   start_managed_microcks
   test_endpoint="$(endpoint_for_container "$API_ENDPOINT")"
@@ -655,6 +699,8 @@ run_microcks_with_managed_server() {
     --keycloakClientId=foo \
     --keycloakClientSecret=bar
 
+  output_file="$(mktemp "$microcks_work_dir/microcks-test.XXXXXX.log")"
+  set +e
   docker_cli test \
     "$API_NAME_VERSION" \
     "$test_endpoint" \
@@ -663,7 +709,18 @@ run_microcks_with_managed_server() {
     --keycloakClientId=foo \
     --keycloakClientSecret=bar \
     --waitFor="$MICROCKS_WAIT_FOR" \
-    --operationsHeaders="$operations_headers"
+    --operationsHeaders="$operations_headers" | tee "$output_file"
+  status=${PIPESTATUS[0]}
+  set -e
+
+  if [[ "$status" -ne 0 ]]; then
+    test_id="$(sed -nE 's/.*test "([^"]+)".*/\1/p; s|.*#/tests/([^[:space:]]+).*|\1|p' "$output_file" | tail -n 1)"
+    if [[ -n "$test_id" ]]; then
+      print_managed_test_result "$test_id"
+    fi
+  fi
+
+  return "$status"
 }
 
 run_microcks() {

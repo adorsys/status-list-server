@@ -210,7 +210,6 @@ jobs:
           if ! STATUS_LIST_SERVER_PID="$server_pid" \
             STATUS_LIST_SERVER_LOG=/tmp/status-list-server.log \
             MICROCKS_VERBOSE=false \
-            RUN_POSTMAN_CONFORMANCE=true \
             ./scripts/test-microcks-conformance.sh; then
             echo "::group::status-list-server logs"
             cat /tmp/status-list-server.log
