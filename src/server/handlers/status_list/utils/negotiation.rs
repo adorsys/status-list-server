@@ -172,7 +172,8 @@ fn qvalue(s: &str) -> Option<f32> {
     };
     if let Some(frac) = frac {
         // Up to three digits, digits only; after `1` only zeros are allowed.
-        if frac.is_empty()
+        // `0.` and `1.` are valid (`0*3DIGIT`); only a bare `.` has no digits.
+        if (int_part.is_empty() && frac.is_empty())
             || frac.len() > 3
             || !frac.bytes().all(|b| b.is_ascii_digit())
             || (int == 1 && !frac.bytes().all(|b| b == b'0'))
@@ -194,6 +195,8 @@ fn qvalue(s: &str) -> Option<f32> {
 fn find_top_level(s: &str, delim: char) -> Option<usize> {
     let mut in_quotes = false;
     let mut escaped = false;
+    // A quoted-string can only start a parameter value, i.e. right after `=`.
+    let mut prev = None;
     for (i, c) in s.char_indices() {
         if in_quotes {
             if escaped {
@@ -203,10 +206,13 @@ fn find_top_level(s: &str, delim: char) -> Option<usize> {
             } else if c == '"' {
                 in_quotes = false;
             }
-        } else if c == '"' {
+        } else if c == '"' && prev == Some('=') {
             in_quotes = true;
         } else if c == delim {
             return Some(i);
+        }
+        if !c.is_whitespace() {
+            prev = Some(c);
         }
     }
     None
@@ -326,8 +332,12 @@ mod tests {
             (&["application/statuslist+cwt;q=inf"], None),
             (&["application/statuslist+cwt;q=-0.5"], None),
             (&["application/statuslist+cwt;q=1e2"], None),
+            // A trailing dot with no digits is malformed, but `0.` / `1.` are
+            // valid per the RFC 9110 grammar (`0*3DIGIT` after the dot).
+            (&["application/statuslist+cwt;q=1."], Some(AcceptType::Cwt)),
+            (&["application/statuslist+cwt;q=."], None),
             // Quoted media parameters: a `,` or `;q=` inside a quoted value is
-            // data, not a list separator / weight (RFC 9110 §5.3).
+            // data, not a list separator / weight (RFC 9110 §5.6.4).
             (
                 &["application/statuslist+jwt;profile=\"a,b\";q=0, \
                      application/statuslist+cwt;q=0.5"],

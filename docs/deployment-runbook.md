@@ -162,8 +162,8 @@ The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB
 
 The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
 (JWT vs CWT) from the client's `Accept` header per RFC 9110 §12.5.1 and serves
-`Vary: Accept, Accept-Encoding` on every response, including `406 Not
-Acceptable`. Two operational consequences follow:
+`Vary: Accept, Accept-Encoding` on its `200`, `304` and `406` responses. Two
+operational consequences follow:
 
 - **Normalize `Accept` at the CDN/edge.** Most HTTP clients and CDNs send a
   catch-all `Accept` (e.g. `*/*` or the legacy JDK default) that the server now

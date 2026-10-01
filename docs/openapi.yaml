@@ -421,7 +421,8 @@ paths:
         `application/statuslist+cwt`; the type with the highest acceptable `q`
         is served, and JWT wins ties (including a wildcard match). A `406 Not
         Acceptable` is returned only when no supported type is acceptable (for
-        example `q=0` on both types, or only unsupported types).
+        example `q=0` on both types, only unsupported types, or a malformed or
+        out-of-range `q` such as `q=2` on the only matching range).
 
         Media parameters other than `q` (for example `profile=v2`) are ignored
         for matching — a deliberately parameter-agnostic policy. The server
@@ -435,8 +436,8 @@ paths:
         only when the client has advertised support via `Accept-Encoding: gzip`
         (see draft-ietf-oauth-status-list-21 §8.2). CWT-format responses are
         never gzip-compressed. Because the representation varies by both `Accept`
-        and `Accept-Encoding`, every response carries `Vary: Accept,
-        Accept-Encoding`.
+        and `Accept-Encoding`, the `200`, `304` and `406` responses carry
+        `Vary: Accept, Accept-Encoding`.
 
         The decoded token conforms to the
         [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
@@ -472,7 +473,8 @@ paths:
             `application/statuslist+jwt` and `application/statuslist+cwt`; the
             type with the highest acceptable `q` is served (JWT wins ties). A
             `406 Not Acceptable` is returned only when no supported type is
-            acceptable (e.g. `q=0` on both, or an unsupported type).
+            acceptable (e.g. `q=0` on both, an unsupported type, or a malformed
+            or out-of-range `q`).
           schema:
             type: string
             example: application/statuslist+jwt
@@ -980,9 +982,9 @@ components:
           schema:
             type: string
           description: |
-            Always `Accept, Accept-Encoding`. Even though the request fails, the
-            406 still varies by `Accept`, so a shared cache must not serve it to
-            a client with a different `Accept` header (RFC 9111 §4.1).
+            Always `Accept, Accept-Encoding`, advertising that the outcome
+            depends on `Accept` (RFC 9110 §12.5.5). The 406 itself is sent with
+            `Cache-Control: no-store`, so caches never store it.
           example: Accept, Accept-Encoding
       content:
         application/json:

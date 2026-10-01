@@ -450,7 +450,7 @@ mod tests {
     async fn test_get_status_list_multiline_accept_header() {
         // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so
         // the handler must read every line and negotiate the whole set
-        // together rather than only the last one.
+        // together, not just the first one (all `HeaderMap::get` returns).
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         publish_status(
@@ -517,8 +517,8 @@ mod tests {
                 StatusCode::NOT_ACCEPTABLE,
                 "Accept: {accept:?}"
             );
-            // The 406 must advertise Vary so a shared cache never serves it to
-            // a client with a different Accept (RFC 9111 §4.1).
+            // The 406 advertises Vary (RFC 9110 §12.5.5). It is `no-store`, so
+            // caches never store it either way.
             assert_eq!(
                 response.headers().get(header::VARY).unwrap(),
                 "Accept, Accept-Encoding"
