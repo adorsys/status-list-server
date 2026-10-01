@@ -250,8 +250,9 @@ An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
 finds out instead of caching an empty aggregation. Responses carry a weak `ETag`
 and answer a matching `If-None-Match` with `304`.
 
-Every signed status list token needs its issuer's aggregation ID, so the service
-keeps found IDs in memory; an ID never changes once assigned.
+Every signed status list token needs its issuer's aggregation ID, so
+`CachingCredentialRepo` keeps found IDs in memory; an ID never changes once
+assigned.
 
 Without an ID, `GET /api/v1/aggregation` still returns every issuer's lists, for
 tokens issued before issuer scoping. It is deprecated. Tokens are signed on each

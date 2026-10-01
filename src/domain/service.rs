@@ -1,9 +1,6 @@
 //! Service container holding injected outbound adapter ports and domain business operations.
 
 use std::sync::Arc;
-use std::time::Duration;
-
-use moka::future::Cache;
 
 use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
@@ -22,8 +19,6 @@ pub struct Service {
     pub(crate) status_list_cache: Arc<dyn StatusListCache>,
     pub(crate) snapshot_repo: Option<Arc<dyn StatusListSnapshotRepo>>,
     pub(crate) cert_provider: Arc<dyn CertificateProvider>,
-    /// Looked up for every signed token, so it must not cost a query each time.
-    aggregation_ids: Cache<String, AggregationId>,
 }
 
 impl Service {
@@ -40,12 +35,6 @@ impl Service {
             status_list_cache,
             snapshot_repo,
             cert_provider,
-            // An ID never changes once assigned. The TTL only bounds how long a
-            // credential re-created directly in the database keeps its old one here.
-            aggregation_ids: Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(Duration::from_secs(3600))
-                .build(),
         }
     }
 
@@ -62,13 +51,13 @@ impl Service {
         SC: StatusListCache,
         CP: CertificateProvider,
     {
-        Self::from_arcs(
-            Arc::new(status_list_repo),
-            Arc::new(credential_repo),
-            Arc::new(status_list_cache),
+        Self {
+            status_list_repo: Arc::new(status_list_repo),
+            credential_repo: Arc::new(credential_repo),
+            status_list_cache: Arc::new(status_list_cache),
             snapshot_repo,
-            Arc::new(cert_provider),
-        )
+            cert_provider: Arc::new(cert_provider),
+        }
     }
 
     pub fn status_list_repo(&self) -> &dyn StatusListRepo {
@@ -317,16 +306,7 @@ impl Service {
         &self,
         issuer: &Issuer,
     ) -> Result<Option<AggregationId>, CredentialError> {
-        if let Some(aggregation_id) = self.aggregation_ids.get(&issuer.0).await {
-            return Ok(Some(aggregation_id));
-        }
-        let aggregation_id = self.credential_repo.find_aggregation_id(&issuer.0).await?;
-        if let Some(aggregation_id) = aggregation_id {
-            self.aggregation_ids
-                .insert(issuer.0.clone(), aggregation_id)
-                .await;
-        }
-        Ok(aggregation_id)
+        self.credential_repo.find_aggregation_id(&issuer.0).await
     }
 
     /// Retrieve credentials by issuer identifier.
@@ -455,11 +435,8 @@ async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusLis
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
     use crate::domain::models::status_list::StatusList;
-    use crate::outbound::memory::MemoryCredentials;
     use crate::test_utils::{publish_list, register_issuer, test_app_state};
 
     fn record_with_updated_at(updated_at: i64) -> StatusListRecord {
@@ -547,69 +524,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page, None);
-    }
-
-    #[derive(Default)]
-    struct CountingCredentials {
-        inner: MemoryCredentials,
-        aggregation_id_lookups: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl CredentialRepo for CountingCredentials {
-        async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError> {
-            self.inner.find(issuer).await
-        }
-
-        async fn insert(
-            &self,
-            credential: Credential,
-            aggregation_id: AggregationId,
-        ) -> Result<(), CredentialError> {
-            self.inner.insert(credential, aggregation_id).await
-        }
-
-        async fn find_aggregation_id(
-            &self,
-            issuer: &str,
-        ) -> Result<Option<AggregationId>, CredentialError> {
-            self.aggregation_id_lookups.fetch_add(1, Ordering::SeqCst);
-            self.inner.find_aggregation_id(issuer).await
-        }
-
-        async fn find_issuer_by_aggregation_id(
-            &self,
-            aggregation_id: AggregationId,
-        ) -> Result<Option<Issuer>, CredentialError> {
-            self.inner
-                .find_issuer_by_aggregation_id(aggregation_id)
-                .await
-        }
-    }
-
-    /// A miss must not be cached: the issuer may be registered, or given an ID,
-    /// right after.
-    #[tokio::test]
-    async fn find_aggregation_id_caches_only_ids_it_found() {
-        let state = test_app_state(None).await;
-        let credentials = Arc::new(CountingCredentials::default());
-        let service = Service::from_arcs(
-            state.service.status_list_repo.clone(),
-            credentials.clone(),
-            state.service.status_list_cache.clone(),
-            None,
-            state.service.cert_provider.clone(),
-        );
-        let issuer = Issuer("issuer1".into());
-
-        assert_eq!(service.find_aggregation_id(&issuer).await.unwrap(), None);
-        let aggregation_id = register_issuer(&service, "issuer1").await;
-        for _ in 0..3 {
-            assert_eq!(
-                service.find_aggregation_id(&issuer).await.unwrap(),
-                Some(aggregation_id)
-            );
-        }
-        assert_eq!(credentials.aggregation_id_lookups.load(Ordering::SeqCst), 2);
     }
 }

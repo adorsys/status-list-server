@@ -67,7 +67,7 @@ use crate::outbound::aws::AwsSecretsManager;
 use crate::outbound::azure_kv::AzureKeyVaultClient;
 #[cfg(feature = "redis")]
 use crate::outbound::cache::RedisStatusListCache;
-use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};
+use crate::outbound::cache::{CachingCredentialRepo, DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -698,7 +698,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
-        credential_repo,
+        Arc::new(CachingCredentialRepo::new(credential_repo)),
         status_list_cache,
         snapshot_option,
         cert_provider,
