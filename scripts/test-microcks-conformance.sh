@@ -263,7 +263,10 @@ publish["requestBody"]["content"]["application/json"]["examples"] = {
         }
     }
 }
-ref_response(publish, "201", "publishStatusList")
+json_example(publish, "201", "publishStatusList", {
+    "size": None,
+    "bits": 2,
+})
 
 update = status_path["patch"]
 keep_responses(update, "200")
@@ -315,13 +318,16 @@ if allocation_path is not None:
             if not example:
                 example = {"count": 1}
 
+            if "count" in example:
+                example["count"] = 1
+
             request_body["examples"] = {"allocateStatusList": {"value": example}}
 
         content = allocation.get("responses", {}).get(response_status, {}).get("content", {})
         if "application/json" in content:
             content["application/json"]["examples"] = {
                 "allocateStatusList": {
-                    "value": content["application/json"].get("example", {})
+                    "value": {"indices": [0]}
                 }
             }
         else:
@@ -563,10 +569,13 @@ seed_microcks_openapi_fixtures() {
   publish_body='{"statuses":[{"index":0,"status":0},{"index":1,"status":1},{"index":2,"status":2}]}'
   update_body='{"statuses":[{"index":1,"status":2}]}'
 
-  for list_id in "$update_list_id" "$jwt_list_id" "$cwt_list_id" "$historical_list_id" "$allocation_list_id"; do
+  for list_id in "$update_list_id" "$jwt_list_id" "$cwt_list_id" "$historical_list_id"; do
     status_code="$(curl_status PUT "$API_ENDPOINT/api/v1/status-lists/$list_id/statuses" "$publish_body")"
     expect_status "$status_code" "201" "Seeding status list $list_id"
   done
+
+  status_code="$(curl_status PUT "$API_ENDPOINT/api/v1/status-lists/$allocation_list_id/statuses" '{"size":8,"statuses":[]}')"
+  expect_status "$status_code" "201" "Seeding fixed-size status list $allocation_list_id"
 
   historical_time="$(date +%s)"
   node -e "const fs = require('fs'); const file = process.argv[1]; const data = JSON.parse(fs.readFileSync(file, 'utf8')); data.historicalTime = Number(process.argv[2]); fs.writeFileSync(file, JSON.stringify(data, null, 2));" "$token_file" "$historical_time"

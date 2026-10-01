@@ -249,7 +249,14 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('publish creates the status list', function () { pm.response.to.have.status(201); });",
-                  "pm.test('successful publish returns an empty body', function () { pm.expect(pm.response.text()).to.equal(''); });",
+                  "pm.test('publish response is empty or describes the stored list', function () {",
+                  "  var text = pm.response.text();",
+                  "  if (!text) { return; }",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('size');",
+                  "  pm.expect(body).to.have.property('bits');",
+                  "  pm.expect([1, 2, 4, 8]).to.include(body.bits);",
+                  "});",
                   "var historicalTime = Math.floor(Date.now() / 1000).toString();",
                   "pm.collectionVariables.set('historical_time', historicalTime);",
                   "pm.environment.set('historical_time', historicalTime);"
