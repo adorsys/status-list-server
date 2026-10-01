@@ -12,10 +12,15 @@
 //!
 //! # Isolation
 //!
-//! One container per *process*, held in a `OnceCell`, and one freshly created
-//! database per *call*. Tests therefore never share tables, and the per-call
-//! cost after the first is a `CREATE DATABASE` plus a migration run rather than
-//! a container boot.
+//! Each fixture owns its container and a freshly migrated database. Keep the
+//! fixture in scope until all pools and spawned tasks using that database have
+//! finished. Dropping the fixture removes its container, including during panic
+//! unwinding. Static container handles must not be used: statics are never dropped
+//! at process exit, so nextest would leave a database server behind for every test.
+//!
+//! Cleanup requires normal Rust unwinding and a reachable Docker daemon. SIGKILL,
+//! process aborts, or `TESTCONTAINERS_COMMAND=keep` can still leave containers behind;
+//! remove only the containers belonging to the interrupted run in those cases.
 //!
 //! Pools are pinned with `max_connections(1).min_connections(1)` so a test that
 //! wants two genuinely distinct connections gets them: with a shared multi-slot
@@ -25,23 +30,14 @@
 //!
 //! # Concurrency
 //!
-//! The `OnceCell` bounds containers per process, not per run: under
-//! `cargo nextest` every test executes in its own process, so the cell is
-//! initialised once per test and parallel tests still boot a container apiece.
-//! That is what the `containers` test group in `.config/nextest.toml` is for —
-//! it serialises these alongside the ACME suite in `tests/cert_provisioning.rs`,
-//! which starts four containers of its own. Booting several servers at once
-//! starves them of CPU during init and they fail before any test code runs:
-//! MySQL reports `WaitContainer(StartupTimeout)`, pebble simply times out.
-//!
-//! The group selects database tests by `mysql`/`postgres` in the test name, so
-//! keep that substring in the name of any new one, and confirm with
-//! `cargo nextest show-config test-groups`. Under plain `cargo test` the
-//! equivalent is `--test-threads=1` — though there the `OnceCell` does share a
-//! single container across the whole binary, since it is one process.
+//! The `containers` test group in `.config/nextest.toml` bounds simultaneous
+//! database and ACME container starts under nextest. Scoped ownership also bounds
+//! resource use over repeated runs: completed tests no longer retain servers.
+//! Keep `mysql` or `postgres` in new database test names so they join that group.
+//! With ordinary `cargo test`, use `--test-threads=1` for container suites on
+//! resource-constrained machines; each test still owns an independent container.
 
-/// MySQL fixture. The container is shared per process; each call carves its own
-/// uniquely named database, so `Migrator::up` has nothing to race against.
+/// MySQL fixture owning a container and a uniquely named migrated database.
 #[cfg(feature = "mysql")]
 pub(crate) mod mysql_helpers {
     use sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -51,16 +47,9 @@ pub(crate) mod mysql_helpers {
         mysql::Mysql as MysqlImage,
         testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
     };
-    use tokio::sync::OnceCell;
-
-    static MYSQL_CONTAINER: OnceCell<ContainerAsync<MysqlImage>> = OnceCell::const_new();
-
-    /// A migrated, test-private database on the shared container. The container
-    /// itself is `&'static`, so unlike a per-test container this can be dropped
-    /// without cutting off connections handed out earlier.
+    /// Keep this guard alive until all connections and tasks using its URL finish.
     pub(crate) struct MysqlTestDb {
-        #[allow(dead_code)]
-        pub(crate) _container: &'static ContainerAsync<MysqlImage>,
+        pub(super) _container: ContainerAsync<MysqlImage>,
         /// Connection URL for this test's database, for opening further pools —
         /// see [`connect_to_test_db`].
         pub(crate) url: String,
@@ -68,27 +57,26 @@ pub(crate) mod mysql_helpers {
 
     impl MysqlTestDb {
         pub(crate) async fn start() -> Self {
-            let node = MYSQL_CONTAINER
-                .get_or_init(|| async {
-                    // Pulling the image can transiently fail over a flaky
-                    // network (`PullImage`/IO "bytes remaining on stream"), so
-                    // retry the container boot rather than fail the whole run.
-                    let mut last_err = None;
-                    for attempt in 1..=3 {
-                        match MysqlImage::default().with_tag("26.7").start().await {
-                            Ok(node) => return node,
-                            Err(err) => {
-                                last_err = Some(err);
-                                if attempt < 3 {
-                                    tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
-                                        .await;
-                                }
+            let node = async {
+                // Pulling the image can transiently fail over a flaky
+                // network (`PullImage`/IO "bytes remaining on stream"), so
+                // retry the container boot rather than fail the whole run.
+                let mut last_err = None;
+                for attempt in 1..=3 {
+                    match MysqlImage::default().with_tag("26.7").start().await {
+                        Ok(node) => return node,
+                        Err(err) => {
+                            last_err = Some(err);
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
+                                    .await;
                             }
                         }
                     }
-                    panic!("Failed to start MySQL container after 3 attempts: {last_err:?}");
-                })
-                .await;
+                }
+                panic!("Failed to start MySQL container after 3 attempts: {last_err:?}");
+            }
+            .await;
 
             let host = node.get_host().await.expect("Failed to resolve MySQL host");
             let port = node
@@ -162,9 +150,7 @@ pub(crate) mod mysql_helpers {
     }
 }
 
-/// Postgres fixture. As with MySQL the container is shared per process and each
-/// call carves its own database; this one hands back the connection directly,
-/// since no Postgres test needs a second pool.
+/// Postgres fixture owning a container, migrated database, and connection pool.
 #[cfg(feature = "postgres-tests")]
 pub(crate) mod postgres_helpers {
     use sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -174,17 +160,13 @@ pub(crate) mod postgres_helpers {
         postgres::Postgres as PostgresImage,
         testcontainers::{ContainerAsync, runners::AsyncRunner},
     };
-    use tokio::sync::OnceCell;
-
-    static POSTGRES_CONTAINER: OnceCell<ContainerAsync<PostgresImage>> = OnceCell::const_new();
-
     pub(crate) struct PostgresTestDb {
-        #[allow(dead_code)]
-        pub(crate) _container: &'static ContainerAsync<PostgresImage>,
         pub(crate) db: Arc<DatabaseConnection>,
         /// Connection URL for this test's database, for opening further pools —
         /// see [`connect_to_test_db`].
         pub(crate) url: String,
+        // Fields drop in declaration order: release our pool before the container.
+        pub(super) _container: ContainerAsync<PostgresImage>,
     }
 
     /// Opens an additional pool of a caller-chosen size against an
@@ -205,27 +187,25 @@ pub(crate) mod postgres_helpers {
     }
 
     pub(crate) async fn postgres_connection() -> PostgresTestDb {
-        let node = POSTGRES_CONTAINER
-            .get_or_init(|| async {
-                // Pulling the image can transiently fail over a flaky network
-                // (`PullImage`/IO "bytes remaining on stream"), so retry the
-                // container boot rather than fail the whole run.
-                let mut last_err = None;
-                for attempt in 1..=3 {
-                    match PostgresImage::default().start().await {
-                        Ok(node) => return node,
-                        Err(err) => {
-                            last_err = Some(err);
-                            if attempt < 3 {
-                                tokio::time::sleep(std::time::Duration::from_secs(1) * attempt)
-                                    .await;
-                            }
+        let node = async {
+            // Pulling the image can transiently fail over a flaky network
+            // (`PullImage`/IO "bytes remaining on stream"), so retry the
+            // container boot rather than fail the whole run.
+            let mut last_err = None;
+            for attempt in 1..=3 {
+                match PostgresImage::default().start().await {
+                    Ok(node) => return node,
+                    Err(err) => {
+                        last_err = Some(err);
+                        if attempt < 3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1) * attempt).await;
                         }
                     }
                 }
-                panic!("Failed to start Postgres container after 3 attempts: {last_err:?}");
-            })
-            .await;
+            }
+            panic!("Failed to start Postgres container after 3 attempts: {last_err:?}");
+        }
+        .await;
         let host = node
             .get_host()
             .await
@@ -264,5 +244,102 @@ pub(crate) mod postgres_helpers {
             db: Arc::new(db),
             url,
         }
+    }
+}
+
+#[cfg(all(test, any(feature = "mysql", feature = "postgres-tests")))]
+mod cleanup_tests {
+    use sea_orm::ConnectionTrait;
+
+    /// Listing must succeed: an unreachable daemon must not look like cleanup.
+    async fn assert_container_exists(id: &str, expected: bool) {
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                &format!("id={id}"),
+            ])
+            .output()
+            .await
+            .expect("Docker CLI is required to verify fixture cleanup");
+        assert!(
+            output.status.success(),
+            "Docker container lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let found = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            found.lines().any(|line| line == id),
+            expected,
+            "container {id}"
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn mysql_fixture_removes_container_after_each_scope() {
+        for _ in 0..2 {
+            let fixture = super::mysql_helpers::MysqlTestDb::start().await;
+            let id = fixture._container.id().to_owned();
+            assert_container_exists(&id, true).await;
+            // The returned pool remains usable while its fixture is retained.
+            fixture
+                .connection()
+                .await
+                .execute_unprepared("SELECT 1")
+                .await
+                .unwrap();
+            drop(fixture);
+            assert_container_exists(&id, false).await;
+        }
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_fixture_removes_container_after_each_scope() {
+        for _ in 0..2 {
+            let fixture = super::postgres_helpers::postgres_connection().await;
+            let id = fixture._container.id().to_owned();
+            assert_container_exists(&id, true).await;
+            fixture.db.execute_unprepared("SELECT 1").await.unwrap();
+            drop(fixture);
+            assert_container_exists(&id, false).await;
+        }
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mysql_fixture_removes_container_on_panic() {
+        let fixture = super::mysql_helpers::MysqlTestDb::start().await;
+        let id = fixture._container.id().to_owned();
+        assert_container_exists(&id, true).await;
+        let failure = tokio::spawn(async move {
+            let _fixture = fixture;
+            panic!("simulate a failed database test");
+        })
+        .await
+        .expect_err("the task must panic");
+        assert!(failure.is_panic());
+        assert_container_exists(&id, false).await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_fixture_removes_container_on_panic() {
+        let fixture = super::postgres_helpers::postgres_connection().await;
+        let id = fixture._container.id().to_owned();
+        assert_container_exists(&id, true).await;
+        let failure = tokio::spawn(async move {
+            let _fixture = fixture;
+            panic!("simulate a failed database test");
+        })
+        .await
+        .expect_err("the task must panic");
+        assert!(failure.is_panic());
+        assert_container_exists(&id, false).await;
     }
 }
