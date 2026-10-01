@@ -124,11 +124,13 @@ pub(crate) struct CachedToken {
 /// The typed identity of a cached signed representation.
 ///
 /// Every field is a distinct cache-key dimension: the list and its content hash
-/// pin the payload, the signer fingerprint pins the signing material, `iat` pins
-/// the minted token's issuance time (and so distinguishes a reinstated token
-/// whose content reverted within a window from the earlier identical-content
-/// entry), and the window/format/encoding/aggregation/ttl/exp dimensions pin
-/// the HTTP representation.
+/// pin the payload, the signer fingerprint pins the signing material, `version`
+/// pins the optimistic-concurrency generation (so a token reinstated to an
+/// earlier content state within the same second — where `iat` would otherwise be
+/// identical — is still a distinct identity and never reuses the stale bytes),
+/// `iat` pins the minted token's issuance time, and the
+/// window/format/encoding/aggregation/ttl/exp dimensions pin the HTTP
+/// representation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TokenCacheKey {
     pub(crate) list_id: String,
@@ -136,6 +138,7 @@ pub(crate) struct TokenCacheKey {
     pub(crate) signer_fingerprint: String,
     pub(crate) window_start: i64,
     pub(crate) iat: i64,
+    pub(crate) version: u64,
     pub(crate) format: String,
     pub(crate) encoding: TokenEncoding,
     pub(crate) aggregation_uri: String,
@@ -188,9 +191,16 @@ impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
         value: &CachedToken,
         _created_at: Instant,
     ) -> Option<Duration> {
-        let exp = i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX);
-        let ttl = i64::try_from(key.token_ttl_secs).unwrap_or(i64::MAX);
-        let width = exp.saturating_sub(ttl).min(ttl).max(1);
+        // The window width comes from the same helper `token_window` uses
+        // (`handlers::status_list::utils::conditional::window_width`), so the
+        // cache frees a closed window's bytes at exactly the instant the window
+        // rolls over. Keeping the two in lockstep means an entry can never
+        // silently outlive (or be freed before) the window it is anchored to.
+        let validity = crate::server::handlers::status_list::TokenValidity::new(
+            key.token_exp_secs,
+            key.token_ttl_secs,
+        );
+        let width = crate::server::handlers::status_list::window_width(validity);
         let window_end = key.window_start.saturating_add(width);
         let secs = (window_end - value.created_at_unix).max(1) as u64;
         Some(Duration::from_secs(secs))
@@ -222,39 +232,27 @@ impl TokenBytesCache {
         cache
     }
 
-    /// Return cached bytes for `key`, only for an entry whose anchored window
-    /// `[window_start, window_start + exp_secs)` still contains `now`. Past that
-    /// bound the bytes are expired and must be re-signed.
+    /// Return cached bytes for `key`, building them on a miss.
     ///
-    /// On a miss, `init` is invoked to build the token. Concurrent misses for
-    /// the same key coalesce onto a single in-flight build; a request that
-    /// arrives after the completed entry was evicted by capacity pressure is a
-    /// fresh miss and re-runs `init`. Returns `Ok(None)` when the window is
-    /// already closed (`init` is *not* called); the caller must re-sign with a
-    /// fresh window. Returns `Ok(Some(_))` on a hit or a successful build, and
-    /// `Err(e)` if `init` fails (nothing is cached on error).
+    /// The caller supplies `init` to build the token. Concurrent misses for the
+    /// same key coalesce onto a single in-flight build; a request that arrives
+    /// after the completed entry was evicted by capacity pressure is a fresh
+    /// miss and re-runs `init`. There is no explicit window bound here: the
+    /// caller always anchors `key.window_start` to the current request's window
+    /// (which contains the token's expiry), and [`EntryExpiry`] frees each entry
+    /// at the end of its own window, so bytes are never served past their
+    /// validity window. Returns the built or cached bytes, or `Err(e)` if
+    /// `init` fails (nothing is cached on error).
     pub(crate) async fn get_or_build<F, Fut, E>(
         &self,
         key: &TokenCacheKey,
-        window_start: i64,
-        exp_secs: i64,
-        now: i64,
         init: F,
-    ) -> Result<Option<CachedToken>, E>
+    ) -> Result<CachedToken, E>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<CachedToken, E>>,
         E: Clone + Send + Sync + 'static,
     {
-        // Guard the window bound explicitly so a closed window never serves
-        // bytes beyond their `exp` even before moka's own TTL fires.
-        if now < window_start || now >= window_start.saturating_add(exp_secs) {
-            token_cache_metrics()
-                .misses
-                .add(1, &[KeyValue::new("cache", "token_bytes")]);
-            return Ok(None);
-        }
-
         let metrics = token_cache_metrics();
 
         // Fast path: already cached.
@@ -262,7 +260,7 @@ impl TokenBytesCache {
             metrics
                 .hits
                 .add(1, &[KeyValue::new("cache", "token_bytes")]);
-            return Ok(Some(cached));
+            return Ok(cached);
         }
 
         // Slow path: build on miss, coalescing concurrent misses for the same
@@ -285,28 +283,14 @@ impl TokenBytesCache {
         metrics
             .misses
             .add(1, &[KeyValue::new("cache", "token_bytes")]);
-        Ok(Some(value))
+        Ok(value)
     }
 
-    /// Look up cached bytes for `key`, only returning a hit for an entry whose
-    /// anchored window `[window_start, window_start + exp_secs)` still contains
-    /// `now`. Past that bound the bytes are expired and must be re-signed.
+    /// Look up cached bytes for `key`.
     ///
     /// Test helper: the serving path uses [`TokenBytesCache::get_or_build`].
     #[cfg(test)]
-    pub(crate) async fn get(
-        &self,
-        key: &TokenCacheKey,
-        window_start: i64,
-        exp_secs: i64,
-        now: i64,
-    ) -> Option<CachedToken> {
-        if now < window_start || now >= window_start.saturating_add(exp_secs) {
-            token_cache_metrics()
-                .misses
-                .add(1, &[KeyValue::new("cache", "token_bytes")]);
-            return None;
-        }
+    pub(crate) async fn get(&self, key: &TokenCacheKey) -> Option<CachedToken> {
         let cached = self.inner.get(key).await;
         let metrics = token_cache_metrics();
         if cached.is_some() {
@@ -346,6 +330,7 @@ mod tests {
             signer_fingerprint: "signer".to_string(),
             window_start: w,
             iat: w,
+            version: 1,
             format: "jwt".to_string(),
             encoding: TokenEncoding::Identity,
             aggregation_uri: String::new(),
@@ -373,15 +358,7 @@ mod tests {
     #[tokio::test]
     async fn hit_within_window() {
         let (cache, key) = cached(1000).await;
-        assert!(cache.get(&key, 1000, 900, 1400).await.is_some());
-    }
-
-    #[tokio::test]
-    async fn miss_after_window_expires() {
-        // now == window_start + exp -> beyond exp, must be a miss even though the
-        // value is still retained by moka.
-        let (cache, key) = cached(1000).await;
-        assert!(cache.get(&key, 1000, 900, 1900).await.is_none());
+        assert!(cache.get(&key).await.is_some());
     }
 
     #[tokio::test]
@@ -399,8 +376,8 @@ mod tests {
             let key = key.clone();
             let builds = builds.clone();
             handles.push(tokio::spawn(async move {
-                let out = cache
-                    .get_or_build(&key, 1000, 900, 1400, || {
+                cache
+                    .get_or_build(&key, || {
                         let builds = builds.clone();
                         async move {
                             builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -412,8 +389,7 @@ mod tests {
                         }
                     })
                     .await
-                    .expect("infallible");
-                out.expect("window open, so Some")
+                    .expect("infallible")
             }));
         }
         for h in handles {
@@ -460,8 +436,8 @@ mod tests {
             let builds = builds.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let out = cache
-                    .get_or_build(&key, 1000, 900, 1400, || {
+                cache
+                    .get_or_build(&key, || {
                         let builds = builds.clone();
                         async move {
                             // Hold the build open long enough for the churn keys
@@ -476,8 +452,7 @@ mod tests {
                         }
                     })
                     .await
-                    .expect("infallible");
-                out.expect("window open, so Some")
+                    .expect("infallible")
             }));
         }
 
@@ -489,8 +464,8 @@ mod tests {
                     list_id: format!("churn-{i}"),
                     ..base_key(1000)
                 };
-                let out = cache
-                    .get_or_build(&k, 1000, 900, 1400, || async {
+                cache
+                    .get_or_build(&k, || async {
                         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                         Ok::<_, std::convert::Infallible>(CachedToken {
                             bytes: Bytes::from(vec![1u8, 2, 3]),
@@ -499,8 +474,7 @@ mod tests {
                         })
                     })
                     .await
-                    .expect("infallible");
-                out.expect("window open, so Some")
+                    .expect("infallible")
             }));
         }
 
@@ -534,7 +508,7 @@ mod tests {
 
         // A: miss, runs builder (build #1), caches under capacity-1 slot.
         let a1 = cache
-            .get_or_build(&key_a, 1000, 900, 1400, {
+            .get_or_build(&key_a, {
                 let builds = builds.clone();
                 || async move {
                     builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -546,8 +520,7 @@ mod tests {
                 }
             })
             .await
-            .expect("infallible")
-            .expect("window open");
+            .expect("infallible");
         assert_eq!(*a1.bytes, vec![1]);
 
         // Churn many distinct keys through the single slot to force A's eviction.
@@ -558,7 +531,7 @@ mod tests {
                 ..base_key(1000)
             };
             cache
-                .get_or_build(&key, 1000, 900, 1400, || async {
+                .get_or_build(&key, || async {
                     Ok::<_, std::convert::Infallible>(CachedToken {
                         bytes: Bytes::from(vec![9u8]),
                         encoding: None,
@@ -566,19 +539,18 @@ mod tests {
                     })
                 })
                 .await
-                .expect("infallible")
-                .expect("window open");
+                .expect("infallible");
         }
 
         // A must have been evicted by capacity pressure, so it is now a miss.
         assert!(
-            cache.get(&key_a, 1000, 900, 1400).await.is_none(),
+            cache.get(&key_a).await.is_none(),
             "capacity pressure must have evicted the still-valid A entry"
         );
 
         // A again in the same open window: fresh miss, runs the builder again.
         let a2 = cache
-            .get_or_build(&key_a, 1000, 900, 1400, {
+            .get_or_build(&key_a, {
                 let builds = builds.clone();
                 || async move {
                     builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -590,8 +562,7 @@ mod tests {
                 }
             })
             .await
-            .expect("infallible")
-            .expect("window open");
+            .expect("infallible");
         assert_eq!(*a2.bytes, vec![3]);
 
         assert_eq!(
@@ -633,6 +604,10 @@ mod tests {
             iat: 1002,
             ..base.clone()
         };
+        let other_version = TokenCacheKey {
+            version: 2,
+            ..base.clone()
+        };
         let other_ttl = TokenCacheKey {
             token_ttl_secs: 600,
             ..base.clone()
@@ -652,6 +627,10 @@ mod tests {
             "aggregation_uri must be in the key"
         );
         assert_ne!(base, other_iat, "iat must be in the key");
+        assert_ne!(
+            base, other_version,
+            "version must be in the key (reinstated content within a second)"
+        );
         assert_ne!(base, other_ttl, "token_ttl_secs must be in the key");
         assert_ne!(base, other_exp, "token_exp_secs must be in the key");
         assert_eq!(base, base_key(1000));
@@ -698,9 +677,9 @@ mod tests {
                     },
                 )
                 .await;
-            assert!(cache.get(&cache_key, 1000, 900, 1400).await.is_some());
-            assert!(cache.get(&cache_key, 1000, 900, 1400).await.is_some()); // hit again
-            assert!(cache.get(&base_key(1000), 1000, 900, 1400).await.is_none());
+            assert!(cache.get(&cache_key).await.is_some());
+            assert!(cache.get(&cache_key).await.is_some()); // hit again
+            assert!(cache.get(&base_key(1000)).await.is_none());
         });
 
         let mut buffer = Vec::new();
@@ -739,7 +718,7 @@ mod tests {
 
         for _ in 0..3 {
             let out = cache
-                .get_or_build(&key, 1000, 900, 1400, {
+                .get_or_build(&key, {
                     let builds = builds.clone();
                     || async move {
                         builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -752,8 +731,9 @@ mod tests {
                 })
                 .await
                 .expect("infallible");
-            assert!(
-                out.is_some(),
+            assert_eq!(
+                out.bytes.as_ref(),
+                &[7u8, 8, 9][..],
                 "capacity-0 cache still returns a freshly built token"
             );
         }
@@ -806,7 +786,7 @@ mod tests {
             )
             .await;
         assert!(
-            cache.get(&key, 1000, 900, 1400).await.is_some(),
+            cache.get(&key).await.is_some(),
             "default byte budget must retain and serve a representative token"
         );
     }

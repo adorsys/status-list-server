@@ -35,21 +35,34 @@ impl TokenValidity {
 /// hence the ETag — stable for the whole window, so a matching ETag proves the
 /// client's cached token is the current one.
 ///
-/// The width is capped at `min(exp_secs - ttl_secs, ttl_secs)`. The
-/// `exp_secs - ttl_secs` cap keeps the window from extending up to (or past) a
-/// token's expiry, so a 304 never certifies a token with less than `ttl_secs` of
-/// runway. The `ttl_secs` cap guarantees `iat + ttl_secs` is always in the
-/// future for a token minted at `window_start`, so a relying party following the
-/// draft-21 §13.7 "refresh at `iat + ttl`" strategy never refetches into a loop
-/// of identical tokens. The width is clamped to `>= 1` so the modulus stays
-/// meaningful for degenerate configs (`exp_secs == 0` or `ttl_secs >=
-/// exp_secs`, which startup validation rejects but tests may construct).
+/// The width is capped at `min(exp_secs - ttl_secs, ttl_secs)` (see
+/// [`window_width`]). The `exp_secs - ttl_secs` cap keeps the window from
+/// extending up to (or past) a token's expiry, so a 304 never certifies a token
+/// with less than `ttl_secs` of runway. The `ttl_secs` cap guarantees
+/// `iat + ttl_secs` is always in the future for a token minted at
+/// `window_start`, so a relying party following the draft-21 §13.7 "refresh at
+/// `iat + ttl`" strategy never refetches into a loop of identical tokens. The
+/// width is clamped to `>= 1` so the modulus stays meaningful for degenerate
+/// configs (`exp_secs == 0` or `ttl_secs >= exp_secs`, which startup validation
+/// rejects but tests may construct).
 pub(crate) fn token_window(now: i64, validity: TokenValidity) -> (i64, i64) {
-    let exp = i64::try_from(validity.exp_secs).unwrap_or(i64::MAX);
-    let ttl = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
-    let width = exp.saturating_sub(ttl).min(ttl).max(1);
+    let width = window_width(validity);
     let start = now.div_euclid(width) * width;
     (start, start.saturating_add(width))
+}
+
+/// The width of a token validity window: `min(exp_secs - ttl_secs, ttl_secs)`,
+/// clamped to `>= 1`.
+///
+/// Shared by [`token_window`] (which anchors a window on the clock) and the
+/// signed-bytes cache's per-entry expiry (which frees a closed window's bytes at
+/// `window_start + width`), so the two can never drift apart: if one changed the
+/// formula and the other did not, entries would quietly expire at the wrong
+/// time.
+pub(crate) fn window_width(validity: TokenValidity) -> i64 {
+    let exp = i64::try_from(validity.exp_secs).unwrap_or(i64::MAX);
+    let ttl = i64::try_from(validity.ttl_secs).unwrap_or(i64::MAX);
+    exp.saturating_sub(ttl).min(ttl).max(1)
 }
 
 /// The `iat` of the live token served at `now` for content last changed at

@@ -15,13 +15,14 @@ use sha2::{Digest, Sha256};
 ///
 /// Instead the ETag is a **weak** validator (`W/"..."`) over the dimensions that
 /// pin the representation identity: `(list_id, content_hash, signer_fingerprint,
-/// window_start, iat, format, encoding, aggregation_uri, token_ttl_secs,
+/// window_start, iat, version, format, encoding, aggregation_uri, token_ttl_secs,
 /// token_exp_secs)`. It is identical across replicas, never requires a sign to
 /// answer a `304`, and changes exactly when the served representation's identity
-/// changes (content, signing key, window, minted `iat`, format, encoding,
-/// aggregation URI, or token ttl/exp). A matching weak ETag proves the client
-/// holds a current-window token from the current signer for this content — the
-/// guarantee the conditional logic needs to certify a `304`.
+/// changes (content, signing key, window, minted `iat`, optimistic-concurrency
+/// generation, format, encoding, aggregation URI, or token ttl/exp). A matching
+/// weak ETag proves the client holds a current-window token from the current
+/// signer for this content — the guarantee the conditional logic needs to
+/// certify a `304`.
 pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
     let mut hasher = Sha256::new();
     // Canonical encoding: strings are length-prefixed and integers are
@@ -33,6 +34,7 @@ pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
     write_len_prefixed(&mut hasher, key.signer_fingerprint.as_bytes());
     hasher.update(key.window_start.to_be_bytes());
     hasher.update(key.iat.to_be_bytes());
+    hasher.update(key.version.to_be_bytes());
     write_len_prefixed(&mut hasher, key.format.as_bytes());
     write_len_prefixed(&mut hasher, encoding_label(key.encoding).as_bytes());
     write_len_prefixed(&mut hasher, key.aggregation_uri.as_bytes());
@@ -117,6 +119,7 @@ mod tests {
             },
             sub: "https://example.com/credentials/status/3".to_string(),
             updated_at: 1234567890,
+            version: 1,
         }
     }
 
@@ -127,6 +130,7 @@ mod tests {
             signer_fingerprint: "signer".to_string(),
             window_start: 1000,
             iat: 1000,
+            version: 1,
             format: "jwt".to_string(),
             encoding: TokenEncoding::Identity,
             aggregation_uri: String::new(),
@@ -192,6 +196,13 @@ mod tests {
                 "iat",
                 TokenCacheKey {
                     iat: 1002,
+                    ..base.clone()
+                },
+            ),
+            (
+                "version",
+                TokenCacheKey {
+                    version: 2,
                     ..base.clone()
                 },
             ),

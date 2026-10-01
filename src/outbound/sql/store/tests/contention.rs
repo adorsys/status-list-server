@@ -46,7 +46,7 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // Seed a status list at a known timestamp
+        // Seed a status list at a known version and timestamp
         let base_timestamp = 1000i64;
         let list_id = "list-contention-mysql";
         let base_record = StatusListRecord {
@@ -60,6 +60,7 @@ mod database_implementation {
             },
             sub: "sub-contention".to_string(),
             updated_at: base_timestamp,
+            version: 1,
         };
         store_a
             .insert_one(base_record.clone(), fixtures::NO_LIST_QUOTA)
@@ -93,7 +94,7 @@ mod database_implementation {
                     size: None,
                     default_status: None,
                 },
-                updated_at: updated_at_a,
+                version: base_record_a.version + 1,
                 ..base_record_a.clone()
             };
             let snapshot_a = StatusListHistoryRecord {
@@ -107,7 +108,7 @@ mod database_implementation {
             };
 
             store_a_clone
-                .update_one_with_snapshot(list_id, record_a, base_timestamp, snapshot_a)
+                .update_one_with_snapshot(list_id, record_a, base_record_a.version, snapshot_a)
                 .await
                 .expect("Update A should complete")
         });
@@ -134,7 +135,7 @@ mod database_implementation {
                     size: None,
                     default_status: None,
                 },
-                updated_at: updated_at_b,
+                version: base_record_b.version + 1,
                 ..base_record_b.clone()
             };
             let snapshot_b = StatusListHistoryRecord {
@@ -147,11 +148,11 @@ mod database_implementation {
                 exp: updated_at_b + 900,
             };
 
-            // This update uses the ORIGINAL base_timestamp as guard
-            // After A commits, the row has updated_at = base_timestamp + 1
-            // So this guard (base_timestamp) should miss → returns false
+            // This update uses the ORIGINAL base version as guard. After A
+            // commits, the row has version = base + 1, so this stale guard
+            // (base) should miss → returns false.
             let result = store_b_clone
-                .update_one_with_snapshot(list_id, record_b, base_timestamp, snapshot_b)
+                .update_one_with_snapshot(list_id, record_b, base_record_b.version, snapshot_b)
                 .await
                 .expect("Update B should complete");
 
@@ -223,9 +224,9 @@ mod database_implementation {
             "A's write should be persisted"
         );
         assert_eq!(
-            final_record.updated_at,
-            base_timestamp + 1,
-            "updated_at should be A's timestamp"
+            final_record.version,
+            base_record.version + 1,
+            "version should reflect A's committed write"
         );
 
         // Verify A's winning snapshot was created.
@@ -297,6 +298,7 @@ mod database_implementation {
             },
             sub: format!("sub-{list_id}"),
             updated_at,
+            version: 1,
         };
         let snapshot = move |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
             snapshot_id: snapshot_id.to_string(),

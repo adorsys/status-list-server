@@ -404,6 +404,7 @@ mod tests {
                 default_status: None,
             },
             updated_at: 1000,
+            version: 1,
         }
     }
 

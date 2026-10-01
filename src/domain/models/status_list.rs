@@ -99,8 +99,18 @@ pub struct StatusListRecord {
     pub issuer: Issuer,
     pub status_list: StatusList,
     pub sub: String,
-    /// Unix timestamp (seconds) of last modification
+    /// Unix timestamp (seconds) of last modification.
+    ///
+    /// This is a real wall-clock value (never artificially advanced past the
+    /// present), so it can be used directly as the token's `iat` and the
+    /// `Last-Modified`/ETag validator without drifting ahead of the clock.
     pub updated_at: i64,
+    /// Monotonic optimistic-concurrency version, bumped on every committed
+    /// mutation. This is the value used for conflict detection and distributed
+    /// cache stale-fill fencing — deliberately separate from `updated_at`, which
+    /// stays a real timestamp so it cannot be pushed into the future by a burst
+    /// of writes to one list (see the update path).
+    pub version: u64,
 }
 
 /// One page of published status list URIs, in `list_id` order.

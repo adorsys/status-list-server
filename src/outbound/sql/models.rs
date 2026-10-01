@@ -87,6 +87,10 @@ pub(crate) mod status_lists {
         pub sub: String,
         /// Unix timestamp (seconds) of last modification
         pub updated_at: i64,
+        /// Monotonic optimistic-concurrency version (see domain
+        /// `StatusListRecord.version`); the concurrency guard, distinct from the
+        /// `updated_at` timestamp.
+        pub version: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -11,6 +11,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(tables::Migration),
             Box::new(add_updated_at::Migration),
+            Box::new(add_status_list_version::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
             Box::new(credentials_list_count::Migration),
@@ -448,6 +449,87 @@ pub(crate) mod add_updated_at {
     enum StatusLists {
         Table,
         UpdatedAt,
+    }
+}
+
+/// Migration to add a monotonic optimistic-concurrency `version` column to
+/// `status_lists`, decoupled from the `updated_at` timestamp.
+///
+/// Before this change, `updated_at` doubled as both the real last-modification
+/// timestamp and the optimistic-concurrency guard (`next_updated_at` advanced it
+/// by at least one per write). That let a burst of writes to a single list push
+/// `updated_at` — and therefore the served token's `iat` — ahead of the wall
+/// clock, which relying parties that reject a future `iat` would refuse. This
+/// column splits the two concerns: the monotonic `version` becomes the
+/// concurrency guard and cache-fencing stamp, while `updated_at` stays a real
+/// timestamp.
+pub(crate) mod add_status_list_version {
+    use super::*;
+
+    /// Migration type for adding the version column
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "add_status_list_version"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        /// Adds the version column to the status_lists table and backfills it.
+        #[allow(elided_lifetimes_in_paths)]
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // MySQL commits the ALTER on its own, so a failed backfill leaves the
+            // column behind with the migration unrecorded; the re-run must skip it.
+            if !manager.has_column("status_lists", "version").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusLists::Table)
+                            .add_column(
+                                ColumnDef::new(StatusLists::Version)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(1),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            // Backfill pre-existing rows so their concurrency guard is
+            // immediately usable: the first post-migration update expects
+            // `version = 1` and matches. `updated_at` is left untouched.
+            let update_stmt = sea_query::Query::update()
+                .table(StatusLists::Table)
+                .value(StatusLists::Version, 1)
+                .to_owned();
+            manager
+                .get_connection()
+                .execute(manager.get_database_backend().build(&update_stmt))
+                .await
+                .map(|_| ())
+        }
+
+        /// Removes the version column from the status_lists table
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(StatusLists::Table)
+                        .drop_column(StatusLists::Version)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        Version,
     }
 }
 

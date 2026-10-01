@@ -252,11 +252,15 @@ async fn build_token_cache_key(
     let signer = signer_fingerprint(&signing_material);
     let aggregation_uri = state.aggregation_uri.as_deref().unwrap_or("");
     // `iat = max(window_start, updated_at)` is the issuance time the token is
-    // minted with (see `live_iat`). Including it in the key (and hence the ETag)
-    // makes a mid-window content revert to an earlier state a distinct identity:
-    // A -> B -> A in one window changes `updated_at` (so `iat`) even though the
-    // content hash returns to A's value, so the reinstated token never reuses the
-    // earlier identical-content entry's cached bytes (which carried the old iat).
+    // minted with (see `live_iat`). `updated_at` is a real wall-clock timestamp
+    // (it is deliberately never inflated past the clock, so `iat` can never land
+    // in the future), which means two updates to the same list in the same second
+    // can share an `iat`. The monotonic optimistic-concurrency `version` is
+    // therefore also part of the key (and hence the ETag), so a mid-window
+    // content revert to an earlier state is still a distinct identity: A -> B -> A
+    // in one window bumps `version` even when `iat` is unchanged, so the
+    // reinstated token never reuses the earlier identical-content entry's cached
+    // bytes (which carried the stale state).
     let iat = window_start.max(status_record.updated_at);
     let key = TokenCacheKey {
         list_id: list_id.to_string(),
@@ -264,6 +268,7 @@ async fn build_token_cache_key(
         signer_fingerprint: signer,
         window_start,
         iat,
+        version: status_record.version,
         format: format.to_string(),
         encoding,
         aggregation_uri: aggregation_uri.to_string(),
@@ -300,9 +305,13 @@ async fn get_or_build_live_token(
     let exp_secs = state.token_exp_secs as i64;
     let validity_window = (iat, iat.saturating_add(exp_secs));
 
+    // A hit serves cached bytes; a miss runs the builder. Config guarantees a
+    // positive `token_exp_secs`, so the window is always open and a token is
+    // always built (no degenerate born-expired `exp == 0` case to re-sign
+    // around).
     let cached = state
         .token_bytes_cache
-        .get_or_build(key, key.window_start, exp_secs, now, || {
+        .get_or_build(key, || {
             let signing_material = signing_material.clone();
             // The record is cloned only when the builder actually runs (a cache
             // miss); a hit serves cached bytes without touching it.
@@ -326,25 +335,7 @@ async fn get_or_build_live_token(
         })
         .await?;
 
-    let (bytes, encoding) = match cached {
-        Some(cached) => (cached.bytes, cached.encoding),
-        // Degenerate `token_exp_secs == 0`: the window is always closed (a minted
-        // token is born expired), so the cache never serves and never builds. We
-        // must still return a body for a plain GET, so re-sign here regardless.
-        None => {
-            let (bytes, enc) = build_status_list_token(
-                state,
-                accept_type,
-                status_record.clone(),
-                Some(validity_window),
-                client_accepts_gzip,
-                signing_material.clone(),
-            )
-            .await?;
-            (Bytes::from(bytes), enc)
-        }
-    };
-    Ok((bytes, encoding))
+    Ok((cached.bytes, cached.encoding))
 }
 
 /// Build a `200 OK` status-list token response from already-signed bytes.
@@ -434,6 +425,9 @@ async fn handle_historical_request(
         status_list: snapshot.status_list,
         sub: snapshot.sub,
         updated_at: snapshot.iat,
+        // A historical token is built from a snapshot, not an optimistic
+        // concurrency update; the version is unused on this path.
+        version: 0,
     };
 
     let signing_material = state
@@ -1730,10 +1724,13 @@ mod tests {
         // suspended (B) and then reinstated (back to A) *within one window*, the
         // content hash returns to A's value, so an `iat`-less cache key would
         // collide with the earlier A entry and serve its stale bytes (which carry
-        // the old `iat`, claiming VALID from before the suspension). Because `iat`
-        // is part of the cache key and the ETag, the reinstated token is a
-        // distinct identity: fresh bytes minted with `iat = max(window_start,
-        // updated_at)`, i.e. the reinstate time, and a different ETag.
+        // the old `iat`, claiming VALID from before the suspension). Because the
+        // monotonic `version` is part of the cache key and the ETag, the
+        // reinstated token is a distinct identity even when a same-second burst
+        // leaves `updated_at` (and hence `iat`) unchanged: fresh bytes are minted
+        // under the bumped version and a different ETag, so the stale A bytes are
+        // never reused. And because `updated_at` stays a real wall-clock value,
+        // the reinstated token's `iat` is never pushed into the future.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1854,79 +1851,19 @@ mod tests {
         assert_ne!(
             etag_a2, etag_a,
             "reinstated content must be a distinct identity from the earlier A \
-             entry (iat is part of the key/ETag)"
+             entry (version is part of the key/ETag)"
         );
         assert!(
-            iat_a2 > iat_a,
-            "the reinstated token's iat must reflect the reinstate time, not the \
-             earlier A entry's issuance (old iat={iat_a}, reinstated iat={iat_a2})"
+            iat_a2 <= iat_a + 1,
+            "the reinstated token's iat must not drift ahead of the clock: the \
+             version bump distinguishes it from the earlier A entry, not an \
+             inflated iat (earlier iat={iat_a}, reinstated iat={iat_a2}); a \
+             same-window A -> B -> A must not push iat into the future"
         );
         assert_ne!(
             body_a2, body_a,
             "the reinstated token must be freshly signed, never the stale A bytes \
              cached before the suspension"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_conditional_request_degenerate_exp_zero_always_re_signs() {
-        // `exp == 0` produces born-expired tokens — a minted token's `exp` equals
-        // its `window_start`, so a 304 can never be certified (it would strand an
-        // already-expired token). The server must re-sign a fresh 200 even on an
-        // immediate revalidation.
-        let (exp, ttl) = (0u64, 300u64);
-        let token_id = uuid::Uuid::new_v4().to_string();
-        let mut app_state = test_app_state(None).await;
-        app_state.token_exp_secs = exp;
-        app_state.token_ttl_secs = ttl;
-
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
-
-        // Revalidate at a realistic `now` at/after the record's `updated_at`.
-        let now0 = crate::domain::service::current_unix_timestamp();
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
-        );
-
-        let res1 = get_status_list_at(
-            State(app_state.clone()),
-            token_id.clone(),
-            Ok(Query(StatusListQuery { time: None })),
-            headers.clone(),
-            now0,
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(res1.status(), StatusCode::OK);
-        let etag = res1.headers().get(header::ETAG).unwrap().clone();
-        headers.insert(header::IF_NONE_MATCH, etag);
-
-        // Same-second window — a 304 would hand an expired token, so it must 200.
-        let res2 = get_status_list_at(
-            State(app_state),
-            token_id,
-            Ok(Query(StatusListQuery { time: None })),
-            headers,
-            now0,
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(
-            res2.status(),
-            StatusCode::OK,
-            "exp==0 must never answer 304 (born-expired tokens)"
         );
     }
 

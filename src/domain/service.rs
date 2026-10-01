@@ -149,6 +149,7 @@ impl Service {
             )?,
             sub: command.sub,
             updated_at: current_unix_timestamp(),
+            version: 1,
         };
 
         if record.status_list.lst.len() > policy.max_serialized_list_size {
@@ -227,8 +228,9 @@ impl Service {
         existing.status_list = existing.status_list.update(statuses)?;
 
         // A request that does not change the list is a successful no-op. It must
-        // not bump `updated_at` or insert a redundant history snapshot, which
-        // would bloat history with a duplicate entry for an unchanged state.
+        // not bump the version or `updated_at`, or insert a redundant history
+        // snapshot, which would bloat history with a duplicate entry for an
+        // unchanged state.
         if existing.status_list == current_status_list {
             return Ok(existing);
         }
@@ -237,17 +239,23 @@ impl Service {
             return Err(StatusListError::TooLarge);
         }
 
-        let previous_updated_at = existing.updated_at;
-        existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
+        // Optimistic-concurrency version: strictly monotonic, bumped on every
+        // committed change and used for conflict detection and cache fencing. It
+        // is deliberately separate from `updated_at`, which stays a real
+        // wall-clock timestamp so a burst of writes to one list can never push a
+        // token's `iat` into the future (RPs reject a future `iat`).
+        let previous_version = existing.version;
+        existing.version = next_version(previous_version);
+        existing.updated_at = current_unix_timestamp();
 
         let landed = if self.snapshots_enabled() {
             let snapshot = build_snapshot(&existing, policy.token_exp_secs)?;
             self.status_list_repo
-                .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
+                .update_with_snapshot(existing.clone(), previous_version, snapshot)
                 .await?
         } else {
             self.status_list_repo
-                .update(existing.clone(), previous_updated_at)
+                .update(existing.clone(), previous_version)
                 .await?
         };
 
@@ -390,8 +398,16 @@ pub fn current_unix_timestamp() -> i64 {
     time::UtcDateTime::now().unix_timestamp()
 }
 
-pub fn next_updated_at(previous: i64, now: i64) -> i64 {
-    now.max(previous + 1)
+/// The next monotonic optimistic-concurrency version for a record currently at
+/// `previous`.
+///
+/// The version is the concurrency guard and distributed cache-fencing stamp; it
+/// is deliberately decoupled from `updated_at` (which stays a real wall-clock
+/// timestamp) so a burst of writes to one list can never push the token's `iat`
+/// into the future. `saturating_add` keeps a saturated version monotonic rather
+/// than wrapping.
+pub fn next_version(previous: u64) -> u64 {
+    previous.saturating_add(1)
 }
 
 /// Enforce the request-level count and index bounds shared by publish and update.
@@ -457,7 +473,7 @@ fn build_snapshot(
 
 async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
     match cache
-        .invalidate_after_update(&record.list_id, record.updated_at)
+        .invalidate_after_update(&record.list_id, record.version)
         .await
     {
         Ok(()) => {
@@ -491,6 +507,7 @@ mod tests {
                 default_status: None,
             },
             updated_at,
+            version: 1,
         }
     }
 

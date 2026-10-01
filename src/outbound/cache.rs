@@ -446,7 +446,7 @@ impl StatusListCache for RedisStatusListCache {
     async fn invalidate_after_update(
         &self,
         list_id: &str,
-        updated_at: i64,
+        version: u64,
     ) -> Result<(), StatusListError> {
         let mut connection = self.connection("invalidate").await?;
         let _: i32 = self
@@ -455,7 +455,7 @@ impl StatusListCache for RedisStatusListCache {
                 REDIS_INVALIDATE_SCRIPT
                     .key(self.key(list_id))
                     .key(self.marker_key(list_id))
-                    .arg(updated_at)
+                    .arg(version)
                     .invoke_async(&mut connection),
             )
             .await?;
@@ -548,6 +548,7 @@ mod tests {
                 },
                 sub: "sub".into(),
                 updated_at: 0,
+                version: 1,
             };
             cache.put(record).await.unwrap();
             assert!(cache.get("k").await.unwrap().is_some());
@@ -584,6 +585,7 @@ mod tests {
             },
             sub: "sub".into(),
             updated_at: 42,
+            version: 3,
         };
 
         let value = serde_json::to_value(&record).expect("serialize record");
@@ -594,7 +596,8 @@ mod tests {
                 "issuer": "issuer",
                 "status_list": { "bits": 1, "lst": "lst" },
                 "sub": "sub",
-                "updated_at": 42
+                "updated_at": 42,
+                "version": 3
             })
         );
     }
@@ -629,6 +632,7 @@ mod redis_tests {
             },
             sub: "sub".into(),
             updated_at,
+            version: 1,
         }
     }
 
@@ -728,8 +732,10 @@ mod redis_tests {
             .put(record_at(&list_id, updated_at))
             .await
             .expect("put stale base");
+        // The base record carries version 1; the invalidation marker is a
+        // strictly higher version so any delayed older fill is fenced out.
         cache
-            .invalidate_after_update(&list_id, updated_at + 1)
+            .invalidate_after_update(&list_id, 2)
             .await
             .expect("write invalidation marker");
         let mut connection = cache.connection("test").await.expect("connect to Redis");
@@ -764,11 +770,11 @@ mod redis_tests {
         let now = crate::domain::service::current_unix_timestamp();
 
         cache
-            .invalidate_after_update(&list_id, now + 2)
+            .invalidate_after_update(&list_id, 2)
             .await
             .expect("write newer invalidation marker");
         cache
-            .invalidate_after_update(&list_id, now + 1)
+            .invalidate_after_update(&list_id, 1)
             .await
             .expect("write delayed older invalidation marker");
         cache
