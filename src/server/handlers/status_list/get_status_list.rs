@@ -105,9 +105,9 @@ async fn get_status_list_at(
     let accept_type = match negotiate_accept(accept_fields) {
         Some(ty) => ty,
         None => {
-            // The response varies by `Accept` even when it fails, so a shared
-            // cache must not serve this 406 to a client with a different
-            // `Accept` header (RFC 9111 §4.1).
+            // Advertise that the outcome depends on `Accept`. The 406 is
+            // `no-store` (set by `ApiError`), so a shared cache never stores it
+            // either way; `Vary` just reflects RFC 9110 §12.5.5's SHOULD.
             return Err(ApiError::new(
                 StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
@@ -174,7 +174,7 @@ async fn get_status_list_at(
             build_fresh_200_response(
                 &state,
                 accept_type,
-                &status_record,
+                status_record,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -194,7 +194,7 @@ async fn get_status_list_at(
             build_fresh_200_response(
                 &state,
                 accept_type,
-                &status_record,
+                status_record,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -211,27 +211,22 @@ async fn get_status_list_at(
 async fn build_fresh_200_response(
     state: &AppState,
     accept_type: AcceptType,
-    status_record: &StatusListRecord,
+    status_record: StatusListRecord,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
-    let (token_bytes, encoding) = build_status_list_token(
-        state,
-        accept_type,
-        status_record.clone(),
-        None,
-        client_accepts_gzip,
-    )
-    .await?;
+    let (token_bytes, encoding) =
+        build_status_list_token(state, accept_type, status_record, None, client_accepts_gzip)
+            .await?;
 
     let mut response = Response::new(token_bytes.into());
     *response.status_mut() = StatusCode::OK;
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type.media_type()).unwrap(),
+        HeaderValue::from_static(accept_type.media_type()),
     );
     h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
     h.insert(
@@ -300,7 +295,7 @@ async fn handle_historical_request(
     let h = response.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(accept_type.media_type()).unwrap(),
+        HeaderValue::from_static(accept_type.media_type()),
     );
     h.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     h.insert(
@@ -449,6 +444,46 @@ mod tests {
                 "Accept: {accept:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_multiline_accept_header() {
+        // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so
+        // the handler must read every line and negotiate the whole set
+        // together rather than only the last one.
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let app_state = test_app_state(None).await;
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.append(header::ACCEPT, "text/html".parse().unwrap());
+        headers.append(
+            header::ACCEPT,
+            "application/statuslist+cwt".parse().unwrap(),
+        );
+
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            ACCEPT_STATUS_LISTS_HEADER_CWT
+        );
     }
 
     #[tokio::test]

@@ -64,7 +64,7 @@ pub(crate) fn negotiate_accept<'a>(
 ) -> Option<AcceptType> {
     let mut ranges = fields
         .into_iter()
-        .flat_map(|f| f.split(','))
+        .flat_map(|f| split_top_level(f, ','))
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .peekable();
@@ -79,7 +79,14 @@ pub(crate) fn negotiate_accept<'a>(
     // §12.5.1 specificity).
     let mut best: [Option<(u8, f32)>; 2] = [None; 2];
     for range in ranges {
-        let (media, params) = range.split_once(';').unwrap_or((range, ""));
+        // Media parameters (e.g. `profile`) may carry quoted strings, and a
+        // quoted value can itself contain `;` or `,` that are data, not
+        // delimiters. Split the range off its parameters at the first *top
+        // level* `;` only, so those embedded characters survive.
+        let (media, params) = match find_top_level(range, ';') {
+            Some(i) => (range[..i].trim(), &range[i + 1..]),
+            None => (range.trim(), ""),
+        };
         let q = weight(params);
         for (slot, ty) in best.iter_mut().zip(AcceptType::ALL) {
             let Some(p) = ty.precedence(media.trim()) else {
@@ -110,15 +117,15 @@ pub(crate) fn client_accepts_gzip(headers: &HeaderMap) -> bool {
     let mut entries: Vec<(&str, f32)> = Vec::new();
     for val in headers.get_all(header::ACCEPT_ENCODING) {
         let Ok(val) = val.to_str() else { continue };
-        for s in val.split(',') {
+        for s in split_top_level(val, ',') {
             let s = s.trim();
             if s.is_empty() {
                 continue;
             }
-            let (coding, params) = s
-                .split_once(';')
-                .map(|(c, p)| (c.trim(), p.trim()))
-                .unwrap_or((s, ""));
+            let (coding, params) = match find_top_level(s, ';') {
+                Some(i) => (s[..i].trim(), &s[i + 1..]),
+                None => (s.trim(), ""),
+            };
             entries.push((coding, weight(params)));
         }
     }
@@ -137,21 +144,85 @@ pub(crate) fn client_accepts_gzip(headers: &HeaderMap) -> bool {
 
 /// No `q` means 1.0; a malformed `q` means 0.0 (excluded).
 fn weight(params: &str) -> f32 {
-    params
-        .split(';')
+    split_top_level(params, ';')
+        .iter()
         .filter_map(|p| p.split_once('='))
         .find(|(n, _)| n.trim().eq_ignore_ascii_case("q"))
         .map_or(1.0, |(_, v)| qvalue(v.trim()).unwrap_or(0.0))
 }
 
-/// Plain decimals only, so the common `.2` shorthand still parses, but never
-/// NaN, inf, a sign or an exponent (all of which `f32::from_str` accepts).
-/// A valid value is clamped to `[0, 1]`.
+/// Parse an RFC 9110 `qvalue`, allowing the common leading-dot shorthand
+/// (`.2` == 0.2). Rejects anything malformed *or outside `[0, 1]`* rather than
+/// clamping, so an invalid range such as `q=2` or `q=1.5` is excluded instead
+/// of winning at full preference (RFC 9110 §12.4.2; issue #576).
 fn qvalue(s: &str) -> Option<f32> {
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+    if s.is_empty() {
         return None;
     }
-    s.parse::<f32>().ok().map(|w| w.min(1.0))
+    // A value beginning with `1` may only carry trailing zeros (`1`, `1.000`).
+    let (int_part, frac) = match s.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (s, None),
+    };
+    let int = match int_part {
+        // The `.2` shorthand and plain `0`/`1`.
+        "" | "0" => 0,
+        "1" => 1,
+        _ => return None,
+    };
+    if let Some(frac) = frac {
+        // Up to three digits, digits only; after `1` only zeros are allowed.
+        if frac.is_empty()
+            || frac.len() > 3
+            || !frac.bytes().all(|b| b.is_ascii_digit())
+            || (int == 1 && !frac.bytes().all(|b| b == b'0'))
+        {
+            return None;
+        }
+    }
+    let normalized = if int_part.is_empty() {
+        format!("0{s}")
+    } else {
+        s.to_string()
+    };
+    normalized.parse::<f32>().ok()
+}
+
+/// Index of the first `delim` at the top level — outside any RFC 9110 quoted
+/// string. A backslash escape inside a quote is honoured so `\"` does not close
+/// the string.
+fn find_top_level(s: &str, delim: char) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_quotes = false;
+            }
+        } else if c == '"' {
+            in_quotes = true;
+        } else if c == delim {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Split `s` on `delim` at the top level (outside quoted strings), so a `,` or
+/// `;` inside a quoted media-parameter value is data, not a list separator.
+fn split_top_level(s: &str, delim: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while let Some(i) = find_top_level(&s[start..], delim) {
+        parts.push(&s[start..start + i]);
+        start += i + delim.len_utf8();
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 #[cfg(test)]
@@ -227,13 +298,23 @@ mod tests {
                 &["application/statuslist+cwt; q = 0.5 , application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
             ),
-            // A malformed or out-of-range weight is handled conservatively: a
-            // malformed weight excludes its range (nothing acceptable -> 406),
-            // while an out-of-range weight is clamped to 1.0.
+            // A malformed or out-of-range weight is handled conservatively: it
+            // excludes its range. `q=banana` is malformed; `q=2` / `q=1.5` are
+            // outside the RFC 9110 `[0,1]` range and must not win at full
+            // preference — including when the invalid range is the *only*
+            // match, which must yield 406 rather than the (previously
+            // clamped-to-1) type.
             (&["application/statuslist+cwt;q=banana"], None),
             (
                 &["application/statuslist+cwt;q=2, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
+            ),
+            // An invalid weight as the only matching range -> nothing acceptable.
+            (&["application/statuslist+cwt;q=2"], None),
+            (&["application/statuslist+cwt;q=1.5"], None),
+            (
+                &["application/statuslist+cwt;q=1.000"],
+                Some(AcceptType::Cwt),
             ),
             // Plain decimals only: no NaN, inf, sign or exponent ever slips
             // through, but the common `.2` shorthand still parses.
@@ -245,6 +326,18 @@ mod tests {
             (&["application/statuslist+cwt;q=inf"], None),
             (&["application/statuslist+cwt;q=-0.5"], None),
             (&["application/statuslist+cwt;q=1e2"], None),
+            // Quoted media parameters: a `,` or `;q=` inside a quoted value is
+            // data, not a list separator / weight (RFC 9110 §5.3).
+            (
+                &["application/statuslist+jwt;profile=\"a,b\";q=0, \
+                     application/statuslist+cwt;q=0.5"],
+                Some(AcceptType::Cwt),
+            ),
+            (
+                &["application/statuslist+jwt;q=0.9, \
+                     application/statuslist+cwt;profile=\"a;q=1\";q=0"],
+                Some(AcceptType::Jwt),
+            ),
             // Unsupported types.
             (&["text/html"], None),
             (&["application/json"], None),
@@ -305,10 +398,29 @@ mod tests {
 
     #[test]
     fn test_accepts_gzip_uppercase_q() {
-        // Regression: `Q=` was previously missed by a `q=`-only parser.
+        // Regression: `Q=0.8` must be honoured (the parameter name is
+        // case-insensitive per RFC 9110 §5.3).
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "gzip;Q=0.8".parse().unwrap());
         assert!(client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_uppercase_q0() {
+        // Regression: the old `q=`-only parser ignored `Q=0` and served gzip
+        // anyway.
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;Q=0".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
+    }
+
+    #[test]
+    fn test_rejects_gzip_malformed_q() {
+        // A malformed `q` excludes the coding: the response goes out
+        // uncompressed rather than assuming the client accepts gzip.
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, "gzip;q=banana".parse().unwrap());
+        assert!(!client_accepts_gzip(&h));
     }
 
     #[test]
