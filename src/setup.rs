@@ -1860,8 +1860,8 @@ mod general_tests {
             "https://[fe80::1]/api/v1",
         ] {
             let warning = check_production_base_url(ENV_PRODUCTION, url)
-                .expect(&format!("{url} must not fail in production"))
-                .expect(&format!("{url} must warn in production"));
+                .unwrap_or_else(|_| panic!("{url} must not fail in production"))
+                .unwrap_or_else(|| panic!("{url} must warn in production"));
             assert!(
                 warning.contains("private/local"),
                 "unexpected warning for {url}: {warning}"

@@ -2435,7 +2435,7 @@ mod tests {
             "https://statuslist.example.com/api/v1/status-lists/foo",
         ] {
             Config::load_from_overrides(&[("server.public_base_url", value)])
-                .expect(&format!("public_base_url {value:?} must load"));
+                .unwrap_or_else(|_| panic!("public_base_url {value:?} must load"));
         }
     }
 
