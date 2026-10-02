@@ -517,7 +517,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .server
             .cert
             .dns
-            .resolve(&app_env)
+            .resolve(app_env)
             .wrap_err("Invalid DNS provider configuration")?;
         if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
             warn!(
@@ -746,7 +746,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // with e.g. `APP_ENV=prod` is caught here exactly as config treats it.
     let app_env = crate::config::normalize_app_env();
     let base_url = config.server.resolved_public_base_url();
-    match check_production_base_url(&app_env, &base_url) {
+    match check_production_base_url(app_env, &base_url) {
         Err(message) => return Err(color_eyre::eyre::eyre!(message)),
         Ok(Some(warning)) => tracing::warn!("{warning}"),
         Ok(None) => {}
