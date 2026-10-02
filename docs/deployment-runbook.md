@@ -329,7 +329,7 @@ kubectl scale deployment statuslist-status-list-server-deployment -n <namespace>
 # grace period to finish shutting down in-flight requests. Wait for them to be
 # gone before upgrading, otherwise the helm upgrade on the next line scales
 # replicas back up and new pods can start while old ones are still draining.
-kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist -n <namespace> --timeout=120s
+kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
 helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
 kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
 ```
