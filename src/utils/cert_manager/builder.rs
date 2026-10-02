@@ -176,13 +176,13 @@ impl CertificateManagerBuilder {
     /// Build and validate the certificate manager.
     pub fn build(self) -> Result<CertManager, CertError> {
         if self.domains.is_empty() {
-            return Err(CertError::Validation(
-                "at least one certificate domain must be configured".to_string(),
+            return Err(CertError::validation(
+                "at least one certificate domain must be configured",
             ));
         }
 
-        let crypto_storage = self.crypto_storage.ok_or(CertError::Validation(
-            "cryptographic-material backend must be configured".to_string(),
+        let crypto_storage = self.crypto_storage.ok_or(CertError::validation(
+            "cryptographic-material backend must be configured",
         ))?;
         let crypto_storage = CryptoStorage::with_cache_policy(crypto_storage, self.cache_policy);
 
@@ -193,8 +193,8 @@ impl CertificateManagerBuilder {
         let strategy_uses_acme = strategy.name() == "acme";
         if strategy_uses_acme {
             if self.challenge_handler.is_none() {
-                return Err(CertError::Validation(
-                    "ACME provisioning requires a challenge handler".to_string(),
+                return Err(CertError::validation(
+                    "ACME provisioning requires a challenge handler",
                 ));
             }
             if self
@@ -203,8 +203,8 @@ impl CertificateManagerBuilder {
                 .unwrap_or_default()
                 .is_empty()
             {
-                return Err(CertError::Validation(
-                    "ACME provisioning requires an ACME directory URL".to_string(),
+                return Err(CertError::validation(
+                    "ACME provisioning requires an ACME directory URL",
                 ));
             }
         }

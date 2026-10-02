@@ -12,10 +12,14 @@ use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::{ConnectOptions, DbErr};
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    feature = "redis"
+))]
 use secrecy::ExposeSecret;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{num::NonZeroU64, sync::Arc, time::Duration};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -44,6 +48,7 @@ use crate::cert_manager::{
     CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
+use crate::config::CacheBackend;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
@@ -60,7 +65,9 @@ use crate::domain::{
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
 use crate::outbound::azure_kv::AzureKeyVaultClient;
-use crate::outbound::cache::MokaStatusListCache;
+#[cfg(feature = "redis")]
+use crate::outbound::cache::RedisStatusListCache;
+use crate::outbound::cache::{DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -604,7 +611,83 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = if config.cache.ttl == 0
+    {
+        tracing::info!(
+            cache.backend = "disabled",
+            cache.reason = "ttl_zero",
+            "status-list cache disabled"
+        );
+        Arc::new(DisabledStatusListCache)
+    } else {
+        match config.cache.backend {
+            CacheBackend::Memory => {
+                tracing::info!(
+                    cache.backend = "memory",
+                    cache.ttl_secs = config.cache.ttl,
+                    cache.max_capacity = config.cache.max_capacity,
+                    "status-list cache backend selected"
+                );
+                Arc::new(MokaStatusListCache::new(
+                    NonZeroU64::new(config.cache.ttl)
+                        .expect("cache TTL is nonzero after disabled-cache selection"),
+                    config.cache.max_capacity,
+                ))
+            }
+            CacheBackend::Redis => {
+                #[cfg(feature = "redis")]
+                {
+                    let redis_url = config.cache.load_resolved_redis_url().await?;
+                    let ca_cert = match &config.cache.ca_file {
+                        Some(path) => Some(tokio::fs::read(path).await.map_err(|err| {
+                            color_eyre::eyre::eyre!(
+                                "failed to read Redis cache CA file '{}': {err}",
+                                path.display()
+                            )
+                        })?),
+                        None => None,
+                    };
+                    let cache = RedisStatusListCache::new(
+                        redis_url.expose_secret(),
+                        config.cache.ttl,
+                        config.cache.key_prefix.clone(),
+                        Duration::from_millis(config.cache.response_timeout_ms),
+                        Duration::from_millis(config.cache.connection_timeout_ms),
+                        Duration::from_millis(config.cache.reconnect_cooldown_ms),
+                        ca_cert,
+                    )
+                    .map_err(|error| {
+                        color_eyre::eyre::eyre!(
+                            "failed to configure Redis status-list cache client: {error}"
+                        )
+                    })?;
+                    if let Err(error) = cache.warm_up().await {
+                        tracing::warn!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            error = ?error,
+                            "Redis status-list cache unavailable at startup; continuing with lazy reconnecting cache"
+                        );
+                    } else {
+                        tracing::info!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            "status-list cache backend selected"
+                        );
+                    }
+                    Arc::new(cache)
+                }
+                #[cfg(not(feature = "redis"))]
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "cache.backend=redis is configured, but this binary was not built with the redis feature"
+                    ));
+                }
+            }
+        }
+    };
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
@@ -615,7 +698,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
         credential_repo,
-        Arc::new(status_list_cache),
+        status_list_cache,
         snapshot_option,
         cert_provider,
     ));
@@ -1071,6 +1154,104 @@ mod general_tests {
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    #[cfg(all(feature = "redis", not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_with_redis_cache_starts_when_redis_is_unreachable() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "1"),
+            ("APP_CACHE__CONNECTION_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RESPONSE_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RECONNECT_COOLDOWN_MS", "50"),
+        ])
+        .expect("load redis cache config");
+
+        build_state(&config)
+            .await
+            .expect("redis cache startup failures should install lazy reconnecting cache");
+    }
+
+    #[cfg(all(not(feature = "redis"), not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_rejects_redis_cache_without_redis_feature() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "6379"),
+        ])
+        .expect("load redis cache config");
+
+        let Err(error) = build_state(&config).await else {
+            panic!("Redis cache configuration must fail without the redis feature");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("cache.backend=redis is configured, but this binary was not built with the redis feature")
+        );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_uses_disabled_cache_when_ttl_is_zero() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "memory"),
+            ("APP_CACHE__TTL", "0"),
+        ])
+        .expect("load ttl-zero cache config");
+
+        let state = build_state(&config).await.expect("build state");
+        assert_eq!(
+            state
+                .service
+                .status_list_cache()
+                .get("any")
+                .await
+                .expect("disabled cache get"),
+            None
+        );
     }
 
     #[cfg(not(feature = "acme"))]

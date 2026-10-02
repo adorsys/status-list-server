@@ -105,19 +105,19 @@ jobs:
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws"
+            features: "postgres,aws,redis"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            features: "postgres,gcp"
+            features: "postgres,gcp,redis"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            features: "postgres,azure"
+            features: "postgres,azure,redis"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            features: "postgres,vault"
+            features: "postgres,vault,redis"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            features: "postgres"
+            features: "postgres,redis"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code
@@ -960,10 +960,40 @@ jobs:
           # `:?` on both -- helm reports an empty value as a YAML error pointing
           # nowhere near the cause, and an empty digest silently falls back to the
           # mutable tag, which is the failure this pipeline exists to prevent.
+          #
+          # Record each release ExternalSecret's pre-deploy refreshTime so the post-deploy
+          # verification can prove reconciliation happened for THIS deployment, not just a
+          # stale Ready=True left over from the previous store. On a fresh install the ES
+          # does not exist yet, so the baseline is empty and verification skips the change
+          # check for that resource.
+          BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
+          : > "$BASELINES"
+          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+            rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
+              -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+            printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
+          done
+
+          # Record the last deployed Helm revision so the post-deploy ESO verification can
+          # explicitly roll back if the new release does not reconcile. --rollback-on-failure
+          # on the upgrade below only covers failures during the upgrade itself; a release that
+          # deploys but whose ExternalSecrets cannot sync from the cluster store needs an
+          # explicit rollback to keep production off stale credentials. Empty on a fresh install
+          # (no previous revision to roll back to), in which case the verify step uninstalls.
+          PREV_REVISION=""
+          if helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" --max 1 >/dev/null 2>&1; then
+            PREV_REVISION=$(helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" \
+              --output json | jq -r 'max_by(.revision) | .revision' 2>/dev/null || true)
+          fi
+          printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
+
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
+            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
+            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
+            --set "secretStore.enabled=false" \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
@@ -977,3 +1007,99 @@ jobs:
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
+
+      - name: Verify ESO secret path reconciles
+        # On an upgrade the app secrets can remain from the old namespaced store even if the
+        # Helm and Deployment rollout succeeds, so gate the release on the ExternalSecrets
+        # actually syncing from the new cluster store.
+        #
+        # We don't read ClusterSecretStore here: the deploy role's EKS/RBAC is
+        # namespace-scoped, so a cluster-scoped get returns Forbidden on every deploy. We
+        # rely on the namespaced release ExternalSecrets instead, requiring each one's
+        # refreshTime to move past its pre-deploy baseline (recorded in the Deploy chart
+        # step) because Ready=True alone can be stale from before the upgrade; on a fresh
+        # install the baseline is empty and only Ready=True is required.
+        #
+        # The chart's refreshInterval is 30m, so an image-only release leaves the
+        # ExternalSecret spec unchanged and ESO could keep the old refreshTime for the whole
+        # wait window; we force-sync with a unique external-secrets.io/force-sync annotation
+        # to trigger an immediate reconcile.
+        #
+        # This runs after helm upgrade --install --rollback-on-failure has already
+        # succeeded, so a failure here alone would leave the broken revision live. We
+        # explicitly roll back to the pre-deploy revision (or uninstall on a fresh install)
+        # when either ExternalSecret fails, keeping the cluster on the last known-good state.
+        env:
+          PRIMARY_ES: statuslist-external-secret
+          CREDS_ES: statuslist-external-secret-aws-credentials
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          RELEASE="${{ env.HELM_RELEASE_NAME }}"
+          BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
+          PREV_REVISION_FILE="$RUNNER_TEMP/eso-prev-revision"
+          FORCE_SYNC="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          TIMEOUT=180
+          rollback_done=0
+
+          cleanup_on_failure() {
+            if [ "$rollback_done" -eq 1 ]; then
+              return 0
+            fi
+            rollback_done=1
+            local prev_rev=""
+            if [ -f "$PREV_REVISION_FILE" ]; then
+              prev_rev=$(cat "$PREV_REVISION_FILE")
+            fi
+            echo "::warning::ESO verification failed; restoring the previous release state"
+            if [ -n "$prev_rev" ]; then
+              helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m || \
+                echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
+            else
+              # Fresh install: nothing to roll back to, so remove the release entirely.
+              helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 5m || \
+                echo "::warning::helm uninstall of fresh release failed; manual intervention required"
+            fi
+          }
+          trap cleanup_on_failure EXIT
+
+          # Force ESO to reconcile both release ExternalSecrets immediately, regardless of
+          # the 30m refreshInterval, so an image-only release cannot leave a stale
+          # refreshTime for the whole wait window.
+          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+            kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
+              "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
+              echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
+          done
+
+          await_synced() {
+            local es="$1" label="$2"
+            local baseline=""
+            if [ -f "$BASELINES" ]; then
+              baseline=$(awk -v es="$es" '$1==es {print $2}' "$BASELINES")
+            fi
+            local i=0 ready="" rt=""
+            while [ "$i" -lt "$TIMEOUT" ]; do
+              ready=$(kubectl get externalsecret "$es" -n "$NAMESPACE" \
+                -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+              rt=$(kubectl get externalsecret "$es" -n "$NAMESPACE" \
+                -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+              if [ "$ready" = "True" ] && { [ -z "$baseline" ] || { [ -n "$rt" ] && [ "$rt" != "$baseline" ]; }; }; then
+                echo "OK: $label reports Ready=True and refreshed for this deployment"
+                return 0
+              fi
+              sleep 5
+              i=$((i + 5))
+            done
+            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the cluster store (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
+            return 1
+          }
+
+          # Primary ExternalSecret syncs from the cluster store.
+          await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
+
+          # The credentials ExternalSecret (aws-credentials-secret) must also sync from the
+          # cluster store so the app's mounted credential volume is fresh.
+          await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+
+          rollback_done=1

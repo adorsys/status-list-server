@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -24,6 +24,11 @@ pub struct ApiError {
     /// RFC 9110 §10.2.3 permits `Retry-After` on any response, not just
     /// 503/429. It is the only machine-readable part of the retry instruction.
     pub retry_after_secs: Option<u64>,
+    /// Extra headers attached to the error response. Used for negotiation-
+    /// dependent responses that must advertise `Vary` even when they fail
+    /// (e.g. `406 Not Acceptable`), so a shared cache never serves the error
+    /// to a client with a different `Accept`.
+    pub extra_headers: Vec<(axum::http::HeaderName, HeaderValue)>,
 }
 
 impl ApiError {
@@ -37,7 +42,16 @@ impl ApiError {
             error: error.into(),
             error_description: description,
             retry_after_secs: None,
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Attach an extra header to the error response. Kept distinct from the
+    /// error body so a caller can add negotiation headers (`Vary`) without
+    /// changing the JSON contract.
+    pub(crate) fn with_header(mut self, name: axum::http::HeaderName, value: HeaderValue) -> Self {
+        self.extra_headers.push((name, value));
+        self
     }
 
     fn retry_after(mut self, secs: u64) -> Self {
@@ -155,6 +169,18 @@ impl IntoResponse for ApiError {
                 headers.insert(axum::http::header::RETRY_AFTER, value);
             }
         }
+        for (name, value) in self.extra_headers {
+            // `insert` overwrites, so a caller must not silently clobber the
+            // managed freshness/retry headers set above. In debug builds, catch
+            // that mistake instead of shipping a response with a mutated
+            // `Cache-Control`/`Retry-After`.
+            debug_assert!(
+                name != axum::http::header::CACHE_CONTROL
+                    && name != axum::http::header::RETRY_AFTER,
+                "with_header must not overwrite the managed Cache-Control/Retry-After headers"
+            );
+            headers.insert(name, value);
+        }
 
         let body = ErrorResponse {
             error: self.error,
@@ -236,6 +262,34 @@ impl IntoApiError for StatusListError {
                 "index_too_large",
                 format!("status index {index} exceeds configured maximum {max}"),
             ),
+            StatusListError::DuplicateIndex { index } => ApiError::bad_request(
+                "duplicate_index",
+                format!("duplicate status index {index} in statuses array"),
+            ),
+            StatusListError::IndexOutOfRange { index, size } => ApiError::bad_request(
+                "index_out_of_range",
+                format!("status index {index} is outside the fixed status list size {size}"),
+            ),
+            StatusListError::InvalidSize { size, max } => ApiError::bad_request(
+                "invalid_size",
+                format!("status list size {size} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::InvalidAllocationCount { count, max } => ApiError::bad_request(
+                "invalid_count",
+                format!("allocation count {count} is invalid; expected 1..={max}"),
+            ),
+            StatusListError::IndexNotAllocated { index } => ApiError::conflict(
+                "index_not_allocated",
+                format!("status index {index} has not been allocated"),
+            ),
+            StatusListError::ListNotFixedSize => ApiError::conflict(
+                "list_not_fixed_size",
+                "status list must be fixed-size to allocate indices",
+            ),
+            StatusListError::AllocationExhausted => ApiError::conflict(
+                "allocation_exhausted",
+                "status list does not have enough unallocated indices",
+            ),
             // Not 429: waiting never frees a slot, so no retry hint. Not 403,
             // which this API reserves for ownership failures.
             StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
@@ -256,6 +310,9 @@ impl IntoApiError for StatusListError {
                 Some("the service is currently unavailable. Please try again later".into()),
             ),
             StatusListError::Backend(err) => ApiError::internal(err),
+            StatusListError::TokenExpiryOverflow { .. } => ApiError::internal(
+                "token exp overflowed the configured token lifetime; check APP_STATUS_LIST__TOKEN_EXP_SECS",
+            ),
         }
     }
 }
@@ -350,6 +407,21 @@ mod tests {
                 "index_too_large",
             ),
             (
+                StatusListError::DuplicateIndex { index: 3 },
+                StatusCode::BAD_REQUEST,
+                "duplicate_index",
+            ),
+            (
+                StatusListError::IndexOutOfRange { index: 3, size: 3 },
+                StatusCode::BAD_REQUEST,
+                "index_out_of_range",
+            ),
+            (
+                StatusListError::AllocationExhausted,
+                StatusCode::CONFLICT,
+                "allocation_exhausted",
+            ),
+            (
                 StatusListError::QuotaExceeded { count: 2, max: 2 },
                 StatusCode::BAD_REQUEST,
                 "list_quota_exceeded",
@@ -371,6 +443,14 @@ mod tests {
             ),
             (
                 StatusListError::Backend(Box::new(std::io::Error::other("test"))),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+            (
+                StatusListError::TokenExpiryOverflow {
+                    iat: 1_000,
+                    token_exp_secs: 900,
+                },
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
             ),
@@ -538,6 +618,36 @@ mod tests {
                 "{error_code} must not advertise Retry-After"
             );
         }
+    }
+
+    /// Extra headers attached via `with_header` must land on the wire response,
+    /// so negotiation-dependent errors can advertise `Vary` without altering the
+    /// JSON body.
+    #[tokio::test]
+    async fn test_extra_headers_are_emitted() {
+        let err = ApiError::new(
+            StatusCode::NOT_ACCEPTABLE,
+            "invalid_accept_header",
+            Some("No acceptable media type.".into()),
+        )
+        .with_header(
+            axum::http::header::VARY,
+            HeaderValue::from_static("Accept, Accept-Encoding"),
+        );
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(
+            response.headers().get(axum::http::header::VARY).unwrap(),
+            "Accept, Accept-Encoding"
+        );
+        // The standard error caching directive must still be present.
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store, max-age=0"
+        );
     }
 
     /// The two 409s carry opposite instructions, so the field clients branch on

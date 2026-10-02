@@ -2,6 +2,7 @@
 
 use crate::domain::models::credential::Issuer;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 
 /// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
@@ -33,6 +34,20 @@ pub enum StatusListError {
     TooManyStatuses { count: usize, max: usize },
     #[error("status index {index} exceeds configured maximum {max}")]
     IndexTooLarge { index: i32, max: i32 },
+    #[error("duplicate status index {index} in statuses array")]
+    DuplicateIndex { index: i32 },
+    #[error("status index {index} is outside the fixed status list size {size}")]
+    IndexOutOfRange { index: i32, size: u32 },
+    #[error("invalid status list size {size}; expected 1..={max}")]
+    InvalidSize { size: u32, max: u32 },
+    #[error("invalid allocation count {count}; expected 1..={max}")]
+    InvalidAllocationCount { count: u32, max: usize },
+    #[error("status index {index} has not been allocated")]
+    IndexNotAllocated { index: i32 },
+    #[error("status list must be fixed-size to allocate indices")]
+    ListNotFixedSize,
+    #[error("status list does not have enough unallocated indices")]
+    AllocationExhausted,
     /// The issuer already holds its configured maximum number of status lists.
     #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
     QuotaExceeded { count: u64, max: u64 },
@@ -54,6 +69,12 @@ pub enum StatusListError {
     Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// `iat + token_exp_secs` overflows `i64`; the configured token lifetime
+    /// cannot be added to the issuance timestamp without wrapping `exp` negative.
+    #[error(
+        "token exp ({iat} + {token_exp_secs}) overflows i64; configured token lifetime is too large for the issuance timestamp"
+    )]
+    TokenExpiryOverflow { iat: i64, token_exp_secs: u64 },
 }
 
 /// Represents the status of a specific index in a status list.
@@ -122,25 +143,91 @@ pub struct StatusListSnapshot {
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
+    /// Fixed entry count requested at publish time. `None` preserves legacy,
+    /// grow-on-write lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    /// Default status used to pre-initialise fixed-size lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_status: Option<Status>,
 }
 
 impl StatusList {
     pub fn create(status_updates: Vec<StatusEntry>) -> Result<Self, StatusListError> {
+        Self::create_with_options(status_updates, None, Status::Valid)
+    }
+
+    pub fn create_with_options(
+        status_updates: Vec<StatusEntry>,
+        size: Option<u32>,
+        default_status: Status,
+    ) -> Result<Self, StatusListError> {
+        validate_unique_indices(&status_updates)?;
+        if let Some(size) = size {
+            if size == 0 {
+                return Err(StatusListError::InvalidSize {
+                    size,
+                    max: u32::MAX,
+                });
+            }
+            validate_within_size(&status_updates, size)?;
+        }
+
         if status_updates.is_empty() {
+            if let Some(size) = size {
+                let bits = determine_bits_for_values(std::slice::from_ref(&default_status), None)?;
+                let rounded_size = round_size_to_byte_boundary(size, bits)?;
+                let mut status_array = vec![0u8; bytes_for_entries(rounded_size, bits)];
+                fill_status_array(&mut status_array, rounded_size, bits, &default_status)?;
+                return Ok(Self {
+                    bits: bits as u8,
+                    lst: encode_compressed(&status_array)?,
+                    size: Some(rounded_size),
+                    default_status: Some(default_status),
+                });
+            }
             return Ok(Self {
                 bits: 1,
                 lst: encode_compressed(&[])?,
+                size: None,
+                default_status: None,
             });
         }
 
-        let bits = determine_bits(&status_updates, None)?;
-        let len = calculate_array_size(&status_updates, bits)?;
+        let bits = determine_bits_with_default(
+            &status_updates,
+            size.as_ref().map(|_| &default_status),
+            None,
+        )?;
+        let rounded_size = size
+            .map(|size| round_size_to_byte_boundary(size, bits))
+            .transpose()?;
+        let len = if let Some(rounded_size) = rounded_size {
+            bytes_for_entries(rounded_size, bits)
+        } else {
+            calculate_array_size(&status_updates, bits)?
+        };
         let mut status_array = vec![0u8; len];
+        if let Some(rounded_size) = rounded_size {
+            fill_status_array(&mut status_array, rounded_size, bits, &default_status)?;
+        }
         apply_updates(&mut status_array, &status_updates, bits)?;
         Ok(Self {
             bits: bits as u8,
             lst: encode_compressed(&status_array)?,
+            size: rounded_size,
+            default_status: rounded_size.map(|_| default_status),
         })
+    }
+
+    pub(crate) fn validate_updates_within_size(
+        &self,
+        status_updates: &[StatusEntry],
+    ) -> Result<(), StatusListError> {
+        if let Some(size) = self.size {
+            validate_within_size(status_updates, size)?;
+        }
+        Ok(())
     }
 
     pub fn update(&self, status_updates: Vec<StatusEntry>) -> Result<Self, StatusListError> {
@@ -148,6 +235,10 @@ impl StatusList {
             return Ok(self.clone());
         }
 
+        validate_unique_indices(&status_updates)?;
+        if let Some(size) = self.size {
+            validate_within_size(&status_updates, size)?;
+        }
         let old_bits = self.bits as usize;
         // Draft-21 only permits 1, 2, 4, or 8. Older rows with wider values
         // are repacked when their stored values are still representable.
@@ -167,8 +258,17 @@ impl StatusList {
                     status,
                 })
                 .collect();
+            // The pre-existing entries are re-emitted first and the caller's
+            // updates appended after them: an index present in both must end up
+            // with the *update's* value, so this widening path relies on
+            // [`apply_updates`] letting the last write win for any given index.
             full_statuses.extend(status_updates);
-            return Self::create_with_bits(full_statuses, new_bits);
+            return Self::create_with_bits(
+                full_statuses,
+                new_bits,
+                self.size,
+                self.default_status.clone(),
+            );
         }
 
         let required_len = calculate_array_size(&status_updates, old_bits)?;
@@ -179,21 +279,70 @@ impl StatusList {
         Ok(Self {
             bits: self.bits,
             lst: encode_compressed(&status_array)?,
+            size: self.size,
+            default_status: self.default_status.clone(),
         })
     }
 
     fn create_with_bits(
         status_updates: Vec<StatusEntry>,
         bits: usize,
+        size: Option<u32>,
+        default_status: Option<Status>,
     ) -> Result<Self, StatusListError> {
         debug_assert!(matches!(bits, 1 | 2 | 4 | 8));
-        let len = calculate_array_size(&status_updates, bits)?;
+        let len = if let Some(size) = size {
+            bytes_for_entries(size, bits)
+        } else {
+            calculate_array_size(&status_updates, bits)?
+        };
         let mut status_array = vec![0u8; len];
+        if let (Some(size), Some(default_status)) = (size, default_status.as_ref()) {
+            fill_status_array(&mut status_array, size, bits, default_status)?;
+        }
         apply_updates(&mut status_array, &status_updates, bits)?;
         Ok(Self {
             bits: bits as u8,
             lst: encode_compressed(&status_array)?,
+            size,
+            default_status,
         })
+    }
+
+    pub(crate) fn rounded_size_for_options(
+        status_updates: &[StatusEntry],
+        size: u32,
+        default_status: &Status,
+    ) -> Result<u32, StatusListError> {
+        let bits = if status_updates.is_empty() {
+            determine_bits_for_values(std::slice::from_ref(default_status), None)?
+        } else {
+            determine_bits_with_default(status_updates, Some(default_status), None)?
+        };
+        round_size_to_byte_boundary(size, bits)
+    }
+
+    pub(crate) fn validate_size_limit(
+        status_updates: &[StatusEntry],
+        size: u32,
+        default_status: &Status,
+        max_status_index: i32,
+    ) -> Result<(), StatusListError> {
+        let max_size = allocation_limit_from_max_index(max_status_index)?;
+        if size == 0 {
+            return Err(StatusListError::InvalidSize {
+                size,
+                max: max_size,
+            });
+        }
+        let rounded_size = Self::rounded_size_for_options(status_updates, size, default_status)?;
+        if rounded_size > max_size {
+            return Err(StatusListError::InvalidSize {
+                size,
+                max: max_size,
+            });
+        }
+        Ok(())
     }
 
     /// The `lst` as it must appear in a token: the stored value, or a valid
@@ -257,6 +406,24 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
     }
 }
 
+/// Reject duplicate indices within a single update payload.
+///
+/// Only the caller-supplied entries are validated, never the entries a widening
+/// [`StatusList::update`] re-derives from the existing list: overlapping an
+/// already-set index is a legitimate "change that position", so this check is
+/// scoped to the request itself.
+pub(crate) fn validate_unique_indices(
+    status_updates: &[StatusEntry],
+) -> Result<(), StatusListError> {
+    let mut seen_indices: HashSet<i32> = HashSet::new();
+    for entry in status_updates {
+        if !seen_indices.insert(entry.index) {
+            return Err(StatusListError::DuplicateIndex { index: entry.index });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn is_application_specific_status_value(value: u32) -> bool {
     matches!(value, 3 | 12..=15)
 }
@@ -274,9 +441,18 @@ fn determine_bits(
     status_updates: &[StatusEntry],
     original_bits: Option<usize>,
 ) -> Result<usize, StatusListError> {
+    determine_bits_with_default(status_updates, None, original_bits)
+}
+
+fn determine_bits_with_default(
+    status_updates: &[StatusEntry],
+    default_status: Option<&Status>,
+    original_bits: Option<usize>,
+) -> Result<usize, StatusListError> {
     let max_status_value = status_updates
         .iter()
         .map(|entry| status_value(&entry.status))
+        .chain(default_status.map(status_value))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .max()
@@ -296,6 +472,90 @@ fn determine_bits(
     };
 
     Ok(original_bits.unwrap_or(required_bits).max(required_bits))
+}
+
+fn determine_bits_for_values(
+    statuses: &[Status],
+    original_bits: Option<usize>,
+) -> Result<usize, StatusListError> {
+    let updates = statuses
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, status)| StatusEntry {
+            index: index as i32,
+            status,
+        })
+        .collect::<Vec<_>>();
+    determine_bits(&updates, original_bits)
+}
+
+fn round_size_to_byte_boundary(size: u32, bits: usize) -> Result<u32, StatusListError> {
+    validate_bits(bits)?;
+    let entries_per_byte = 8 / bits;
+    let size = usize::try_from(size).map_err(|_| {
+        StatusListError::InvalidStatusList("status list size does not fit usize".to_string())
+    })?;
+    let rounded = if size == 0 {
+        0
+    } else {
+        size.next_multiple_of(entries_per_byte)
+    };
+    u32::try_from(rounded).map_err(|_| {
+        StatusListError::InvalidStatusList("rounded status list size exceeds u32".to_string())
+    })
+}
+
+fn bytes_for_entries(entries: u32, bits: usize) -> usize {
+    (entries as usize * bits).div_ceil(8)
+}
+
+fn validate_within_size(status_updates: &[StatusEntry], size: u32) -> Result<(), StatusListError> {
+    for entry in status_updates {
+        let Ok(index) = u32::try_from(entry.index) else {
+            continue;
+        };
+        if index >= size {
+            return Err(StatusListError::IndexOutOfRange {
+                index: entry.index,
+                size,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn allocation_limit_from_max_index(
+    max_status_index: i32,
+) -> Result<u32, StatusListError> {
+    let max = u32::try_from(max_status_index).map_err(|_| {
+        StatusListError::InvalidStatusList(
+            "max_status_index must be greater than or equal to 0".to_string(),
+        )
+    })?;
+    max.checked_add(1).ok_or_else(|| {
+        StatusListError::InvalidStatusList("max_status_index is too large".to_string())
+    })
+}
+
+pub(crate) fn choose_unallocated_indices(
+    allocated: &BTreeSet<i32>,
+    count: usize,
+    limit: u32,
+) -> Result<Vec<i32>, StatusListError> {
+    let mut result = Vec::with_capacity(count);
+    for candidate in 0..limit {
+        let candidate = i32::try_from(candidate).map_err(|_| {
+            StatusListError::InvalidStatusList("allocation index exceeds i32".to_string())
+        })?;
+        if !allocated.contains(&candidate) {
+            result.push(candidate);
+            if result.len() == count {
+                return Ok(result);
+            }
+        }
+    }
+    Err(StatusListError::AllocationExhausted)
 }
 
 fn calculate_array_size(
@@ -320,6 +580,29 @@ fn calculate_array_size(
 
     let end_bit = (max_index as usize) * bits + bits - 1;
     Ok(end_bit / 8 + 1)
+}
+
+fn fill_status_array(
+    status_array: &mut [u8],
+    entries: u32,
+    bits: usize,
+    status: &Status,
+) -> Result<(), StatusListError> {
+    if entries == 0 {
+        return Ok(());
+    }
+    let value = status_value(status)?;
+    if value == 0 {
+        return Ok(());
+    }
+
+    let entries_per_byte = 8 / bits;
+    let mut byte = 0u8;
+    for offset in 0..entries_per_byte {
+        byte |= (value as u8) << (offset * bits);
+    }
+    status_array.fill(byte);
+    Ok(())
 }
 
 fn apply_updates(
@@ -603,10 +886,41 @@ mod tests {
         assert_eq!(decompress(&result.lst), vec![0b0110_0100]);
     }
 
+    #[test]
+    fn create_pre_sized_list_with_non_zero_default() {
+        let result = StatusList::create_with_options(vec![], Some(5), Status::Invalid).unwrap();
+
+        assert_eq!(result.bits, 1);
+        assert_eq!(result.size, Some(8));
+        assert_eq!(result.default_status, Some(Status::Invalid));
+        assert_eq!(decompress(&result.lst), vec![0b1111_1111]);
+    }
+
+    #[test]
+    fn create_with_options_rejects_zero_size() {
+        let err = StatusList::create_with_options(vec![], Some(0), Status::Valid).unwrap_err();
+
+        assert!(matches!(err, StatusListError::InvalidSize { size: 0, .. }));
+    }
+
+    #[test]
+    fn update_rejects_index_beyond_fixed_size() {
+        let list = StatusList::create_with_options(vec![], Some(8), Status::Valid).unwrap();
+
+        let err = list.update(vec![entry(8, Status::Invalid)]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            StatusListError::IndexOutOfRange { index: 8, size: 8 }
+        ));
+    }
+
     fn from_raw(bytes: &[u8], bits: u8) -> StatusList {
         StatusList {
             bits,
             lst: encode_compressed(bytes).unwrap(),
+            size: None,
+            default_status: None,
         }
     }
 
@@ -791,6 +1105,8 @@ mod tests {
         let bad_base64 = StatusList {
             bits: 1,
             lst: "not valid base64!!".to_string(),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             bad_base64.update(vec![entry(0, Status::Invalid)]),
@@ -800,6 +1116,8 @@ mod tests {
         let bad_zlib = StatusList {
             bits: 1,
             lst: base64url::encode([0xFF, 0xFF, 0xFF, 0xFF]),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             bad_zlib.update(vec![entry(0, Status::Invalid)]),
@@ -832,6 +1150,8 @@ mod tests {
         let invalid_bits_list = StatusList {
             bits: 9,
             lst: encode_compressed(&[0x00, 0x01]).unwrap(),
+            size: None,
+            default_status: None,
         };
         assert!(matches!(
             invalid_bits_list.update(vec![entry(1, Status::Invalid)]),
@@ -844,6 +1164,8 @@ mod tests {
         let legacy_empty = StatusList {
             bits: 1,
             lst: String::new(),
+            size: None,
+            default_status: None,
         };
 
         let updated = legacy_empty
@@ -871,6 +1193,8 @@ mod tests {
         let legacy_representable = StatusList {
             bits: 9,
             lst: encode_compressed(&[15, 0]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         let (bits, lst) = legacy_representable.token_lst().unwrap();
@@ -884,6 +1208,8 @@ mod tests {
         let legacy_representable = StatusList {
             bits: 9,
             lst: encode_compressed(&[15, 0]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         let updated = legacy_representable
@@ -899,6 +1225,8 @@ mod tests {
         let legacy_unrepresentable = StatusList {
             bits: 9,
             lst: encode_compressed(&[0, 1]).unwrap(),
+            size: None,
+            default_status: None,
         };
 
         assert!(matches!(
@@ -912,6 +1240,8 @@ mod tests {
         let legacy_empty = StatusList {
             bits: 1,
             lst: String::new(),
+            size: None,
+            default_status: None,
         };
 
         let (bits, lst) = legacy_empty.token_lst().unwrap();
@@ -983,6 +1313,85 @@ mod tests {
             list.update(vec![entry(-5, Status::Invalid)]),
             Err(StatusListError::InvalidIndex)
         ));
+    }
+
+    #[test]
+    fn create_rejects_duplicate_indices() {
+        let updates = vec![entry(0, Status::Valid), entry(0, Status::Invalid)];
+        assert!(matches!(
+            StatusList::create(updates),
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn update_rejects_duplicate_indices() {
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        let result = list.update(vec![entry(1, Status::Invalid), entry(1, Status::Suspended)]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 1 })
+        ));
+    }
+
+    /// Duplicate detection runs before the negative-index check, so a payload
+    /// whose duplicate is also negative must report `DuplicateIndex`, never
+    /// `InvalidIndex`. This pins that ordering in both create and update.
+    #[test]
+    fn duplicate_negative_index_reports_duplicate_before_invalid() {
+        let duplicates = vec![entry(-1, Status::Valid), entry(-1, Status::Invalid)];
+
+        assert!(matches!(
+            StatusList::create(duplicates.clone()),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+
+        let list = StatusList::create(vec![entry(0, Status::Valid)]).unwrap();
+        assert!(matches!(
+            list.update(duplicates),
+            Err(StatusListError::DuplicateIndex { index: -1 })
+        ));
+    }
+
+    /// Duplicate detection must not depend on the duplicates being adjacent:
+    /// a duplicate with other distinct indices in between is still rejected.
+    #[test]
+    fn create_rejects_non_adjacent_duplicate_indices() {
+        let result = StatusList::create(vec![
+            entry(0, Status::Valid),
+            entry(1, Status::Invalid),
+            entry(0, Status::Valid),
+        ]);
+        assert!(matches!(
+            result,
+            Err(StatusListError::DuplicateIndex { index: 0 })
+        ));
+    }
+
+    /// Re-sending the current value on a legacy-width row must still repack the
+    /// list to a supported width, so the result differs from the input. This
+    /// keeps the service's no-op guard (which compares whole lists) from
+    /// swallowing that one-time normalisation write.
+    #[test]
+    fn update_value_identical_on_legacy_width_repacks() {
+        let legacy = from_raw(&[8, 0], 3);
+        let updated = legacy
+            .update(vec![entry(1, Status::Invalid)])
+            .expect("re-sending the current value on a legacy row must succeed");
+
+        assert_eq!(
+            updated.bits, 1,
+            "the legacy 3-bit row must be repacked to a supported 1-bit row"
+        );
+        assert_eq!(
+            decompress(&updated.lst),
+            vec![0b0000_0010],
+            "index 1 = Invalid must survive the repack at 1 bit"
+        );
+        assert_ne!(
+            updated, legacy,
+            "the repacked row must differ from the legacy input so a write happens"
+        );
     }
 
     #[test]

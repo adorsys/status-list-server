@@ -70,6 +70,23 @@ impl DatabaseBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+impl CacheBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CacheBackend::Memory => "memory",
+            CacheBackend::Redis => "redis",
+        }
+    }
+}
+
 /// Recognized values of the APP_ENV environment variable
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
@@ -991,10 +1008,186 @@ pub struct AzureKeyVaultConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Cache backend selected at runtime.
+    #[serde(default)]
+    pub backend: CacheBackend,
     /// Time-to-live for cached status list items in seconds.
     /// Setting this to 0 disables caching entirely.
     pub ttl: u64,
     pub max_capacity: u64,
+    /// Redis hostname or IP address used when `cache.backend=redis`.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Redis port. Defaults to 6379 without TLS and 6380 with TLS.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Optional Redis username.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Redis password.
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    /// File containing the Redis password, for secret-mounted deployments.
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
+    /// Redis database number.
+    #[serde(default)]
+    pub database: Option<u8>,
+    /// Use TLS (`rediss://`) for the Redis connection.
+    #[serde(default)]
+    pub tls: bool,
+    /// Optional path to a private CA bundle for Redis TLS deployments.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    /// Prefix for all Redis cache keys, used to isolate shared Redis instances.
+    #[serde(default = "default_cache_key_prefix")]
+    pub key_prefix: String,
+    /// Redis response timeout in milliseconds.
+    #[serde(default = "default_cache_response_timeout_ms")]
+    pub response_timeout_ms: u64,
+    /// Redis connection timeout in milliseconds.
+    #[serde(default = "default_cache_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+    /// Cooldown in milliseconds after a Redis connection failure before retrying.
+    #[serde(default = "default_cache_reconnect_cooldown_ms")]
+    pub reconnect_cooldown_ms: u64,
+}
+
+fn default_cache_key_prefix() -> String {
+    "status-list-server:status-list:".to_string()
+}
+
+fn default_cache_response_timeout_ms() -> u64 {
+    250
+}
+
+fn default_cache_connection_timeout_ms() -> u64 {
+    250
+}
+
+fn default_cache_reconnect_cooldown_ms() -> u64 {
+    250
+}
+
+impl CacheConfig {
+    fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
+        if self.password.is_some() && self.password_file.is_some() {
+            return Err(ConfigError::Message(
+                "Ambiguous Redis cache configuration: use either cache.password or cache.password_file, not both".to_string(),
+            ));
+        }
+        if self.backend == CacheBackend::Redis {
+            if environment.is_production() {
+                if !self.tls {
+                    return Err(ConfigError::Message(
+                        "cache.backend=redis requires cache.tls=true in production".to_string(),
+                    ));
+                }
+                if self.password.is_none() && self.password_file.is_none() {
+                    return Err(ConfigError::Message(
+                        "cache.backend=redis requires cache.password or cache.password_file in production".to_string(),
+                    ));
+                }
+            }
+            if let Some(ca_file) = &self.ca_file {
+                if !self.tls {
+                    return Err(ConfigError::Message(
+                        "cache.ca_file requires cache.tls=true".to_string(),
+                    ));
+                }
+                if ca_file.as_os_str().is_empty() {
+                    return Err(ConfigError::Message(
+                        "cache.ca_file must not be empty".to_string(),
+                    ));
+                }
+            }
+            if trim_non_empty(Some(&self.key_prefix)).is_none() {
+                return Err(ConfigError::Message(
+                    "cache.key_prefix must not be empty".to_string(),
+                ));
+            }
+            if self.response_timeout_ms == 0
+                || self.connection_timeout_ms == 0
+                || self.reconnect_cooldown_ms == 0
+            {
+                return Err(ConfigError::Message(
+                    "cache Redis timeout values must be greater than zero".to_string(),
+                ));
+            }
+            if self.password_file.is_some() {
+                let mut config = self.clone();
+                config.password = Some(SecretString::from("placeholder".to_string()));
+                config.resolved_redis_url()?;
+            } else {
+                self.resolved_redis_url()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
+        let host = required_config_field(self.host.as_deref(), "cache.host")?;
+        validate_database_host(host)?;
+        let url_host = format_database_url_host(host);
+        let scheme = if self.tls { "rediss" } else { "redis" };
+        let port = self.port.unwrap_or(if self.tls { 6380 } else { 6379 });
+        let database = self.database.unwrap_or(0);
+        let password = self
+            .password
+            .as_ref()
+            .map(SecretString::expose_secret)
+            .filter(|value| !value.is_empty());
+
+        let auth = match (trim_non_empty(self.username.as_deref()), password) {
+            (Some(username), Some(password)) => {
+                format!(
+                    "{}:{}@",
+                    encode_url_part(username),
+                    encode_url_part(password.trim())
+                )
+            }
+            (None, Some(password)) => format!(":{}@", encode_url_part(password.trim())),
+            (Some(username), None) => {
+                return Err(ConfigError::Message(format!(
+                    "Missing required config field: cache.password for Redis username '{}'",
+                    username
+                )));
+            }
+            (None, None) => String::new(),
+        };
+
+        Ok(SecretString::from(format!(
+            "{scheme}://{auth}{url_host}:{port}/{database}"
+        )))
+    }
+
+    pub async fn load_resolved_redis_url(&self) -> Result<SecretString, ConfigError> {
+        let Some(path) = &self.password_file else {
+            return self.resolved_redis_url();
+        };
+        let password = tokio::fs::read_to_string(path).await.map_err(|err| {
+            ConfigError::Message(format!(
+                "Failed to read cache.password_file '{}': {err}",
+                path.display()
+            ))
+        })?;
+        let mut config = self.clone();
+        config.password = Some(SecretString::from(password.trim().to_string()));
+        config.resolved_redis_url()
+    }
+
+    pub fn redacted_redis_target(&self) -> String {
+        match trim_non_empty(self.host.as_deref()) {
+            Some(host) => format!(
+                "backend=redis, host={}, port={}, database={}, tls={}",
+                host,
+                self.port.unwrap_or(if self.tls { 6380 } else { 6379 }),
+                self.database.unwrap_or(0),
+                self.tls
+            ),
+            None => "backend=redis, host=<unset>".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1016,6 +1209,62 @@ pub struct StatusListConfig {
     /// `snapshot_retention_secs` (`APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`).
     #[serde(alias = "history_retention_secs")]
     pub snapshot_retention_secs: u64,
+}
+
+/// Upper bound (in seconds) for the configured token lifetime.
+///
+/// This is a fixed, clock-independent product ceiling: the spec (§5.1/§5.2)
+/// requires `ttl` to be a positive number and §11.5 asks for reasonable ranges,
+/// so values that would effectively never expire (or push the `exp` claim past
+/// what relying parties can handle) are rejected at configuration load instead
+/// of at issuance. It deliberately does NOT compare against the startup clock,
+/// so configuration acceptance never depends on the instant the process started.
+pub const MAX_TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 3600;
+
+impl StatusListConfig {
+    /// Rejects token-lifetime values the spec forbids.
+    ///
+    /// This enforces only static, representation-level invariants: positive
+    /// values within `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. It deliberately
+    /// does NOT compare `token_exp_secs` against the wall clock at startup:
+    /// configuration acceptance must not depend on the instant the process
+    /// started, so an otherwise-valid value would silently change behaviour one
+    /// second later. Overflow of `iat + token_exp_secs` at issuance time is
+    /// instead guarded by `checked_add` at every expiry construction, which fails
+    /// closed instead of wrapping `exp` negative (see `build_snapshot` and the
+    /// token validity window).
+    fn validate(&self) -> Result<(), ConfigError> {
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
+        validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
+        if self.token_ttl_secs >= self.token_exp_secs {
+            return Err(ConfigError::Message(format!(
+                "APP_STATUS_LIST__TOKEN_TTL_SECS ({}) must be less than \
+                 APP_STATUS_LIST__TOKEN_EXP_SECS ({}); a ttl >= exp leaves no usable token lifetime",
+                self.token_ttl_secs, self.token_exp_secs
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `secs` must be a positive number at or below `MAX_TOKEN_LIFETIME_SECS`;
+/// `0` breaks the spec (ttl MUST be positive) and values above the ceiling would
+/// produce effectively-never-expiring tokens (or an `exp` past year 9999) that
+/// relying parties cannot handle, and let revoked credentials look valid (§11.5).
+fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
+    if secs == 0 {
+        return Err(ConfigError::Message(format!(
+            "{env_var} must be a positive number (greater than 0)"
+        )));
+    }
+    if secs > MAX_TOKEN_LIFETIME_SECS {
+        return Err(ConfigError::Message(format!(
+            "{env_var} ({secs}) exceeds the maximum supported token lifetime \
+             (MAX_TOKEN_LIFETIME_SECS = {MAX_TOKEN_LIFETIME_SECS} seconds, one year); \
+             larger values would effectively never expire and let revoked credentials look valid"
+        )));
+    }
+    Ok(())
 }
 
 impl Config {
@@ -1057,7 +1306,9 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
+        config.status_list.validate()?;
         config.limits.validate()?;
         Ok(config)
     }
@@ -1142,8 +1393,30 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("gcp_secret_manager.secrets_cache_ttl", 300)?
         .set_default("azure_keyvault.vault_url", Option::<String>::None)?
         .set_default("azure_keyvault.secrets_cache_ttl", 300)?
+        .set_default("cache.backend", "memory")?
         .set_default("cache.ttl", 5 * 60)?
-        .set_default("cache.max_capacity", 100)?
+        .set_default("cache.max_capacity", 1000)?
+        .set_default("cache.host", Option::<String>::None)?
+        .set_default("cache.port", Option::<u16>::None)?
+        .set_default("cache.username", Option::<String>::None)?
+        .set_default("cache.password", Option::<String>::None)?
+        .set_default("cache.password_file", Option::<String>::None)?
+        .set_default("cache.database", Option::<u8>::None)?
+        .set_default("cache.tls", false)?
+        .set_default("cache.ca_file", Option::<String>::None)?
+        .set_default("cache.key_prefix", default_cache_key_prefix())?
+        .set_default(
+            "cache.response_timeout_ms",
+            default_cache_response_timeout_ms(),
+        )?
+        .set_default(
+            "cache.connection_timeout_ms",
+            default_cache_connection_timeout_ms(),
+        )?
+        .set_default(
+            "cache.reconnect_cooldown_ms",
+            default_cache_reconnect_cooldown_ms(),
+        )?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1311,8 +1584,20 @@ mod tests {
             ("server.cert.renewal_cron_schedule", "0 0 12 * * *"),
             ("server.cert.dns_challenge_server_url", "http://pebble:8055"),
             ("aws.region", "us-west-2"),
+            ("cache.backend", "redis"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
+            ("cache.host", "redis"),
+            ("cache.port", "6380"),
+            ("cache.username", "default"),
+            ("cache.password", "redis-password"),
+            ("cache.database", "2"),
+            ("cache.tls", "true"),
+            ("cache.ca_file", "/etc/redis/ca.pem"),
+            ("cache.key_prefix", "tenant-a:status-list:"),
+            ("cache.response_timeout_ms", "150"),
+            ("cache.connection_timeout_ms", "200"),
+            ("cache.reconnect_cooldown_ms", "300"),
             ("status_list.token_exp_secs", "1800"),
             ("status_list.token_ttl_secs", "600"),
             ("management_auth.leeway_secs", "30"),
@@ -1361,8 +1646,67 @@ mod tests {
             "https://acme-v02.api.letsencrypt.org/directory"
         );
         assert_eq!(overridden.aws.region, "us-west-2");
+        assert_eq!(overridden.cache.backend, CacheBackend::Redis);
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(overridden.cache.host.as_deref(), Some("redis"));
+        assert_eq!(overridden.cache.port, Some(6380));
+        assert_eq!(overridden.cache.username.as_deref(), Some("default"));
+        assert_eq!(
+            overridden
+                .cache
+                .password
+                .as_ref()
+                .expect("redis password override")
+                .expose_secret(),
+            "redis-password"
+        );
+        assert_eq!(overridden.cache.database, Some(2));
+        assert!(overridden.cache.tls);
+        assert_eq!(
+            overridden.cache.ca_file.as_deref(),
+            Some(std::path::Path::new("/etc/redis/ca.pem"))
+        );
+        assert_eq!(overridden.cache.key_prefix, "tenant-a:status-list:");
+        assert_eq!(overridden.cache.response_timeout_ms, 150);
+        assert_eq!(overridden.cache.connection_timeout_ms, 200);
+        assert_eq!(overridden.cache.reconnect_cooldown_ms, 300);
+        assert_eq!(
+            overridden
+                .cache
+                .resolved_redis_url()
+                .expect("redis url")
+                .expose_secret(),
+            "rediss://default:redis-password@redis:6380/2"
+        );
+
+        let redis_without_tls_in_prod = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("cache.backend", "redis"),
+            ("cache.host", "redis"),
+            ("cache.password", "redis-password"),
+        ])
+        .expect_err("production Redis without TLS should be rejected");
+        assert!(
+            redis_without_tls_in_prod
+                .to_string()
+                .contains("cache.tls=true"),
+            "unexpected error: {redis_without_tls_in_prod}"
+        );
+
+        let redis_without_auth_in_prod = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("cache.backend", "redis"),
+            ("cache.host", "redis"),
+            ("cache.tls", "true"),
+        ])
+        .expect_err("production Redis without auth should be rejected");
+        assert!(
+            redis_without_auth_in_prod
+                .to_string()
+                .contains("cache.password or cache.password_file"),
+            "unexpected error: {redis_without_auth_in_prod}"
+        );
         assert_eq!(overridden.status_list.token_exp_secs, 1800);
         assert_eq!(overridden.status_list.token_ttl_secs, 600);
         assert_eq!(overridden.management_auth.leeway_secs, 30);
@@ -1785,6 +2129,83 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_status_list_validations() {
+        // The valid default (900 / 300) loads without error.
+        let defaults = Config::load_from_overrides(&[]).expect("default config should load");
+        assert_eq!(defaults.status_list.token_exp_secs, 900);
+        assert_eq!(defaults.status_list.token_ttl_secs, 300);
+
+        // Each rejected override must fail AND name the offending env var, so
+        // deleting a validation branch cannot leave the test green.
+        let above_ceiling = (MAX_TOKEN_LIFETIME_SECS + 1).to_string();
+        let rejects: Vec<(Vec<(&str, &str)>, &str)> = vec![
+            // token_exp_secs == 0 -> every token is already expired at issue time.
+            (
+                vec![("status_list.token_exp_secs", "0")],
+                "APP_STATUS_LIST__TOKEN_EXP_SECS must be a positive number",
+            ),
+            // token_ttl_secs == 0 -> breaks the spec MUST that ttl be positive.
+            (
+                vec![("status_list.token_ttl_secs", "0")],
+                "APP_STATUS_LIST__TOKEN_TTL_SECS must be a positive number",
+            ),
+            // token_exp_secs above the ceiling would never expire (and exceed i64).
+            (
+                vec![("status_list.token_exp_secs", "9223372036854775808")],
+                "APP_STATUS_LIST__TOKEN_EXP_SECS (9223372036854775808) exceeds the maximum \
+                 supported token lifetime",
+            ),
+            // token_ttl_secs above the ceiling would never expire (and exceed i64).
+            (
+                vec![("status_list.token_ttl_secs", "9223372036854775808")],
+                "APP_STATUS_LIST__TOKEN_TTL_SECS (9223372036854775808) exceeds the maximum \
+                 supported token lifetime",
+            ),
+            // Just above the one-year ceiling is rejected.
+            (
+                vec![("status_list.token_exp_secs", &above_ceiling)],
+                "exceeds the maximum supported token lifetime",
+            ),
+            // token_ttl_secs == token_exp_secs leaves no usable token lifetime.
+            (
+                vec![("status_list.token_ttl_secs", "900")],
+                "APP_STATUS_LIST__TOKEN_TTL_SECS (900) must be less than",
+            ),
+            // token_ttl_secs > token_exp_secs leaves no usable token lifetime.
+            (
+                vec![
+                    ("status_list.token_exp_secs", "300"),
+                    ("status_list.token_ttl_secs", "600"),
+                ],
+                "APP_STATUS_LIST__TOKEN_TTL_SECS (600) must be less than",
+            ),
+        ];
+        for (overrides, expected) in rejects {
+            let err = match Config::load_from_overrides(&overrides) {
+                Ok(_) => panic!("overrides {overrides:?} should fail config loading"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains(expected),
+                "expected error to mention {expected:?}, got: {err}"
+            );
+        }
+
+        // Exact MAX_TOKEN_LIFETIME_SECS is the boundary and is accepted: it is
+        // positive, within the ceiling, and (with a lower ttl) leaves a usable
+        // lifetime. This is a fixed, clock-independent constant, so acceptance
+        // does not depend on the instant the process started.
+        let max_exp = Config::load_from_overrides(&[(
+            "status_list.token_exp_secs",
+            &MAX_TOKEN_LIFETIME_SECS.to_string(),
+        )]);
+        assert!(
+            max_exp.is_ok(),
+            "token_exp_secs == MAX_TOKEN_LIFETIME_SECS should load"
         );
     }
 

@@ -98,6 +98,37 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
+## Redis Status-List Cache
+
+Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, provide
+`APP_CACHE__HOST`, and configure `APP_CACHE__TLS=true` with a password in production.
+For Helm, source `APP_CACHE__PASSWORD` from `statuslist.secretEnv` and set
+`statuslist.networkPolicy.cacheEgress` when NetworkPolicy is enabled.
+
+Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
+write-capable Redis user with other applications. For the default prefix, create one with:
+
+```text
+ACL SETUSER status-list-server reset on >REPLACE_WITH_A_STRONG_PASSWORD ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load
+```
+
+`SET` maintains durable invalidation fences, `SELECT` is needed when
+`APP_CACHE__DATABASE` is non-zero, and `SCRIPT|LOAD` lets `redis::Script` recover
+after a Redis restart. Restrict the key pattern when you configure a custom prefix.
+
+Configure Redis with `maxmemory-policy volatile-lru` (or `volatile-lfu`). Cache record
+keys have a TTL and remain eligible for eviction, while durable marker keys have no TTL
+and stay resident to preserve stale-fill fencing. Do not use any `allkeys-*` policy: it
+can evict a marker and allow a delayed pre-PATCH fill to make a revoked credential look
+valid. Size Redis for one durable marker per distinct status-list ID that has been
+invalidated, in addition to the TTL-bound records; markers deliberately outlive records
+and are not bounded by `APP_CACHE__MAX_CAPACITY`.
+
+The cache supports private CA bundles (`APP_CACHE__CA_FILE`) and configurable
+response, connection, and reconnect-cooldown timeouts. See
+[`deploy/helm/chart/values.yaml`](../deploy/helm/chart/values.yaml) for the full
+Helm value reference.
+
 ### Install
 
 ```bash
@@ -126,6 +157,31 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 - Or set `statuslist.ingress.enabled=false` and expose the `ClusterIP` Service another way (NodePort, port-forward, or a LoadBalancer).
 
 The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
+
+### Content negotiation at the edge
+
+The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
+(JWT vs CWT) from the client's `Accept` header per RFC 9110 §12.5.1 and serves
+`Vary: Accept, Accept-Encoding` on its `200`, `304` and `406` responses. Two
+operational consequences follow:
+
+- **Normalize `Accept` at the CDN/edge.** Most HTTP clients and CDNs send a
+  catch-all `Accept` (e.g. `*/*` or the legacy JDK default) that the server now
+  accepts and answers with the default JWT format instead of a `406`. If you
+  run a caching CDN in front of the service, make sure it keys its cache on
+  `Vary: Accept` and, if you can, normalize or collapse the `Accept` header at
+  the edge (for example strip wildcard-only values down to
+  `application/statuslist+jwt`) so downstream cache-hit ratios stay high and
+  one canonical variant is served per client class.
+- **Plan for signing load.** Because wildcard/absent `Accept` headers now return
+  `200 OK` (previously `406`), clients that were failing will suddenly start
+  receiving freshly signed tokens. Every `200` triggers a token re-sign on the
+  hot path (subject to the conditional-revalidation ETag window), so watch
+  signing throughput and CPU after rollout — a large fleet of previously-`406`
+  clients can add sustained signing work that was not there before. The Redis
+  status-list cache and the conditional-revalidation metrics
+  (`conditional_revalidation_total`) help you confirm the new traffic is being
+  served efficiently rather than re-signing every request.
 
 ### Pinning the image
 

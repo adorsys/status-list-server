@@ -19,7 +19,7 @@
     "podAnnotations": {
       "type": "object",
       "title": "Pod annotations",
-      "description": "Optional annotations merged onto the Pod template metadata (top-level, distinct from statuslist.podLabels which go into the pod labels). Consumed by deployment.yaml on top of the always-emitted prometheus.io/scrape annotations. Defaults to an empty map; overlays supply the annotations. Values may be strings or booleans.",
+      "description": "Optional annotations merged onto the Pod template metadata (top-level, distinct from statuslist.podLabels which go into the pod labels). Consumed by deployment.yaml in addition to the prometheus.io/scrape annotations, which are emitted only when statuslist.prometheusAnnotations is enabled. Defaults to an empty map; overlays supply the annotations. Values may be strings or booleans.",
       "additionalProperties": {
         "type": ["string", "boolean", "integer", "number"]
       }
@@ -80,6 +80,11 @@
           "title": "Pod labels",
           "description": "Extra labels merged onto the Pod template metadata. For Azure Workload Identity, azure.workload.identity/use must be a quoted string, e.g. \"true\", not a boolean.",
           "additionalProperties": { "type": "string" }
+        },
+        "prometheusAnnotations": {
+          "type": "boolean",
+          "title": "Emit prometheus.io/scrape pod annotations",
+          "description": "When true, deployment.yaml adds prometheus.io/scrape + port + path Pod annotations. Defaults to false on purpose: kube-prometheus-stack does NOT scrape arbitrary annotation-marked Pods (the ServiceMonitor is the authoritative discovery method). Enable only for a separately configured scraper that relies on these annotations."
         },
         "image": {
           "type": "object",
@@ -229,7 +234,39 @@
         "env": {
           "type": "object",
           "title": "Application environment variables",
-          "description": "Environment for the status-list-server container. APP_DATABASE__BACKEND selects the backend (postgres | mysql). APP_DATABASE__HOST/PORT/USERNAME/NAME default to the active backend's values when omitted. Do NOT set APP_DATABASE__URL or APP_DATABASE__PASSWORD here; the chart rejects them and delivers the password via APP_DATABASE__PASSWORD_FILE / the fallback Secret.",
+          "description": "Environment for the status-list-server container. APP_DATABASE__BACKEND selects the backend (postgres | mysql). APP_DATABASE__HOST/PORT/USERNAME/NAME default to the active backend's values when omitted. Do NOT set APP_DATABASE__URL or APP_DATABASE__PASSWORD here; the chart rejects them and delivers the password via APP_DATABASE__PASSWORD_FILE / the fallback Secret. The status-list token lifetime (APP_STATUS_LIST__TOKEN_EXP_SECS / APP_STATUS_LIST__TOKEN_TTL_SECS) must be positive (>= 1) and ttl strictly less than exp; the application rejects violations at startup.",
+          "properties": {
+            "APP_STATUS_LIST__TOKEN_EXP_SECS": {
+              "title": "Token exp (seconds)",
+              "description": "Seconds added to iat to derive the token exp claim. Must be a positive number (>= 1) at or below the one-year ceiling (31536000); the application rejects larger values as effectively-never-expiring. Values below 1 are rejected here.",
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31536000
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              ]
+            },
+            "APP_STATUS_LIST__TOKEN_TTL_SECS": {
+              "title": "Token ttl (seconds)",
+              "description": "Cache-Control max-age / token ttl claim in seconds. The spec requires ttl to be a positive number (>= 1) and strictly less than exp. Values below 1 are rejected here.",
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31536000
+                },
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              ]
+            }
+          },
           "additionalProperties": { "type": "string" }
         },
         "aws": {
@@ -322,6 +359,17 @@
             }
           }
         },
+        "secretEnv": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["name", "key"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "key": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "database": {
           "type": "object",
           "title": "Database password key",
@@ -379,6 +427,11 @@
               "type": "array",
               "title": "Explicit database egress destinations",
               "description": "Required for MySQL or external databases (RDS, Cloud SQL, another namespace, operator-managed), where the chart cannot infer the target."
+            },
+            "cacheEgress": {
+              "type": "array",
+              "title": "Explicit Redis cache egress destinations",
+              "description": "Required when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis. The rule uses APP_CACHE__PORT, or 6379/6380 from APP_CACHE__TLS when the port is omitted. Use a dedicated Redis ACL user scoped to APP_CACHE__KEY_PREFIX."
             }
           }
         },
@@ -732,6 +785,20 @@
           "type": "object",
           "title": "PrometheusRule labels",
           "description": "Selector labels required by your Prometheus RuleSelector, e.g. release: kube-prometheus-stack."
+        }
+      }
+    },
+    "grafanaDashboard": {
+      "type": "object",
+      "title": "Grafana dashboard provisioning",
+      "description": "Grafana dashboard provisioning for the central (shared) Grafana. When enabled, renders the generated SLO dashboard as a ConfigMap labelled grafana_dashboard: \"1\" (override via labels). The central Grafana sidecar auto-discovers it and provisions the dashboard.",
+      "properties": {
+        "enabled": { "type": "boolean", "title": "Render the dashboard ConfigMap" },
+        "labels": {
+          "type": "object",
+          "title": "Dashboard ConfigMap labels",
+          "description": "Additional labels required by your Grafana dashboards sidecar, e.g. grafana_dashboard: \"1\" + release: kube-prometheus-stack.",
+          "additionalProperties": { "type": "string" }
         }
       }
     },
