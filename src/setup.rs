@@ -739,13 +739,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // private IPv4, link-local, ULA) may be valid internal setups, so those only
     // warn with an accurate message. The Helm chart falls back to `localhost`
     // with APP_ENV=production when no host is configured, which this catches.
-    let app_env = if config.telemetry.environment.is_production() {
-        crate::config::ENV_PRODUCTION
-    } else {
-        crate::config::ENV_DEVELOPMENT
-    };
+    // `APP_ENV` is read directly (not telemetry.environment, which operators may
+    // override just to change the log format) so the guard is tied to the real
+    // deployment profile.
+    let app_env =
+        std::env::var("APP_ENV").unwrap_or_else(|_| crate::config::ENV_DEVELOPMENT.to_string());
     let base_url = config.server.resolved_public_base_url();
-    match check_production_base_url(app_env, &base_url) {
+    match check_production_base_url(&app_env, &base_url) {
         Err(message) => return Err(color_eyre::eyre::eyre!(message)),
         Ok(Some(warning)) => tracing::warn!("{warning}"),
         Ok(None) => {}
@@ -754,13 +754,27 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // ACME issues a certificate only for `server.domain`; when `sub` comes from
     // a different host, relying parties that check the token signature against
     // the host in `sub` will reject it.
+    //
+    // Both sides are compared as normalized hosts: the WHATWG parser lowercases
+    // domain names and brackets a bare IPv6 address the same way
+    // `resolved_public_base_url` renders the domain into the URL authority, so
+    // an identical host never false-positives here.
     #[cfg(feature = "acme")]
     {
         let base_url = config.server.resolved_public_base_url();
-        if let Some(sub_host) = url::Url::parse(&base_url)
+        let sub_host = url::Url::parse(&base_url)
             .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            && sub_host != config.server.domain
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .and_then(|h| url::Host::parse(&h).ok());
+        let domain_host = config
+            .server
+            .domain
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(url::Host::Ipv6)
+            .or_else(|| url::Host::parse(&config.server.domain).ok());
+        if let (Some(sub_host), Some(domain_host)) = (sub_host, domain_host)
+            && sub_host != domain_host
         {
             tracing::warn!(
                 cert.host = %config.server.domain,

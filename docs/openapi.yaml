@@ -317,7 +317,10 @@ paths:
       - name: list_id
         in: path
         required: true
-        description: UUID of the status list.
+        description: |
+          UUID of the status list. Only the lowercase, hyphenated UUID form is
+          accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
+          `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
         schema:
           type: string
           format: uuid

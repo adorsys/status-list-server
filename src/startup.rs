@@ -286,9 +286,13 @@ fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
 
     let parsed = reqwest::Url::parse(uri).wrap_err("Invalid aggregation_uri: not a valid URL")?;
     let path = parsed.path();
-    // The aggregation route is served under the same shared API prefix as the
-    // rest of the status-list routes, so it is derived from that constant.
-    let expected = format!("{PUBLIC_API_PATH_PREFIX}/aggregation");
+    // The aggregation route is served under the same base path the published
+    // `sub` uses (`{public_base_url}/aggregation`). Deriving the expected path
+    // from the resolved base URL — rather than the hard-coded API prefix — lets
+    // a proxy prefix in `server.public_base_url` be reflected here too.
+    let base = reqwest::Url::parse(&config.server.resolved_public_base_url())
+        .wrap_err("Invalid server.public_base_url")?;
+    let expected = format!("{}/aggregation", base.path().trim_end_matches('/'));
     if path != expected {
         return Err(eyre!(
             "Configured aggregation_uri path '{path}' does not match the actual route '{expected}'"
@@ -315,6 +319,48 @@ mod tests {
         )])
         .unwrap();
         assert!(validate_aggregation_uri(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_accepts_proxy_prefixed_path() {
+        // Behind a proxy at `/statuslist`, the published `sub` and the
+        // aggregation route both live under the proxy prefix.
+        let config = Config::load_from_overrides(&[
+            (
+                "server.public_base_url",
+                "https://host.example.com/statuslist/api/v1",
+            ),
+            (
+                "server.aggregation_uri",
+                "https://host.example.com/statuslist/api/v1/aggregation",
+            ),
+        ])
+        .unwrap();
+        assert!(
+            validate_aggregation_uri(&config).is_ok(),
+            "aggregation_uri must be accepted when it shares the public_base_url proxy prefix"
+        );
+    }
+
+    #[test]
+    fn test_validate_aggregation_uri_rejects_path_not_under_public_base_url() {
+        // The aggregation_uri must share the public_base_url's proxy prefix;
+        // a route served directly at the bare API prefix does not match.
+        let config = Config::load_from_overrides(&[
+            (
+                "server.public_base_url",
+                "https://host.example.com/statuslist/api/v1",
+            ),
+            (
+                "server.aggregation_uri",
+                "https://host.example.com/api/v1/aggregation",
+            ),
+        ])
+        .unwrap();
+        assert!(
+            validate_aggregation_uri(&config).is_err(),
+            "aggregation_uri must be rejected when it omits the public_base_url proxy prefix"
+        );
     }
 
     #[test]

@@ -336,6 +336,12 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 - `/health/ready` reports a failing backing store.
 - Check database readiness (PostgreSQL pod/connection), the ExternalSecret/SecretStore status (if ESO), and application env values.
 
+### Pod crash-loops at startup in a production profile
+
+- The pod exits before it becomes ready, with a log line like `server.public_base_url (https://localhost/api/v1) resolves to localhost/loopback in a production profile`.
+- This is a deliberate startup guard: a `localhost`/loopback `sub` can never be reached by a relying party, so a production profile (`APP_ENV=production`) refuses to start rather than silently signing tokens every relying party rejects. The Helm chart falls back to `localhost` when no host is configured, which is why an unconfigured upgrade hits this.
+- Set `APP_SERVER__DOMAIN` (or `APP_SERVER__PUBLIC_BASE_URL`) to the public host and redeploy. The guard keys off `APP_ENV`, so it only blocks production profiles; private/local hosts (`.local`, private IPv4, link-local, ULA) warn instead of stopping.
+
 ### Secret not synced (ESO)
 
 - The pod is up but not ready and reports a missing/empty Secret, or `kubectl get externalsecret` shows a condition other than `SecretSynced`.

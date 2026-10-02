@@ -74,14 +74,22 @@ fn build_status_list_uri(public_base_url: &str, list_id: &str) -> String {
 
 /// Map a publish error to an `ApiError`. A `409` conflict carries the stored
 /// list URI as the `Location` header so a racing publisher can adopt the
-/// canonical `sub` for the `list_id` it already supplied.
-async fn publish_error(appstate: &AppState, list_id: &str, err: StatusListError) -> ApiError {
+/// canonical `sub` for the `list_id` it already supplied — but only when the
+/// stored list belongs to the caller. Handing a different issuer the URI of a
+/// list they do not own would have them embed it in their own credentials and
+/// then fail on every PATCH.
+async fn publish_error(
+    appstate: &AppState,
+    list_id: &str,
+    principal: &AuthenticatedIssuer,
+    err: StatusListError,
+) -> ApiError {
     if matches!(err, StatusListError::AlreadyExists)
         && let Ok(record) = appstate.service.get_status_list(list_id).await
+        && record.issuer == *principal.issuer()
         && let Ok(value) = axum::http::HeaderValue::try_from(&record.sub)
     {
-        return ApiError::conflict("status_list_already_exists", "Status list already exists")
-            .with_header(axum::http::header::LOCATION, value);
+        return ApiError::from(err).with_header(axum::http::header::LOCATION, value);
     }
     err.into()
 }
@@ -125,19 +133,19 @@ async fn publish_status_with_options(
         .collect::<Vec<_>>();
     let default_status = payload.default_status.map(Into::into);
 
-    // Build the sub URI *before* the write: it depends only on config and
-    // `list_id`, so a failure here must never leave a stored list whose URI the
-    // issuer cannot see. The value signed into `sub` is what `record.sub` holds
-    // afterwards, so the response body echoes exactly what was stored.
+    // Build the sub URI from the normalized base URL and the canonical
+    // `list_id`: it depends only on config, so the value signed into `sub` is
+    // exactly what `record.sub` holds afterwards and the response echoes it.
     let uri = build_status_list_uri(&appstate.public_base_url, &list_id);
 
     let policy = appstate.status_list_policy();
+    let issuer: crate::domain::models::credential::Issuer = principal.clone().into();
     let record = match appstate
         .service
         .publish_status_list(
             PublishStatusListCommand {
                 list_id: list_id.clone(),
-                issuer: principal.into(),
+                issuer: issuer.clone(),
                 sub: uri.clone(),
                 statuses,
                 size: payload.size,
@@ -148,7 +156,7 @@ async fn publish_status_with_options(
         .await
     {
         Ok(record) => record,
-        Err(err) => return Err(publish_error(&appstate, &list_id, err).await),
+        Err(err) => return Err(publish_error(&appstate, &list_id, &principal, err).await),
     };
 
     let mut headers = HeaderMap::new();
@@ -933,6 +941,12 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::CONFLICT);
+        assert!(
+            err.extra_headers
+                .iter()
+                .any(|(name, _)| name == axum::http::header::LOCATION),
+            "a same-issuer republish must advertise the stored list's canonical Location header"
+        );
     }
 
     /// Publish is insert-only for a list ID: once `issuer1` creates a list,
@@ -971,6 +985,12 @@ mod tests {
         };
         assert_eq!(err.status, StatusCode::CONFLICT);
         assert_eq!(err.error, "status_list_already_exists");
+        assert!(
+            err.extra_headers
+                .iter()
+                .all(|(name, _)| name != axum::http::header::LOCATION),
+            "a wrong-issuer republish must not advertise the stored list's Location header"
+        );
 
         let record = app_state.service.get_status_list(&token_id).await.unwrap();
         assert_eq!(record.issuer, Issuer("issuer1".into()));
