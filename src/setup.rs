@@ -1918,7 +1918,10 @@ mod general_tests {
 
         for raw in ["prod", "PROD", " production ", "PrOd"] {
             let app_env = classify_app_env(raw);
-            assert_eq!(app_env, ENV_PRODUCTION, "{raw:?} must classify as production");
+            assert_eq!(
+                app_env, ENV_PRODUCTION,
+                "{raw:?} must classify as production"
+            );
             let result = check_production_base_url(app_env, "https://localhost/api/v1");
             assert!(
                 result
