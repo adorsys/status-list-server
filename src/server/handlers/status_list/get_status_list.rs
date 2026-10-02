@@ -352,6 +352,7 @@ mod tests {
     use crate::test_utils::{authenticated_issuer, test_app_state};
     use axum::extract::Json;
     use axum::http::HeaderMap;
+    use coset::TaggedCborSerializable;
 
     /// Decode the JWT payload of a freshly served (uncompressed) token so tests
     /// can assert the `iat`/`exp` claims directly without a verification key.
@@ -596,6 +597,7 @@ mod tests {
             header::ACCEPT,
             ACCEPT_STATUS_LISTS_HEADER_CWT.parse().unwrap(),
         );
+        headers.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
 
         let response = get_status_list(
             State(app_state),
@@ -611,6 +613,43 @@ mod tests {
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             ACCEPT_STATUS_LISTS_HEADER_CWT
+        );
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes[0], 0xd2, "CWT must start with tag 18 (0xd2)");
+        assert_ne!(&bytes[..2], &[0xd8, 0x3d], "CWT must not start with tag 61");
+
+        let sign1 = coset::CoseSign1::from_tagged_slice(&bytes).unwrap();
+        let mut found_cwt_type = false;
+        let mut found_x5chain = false;
+        for (param, val) in &sign1.protected.header.rest {
+            match param {
+                coset::Label::Int(16) => {
+                    assert_eq!(
+                        val,
+                        &coset::cbor::Value::Text(
+                            crate::server::handlers::status_list::utils::constants::STATUS_LISTS_CWT_TYPE_VALUE
+                                .into()
+                        )
+                    );
+                    found_cwt_type = true;
+                }
+                coset::Label::Int(33) => {
+                    found_x5chain = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found_cwt_type,
+            "cwt.protected.header label 16 (type) must be present"
+        );
+        assert!(
+            found_x5chain,
+            "cwt.protected.header label 33 (x5chain) must be present"
         );
     }
 

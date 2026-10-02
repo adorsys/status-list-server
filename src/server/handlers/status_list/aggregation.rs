@@ -176,11 +176,55 @@ mod tests {
         let state = test_app_state(None).await;
         let response = get(&state, None, None).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
         assert!(response.headers().get(header::LINK).is_none());
 
         let page = body(response).await;
         assert!(page.status_lists.is_empty());
         assert_eq!(page.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_content_type_and_uri_resolution() {
+        let state = test_app_state(None).await;
+        let sub = publish(&state, "issuer1").await;
+
+        let response = get(&state, None, None).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        let page = body(response).await;
+        assert_eq!(page.status_lists, vec![sub.clone()]);
+
+        let list_id = sub.split('/').last().unwrap();
+        let headers = HeaderMap::new();
+        let res = crate::server::handlers::status_list::get_status_list::get_status_list(
+            axum::extract::State(state),
+            axum::extract::Path(list_id.to_string()),
+            Ok(axum::extract::Query(
+                crate::server::handlers::status_list::get_status_list::StatusListQuery {
+                    time: None,
+                },
+            )),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let token_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let token_str = std::str::from_utf8(&token_bytes).unwrap();
+        let payload_b64 = token_str.split('.').nth(1).unwrap();
+        let payload_bytes = base64url::decode(payload_b64).unwrap();
+        let payload_json: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(payload_json["sub"], sub);
     }
 
     #[tokio::test]

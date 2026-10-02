@@ -153,6 +153,24 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
     }
 }
 
+pub(crate) fn fixture_cert_chain() -> Vec<String> {
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
+    use std::sync::OnceLock;
+
+    static CERT_B64: OnceLock<String> = OnceLock::new();
+    let b64 = CERT_B64.get_or_init(|| {
+        let key_pem = include_str!("../test_data/ec-private.pem");
+        let key_pair = rcgen::KeyPair::from_pem(key_pem).expect("valid ec-private.pem");
+        let params = rcgen::CertificateParams::new(vec!["example.com".to_string()])
+            .expect("valid cert params");
+        let cert = params
+            .self_signed(&key_pair)
+            .expect("self-signed cert generation");
+        BASE64_STANDARD.encode(cert.der())
+    });
+    vec![b64.clone()]
+}
+
 pub(crate) struct TestCertProvider {
     pub key_pem: String,
     pub cert_chain: Option<Vec<String>>,

@@ -49,57 +49,68 @@ pub struct HttpServer {
     router: Router,
 }
 
+pub fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_origin(Any)
+        .allow_headers(Any)
+        .expose_headers([axum::http::header::ETAG, axum::http::header::LINK])
+}
+
+pub fn build_router(
+    config: &Config,
+    state: AppState,
+    prometheus_registry: Registry,
+) -> color_eyre::Result<Router> {
+    let cors = cors_layer();
+    let max_body_size = config.limits.max_body_size_bytes;
+
+    let (strict_governor, issuer_governor, permissive_governor) =
+        build_governor_configs(&config.rate_limit)?;
+
+    let mut router = Router::new()
+        .route("/", get(welcome))
+        .route("/health", get(health::live))
+        .route("/health/live", get(health::live))
+        .route("/health/ready", get(health::ready))
+        .nest(
+            "/api/v1",
+            api_v1_routes(
+                state.clone(),
+                strict_governor.clone(),
+                issuer_governor.clone(),
+                permissive_governor.clone(),
+            ),
+        )
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::utils::telemetry::make_http_request_span),
+        )
+        .layer(CatchPanicLayer::new())
+        .layer(middleware::from_fn(track_http_metrics))
+        .layer(cors)
+        .layer(RequestBodyLimitLayer::new(max_body_size))
+        .layer(DefaultBodyLimit::disable())
+        .with_state(state);
+
+    router = attach_metrics(router, config, prometheus_registry);
+    validate_aggregation_uri(config)?;
+    Ok(router)
+}
+
 impl HttpServer {
     pub async fn new(
         config: &Config,
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let cors = CorsLayer::new()
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::OPTIONS,
-            ])
-            .allow_origin(Any)
-            .allow_headers(Any);
-
-        let max_body_size = config.limits.max_body_size_bytes;
-
-        let (strict_governor, issuer_governor, permissive_governor) =
-            build_governor_configs(&config.rate_limit)?;
-
-        let mut router = Router::new()
-            .route("/", get(welcome))
-            .route("/health", get(health::live))
-            .route("/health/live", get(health::live))
-            .route("/health/ready", get(health::ready))
-            .nest(
-                "/api/v1",
-                api_v1_routes(
-                    state.clone(),
-                    strict_governor.clone(),
-                    issuer_governor.clone(),
-                    permissive_governor.clone(),
-                ),
-            )
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(crate::utils::telemetry::make_http_request_span),
-            )
-            .layer(CatchPanicLayer::new())
-            .layer(middleware::from_fn(track_http_metrics))
-            .layer(cors)
-            .layer(RequestBodyLimitLayer::new(max_body_size))
-            .layer(DefaultBodyLimit::disable())
-            .with_state(state);
-
-        router = attach_metrics(router, config, prometheus_registry);
-
-        validate_aggregation_uri(config)?;
-
+        let router = build_router(config, state, prometheus_registry)?;
         let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
             .await
             .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
@@ -692,5 +703,59 @@ mod tests {
             ),
             "expected 5xx counter for a panicking handler; body:\n{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cors_options_preflight_allows_get_and_exposes_etag() {
+        use tower::ServiceExt;
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        let registry = Registry::new();
+        let router = build_router(&config, state, registry).unwrap();
+
+        // 1. Preflight OPTIONS request
+        let preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v1/status-lists/test-list")
+            .header("origin", "https://client.example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "accept")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.clone().oneshot(preflight).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "*"
+        );
+        let methods = resp
+            .headers()
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(methods.contains("GET"));
+
+        // 2. Cross-origin GET request
+        let get_req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/status-lists/test-list")
+            .header("origin", "https://client.example.com")
+            .body(Body::empty())
+            .unwrap();
+
+        let get_resp = router.oneshot(get_req).await.unwrap();
+        assert_eq!(
+            get_resp
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
+        if let Some(expose) = get_resp.headers().get("access-control-expose-headers") {
+            let expose_str = expose.to_str().unwrap();
+            assert!(expose_str.to_lowercase().contains("etag"));
+        }
     }
 }

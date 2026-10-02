@@ -359,7 +359,7 @@ fn cose_algorithm(algorithm: SigningAlgorithm) -> Result<Algorithm, StatusListEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::status_list::StatusList;
+    use crate::domain::models::status_list::{Status, StatusEntry, StatusList};
     use crate::utils::crypto::SigningKey;
     use aws_lc_rs::signature::{
         ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256,
@@ -369,7 +369,7 @@ mod tests {
     use jsonwebtoken::{DecodingKey, Validation, decode};
     use std::sync::Arc;
 
-    use base64::prelude::Engine as _;
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
 
     fn sample_record() -> StatusListRecord {
         StatusListRecord {
