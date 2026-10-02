@@ -91,6 +91,33 @@ impl CacheBackend {
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
 
+/// Normalize the raw `APP_ENV` environment variable to the canonical
+/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] value. Any casing, surrounding
+/// whitespace, and both `production`/`prod` count as a production profile;
+/// anything else is treated as development. Callers outside config that need
+/// the deployment profile must use this rather than comparing the raw value,
+/// so the guard matches what config itself decided.
+pub fn normalize_app_env() -> &'static str {
+    classify_app_env(&std::env::var("APP_ENV").unwrap_or_default())
+}
+
+/// Pure classification of a raw `APP_ENV` value into the canonical
+/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] profile. Extracted from
+/// [`normalize_app_env`] so the mapping is testable without touching the
+/// process environment.
+pub fn classify_app_env(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "production" | "prod" => ENV_PRODUCTION,
+        _ => ENV_DEVELOPMENT,
+    }
+}
+
+/// Whether `app_env` (a value produced by [`normalize_app_env`]) is a
+/// production profile.
+pub fn is_production(app_env: &str) -> bool {
+    app_env == ENV_PRODUCTION
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -249,6 +276,134 @@ pub struct ServerConfig {
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
+    /// Defaults to `https://{domain}/api/v1` when unset.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+}
+
+impl ServerConfig {
+    /// The resolved public base URL, defaulting to `https://{domain}/api/v1`.
+    ///
+    /// IPv6 hosts are bracketed so the result is a valid URL.
+    ///
+    /// The URL is parsed once and re-serialized, so the returned value is the
+    /// canonical form of what validation accepted: scheme/host are lowercased,
+    /// the default port is dropped, and `.`/`..` path segments are resolved.
+    /// This same normalized URL is what gets signed into `sub` and returned to
+    /// issuers, so it matches the URL that `validate_public_base_url` checked.
+    pub fn resolved_public_base_url(&self) -> String {
+        // Parse once (validation guarantees it parses) and serialize back so the
+        // returned URL is normalized, not the raw string typed into config.
+        url::Url::parse(&self.raw_resolved_public_base_url())
+            .expect("resolved public base URL was validated at config load")
+            .to_string()
+    }
+
+    /// The resolved public base URL exactly as configured or derived, without
+    /// normalization. This is what validation inspects so the trailing-slash
+    /// rule sees the operator's actual input rather than the re-serialized form.
+    fn raw_resolved_public_base_url(&self) -> String {
+        match trim_non_empty(self.public_base_url.as_deref()) {
+            Some(base) => base.to_string(),
+            None => format!(
+                "https://{}{PUBLIC_API_PATH_PREFIX}",
+                url_authority_host(&self.domain)
+            ),
+        }
+    }
+}
+
+/// Renders a configured host for use as a URL authority: a bare IPv6 address
+/// is wrapped in brackets, everything else is passed through unchanged.
+fn url_authority_host(domain: &str) -> String {
+    if domain.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{domain}]")
+    } else {
+        domain.to_string()
+    }
+}
+
+/// Validates `server.domain`: a bare host name or IP address with no scheme,
+/// path, userinfo, port, query, or fragment.
+///
+/// Structural rejection (scheme, port, path, userinfo, query, fragment,
+/// whitespace) uses [`url::Host::parse`], the same parser the base URL check
+/// and `resolved_public_base_url` use, so the two validations cannot drift.
+/// The WHATWG host parser deliberately accepts leading/trailing dots or
+/// hyphens, so a few hygiene rules are kept on top of it.
+fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
+    // `url::Host::parse` accepts bracketed IPv6 (`[::1]`) but not the bare
+    // form; `is_ipv6_host` accepts both, so it fills that gap.
+    let parsed_as_host = url::Host::parse(domain).is_ok() || is_ipv6_host(domain);
+
+    let unhygienic = domain.starts_with('-')
+        || domain.ends_with('-')
+        || domain.starts_with('.')
+        || domain.trim_end_matches('.').is_empty();
+
+    if !parsed_as_host || unhygienic {
+        return Err(ConfigError::Message(
+            "Invalid server.domain: expected a bare hostname or IP address without scheme, port, path, userinfo, query, or fragment".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// API path prefix under which the status-list routes are mounted. The published
+/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so by default
+/// `public_base_url` carries this prefix for it to resolve. Operators running
+/// behind a proxy with a different path prefix may set a custom
+/// `server.public_base_url` whose path differs; the router mounts the same
+/// prefix so the two cannot drift.
+pub const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
+
+/// Validates `server.public_base_url`: an absolute `https` URL with a host, no
+/// userinfo, query, or fragment, and no trailing slash. The path is not
+/// constrained to a single value so the server can be served behind a proxy
+/// with a path prefix (`statuslist.ingress.path`); it only has to be a
+/// well-formed path that, once `/status-lists/{list_id}` is appended, resolves
+/// to the served route.
+fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(base_url).map_err(|err| {
+        // Do not echo the raw value: a mistyped URL may carry a password in the
+        // userinfo that the checks below would otherwise reject.
+        ConfigError::Message(format!(
+            "Invalid server.public_base_url: not a valid URL ({err})"
+        ))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: scheme must be https".to_string(),
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: expected an absolute URL with a host".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain userinfo (username or password)"
+                .to_string(),
+        ));
+    }
+    if parsed.query().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain a query".to_string(),
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain a fragment".to_string(),
+        ));
+    }
+    if base_url.ends_with('/') {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not end with a trailing slash".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -557,7 +712,7 @@ impl DnsConfig {
     /// borrowed, so consumers need no re-validation. Synchronous and
     /// network-free by design; anything needing I/O belongs to the boot path.
     pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
-        let kind = self.provider.unwrap_or(if app_env == ENV_PRODUCTION {
+        let kind = self.provider.unwrap_or(if is_production(app_env) {
             DnsProviderKind::Route53
         } else {
             DnsProviderKind::Pebble
@@ -684,7 +839,8 @@ fn format_database_url_host(host: &str) -> String {
     }
 }
 
-fn database_host_is_ipv6(host: &str) -> bool {
+/// Whether `host` is an IPv6 address, optionally wrapped in brackets.
+fn is_ipv6_host(host: &str) -> bool {
     host.parse::<std::net::Ipv6Addr>().is_ok()
         || host
             .strip_prefix('[')
@@ -742,7 +898,7 @@ fn validate_database_query(query: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_database_host(host: &str) -> Result<(), ConfigError> {
-    if database_host_is_ipv6(host) {
+    if is_ipv6_host(host) {
         return Ok(());
     }
 
@@ -1213,12 +1369,12 @@ pub struct StatusListConfig {
 
 /// Upper bound (in seconds) for the configured token lifetime.
 ///
-/// This is a fixed, clock-independent product ceiling: the spec (§5.1/§5.2)
-/// requires `ttl` to be a positive number and §11.5 asks for reasonable ranges,
-/// so values that would effectively never expire (or push the `exp` claim past
-/// what relying parties can handle) are rejected at configuration load instead
-/// of at issuance. It deliberately does NOT compare against the startup clock,
-/// so configuration acceptance never depends on the instant the process started.
+/// Draft-21 requires `ttl` to be a positive number and §11.5 asks for reasonable
+/// ranges, so values that would effectively never expire (or push the `exp`
+/// claim past what relying parties can handle) are rejected at configuration
+/// load instead of at issuance. It deliberately does NOT compare against the
+/// startup clock, so configuration acceptance never depends on the instant the
+/// process started.
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 3600;
 
 impl StatusListConfig {
@@ -1306,6 +1462,12 @@ impl Config {
         if let Some(query) = trim_non_empty(config.database.query.as_deref()) {
             validate_database_query(query)?;
         }
+        validate_server_domain(&config.server.domain)?;
+        // Validate the *resolved* base URL — whether explicitly set or derived
+        // from `server.domain` — so a broken fallback is caught at startup too.
+        // The raw (un-normalized) value is inspected so the trailing-slash rule
+        // sees the operator's actual input.
+        validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.status_list.validate()?;
@@ -1333,15 +1495,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     ))]
     let default_db_backend = "memory";
 
-    let telemetry_environment = match std::env::var("APP_ENV")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "production" | "prod" => ENV_PRODUCTION,
-        _ => ENV_DEVELOPMENT,
-    };
+    let telemetry_environment = normalize_app_env();
 
     let builder = ConfigLib::builder()
         .set_default("server.host", "localhost")?
@@ -2219,6 +2373,214 @@ mod tests {
     }
 
     #[test]
+    fn test_public_base_url_derives_from_domain_by_default() {
+        let config = Config::load_from_overrides(&[("server.domain", "statuslist.example.com")])
+            .expect("config loads");
+        assert_eq!(config.server.public_base_url, None);
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://statuslist.example.com/api/v1"
+        );
+
+        // An explicit public_base_url wins over the derived default.
+        let config = Config::load_from_overrides(&[
+            ("server.domain", "statuslist.example.com"),
+            (
+                "server.public_base_url",
+                "https://status.example.org/api/v1",
+            ),
+        ])
+        .expect("config loads");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://status.example.org/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_public_base_url_rejects_non_https_query_and_fragment() {
+        for (value, expected) in [
+            (
+                "http://statuslist.example.com/api/v1",
+                "scheme must be https",
+            ),
+            (
+                "https://statuslist.example.com/api/v1?x=1",
+                "must not contain a query",
+            ),
+            (
+                "https://statuslist.example.com/api/v1#frag",
+                "must not contain a fragment",
+            ),
+            (
+                "https://statuslist.example.com/api/v1/",
+                "must not end with a trailing slash",
+            ),
+            (
+                "https://user@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://user:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            ("not a url", "not a valid URL"),
+        ] {
+            let err = Config::load_from_overrides(&[("server.public_base_url", value)])
+                .expect_err(&format!("public_base_url {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
+
+        // A well-formed absolute https URL with exactly the API prefix loads.
+        Config::load_from_overrides(&[(
+            "server.public_base_url",
+            "https://statuslist.example.com/api/v1",
+        )])
+        .expect("a valid public_base_url must load");
+    }
+
+    #[test]
+    fn test_public_base_url_allows_non_api_v1_path() {
+        // The path is not constrained to `/api/v1`: operators may serve the
+        // status-list routes behind a proxy with a path prefix, and the sub URI
+        // simply carries `{public_base_url}/status-lists/{list_id}`.
+        for value in [
+            "https://statuslist.example.com",
+            "https://statuslist.example.com/api/v2",
+            "https://statuslist.example.com/proxy",
+            "https://statuslist.example.com/api/v1/status-lists/foo",
+        ] {
+            Config::load_from_overrides(&[("server.public_base_url", value)])
+                .unwrap_or_else(|_| panic!("public_base_url {value:?} must load"));
+        }
+    }
+
+    #[test]
+    fn test_public_base_url_rejects_userinfo() {
+        for (value, expected) in [
+            (
+                "https://user@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://user:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+        ] {
+            let err = Config::load_from_overrides(&[("server.public_base_url", value)])
+                .expect_err(&format!("public_base_url {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolved_public_base_url_is_normalized() {
+        // The resolved URL is the canonical form of what validation accepted,
+        // not the raw string typed into config: the scheme and host are
+        // lowercased, the default port is dropped, and `.`/`..` path segments
+        // are resolved. The same normalized value is what gets signed into
+        // `sub`, so it matches the URL that `validate_public_base_url` checked.
+        let config = Config::load_from_overrides(&[(
+            "server.public_base_url",
+            "HTTPS://StatusList.Example.COM:443/api/../api/v1",
+        )])
+        .expect("config loads");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://statuslist.example.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_public_base_url_derived_from_ipv6_domain_is_bracketed_and_valid() {
+        // A bare IPv6 `server.domain` must yield a bracket-wrapped, valid
+        // derived base URL rather than a malformed `https://2001:db8::1/api/v1`.
+        let config = Config::load_from_overrides(&[("server.domain", "2001:db8::1")])
+            .expect("a bare IPv6 server.domain should load");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://[2001:db8::1]/api/v1"
+        );
+
+        // An already-bracketed IPv6 domain passes through unchanged.
+        let config = Config::load_from_overrides(&[("server.domain", "[2001:db8::1]")])
+            .expect("a bracketed IPv6 server.domain should load");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://[2001:db8::1]/api/v1"
+        );
+    }
+
+    #[test]
+    fn test_server_domain_must_be_bare_host() {
+        // Cases rejected by `url::Host::parse` — the same parser the base URL
+        // check uses — plus the extra hygiene rules kept on top of it.
+        for (value, expected) in [
+            (
+                "https://example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com/path",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com:443",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "user@example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com?x",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com#x",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com\\path",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example .com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "-example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com-",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                ".example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+        ] {
+            let err = Config::load_from_overrides(&[("server.domain", value)])
+                .expect_err(&format!("server.domain {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_critical_validations() {
         // Invalid database backend configuration
         let invalid_db_res = Config::load_from_overrides(&[
@@ -2587,5 +2949,33 @@ mod tests {
             PathBuf::from("/custom/token/path")
         );
         assert_eq!(k8s_config.vault.k8s_auth_mount, "custom-k8s");
+    }
+
+    #[test]
+    fn normalize_app_env_aliases_match_config() {
+        // The exact aliases config treats as production (`production`/`prod`,
+        // any case, surrounding whitespace) must classify as production, and
+        // everything else as development. This is the pure mapping behind
+        // `normalize_app_env`, so the deployment guard agrees with config.
+        for raw in ["production", "prod", "PRODUCTION", " Prod ", "  prod  "] {
+            assert_eq!(
+                classify_app_env(raw),
+                ENV_PRODUCTION,
+                "raw APP_ENV {raw:?} must be production"
+            );
+            assert!(is_production(classify_app_env(raw)));
+        }
+        for raw in ["development", "dev", "", "staging", "development ", "PRODx"] {
+            assert_eq!(
+                classify_app_env(raw),
+                ENV_DEVELOPMENT,
+                "raw APP_ENV {raw:?} must be development"
+            );
+            assert!(!is_production(classify_app_env(raw)));
+        }
+        // The predicate itself only matches the canonical production value.
+        assert!(is_production(ENV_PRODUCTION));
+        assert!(!is_production("prod"));
+        assert!(!is_production(" production "));
     }
 }
