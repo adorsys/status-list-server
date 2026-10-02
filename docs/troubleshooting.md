@@ -906,7 +906,7 @@ watch the `list_count` of your biggest issuers.
 **When you see this:** A pod exits at startup with:
 
 ```text
-limits.max_lists_per_issuer (2000) must not exceed 1000, the fixed aggregation page size: an issuer's aggregation would no longer fit in one response, and clients that do not page would silently see part of it
+limits.max_lists_per_issuer (2000) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: an issuer's aggregation would no longer fit in one response, and clients that do not page would silently see part of it
 ```
 
 **Root cause:** Each issuer's Status List Aggregation must fit in the first page of
@@ -967,7 +967,7 @@ For quick grep, the application emits these verbatim:
 - `readiness check failed` (WARN)
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`
 - `limits.max_lists_per_issuer must be greater than 0`
-- `limits.max_lists_per_issuer (N) must not exceed 1000, the fixed aggregation page size: ...`
+- `limits.max_lists_per_issuer (N) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: ...`
 - `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri path '...' does not match the aggregation route '/api/v1/aggregation'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
 - `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set, so an issuer's aggregation may not fit in one page. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)

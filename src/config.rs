@@ -148,9 +148,10 @@ impl LimitsConfig {
         }
         if self.max_lists_per_issuer > AGGREGATION_DEFAULT_LIMIT as u64 {
             return Err(ConfigError::Message(format!(
-                "limits.max_lists_per_issuer ({}) must not exceed {AGGREGATION_DEFAULT_LIMIT}, \
-                 the fixed aggregation page size: an issuer's aggregation would no longer fit \
-                 in one response, and clients that do not page would silently see part of it",
+                "limits.max_lists_per_issuer ({}) must not exceed AGGREGATION_DEFAULT_LIMIT \
+                 ({AGGREGATION_DEFAULT_LIMIT}), the aggregation page size: an issuer's \
+                 aggregation would no longer fit in one response, and clients that do not page \
+                 would silently see part of it",
                 self.max_lists_per_issuer
             )));
         }
@@ -2269,8 +2270,16 @@ mod tests {
         let err = Config::load_from_overrides(&[("limits.max_lists_per_issuer", &over)])
             .expect_err("a quota larger than one aggregation page must fail config loading")
             .to_string();
-        assert!(err.contains("limits.max_lists_per_issuer"), "{err}");
-        assert!(err.contains("aggregation page size"), "{err}");
+        assert!(
+            err.contains(&format!("limits.max_lists_per_issuer ({over})")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "AGGREGATION_DEFAULT_LIMIT ({AGGREGATION_DEFAULT_LIMIT})"
+            )),
+            "{err}"
+        );
 
         let at_page = AGGREGATION_DEFAULT_LIMIT.to_string();
         assert!(Config::load_from_overrides(&[("limits.max_lists_per_issuer", &at_page)]).is_ok());
