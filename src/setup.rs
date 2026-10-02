@@ -838,7 +838,7 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 /// this inspects it rather than `server.domain`.
 fn resolved_base_url_uses_local_host(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
-        // Config validation already rejected an unparseable URL; be conservative.
+        // Config validation already rejected an unparsable URL; be conservative.
         return false;
     };
     let Some(host) = parsed.host() else {
