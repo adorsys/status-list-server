@@ -281,6 +281,110 @@ podDisruptionBudget:
 
 `replicaCount` lives under `statuslist:` (the Deployment reads `statuslist.replicaCount`); `autoscaling` and `podDisruptionBudget` are top-level values. When `autoscaling.enabled=true` the Deployment omits `replicas` so the HPA controls the count. Keep `podDisruptionBudget.maxUnavailable` below the replica count (the safe default) so node drains do not get blocked.
 
+## Status List Aggregation
+
+Set `APP_SERVER__AGGREGATION_URI` to the aggregation endpoint's public URL, for
+example `https://statuslist.example.com/api/v1/aggregation`, to advertise it in
+status list tokens. Its path must be `/api/v1/aggregation`, and it must have no
+query or fragment: each token carries its issuer's URI, the configured one plus
+`/<aggregation_id>`. Pods refuse to start otherwise. Unset, tokens carry no
+`aggregation_uri`. The endpoints are served either way.
+
+Setting it lets anyone who holds one of an issuer's tokens list all of that
+issuer's status lists; see
+[architecture](architecture.md#status-list-aggregation) before enabling it on a
+server shared by several issuers.
+
+`APP_LIMITS__MAX_LISTS_PER_ISSUER` cannot exceed 1000, the default aggregation
+page size. That keeps every issuer's aggregation complete in one response, for
+relying parties that do not page; pods refuse to start above it (see
+[troubleshooting](troubleshooting.md#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
+It only holds while the list quota is enforced: with
+`APP_LIMITS__LIST_QUOTA_TRANSITION` set, any issuer can outgrow one page.
+
+### Upgrading to issuer-scoped aggregation
+
+Before the upgrade:
+
+- Make sure `APP_LIMITS__MAX_LISTS_PER_ISSUER` is at most `1000`.
+- Find issuers at or near 1000 lists. Those above it keep their lists, and their
+  aggregation spans several pages, but **every further publish is refused** with
+  `400 list_quota_exceeded` until they are back under the cap, which only
+  deleting lists does. Those near it reach it sooner than under a higher cap:
+
+  ```sql
+  SELECT issuer, COUNT(*) AS lists FROM status_lists
+  GROUP BY issuer HAVING COUNT(*) >= 900 ORDER BY lists DESC;
+  ```
+
+- On PostgreSQL, build the new index beforehand. Left to the migration, a plain
+  `CREATE INDEX` blocks publishes and status updates, revocations included,
+  until it finishes, which takes longer the more status lists there are. The
+  migration skips an index that already exists:
+
+  ```sql
+  CREATE INDEX CONCURRENTLY idx_status_lists_issuer_list_id
+    ON status_lists (issuer, list_id);
+  SELECT indisvalid FROM pg_index
+  WHERE indexrelid = 'idx_status_lists_issuer_list_id'::regclass;
+  ```
+
+  A concurrent build that fails leaves an invalid index, which the migration
+  would skip too: if `indisvalid` is false, drop it and build it again. MySQL
+  builds the index online.
+
+During the upgrade:
+
+- The migrations add `credentials.aggregation_id` and an `(issuer, list_id)`
+  index on `status_lists`.
+- Pods of the previous release do not serve `/api/v1/aggregation/<id>`, so a
+  relying party following a token from a new pod may get a `404` from an old
+  one until the rollout completes. The claim is optional, and relying parties
+  still fetch each status list directly.
+- Issuers registered before the upgrade, or by an old pod during it, get an
+  aggregation ID the first time one of their tokens is served. They can read it
+  from `GET /api/v1/credentials`.
+- Status list tokens are signed on each request, so every token served after
+  the rollout carries the scoped URI. Tokens relying parties cached earlier
+  carry the unscoped one, which keeps working.
+
+### Rolling back
+
+The previous release refuses to start while the database records migrations it
+does not know, so `helm rollback` alone leaves its pods crash-looping. Remove
+the two records first. The schema changes stay, which the previous release
+ignores, and so do the aggregation IDs:
+
+```sql
+DELETE FROM seaql_migrations WHERE version IN (
+  'm20260929_000001_credentials_aggregation_id',
+  'm20260929_000002_status_lists_issuer_list_id_index'
+);
+```
+
+Upgrading again re-runs both migrations, which find their changes already made.
+Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
+parties already hold return `404` until the upgrade.
+
+**Never run the down migration of `credentials.aggregation_id`**, nor restore a
+backup taken before it, once tokens with scoped URIs have been served: the IDs
+are lost, new ones are assigned, and every URI already in tokens or issuer
+metadata returns `404`. Deleting an issuer's credential in the database and
+registering it again does the same to that issuer.
+
+### Metrics
+
+- `aggregation_pages_total{scope="issuer",outcome="truncated"}` should stay at
+  `0`. Anything else means an issuer's aggregation did not fit in one page: an
+  issuer from the pre-upgrade query above, or any issuer while the list quota
+  is in transition.
+- `aggregation_pages_total{scope="all"}` counts requests to the deprecated
+  unscoped form. Remove that form once `token_exp_secs` has passed since the
+  rollout and this stays at zero.
+- `aggregation_uri_omitted_total` counts tokens signed without
+  `aggregation_uri` because looking up the issuer's aggregation ID failed; the
+  tokens are still served.
+
 ## Verification
 
 ```bash

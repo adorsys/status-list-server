@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer};
+use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -72,9 +72,11 @@ pub trait StatusListRepo: Send + Sync + 'static {
     ) -> Result<bool, StatusListError>;
 
     /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
-    /// starting strictly after `after`.
+    /// starting strictly after `after`, from one issuer's lists when `issuer`
+    /// is given and from every issuer's otherwise.
     async fn list_uris(
         &self,
+        issuer: Option<&str>,
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
@@ -101,7 +103,23 @@ pub trait CredentialRepo: Send + Sync + 'static {
     async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError>;
 
     /// Insert new issuer credential details into storage.
-    async fn insert(&self, credential: Credential) -> Result<(), CredentialError>;
+    async fn insert(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError>;
+
+    /// The issuer's aggregation ID, or `None` for an unknown issuer.
+    async fn find_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<AggregationId>, CredentialError>;
+
+    /// The issuer an aggregation ID belongs to.
+    async fn find_issuer_by_aggregation_id(
+        &self,
+        aggregation_id: AggregationId,
+    ) -> Result<Option<Issuer>, CredentialError>;
 }
 
 /// Persistence interface for historical status list snapshots.

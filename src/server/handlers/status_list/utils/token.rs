@@ -11,6 +11,7 @@ use opentelemetry::{KeyValue, global, metrics::Counter};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::domain::models::credential::Issuer;
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
 use crate::domain::models::token::SigningAlgorithm;
 use crate::domain::ports::TokenSigner;
@@ -23,6 +24,7 @@ use super::negotiation::AcceptType;
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
 const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
+const AGGREGATION_URI_OMITTED_METRIC: &str = "aggregation_uri_omitted";
 
 /// Token-generation SLI counters. Cached after first use: the first token is
 /// only ever generated after `init_telemetry`/`setup_metrics` has installed the
@@ -32,6 +34,7 @@ const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
 struct TokenMetrics {
     attempts: Counter<u64>,
     failures: Counter<u64>,
+    aggregation_uri_omitted: Counter<u64>,
 }
 
 fn token_metrics() -> TokenMetrics {
@@ -47,8 +50,39 @@ fn token_metrics() -> TokenMetrics {
                 .u64_counter(TOKEN_FAILURES_METRIC)
                 .with_description("Total number of failed status-list token generations")
                 .build(),
+            aggregation_uri_omitted: meter
+                .u64_counter(AGGREGATION_URI_OMITTED_METRIC)
+                .with_description(
+                    "Tokens signed without aggregation_uri because the aggregation ID lookup \
+                     failed",
+                )
+                .build(),
         }
     })
+}
+
+/// The `aggregation_uri` claim for an issuer's tokens. The claim is optional,
+/// so a failed lookup leaves it out rather than failing the request. Falling
+/// back to the unscoped URI would be worse: relying parties may keep it.
+///
+/// Logged at DEBUG: the metric counts failures, and a database outage would
+/// otherwise log once per request.
+pub(crate) async fn issuer_aggregation_uri(
+    state: &crate::server::AppState,
+    issuer: &Issuer,
+) -> Option<String> {
+    state.aggregation_uri.as_ref()?;
+    match state.service.find_aggregation_id(issuer).await {
+        Ok(aggregation_id) => state.aggregation_uri_for(aggregation_id?),
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "aggregation ID lookup failed; aggregation_uri left out"
+            );
+            token_metrics().aggregation_uri_omitted.add(1, &[]);
+            None
+        }
+    }
 }
 
 /// Classify the client's negotiated format into the bounded `format` label value.
@@ -88,12 +122,14 @@ struct JwtHeader<'a> {
 /// # Parameters
 /// * `accept` – the negotiated format (`AcceptType::Jwt` or `AcceptType::Cwt`)
 /// * `status_record` – the status list data to encode
+/// * `aggregation_uri` – the `aggregation_uri` claim, if any
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: AcceptType,
     status_record: StatusListRecord,
+    aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
@@ -103,6 +139,7 @@ pub(crate) async fn build_status_list_token(
         state,
         accept,
         status_record,
+        aggregation_uri,
         validity_window,
         client_accepts_gzip,
     )
@@ -120,6 +157,7 @@ async fn build_status_list_token_inner(
     state: &crate::server::AppState,
     accept: AcceptType,
     status_record: StatusListRecord,
+    aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
@@ -130,7 +168,6 @@ async fn build_status_list_token_inner(
         .await
         .map_err(|e| StatusListError::Backend(Box::new(e)))?;
 
-    let aggregation_uri = state.aggregation_uri.clone();
     let validity_window = match validity_window {
         Some(window) => window,
         None => {
@@ -533,11 +570,12 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = i64::MAX as u64;
 
-        let err = build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, false)
-            .await
-            .expect_err(
-                "a positive iat plus i64::MAX token_exp_secs must overflow and be rejected",
-            );
+        let err =
+            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+                .await
+                .expect_err(
+                    "a positive iat plus i64::MAX token_exp_secs must overflow and be rejected",
+                );
 
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
@@ -586,9 +624,10 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = u64::MAX;
 
-        let err = build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, false)
-            .await
-            .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+        let err =
+            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+                .await
+                .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
 
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
@@ -606,9 +645,10 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_ttl_secs = u64::MAX;
 
-        let err = build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, false)
-            .await
-            .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
+        let err =
+            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+                .await
+                .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
 
         assert!(
             matches!(err, StatusListError::Backend(_)),
@@ -625,7 +665,8 @@ mod tests {
         let record = sample_record();
 
         for accept in [AcceptType::Cwt, AcceptType::Jwt] {
-            let result = build_status_list_token(&state, accept, record.clone(), None, false).await;
+            let result =
+                build_status_list_token(&state, accept, record.clone(), None, None, false).await;
             assert!(
                 matches!(result, Err(StatusListError::Backend(_))),
                 "missing chain must surface as a 500 (Backend) for accept `{accept:?}`, got {result:?}"

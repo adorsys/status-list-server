@@ -32,6 +32,9 @@ pub(crate) mod credentials {
         pub public_key: PublicKey,
         /// Status lists published by this issuer; see `store::reserve_list_slot`.
         pub list_count: i64,
+        /// Hyphenated `AggregationId`. `NULL` on rows a release that predates it
+        /// wrote, until the first lookup assigns one.
+        pub aggregation_id: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -44,11 +47,23 @@ pub(crate) mod credentials {
 pub struct Credentials {
     pub issuer: String,
     pub public_key: Jwk,
+    pub aggregation_id: Option<String>,
 }
 
 impl Credentials {
     pub fn new(issuer: String, public_key: Jwk) -> Self {
-        Self { issuer, public_key }
+        Self {
+            issuer,
+            public_key,
+            aggregation_id: None,
+        }
+    }
+
+    pub fn with_aggregation_id(self, aggregation_id: String) -> Self {
+        Self {
+            aggregation_id: Some(aggregation_id),
+            ..self
+        }
     }
 }
 
@@ -57,6 +72,7 @@ impl From<credentials::Model> for Credentials {
         Self {
             issuer: model.issuer,
             public_key: model.public_key.into(),
+            aggregation_id: model.aggregation_id,
         }
     }
 }
@@ -68,6 +84,11 @@ impl From<Credentials> for credentials::ActiveModel {
             public_key: Set(PublicKey(creds.public_key)),
             // NotSet so a credential update never resets the counter.
             list_count: NotSet,
+            // NotSet unless given, so a credential update never replaces the ID
+            // that published aggregation URIs point to.
+            aggregation_id: creds
+                .aggregation_id
+                .map_or(NotSet, |aggregation_id| Set(Some(aggregation_id))),
         }
     }
 }

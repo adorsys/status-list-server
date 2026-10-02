@@ -1,15 +1,24 @@
+use std::sync::OnceLock;
+
 use axum::{
-    Json,
-    extract::{Query, State, rejection::QueryRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{PathRejection, QueryRejection},
+    },
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use opentelemetry::{KeyValue, global, metrics::Counter};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use crate::domain::models::credential::AggregationId;
+use crate::domain::models::status_list::{AGGREGATION_DEFAULT_LIMIT, AGGREGATION_MAX_LIMIT};
 use crate::server::{AppState, error::ApiError};
+use crate::utils::metrics::{InstrumentSlot, cached_instruments};
 
-use super::utils::constants::{AGGREGATION_DEFAULT_LIMIT, AGGREGATION_MAX_LIMIT};
+use super::utils::conditional::{ConditionalResponse, evaluate_if_none_match};
 
 #[derive(Debug, Deserialize)]
 pub struct AggregationQuery {
@@ -30,25 +39,62 @@ const CURSOR_VERSION: &str = "v1:";
 /// Bounds decoding work; far above the length of any stored `list_id`.
 const MAX_CURSOR_LEN: usize = 2048;
 
-/// Handle GET /aggregation: one page of at most `AGGREGATION_MAX_LIMIT` status
-/// list URIs. No total count is returned, as counting every row is unbounded.
-///
-/// Errors log at INFO: on this public endpoint they are mostly malformed queries.
+fn aggregation_pages() -> Counter<u64> {
+    static COUNTER: InstrumentSlot<Counter<u64>> = OnceLock::new();
+    cached_instruments(&COUNTER, || {
+        global::meter("status-list-server")
+            .u64_counter("aggregation_pages")
+            .with_description(
+                "Aggregation pages served, by scope (issuer|all) and outcome \
+                 (complete|truncated|paged).",
+            )
+            .build()
+    })
+}
+
+/// Handle GET /aggregation: every issuer's status lists. Deprecated, but
+/// tokens issued before aggregation was scoped to one issuer point here.
 #[tracing::instrument(skip_all, err(level = "info", Debug))]
 pub async fn get_aggregation(
     State(state): State<AppState>,
-    query_result: Result<Query<AggregationQuery>, QueryRejection>,
-) -> Result<impl IntoResponse, ApiError> {
-    let query = match query_result {
-        Ok(Query(q)) => q,
-        Err(e) => {
-            return Err(ApiError::bad_request(
-                "invalid_query",
-                format!("Failed to parse query parameters: {e}"),
-            ));
-        }
-    };
+    headers: HeaderMap,
+    query: Result<Query<AggregationQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    aggregation_page(&state, None, &headers, query).await
+}
 
+/// Handle GET /aggregation/{aggregation_id}: one issuer's status lists.
+#[tracing::instrument(skip_all, err(level = "info", Debug))]
+pub async fn get_issuer_aggregation(
+    State(state): State<AppState>,
+    aggregation_id: Result<Path<AggregationId>, PathRejection>,
+    headers: HeaderMap,
+    query: Result<Query<AggregationQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Path(aggregation_id) = aggregation_id.map_err(|_| {
+        ApiError::bad_request("invalid_aggregation_id", "aggregation_id must be a UUID")
+    })?;
+    aggregation_page(&state, Some(aggregation_id), &headers, query).await
+}
+
+/// One page of at most `AGGREGATION_MAX_LIMIT` status list URIs, from one
+/// issuer when `scope` is given. No total count is returned, as counting every
+/// row is unbounded.
+///
+/// The handlers log its errors at INFO: on these public endpoints they are
+/// mostly malformed requests.
+async fn aggregation_page(
+    state: &AppState,
+    scope: Option<AggregationId>,
+    headers: &HeaderMap,
+    query: Result<Query<AggregationQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query.map_err(|e| {
+        ApiError::bad_request(
+            "invalid_query",
+            format!("Failed to parse query parameters: {e}"),
+        )
+    })?;
     let limit = query.limit.unwrap_or(AGGREGATION_DEFAULT_LIMIT);
     if !(1..=AGGREGATION_MAX_LIMIT).contains(&limit) {
         return Err(ApiError::bad_request(
@@ -58,32 +104,80 @@ pub async fn get_aggregation(
     }
     let after = query.cursor.as_deref().map(decode_cursor).transpose()?;
 
-    let page = state.service.list_uris(after.as_deref(), limit).await?;
+    let page = match scope {
+        None => state.service.list_uris(after.as_deref(), limit).await?,
+        Some(aggregation_id) => state
+            .service
+            .list_issuer_uris(aggregation_id, after.as_deref(), limit)
+            .await?
+            .ok_or_else(|| {
+                ApiError::not_found("aggregation_not_found", "No issuer has this aggregation ID")
+            })?,
+    };
     let next_cursor = page.next_after.as_deref().map(encode_cursor);
 
-    let mut headers = HeaderMap::new();
-    if let Some(cursor) = &next_cursor {
-        // RFC 8288 next link; the base64url cursor needs no percent-encoding.
-        let link = format!("<?limit={limit}&cursor={cursor}>; rel=\"next\"");
-        headers.insert(
-            header::LINK,
-            HeaderValue::from_str(&link).map_err(ApiError::internal)?,
-        );
-    }
-
+    aggregation_pages().add(
+        1,
+        &[
+            KeyValue::new("scope", if scope.is_some() { "issuer" } else { "all" }),
+            KeyValue::new(
+                "outcome",
+                page_outcome(
+                    query.cursor.is_some(),
+                    query.limit.is_some(),
+                    next_cursor.is_some(),
+                ),
+            ),
+        ],
+    );
     tracing::info!(
         "Serving status list aggregation page with {} list(s)",
         page.status_lists.len()
     );
 
-    Ok((
-        StatusCode::OK,
-        headers,
-        Json(AggregationResponse {
-            status_lists: page.status_lists,
-            next_cursor,
-        }),
-    ))
+    let mut response_headers = HeaderMap::new();
+    if let Some(cursor) = &next_cursor {
+        // RFC 8288 next link. Resolved against the request URI, it keeps the
+        // path and so the issuer; the base64url cursor needs no percent-encoding.
+        let link = format!("<?limit={limit}&cursor={cursor}>; rel=\"next\"");
+        response_headers.insert(
+            header::LINK,
+            HeaderValue::from_str(&link).map_err(ApiError::internal)?,
+        );
+    }
+    let body = serde_json::to_vec(&AggregationResponse {
+        status_lists: page.status_lists,
+        next_cursor,
+    })
+    .map_err(ApiError::internal)?;
+    let etag = format!("W/\"{}\"", hex::encode(Sha256::digest(&body)));
+    response_headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).map_err(ApiError::internal)?,
+    );
+
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if evaluate_if_none_match(if_none_match, &etag) == ConditionalResponse::NotModified {
+        return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
+    }
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Ok((StatusCode::OK, response_headers, body).into_response())
+}
+
+/// `truncated` is the page a client that knows only draft-21 §9.3 sees when
+/// more lists follow: the first one, at the default size. It should stay at
+/// zero for scoped requests while the list quota fits in one page.
+fn page_outcome(has_cursor: bool, has_limit: bool, has_next: bool) -> &'static str {
+    match (has_cursor, has_limit, has_next) {
+        (false, _, false) => "complete",
+        (false, false, true) => "truncated",
+        _ => "paged",
+    }
 }
 
 /// Encodes the last `list_id` of a page as an opaque cursor. The `list_id` is
@@ -94,6 +188,10 @@ fn encode_cursor(list_id: &str) -> String {
 
 /// Deliberately not restricted to UUIDs: rows stored before `list_id` was
 /// validated would otherwise produce a `next_cursor` that strands the walk.
+///
+/// NUL is the one exception: Postgres rejects it in text, so letting it through
+/// is a 500. The trade-off is that a pre-validation `list_id` containing NUL,
+/// storable only on MySQL or SQLite, ends a walk at its page.
 fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
     (cursor.len() <= MAX_CURSOR_LEN)
         .then_some(cursor)
@@ -102,7 +200,7 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
         .and_then(|decoded| {
             decoded
                 .strip_prefix(CURSOR_VERSION)
-                .filter(|list_id| !list_id.is_empty())
+                .filter(|list_id| !list_id.is_empty() && !list_id.contains('\0'))
                 .map(str::to_string)
         })
         .ok_or_else(|| {
@@ -116,34 +214,18 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::credential::Issuer;
-    use crate::domain::service::PublishStatusListCommand;
-    use crate::test_utils::test_app_state;
-    use axum::body::to_bytes;
-    use axum::response::Response;
+    use crate::domain::models::status_list::StatusListError;
+    use crate::test_utils::{
+        metrics_after, publish_list, publish_list_under_quota, register_issuer, test_app_state,
+    };
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
     use std::collections::BTreeSet;
+    use tower::ServiceExt;
 
     /// Publishes a list with a fresh `list_id` and returns its URI.
     async fn publish(state: &AppState, issuer: &str) -> String {
-        let list_id = uuid::Uuid::new_v4().to_string();
-        let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
-        let policy = state.status_list_policy();
-        state
-            .service
-            .publish_status_list(
-                PublishStatusListCommand {
-                    list_id,
-                    issuer: Issuer(issuer.into()),
-                    sub: sub.clone(),
-                    statuses: vec![],
-                    size: None,
-                    default_status: None,
-                },
-                &policy,
-            )
-            .await
-            .unwrap();
-        sub
+        publish_list(&state.service, issuer, &uuid::Uuid::new_v4().to_string()).await
     }
 
     fn query(
@@ -156,14 +238,63 @@ mod tests {
         }))
     }
 
+    async fn get_page(
+        state: &AppState,
+        scope: Option<AggregationId>,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<Response, ApiError> {
+        let state = State(state.clone());
+        match scope {
+            None => get_aggregation(state, HeaderMap::new(), query(limit, cursor)).await,
+            Some(aggregation_id) => {
+                get_issuer_aggregation(
+                    state,
+                    Ok(Path(aggregation_id)),
+                    HeaderMap::new(),
+                    query(limit, cursor),
+                )
+                .await
+            }
+        }
+    }
+
     async fn get(
         state: &AppState,
         limit: Option<usize>,
         cursor: Option<&str>,
     ) -> Result<Response, ApiError> {
-        get_aggregation(State(state.clone()), query(limit, cursor))
+        get_page(state, None, limit, cursor).await
+    }
+
+    async fn get_scoped(
+        state: &AppState,
+        aggregation_id: AggregationId,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<Response, ApiError> {
+        get_page(state, Some(aggregation_id), limit, cursor).await
+    }
+
+    /// Sends `uri` through the aggregation routes as they are mounted.
+    async fn send(state: &AppState, uri: &str) -> Response {
+        axum::Router::new()
+            .route("/api/v1/aggregation", axum::routing::get(get_aggregation))
+            .route(
+                "/api/v1/aggregation/{aggregation_id}",
+                axum::routing::get(get_issuer_aggregation),
+            )
+            .with_state(state.clone())
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
             .await
-            .map(IntoResponse::into_response)
+            .unwrap()
+    }
+
+    fn link(response: &Response) -> Option<String> {
+        response
+            .headers()
+            .get(header::LINK)
+            .map(|value| value.to_str().unwrap().to_string())
     }
 
     async fn body(response: Response) -> AggregationResponse {
@@ -219,10 +350,7 @@ mod tests {
         let mut pages = 0;
         loop {
             let response = get(&state, Some(2), cursor.as_deref()).await.unwrap();
-            let link = response
-                .headers()
-                .get(header::LINK)
-                .map(|v| v.to_str().unwrap().to_string());
+            let link = link(&response);
             let page = body(response).await;
             pages += 1;
             seen.extend(page.status_lists);
@@ -287,6 +415,8 @@ mod tests {
             URL_SAFE_NO_PAD.encode(CURSOR_VERSION).as_str(),
             URL_SAFE_NO_PAD.encode([0xff, 0xfe]).as_str(),
             encode_cursor(&"a".repeat(MAX_CURSOR_LEN)).as_str(),
+            encode_cursor("\0").as_str(),
+            encode_cursor("477121aa-b598\0-419e-916f-1e74654ff38b").as_str(),
         ] {
             let err = get(&state, None, Some(cursor)).await.unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST, "cursor={cursor}");
@@ -300,7 +430,7 @@ mod tests {
         let rejection =
             Query::<AggregationQuery>::try_from_uri(&"/aggregation?limit=abc".parse().unwrap())
                 .unwrap_err();
-        let Err(err) = get_aggregation(State(state), Err(rejection)).await else {
+        let Err(err) = get_aggregation(State(state), HeaderMap::new(), Err(rejection)).await else {
             panic!("an unparsable query must be rejected");
         };
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -318,32 +448,261 @@ mod tests {
             // Stored before list_id had to be a UUID.
             "legacy-list",
             "list with spaces/and?query",
+            "legacy\tlist\n",
         ] {
             let cursor = encode_cursor(list_id);
             assert_eq!(decode_cursor(&cursor).unwrap(), list_id);
         }
     }
 
+    /// The headline guarantee: an issuer at its full quota still fits in the
+    /// page a draft-21 §9.3 client gets, and only its own lists are in it.
+    async fn assert_full_quota_is_one_page(state: AppState, backend: &str) {
+        let quota = AGGREGATION_DEFAULT_LIMIT as u64;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        register_issuer(&state.service, "issuer2").await;
+        let other = publish(&state, "issuer2").await;
+        let publish_under_quota = || {
+            let list_id = uuid::Uuid::new_v4().to_string();
+            let service = state.service.clone();
+            async move { publish_list_under_quota(&service, "issuer1", &list_id, quota).await }
+        };
+        for _ in 0..quota {
+            publish_under_quota().await.unwrap();
+        }
+        let over = publish_under_quota().await;
+        assert!(
+            matches!(over, Err(StatusListError::QuotaExceeded { .. })),
+            "the quota must hold on {backend}: {over:?}"
+        );
+
+        let response = get_scoped(&state, aggregation_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(link(&response), None, "on {backend}");
+        let page = body(response).await;
+        assert_eq!(
+            page.status_lists.len(),
+            AGGREGATION_DEFAULT_LIMIT,
+            "on {backend}"
+        );
+        assert_eq!(page.next_cursor, None, "on {backend}");
+        assert!(!page.status_lists.contains(&other), "on {backend}");
+    }
+
+    #[tokio::test]
+    async fn test_scoped_aggregation_at_full_quota_is_one_complete_page() {
+        assert_full_quota_is_one_page(test_app_state(None).await, "memory").await;
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+    async fn assert_full_quota_is_one_page_on_sql(
+        db: std::sync::Arc<sea_orm::DatabaseConnection>,
+        backend: &str,
+    ) {
+        crate::outbound::sql::list_quota::enable(&db, AGGREGATION_DEFAULT_LIMIT as u64)
+            .await
+            .unwrap();
+        assert_full_quota_is_one_page(test_app_state(Some(db)).await, backend).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_scoped_aggregation_at_full_quota_is_one_complete_page() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        assert_full_quota_is_one_page_on_sql(db, "SQLite").await;
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn test_mysql_scoped_aggregation_at_full_quota_is_one_complete_page() {
+        let test_db =
+            crate::outbound::sql::test_containers::mysql_helpers::MysqlTestDb::start().await;
+        assert_full_quota_is_one_page_on_sql(test_db.connection().await, "MySQL").await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn test_postgres_scoped_aggregation_at_full_quota_is_one_complete_page() {
+        let test_db =
+            crate::outbound::sql::test_containers::postgres_helpers::postgres_connection().await;
+        assert_full_quota_is_one_page_on_sql(test_db.db.clone(), "Postgres").await;
+    }
+
+    /// Follows `Link` the way a client does, resolving it against the request
+    /// URI, so the walk stays on the issuer's path.
+    #[tokio::test]
+    async fn test_scoped_walk_follows_link() {
+        let state = test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        let mut expected = BTreeSet::new();
+        for _ in 0..3 {
+            expected.insert(publish(&state, "issuer1").await);
+        }
+        publish(&state, "issuer2").await;
+
+        let mut seen = BTreeSet::new();
+        let mut next = Some(
+            url::Url::parse(&format!(
+                "http://localhost/api/v1/aggregation/{aggregation_id}?limit=2"
+            ))
+            .unwrap(),
+        );
+        while let Some(url) = next {
+            let response = send(&state, &url[url::Position::BeforePath..]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{url}");
+            next = link(&response).map(|link| {
+                let (target, _) = link.strip_prefix('<').unwrap().split_once('>').unwrap();
+                url.join(target).unwrap()
+            });
+            seen.extend(body(response).await.status_lists);
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_id_is_accepted_in_any_uuid_form() {
+        let state = test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        let expected = vec![publish(&state, "issuer1").await];
+
+        for id in [
+            aggregation_id.0.hyphenated().to_string().to_uppercase(),
+            aggregation_id.0.simple().to_string(),
+            aggregation_id.0.urn().to_string(),
+        ] {
+            let response = send(&state, &format!("/api/v1/aggregation/{id}")).await;
+            assert_eq!(response.status(), StatusCode::OK, "{id}");
+            assert_eq!(body(response).await.status_lists, expected, "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_malformed_aggregation_id_is_rejected() {
+        let state = test_app_state(None).await;
+        for id in ["not-a-uuid", "%00", "0b8ef1c4-3c6a-4d2e-9f1a"] {
+            let response = send(&state, &format!("/api/v1/aggregation/{id}")).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{id}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"], "invalid_aggregation_id", "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_aggregation_id_is_not_found() {
+        let state = test_app_state(None).await;
+        register_issuer(&state.service, "issuer1").await;
+        publish(&state, "issuer1").await;
+
+        let err = get_scoped(&state, AggregationId::generate(), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "aggregation_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_issuer_without_lists_is_an_empty_page() {
+        let state = test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+
+        let page = body(
+            get_scoped(&state, aggregation_id, None, None)
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(page.status_lists.is_empty());
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_unchanged_page_revalidates_with_304() {
+        let state = test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        publish(&state, "issuer1").await;
+        let revalidate = |etag: HeaderValue| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::IF_NONE_MATCH, etag);
+            get_issuer_aggregation(
+                State(state.clone()),
+                Ok(Path(aggregation_id)),
+                headers,
+                query(None, None),
+            )
+        };
+
+        let first = get_scoped(&state, aggregation_id, None, None)
+            .await
+            .unwrap();
+        let etag = first.headers()[header::ETAG].clone();
+
+        let unchanged = revalidate(etag.clone()).await.unwrap();
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(unchanged.headers()[header::ETAG], etag);
+
+        publish(&state, "issuer1").await;
+        let changed = revalidate(etag).await.unwrap();
+        assert_eq!(changed.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_page_outcome() {
+        assert_eq!(page_outcome(false, false, false), "complete");
+        assert_eq!(page_outcome(false, true, false), "complete");
+        assert_eq!(page_outcome(false, false, true), "truncated");
+        assert_eq!(page_outcome(false, true, true), "paged");
+        assert_eq!(page_outcome(true, false, true), "paged");
+        assert_eq!(page_outcome(true, false, false), "paged");
+    }
+
+    #[test]
+    fn test_aggregation_pages_are_counted_by_scope_and_outcome() {
+        let metrics = metrics_after(async {
+            let state = test_app_state(None).await;
+            let aggregation_id = register_issuer(&state.service, "issuer1").await;
+            publish(&state, "issuer1").await;
+            for _ in 0..AGGREGATION_DEFAULT_LIMIT {
+                publish(&state, "issuer2").await;
+            }
+
+            get_scoped(&state, aggregation_id, None, None)
+                .await
+                .unwrap();
+            get(&state, None, None).await.unwrap();
+            get(&state, Some(1), None).await.unwrap();
+        });
+
+        let pages: Vec<_> = metrics
+            .lines()
+            .filter(|line| line.starts_with("aggregation_pages_total"))
+            .collect();
+        for (scope, outcome) in [
+            ("issuer", "complete"),
+            ("all", "truncated"),
+            ("all", "paged"),
+        ] {
+            assert!(
+                pages.iter().any(|line| {
+                    line.contains(&format!("scope=\"{scope}\""))
+                        && line.contains(&format!("outcome=\"{outcome}\""))
+                }),
+                "no {scope}/{outcome} series in {pages:#?}"
+            );
+        }
+    }
+
     /// Every accepted `list_id` form, plus a legacy non-UUID one, must round-trip
-    /// through the cursor under the backend's collation. `limit=1` makes every
-    /// ID a cursor.
+    /// through the cursor, scoped and not, under the backend's collation.
+    /// `limit=1` makes every ID a cursor.
     #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
     async fn assert_aggregation_walk_on_sql(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
         backend: &str,
     ) {
-        use crate::domain::models::credential::{Credential, PublicJwk};
-        use crate::test_fixtures::TEST_EC_PUBLIC_JWK;
-
         let state = test_app_state(Some(db)).await;
-        state
-            .service
-            .publish_credential(Credential {
-                issuer: Issuer("issuer1".into()),
-                public_key: PublicJwk::try_new(TEST_EC_PUBLIC_JWK.as_bytes().to_vec()).unwrap(),
-            })
-            .await
-            .unwrap();
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
 
         // Distinct UUIDs: MySQL's case-insensitive collation would treat an
         // uppercase copy as a duplicate key.
@@ -358,59 +717,48 @@ mod tests {
         ];
         let mut expected = BTreeSet::new();
         for list_id in list_ids {
-            let sub = format!("https://example.com/api/v1/status-lists/{list_id}");
-            let policy = state.status_list_policy();
-            state
-                .service
-                .publish_status_list(
-                    PublishStatusListCommand {
-                        list_id,
-                        issuer: Issuer("issuer1".into()),
-                        sub: sub.clone(),
-                        statuses: vec![],
-                        size: None,
-                        default_status: None,
-                    },
-                    &policy,
-                )
-                .await
-                .unwrap();
-            expected.insert(sub);
+            expected.insert(publish_list(&state.service, "issuer1", &list_id).await);
         }
 
-        for limit in [1, 2] {
-            let mut seen = Vec::new();
-            let mut cursor: Option<String> = None;
-            loop {
-                let response = get(&state, Some(limit), cursor.as_deref())
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!("page after {cursor:?} (limit={limit}) on {backend}: {e:?}")
-                    });
-                let has_link = response.headers().contains_key(header::LINK);
-                let page = body(response).await;
-                assert_eq!(
-                    has_link,
-                    page.next_cursor.is_some(),
-                    "Link and next_cursor must agree (limit={limit}) on {backend}"
-                );
-                seen.extend(page.status_lists);
-                match page.next_cursor {
-                    Some(next) => cursor = Some(next),
-                    None => break,
+        for scope in [None, Some(aggregation_id)] {
+            for limit in [1, 2] {
+                let mut seen = Vec::new();
+                let mut cursor: Option<String> = None;
+                loop {
+                    let response = get_page(&state, scope, Some(limit), cursor.as_deref())
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "page after {cursor:?} (scope={scope:?}, limit={limit}) \
+                                 on {backend}: {e:?}"
+                            )
+                        });
+                    let has_link = response.headers().contains_key(header::LINK);
+                    let page = body(response).await;
+                    assert_eq!(
+                        has_link,
+                        page.next_cursor.is_some(),
+                        "Link and next_cursor must agree (scope={scope:?}, limit={limit}) \
+                         on {backend}"
+                    );
+                    seen.extend(page.status_lists);
+                    match page.next_cursor {
+                        Some(next) => cursor = Some(next),
+                        None => break,
+                    }
                 }
-            }
 
-            let unique: BTreeSet<_> = seen.iter().cloned().collect();
-            assert_eq!(
-                unique.len(),
-                seen.len(),
-                "no list may appear twice (limit={limit}) on {backend}"
-            );
-            assert_eq!(
-                unique, expected,
-                "every list must appear (limit={limit}) on {backend}"
-            );
+                let unique: BTreeSet<_> = seen.iter().cloned().collect();
+                assert_eq!(
+                    unique.len(),
+                    seen.len(),
+                    "no list may appear twice (scope={scope:?}, limit={limit}) on {backend}"
+                );
+                assert_eq!(
+                    unique, expected,
+                    "every list must appear (scope={scope:?}, limit={limit}) on {backend}"
+                );
+            }
         }
     }
 
@@ -441,28 +789,11 @@ mod tests {
     #[tokio::test]
     async fn test_aggregation_walk_passes_legacy_non_uuid_list_ids() {
         let state = test_app_state(None).await;
-        let mut expected = BTreeSet::from([
+        let expected = BTreeSet::from([
             publish(&state, "issuer1").await,
             publish(&state, "issuer1").await,
+            publish_list(&state.service, "issuer1", "legacy-list").await,
         ]);
-        let legacy_sub = "https://example.com/api/v1/status-lists/legacy-list".to_string();
-        let policy = state.status_list_policy();
-        state
-            .service
-            .publish_status_list(
-                PublishStatusListCommand {
-                    list_id: "legacy-list".to_string(),
-                    issuer: Issuer("issuer1".into()),
-                    sub: legacy_sub.clone(),
-                    statuses: vec![],
-                    size: None,
-                    default_status: None,
-                },
-                &policy,
-            )
-            .await
-            .unwrap();
-        expected.insert(legacy_sub);
 
         let mut seen = BTreeSet::new();
         let mut cursor: Option<String> = None;

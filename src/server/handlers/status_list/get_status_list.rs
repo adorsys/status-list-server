@@ -24,7 +24,7 @@ use super::utils::{
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{generate_etag, generate_historical_etag},
     negotiation::{AcceptType, client_accepts_gzip, negotiate_accept},
-    token::build_status_list_token,
+    token::{build_status_list_token, issuer_aggregation_uri},
 };
 
 /// Conditional-revalidation SLI counter. Cached after first use (the same
@@ -83,6 +83,16 @@ async fn get_status_list_at(
     headers: HeaderMap,
     now: i64,
 ) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    // Not a UUID check like publish: lists created before list_id validation
+    // have other IDs, and issued credentials still point at them. NUL alone is
+    // rejected because Postgres refuses it in text, which would be a 500.
+    if list_id.contains('\0') {
+        return Err(ApiError::bad_request(
+            "invalid_list_id",
+            "list_id must not contain NUL",
+        ));
+    }
+
     let query = match query_result {
         Ok(Query(q)) => q,
         Err(e) => {
@@ -136,10 +146,15 @@ async fn get_status_list_at(
         .and_then(|h| h.to_str().ok());
 
     let status_record = fetch_status_record(&list_id, &state).await?;
+    let aggregation_uri = issuer_aggregation_uri(&state, &status_record.issuer).await;
     // Anchor the ETag to the current token validity window so the validator
     // rotates with the token's lifetime (see etag::generate_etag).
     let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
-    let current_etag = generate_etag(&status_record, token_window(now, validity).0)?;
+    let current_etag = generate_etag(
+        &status_record,
+        aggregation_uri.as_deref(),
+        token_window(now, validity).0,
+    )?;
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs);
@@ -175,6 +190,7 @@ async fn get_status_list_at(
                 &state,
                 accept_type,
                 status_record,
+                aggregation_uri,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -195,6 +211,7 @@ async fn get_status_list_at(
                 &state,
                 accept_type,
                 status_record,
+                aggregation_uri,
                 &current_etag,
                 &last_modified,
                 &cache_control,
@@ -208,18 +225,26 @@ async fn get_status_list_at(
 /// Build a freshly signed `200 OK` status-list token response, reusing the
 /// current validator and freshness headers. Shared by the content-change
 /// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
+#[allow(clippy::too_many_arguments)]
 async fn build_fresh_200_response(
     state: &AppState,
     accept_type: AcceptType,
     status_record: StatusListRecord,
+    aggregation_uri: Option<String>,
     current_etag: &str,
     last_modified: &str,
     cache_control: &str,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
-    let (token_bytes, encoding) =
-        build_status_list_token(state, accept_type, status_record, None, client_accepts_gzip)
-            .await?;
+    let (token_bytes, encoding) = build_status_list_token(
+        state,
+        accept_type,
+        status_record,
+        aggregation_uri,
+        None,
+        client_accepts_gzip,
+    )
+    .await?;
 
     let mut response = Response::new(token_bytes.into());
     *response.status_mut() = StatusCode::OK;
@@ -281,10 +306,12 @@ async fn handle_historical_request(
         updated_at: snapshot.iat,
     };
 
+    let aggregation_uri = issuer_aggregation_uri(state, &status_record.issuer).await;
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
         status_record,
+        aggregation_uri,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
     )
@@ -344,12 +371,16 @@ fn build_cache_control(token_ttl_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
+    use crate::domain::ports::CredentialRepo;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::update_status::update_status;
     use crate::server::handlers::status_list::utils::request::{
         Status, StatusEntry, StatusesRequest,
     };
-    use crate::test_utils::{authenticated_issuer, test_app_state};
+    use crate::test_utils::{
+        authenticated_issuer, metrics_after, publish_list, register_issuer, test_app_state,
+    };
     use axum::extract::Json;
     use axum::http::HeaderMap;
 
@@ -380,6 +411,44 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_nul_in_list_id() {
+        let app_state = test_app_state(None).await;
+        let past = time::OffsetDateTime::now_utc().unix_timestamp() - 60;
+
+        for time in [None, Some(past)] {
+            let err = get_status_list(
+                State(app_state.clone()),
+                Path("477121aa-b598\0-419e-916f-1e74654ff38b".to_string()),
+                Ok(Query(StatusListQuery { time })),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "time={time:?}");
+            assert_eq!(err.error, "invalid_list_id", "time={time:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_resolves_legacy_non_uuid_list_id() {
+        let app_state = test_app_state(None).await;
+        publish_list(&app_state.service, "issuer1", "legacy-list").await;
+
+        let response = get_status_list(
+            State(app_state),
+            Path("legacy-list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -652,13 +721,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_jwt_emits_aggregation_uri_when_configured() {
-        let token_id = uuid::Uuid::new_v4().to_string();
-        let mut app_state = test_app_state(None).await;
-        app_state.aggregation_uri =
-            Some("https://aggregation.example.com/statuslists/aggregation".to_string());
+    const AGGREGATION_BASE: &str = "https://statuslist.example.com/api/v1/aggregation";
 
+    /// Publishes a list for `issuer1` and returns the `aggregation_uri` claim of
+    /// the token served for it in the `accept` format.
+    async fn served_aggregation_uri(app_state: AppState, accept: &str) -> Option<String> {
+        let token_id = uuid::Uuid::new_v4().to_string();
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -669,11 +737,7 @@ mod tests {
         .unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
-        );
-
+        headers.insert(header::ACCEPT, accept.parse().unwrap());
         let response = get_status_list(
             State(app_state),
             Path(token_id),
@@ -683,16 +747,82 @@ mod tests {
         .await
         .unwrap()
         .into_response();
-
         assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
+            cwt_aggregation_uri(&body)
+        } else {
+            decode_jwt_claims(&body)["status_list"]["aggregation_uri"]
+                .as_str()
+                .map(str::to_string)
+        }
+    }
+
+    fn cwt_aggregation_uri(cwt: &[u8]) -> Option<String> {
+        use crate::server::handlers::status_list::utils::constants::STATUS_LIST;
+        use coset::{TaggedCborSerializable as _, cbor::Value};
+
+        let payload = coset::CoseSign1::from_tagged_slice(cwt)
+            .unwrap()
+            .payload
+            .unwrap();
+        let claims: Value = coset::cbor::de::from_reader(payload.as_slice()).unwrap();
+        let status_list = claims
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| *key == Value::Integer(STATUS_LIST.into()))
+            .map(|(_, value)| value)
+            .unwrap();
+        status_list
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| key.as_text() == Some("aggregation_uri"))
+            .and_then(|(_, value)| value.as_text())
+            .map(str::to_string)
     }
 
     #[tokio::test]
-    async fn test_jwt_omits_aggregation_uri_when_not_configured() {
-        let token_id = uuid::Uuid::new_v4().to_string();
+    async fn test_token_carries_issuer_scoped_aggregation_uri() {
         let mut app_state = test_app_state(None).await;
-        app_state.aggregation_uri = None;
+        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+        let aggregation_id = register_issuer(&app_state.service, "issuer1").await;
+        let expected = format!("{AGGREGATION_BASE}/{aggregation_id}");
 
+        for accept in [
+            ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT,
+        ] {
+            assert_eq!(
+                served_aggregation_uri(app_state.clone(), accept).await,
+                Some(expected.clone()),
+                "{accept}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_omits_aggregation_uri_when_not_configured() {
+        let app_state = test_app_state(None).await;
+        register_issuer(&app_state.service, "issuer1").await;
+
+        assert_eq!(
+            served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+            None
+        );
+    }
+
+    /// A token that gains the claim is a new representation, so a client
+    /// holding one without it gets the new token instead of a 304.
+    #[tokio::test]
+    async fn test_revalidation_serves_a_new_token_once_it_carries_aggregation_uri() {
+        let mut app_state = test_app_state(None).await;
+        register_issuer(&app_state.service, "issuer1").await;
+        let token_id = uuid::Uuid::new_v4().to_string();
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -701,24 +831,102 @@ mod tests {
         )
         .await
         .unwrap();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let revalidate = |app_state: AppState, etag: HeaderValue| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::IF_NONE_MATCH, etag);
+            get_status_list_at(
+                State(app_state),
+                token_id.clone(),
+                Ok(Query(StatusListQuery { time: None })),
+                headers,
+                now,
+            )
+        };
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
-        );
-
-        let response = get_status_list(
-            State(app_state),
-            Path(token_id),
+        let first = get_status_list_at(
+            State(app_state.clone()),
+            token_id.clone(),
             Ok(Query(StatusListQuery { time: None })),
-            headers,
+            HeaderMap::new(),
+            now,
         )
         .await
         .unwrap()
         .into_response();
+        let etag = first.headers().get(header::ETAG).unwrap().clone();
+        let unchanged = revalidate(app_state.clone(), etag.clone())
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
 
-        assert_eq!(response.status(), StatusCode::OK);
+        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+        let with_claim = revalidate(app_state, etag).await.unwrap().into_response();
+        assert_eq!(with_claim.status(), StatusCode::OK);
+    }
+
+    struct UnavailableCredentials;
+
+    #[async_trait::async_trait]
+    impl CredentialRepo for UnavailableCredentials {
+        async fn find(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn find_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<AggregationId>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn find_issuer_by_aggregation_id(
+            &self,
+            _: AggregationId,
+        ) -> Result<Option<Issuer>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+    }
+
+    /// A revocation check must not fail because the aggregation ID could not
+    /// be looked up; the optional claim is left out and the miss counted.
+    #[test]
+    fn test_token_omits_aggregation_uri_when_lookup_fails() {
+        let metrics = metrics_after(async {
+            let mut app_state = test_app_state(None).await;
+            app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+            let service = &app_state.service;
+            app_state.service = std::sync::Arc::new(crate::domain::service::Service::from_arcs(
+                service.status_list_repo.clone(),
+                std::sync::Arc::new(UnavailableCredentials),
+                service.status_list_cache.clone(),
+                service.snapshot_repo.clone(),
+                service.cert_provider.clone(),
+            ));
+
+            assert_eq!(
+                served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+                None
+            );
+        });
+        let omitted = metrics
+            .lines()
+            .find(|line| line.starts_with("aggregation_uri_omitted_total"))
+            .unwrap_or_else(|| panic!("aggregation_uri_omitted not exported:\n{metrics}"));
+        assert!(omitted.ends_with(" 1"), "{omitted}");
     }
 
     #[tokio::test]

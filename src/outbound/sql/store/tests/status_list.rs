@@ -131,7 +131,8 @@ async fn test_status_list_find_all() {
     assert_eq!(records[1].status_list.lst, "xyz");
 }
 
-/// Pins the keyset shape, in particular the `LIMIT` that bounds the read.
+/// Pins the keyset shape, in particular the `LIMIT` that bounds the read, and
+/// the `issuer` equality a scoped page adds for the `(issuer, list_id)` index.
 #[tokio::test]
 async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
     let row = |id: &str| {
@@ -146,16 +147,16 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
 
     let db_conn = Arc::new(
         MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![
-                row("b"),
-                row("c"),
-            ]])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![
+                vec![row("b"), row("c")],
+                vec![row("b")],
+            ])
             .into_connection(),
     );
     let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
 
     let rows = store
-        .find_status_list_uris_after(Some("a"), 3)
+        .find_status_list_uris_after(None, Some("a"), 3)
         .await
         .unwrap();
     assert_eq!(
@@ -171,16 +172,27 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
             ),
         ]
     );
+    store
+        .find_status_list_uris_after(Some("issuer-1"), Some("a"), 3)
+        .await
+        .unwrap();
 
     drop(store);
     let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
     assert_eq!(
         db_conn.into_transaction_log(),
-        [Transaction::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
-            ["a".into(), 3u64.into()],
-        )]
+        [
+            Transaction::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
+                ["a".into(), 3u64.into()],
+            ),
+            Transaction::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."issuer" = $1 AND "status_lists"."list_id" > $2 ORDER BY "status_lists"."list_id" ASC LIMIT $3"#,
+                ["issuer-1".into(), "a".into(), 3u64.into()],
+            ),
+        ]
     );
 }
 
@@ -1570,13 +1582,35 @@ async fn assert_list_uris_walk_is_complete(
     use crate::domain::ports::StatusListRepo;
     use crate::outbound::sql::SqlStatusListRepo;
 
+    async fn walk(repo: &SqlStatusListRepo, issuer: Option<&str>) -> (Vec<usize>, Vec<String>) {
+        let mut seen = Vec::new();
+        let mut page_sizes = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = repo.list_uris(issuer, after.as_deref(), 2).await.unwrap();
+            page_sizes.push(page.status_lists.len());
+            seen.extend(page.status_lists);
+            match page.next_after {
+                Some(next) => after = Some(next),
+                None => return (page_sizes, seen),
+            }
+        }
+    }
+
+    let other_issuer = format!("{issuer}-other");
     fixtures::seed_credential(&db, issuer).await;
+    fixtures::seed_credential(&db, &other_issuer).await;
     let store = SeaOrmStore::<StatusListRecord>::new(db);
     let ids = ["c", "A", "e", "b", "D"];
-    for id in ids {
+    let other_ids = ["f", "G"];
+    for (id, owner) in ids
+        .iter()
+        .map(|id| (id, issuer))
+        .chain(other_ids.iter().map(|id| (id, other_issuer.as_str())))
+    {
         store
             .insert_one(
-                fixtures::record(id, issuer, "initial", &format!("sub-{id}"), 0),
+                fixtures::record(id, owner, "initial", &format!("sub-{id}"), 0),
                 fixtures::NO_LIST_QUOTA,
             )
             .await
@@ -1584,20 +1618,8 @@ async fn assert_list_uris_walk_is_complete(
     }
     let repo = SqlStatusListRepo::new(store);
 
-    let mut seen = Vec::new();
-    let mut page_sizes = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let page = repo.list_uris(after.as_deref(), 2).await.unwrap();
-        page_sizes.push(page.status_lists.len());
-        seen.extend(page.status_lists);
-        match page.next_after {
-            Some(next) => after = Some(next),
-            None => break,
-        }
-    }
-
-    assert_eq!(page_sizes, [2, 2, 1], "page sizes on {backend}");
+    let (page_sizes, seen) = walk(&repo, Some(issuer)).await;
+    assert_eq!(page_sizes, [2, 2, 1], "scoped page sizes on {backend}");
     let unique: BTreeSet<_> = seen.iter().cloned().collect();
     assert_eq!(
         unique.len(),
@@ -1605,7 +1627,27 @@ async fn assert_list_uris_walk_is_complete(
         "no list may appear twice on {backend}"
     );
     let expected: BTreeSet<_> = ids.iter().map(|id| format!("sub-{id}")).collect();
-    assert_eq!(unique, expected, "every list must appear on {backend}");
+    assert_eq!(
+        unique, expected,
+        "a scoped walk returns every list of that issuer and no other on {backend}"
+    );
+
+    let (_, seen) = walk(&repo, None).await;
+    let unique: BTreeSet<_> = seen.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "no list may appear twice on {backend}"
+    );
+    let expected: BTreeSet<_> = ids
+        .iter()
+        .chain(&other_ids)
+        .map(|id| format!("sub-{id}"))
+        .collect();
+    assert_eq!(
+        unique, expected,
+        "an unscoped walk returns every list on {backend}"
+    );
 }
 
 #[cfg(feature = "sqlite")]
@@ -1663,7 +1705,7 @@ async fn assert_list_uris_walk_survives_concurrent_publishes(
     }
     let repo = SqlStatusListRepo::new(store.clone());
 
-    let first = repo.list_uris(None, 1).await.unwrap();
+    let first = repo.list_uris(None, None, 1).await.unwrap();
     assert_eq!(
         first.status_lists,
         ["sub-list-b"],
@@ -1676,7 +1718,7 @@ async fn assert_list_uris_walk_survives_concurrent_publishes(
     let mut seen = first.status_lists;
     let mut after = first.next_after;
     while let Some(cursor) = after {
-        let page = repo.list_uris(Some(&cursor), 1).await.unwrap();
+        let page = repo.list_uris(None, Some(&cursor), 1).await.unwrap();
         seen.extend(page.status_lists);
         after = page.next_after;
     }

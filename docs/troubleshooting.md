@@ -779,7 +779,8 @@ failure rolls back instead of wedging the release.
 Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
 env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_count` and is
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
-the count only ever rises.
+the count only ever rises. The cap cannot be set above `1000`, the aggregation page size (see
+[below](#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
 
 A fresh install enforces it from the first start. On a database a release without the quota has
 served, pods refuse to start until it is enabled, unless the operator opts into the transition (see
@@ -816,7 +817,7 @@ quota starts off on such a database, and a pod does not serve without it unless 
 
 1. Deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`. Pods then start with the quota off and log
    `limits.max_lists_per_issuer is NOT enforced` at `ERROR` on every start; `list_quota_enforced`
-   reads `0`.
+   reads `0`. Until step 2, an issuer's aggregation may no longer fit in one page.
 2. Once the rollout has finished and **no pod of an older release is left**, run
    `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
 3. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
@@ -836,9 +837,10 @@ refusing to enable the list quota
     https://issuer.example (1003 lists)
 ```
 
-- **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the Deployment, or delete
-  lists as described [below](#publish-rejected-with-400-list_quota_exceeded), then run
-  `enable` again.
+- **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` (up to `1000`) and roll the
+  Deployment, or delete lists as described [below](#publish-rejected-with-400-list_quota_exceeded),
+  then run `enable` again. An issuer with more than 1000 lists can only be brought under the cap by
+  deleting lists; until then the quota stays off and pods need `APP_LIMITS__LIST_QUOTA_TRANSITION`.
 - **`list_count` does not match:** a pod of an older release published after the recount, or the
   recount was skipped. Make sure none is left, then run `recount` and `enable` again.
 
@@ -880,8 +882,8 @@ If `list_count` and `actual` differ, the counter has drifted; recompute it as de
 
 **Fix:** Either:
 
-- **Raise the quota.** Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the Deployment. The limit is
-  global: it raises the ceiling for every issuer, not only this one.
+- **Raise the quota**, if it is below `1000`. Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the
+  Deployment. The limit is global: it raises the ceiling for every issuer, not only this one.
 - **Delete lists the issuer no longer needs**, directly in the database, then
   [recompute the counter](#recomputing-credentialslist_count). Only delete a list that no
   unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`
@@ -896,6 +898,25 @@ keeps its lists and every further publish is refused. Run `list-quota disable` a
 
 **Prevention:** Size `max_lists_per_issuer` from how many lists your largest issuer needs, and
 watch the `list_count` of your biggest issuers.
+
+---
+
+### Startup refused: max_lists_per_issuer exceeds the aggregation page size
+
+**When you see this:** A pod exits at startup with:
+
+```text
+limits.max_lists_per_issuer (2000) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: an issuer's aggregation would no longer fit in one response, and clients that do not page would silently see part of it
+```
+
+**Root cause:** Each issuer's Status List Aggregation must fit in the first page of
+`GET /api/v1/aggregation/{aggregation_id}`, because a relying party that follows draft-21 §9.3
+reads only `status_lists` and does not page. The quota is what keeps an issuer within that page, so
+it cannot be larger than the page.
+
+**Fix:** Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` to `1000` or less and roll the Deployment. Issuers
+that already hold more lists keep them, and their aggregation spans several pages, but every
+further publish is refused until they are back under the cap.
 
 ---
 
@@ -946,8 +967,10 @@ For quick grep, the application emits these verbatim:
 - `readiness check failed` (WARN)
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`
 - `limits.max_lists_per_issuer must be greater than 0`
+- `limits.max_lists_per_issuer (N) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: ...`
+- `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri path '...' does not match the aggregation route '/api/v1/aggregation'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
-- `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
+- `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set, so an issuer's aggregation may not fit in one page. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
 - `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,

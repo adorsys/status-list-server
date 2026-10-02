@@ -160,9 +160,10 @@ each tier keyed and tuned independently:
 | Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
 | -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
 | **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
-| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,          | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+|                | `GET /api/v1/credentials` (authenticated)                       | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
+| **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+|                | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` |                                                             |                                                               |
 
 The writes tier is applied **before** the `auth` middleware (rate limiting by IP
 happens first, then authentication rejects unauthenticated requests with `401`).
@@ -217,12 +218,54 @@ quota from startup.
 It bounds lists **per issuer**, not in total: while
 `POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
 brings a fresh quota. Lists cannot be deleted through the API, so an issuer at
-its quota stays there until the operator raises it (see
+its quota stays there until the operator raises it, which is possible only up
+to the aggregation page size (see
 [troubleshooting](troubleshooting.md#status-list-quota)).
 
-`GET /api/v1/aggregation` is paginated rather than bounded by a configuration
-value: each page holds at most 1000 URIs, read by a keyset scan on `list_id`,
-and there is no total count.
+### Status list aggregation
+
+`GET /api/v1/aggregation/{aggregation_id}` returns one issuer's status list URIs
+(draft-21 §9). Each issuer gets a random `aggregation_id` at registration,
+returned in the registration response and by the authenticated
+`GET /api/v1/credentials`. An issuer registered before aggregation IDs existed
+gets one the first time it is looked up. Public URIs name the issuer by that ID,
+so tokens never disclose the issuer identifier, which may be an internal tenant
+name. With `server.aggregation_uri` set, each status list token carries its
+issuer's URI, `<aggregation_uri>/<aggregation_id>`.
+
+The ID is a path segment rather than a query parameter so that a cache or CDN
+that ignores query strings still keeps issuers apart, and so that the relative
+`Link` to the next page keeps the issuer without repeating it.
+
+An issuer's aggregation is complete in one response: the server refuses to start
+while `limits.max_lists_per_issuer` exceeds the default page size (1000), and the
+list quota holds each issuer to it. So a relying party that reads only
+`status_lists`, as draft-21 §9.3 defines it, gets every list. That holds only
+while the quota is enforced, not while an operator runs with
+`limits.list_quota_transition`, and an issuer that had more lists before the
+quota was enforced keeps paging. Pages are read by a keyset scan on
+`(issuer, list_id)` and there is no total count.
+
+An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
+finds out instead of caching an empty aggregation. Responses carry a weak `ETag`
+and answer a matching `If-None-Match` with `304`.
+
+Every signed status list token needs its issuer's aggregation ID, so
+`CachingCredentialRepo` keeps found IDs in memory; an ID never changes once
+assigned.
+
+Without an ID, `GET /api/v1/aggregation` still returns every issuer's lists, for
+tokens issued before issuer scoping. It is deprecated. Tokens are signed on each
+request, so once every pod runs this release no newly served token points there.
+It can be removed once `token_exp_secs` has passed since the rollout and
+`aggregation_pages_total{scope="all"}` stays at zero; the metric catches relying
+parties that stored the URI instead of reading it from each token.
+
+**Privacy.** Anyone holding one of an issuer's tokens can list all of that
+issuer's status lists, and from them count its lists and the share of its
+credentials that are revoked or suspended. Draft-21 §9 intends this, but on a
+server shared by several issuers it is per-tenant information the unscoped
+listing did not attribute. Tell tenants before setting `server.aggregation_uri`.
 
 ### Error response summary
 

@@ -1,13 +1,14 @@
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
 use sha2::{Digest, Sha256};
 
-/// Weak ETag for the *live* representation, keyed to the record content and the
-/// current `E - ttl` token validity window. Rotating it with the window makes a
-/// matching ETag imply the cached token still has plenty of validity left; once
-/// the window rolls over the ETag changes and a stale client is served a fresh
-/// token instead of a body-less 304.
+/// Weak ETag for the *live* representation, keyed to the record content, the
+/// token's `aggregation_uri` and the current `E - ttl` token validity window.
+/// Rotating it with the window makes a matching ETag imply the cached token
+/// still has plenty of validity left; once the window rolls over the ETag
+/// changes and a stale client is served a fresh token instead of a body-less 304.
 pub(crate) fn generate_etag(
     record: &StatusListRecord,
+    aggregation_uri: Option<&str>,
     window_start: i64,
 ) -> Result<String, StatusListError> {
     let mut hasher = Sha256::new();
@@ -17,6 +18,9 @@ pub(crate) fn generate_etag(
     hasher.update(lst.as_bytes());
     hasher.update(record.issuer.0.as_bytes());
     hasher.update(record.sub.as_bytes());
+    if let Some(uri) = aggregation_uri {
+        hasher.update(uri.as_bytes());
+    }
     hasher.update(window_start.to_string().as_bytes());
 
     let hash = hasher.finalize();
@@ -64,7 +68,7 @@ mod tests {
     }
 
     fn etag(record: &StatusListRecord, window_start: i64) -> String {
-        generate_etag(record, window_start).unwrap()
+        generate_etag(record, None, window_start).unwrap()
     }
 
     #[test]
@@ -169,5 +173,21 @@ mod tests {
         record2.sub = "https://example.com/2".to_string();
 
         assert_ne!(etag(&record1, WINDOW), etag(&record2, WINDOW));
+    }
+
+    /// A token that gains, loses or changes `aggregation_uri` is a different
+    /// representation, so a client holding the old one must not get a 304.
+    #[test]
+    fn test_generate_etag_aggregation_uri_sensitivity() {
+        let record = create_test_record();
+        let etags = [
+            None,
+            Some("https://example.com/api/v1/aggregation/a"),
+            Some("https://example.com/api/v1/aggregation/b"),
+        ]
+        .map(|uri| generate_etag(&record, uri, WINDOW).unwrap());
+
+        assert_ne!(etags[0], etags[1]);
+        assert_ne!(etags[1], etags[2]);
     }
 }
