@@ -582,11 +582,10 @@ paths:
           required: false
           description: |
             Date-time validator matching the `Last-Modified` header of a previous
-            response. `304 Not Modified` is returned only while `now` still has
-            more than `ttl` seconds of runway before the earliest possible expiry
-            of the client's cached token (its `iat`, anchored to the window
-            containing the list's last modification, plus `exp - iat`); otherwise
-            the server returns a freshly signed `200 OK` token.
+            response. Unlike `If-None-Match`, an `If-Modified-Since`-only request
+            never returns `304 Not Modified`; the server always returns a freshly
+            signed `200 OK` token. `304` is returned only for a matching
+            `If-None-Match`.
           schema:
             type: string
             example: "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -644,17 +643,20 @@ paths:
               example: Accept, Accept-Encoding
         "304":
           description: |
-            Not Modified. Returned for a conditional revalidation (`If-None-Match`
-            or `If-Modified-Since`) when the list has not changed and the client's
-            previously cached Status List Token is still more than `ttl` seconds
-            from `exp`. The client can continue to use its cached token, so no
-            body is sent.
+            Not Modified. Returned only for a matching `If-None-Match`
+            conditional revalidation when the list has not changed and the
+            client's previously cached Status List Token is still more than `ttl`
+            seconds from `exp`. The client can continue to use its cached token,
+            so no body is sent.
 
             A matching `If-None-Match` proves the client holds the current-window
             token; the server certifies the `304` only while that token is still
             valid beyond the advertised `max-age = ttl`, so the `304` never
             strands the relying party with a token that is about to expire or
             already expired (RFC 9110 §8.8.1).
+
+            An `If-Modified-Since`-only request never gets a `304`; it always
+            receives a freshly signed `200 OK` token.
           headers:
             ETag:
               schema:
