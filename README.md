@@ -80,6 +80,44 @@ curl -i http://localhost:8000/api/v1/status-lists/477121aa-b598-419e-916f-1e7465
 
 The complete OpenAPI 3.1 REST API specification is available at [OpenAPI Specification](docs/openapi.yaml).
 
+### Postman and Contract Testing
+
+API explorers can import the ready-to-run Postman assets directly:
+
+- [Postman collection](postman/status-list-server.postman_collection.json)
+- [Postman environment](postman/status-list-server.postman_environment.json)
+
+The collection covers health, metrics, issuer registration, status-list
+publication, JWT/CWT retrieval, historical resolution, status updates, and
+aggregation, with scripts that assert status codes, schemas, and response
+headers.
+
+To run the Postman collection from the command line, start the server with local static signing material:
+
+```bash
+APP_SERVER__HOST=0.0.0.0 \
+APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
+cargo run
+```
+
+Then run the collection in another terminal:
+
+```bash
+./scripts/test-postman-collection.sh
+```
+
+To verify that the live implementation still conforms to the OpenAPI contract
+with Microcks, keep the server running and run:
+
+```bash
+./scripts/test-microcks-conformance.sh
+```
+
+See [API Testing](docs/api-testing.md) for Postman import steps, issuer token
+setup, Newman usage, host prerequisites, and Microcks runner configuration.
+
 ## Cargo Feature Matrix
 
 The server compiles with modular feature flags to gate database drivers and cloud secret providers:
