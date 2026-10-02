@@ -80,11 +80,8 @@ async fn publish_error(appstate: &AppState, list_id: &str, err: StatusListError)
         && let Ok(record) = appstate.service.get_status_list(list_id).await
         && let Ok(value) = axum::http::HeaderValue::try_from(&record.sub)
     {
-        return ApiError::conflict(
-            "status_list_already_exists",
-            "Status list already exists",
-        )
-        .with_header(axum::http::header::LOCATION, value);
+        return ApiError::conflict("status_list_already_exists", "Status list already exists")
+            .with_header(axum::http::header::LOCATION, value);
     }
     err.into()
 }
@@ -118,7 +115,8 @@ async fn publish_status_with_options(
     Path(list_id): Path<String>,
     Json(payload): Json<PublishStatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    parse_list_id_uuid(&list_id).map_err(|message| ApiError::bad_request("invalid_list_id", message))?;
+    parse_list_id_uuid(&list_id)
+        .map_err(|message| ApiError::bad_request("invalid_list_id", message))?;
 
     let statuses = payload
         .statuses
@@ -527,7 +525,10 @@ mod tests {
                 "/api/v1",
                 Router::new()
                     .route("/status-lists/{list_id}", get(get_status_list))
-                    .route("/aggregation", get(crate::server::handlers::get_aggregation)),
+                    .route(
+                        "/aggregation",
+                        get(crate::server::handlers::get_aggregation),
+                    ),
             )
             .with_state(state_rebased.clone());
 
@@ -610,7 +611,12 @@ mod tests {
         let braced = format!("{{{canonical}}}");
         let urn = format!("urn:uuid:{canonical}");
 
-        for bad in [uppercase.as_str(), no_hyphen.as_str(), braced.as_str(), urn.as_str()] {
+        for bad in [
+            uppercase.as_str(),
+            no_hyphen.as_str(),
+            braced.as_str(),
+            urn.as_str(),
+        ] {
             let appstate = test_app_state(None).await;
             let result = publish_status(
                 State(appstate),

@@ -47,20 +47,21 @@ pub(crate) mod mysql_helpers {
     use sea_orm::{ConnectionTrait, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
-    use testcontainers_modules::{
-        mysql::Mysql as MysqlImage,
-        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+    use testcontainers_modules::testcontainers::{
+        ContainerAsync, GenericImage, ImageExt,
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
     };
     use tokio::sync::OnceCell;
 
-    static MYSQL_CONTAINER: OnceCell<ContainerAsync<MysqlImage>> = OnceCell::const_new();
+    static MYSQL_CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
 
     /// A migrated, test-private database on the shared container. The container
     /// itself is `&'static`, so unlike a per-test container this can be dropped
     /// without cutting off connections handed out earlier.
     pub(crate) struct MysqlTestDb {
         #[allow(dead_code)]
-        pub(crate) _container: &'static ContainerAsync<MysqlImage>,
+        pub(crate) _container: &'static ContainerAsync<GenericImage>,
         /// Connection URL for this test's database, for opening further pools —
         /// see [`connect_to_test_db`].
         pub(crate) url: String,
@@ -73,9 +74,27 @@ pub(crate) mod mysql_helpers {
                     // Pulling the image can transiently fail over a flaky
                     // network (`PullImage`/IO "bytes remaining on stream"), so
                     // retry the container boot rather than fail the whole run.
+                    //
+                    // InnoDB's native AIO (`io_setup`) is unavailable in some
+                    // container runtimes (Docker Desktop on macOS/Windows, and
+                    // restricted CI sandboxes), where MySQL then fails to boot
+                    // with "io_setup() failed with EAGAIN ... Cannot initialize
+                    // AIO sub-system". Disabling native AIO makes InnoDB fall
+                    // back to its simulated AIO layer, a standard and behaviour-
+                    // preserving setting for containerised MySQL.
                     let mut last_err = None;
                     for attempt in 1..=3 {
-                        match MysqlImage::default().with_tag("26.7").start().await {
+                        let image = GenericImage::new("mysql", "26.7")
+                            .with_exposed_port(3306.tcp())
+                            // The entrypoint's `--initialize` phase also prints
+                            // "ready for connections" but binds port 0; only the
+                            // real server logs "port: 3306", so wait for that to
+                            // avoid connecting during init.
+                            .with_wait_for(WaitFor::message_on_stderr("port: 3306"))
+                            .with_env_var("MYSQL_DATABASE", "test")
+                            .with_env_var("MYSQL_ALLOW_EMPTY_PASSWORD", "yes")
+                            .with_cmd(vec!["--innodb-use-native-aio=0"]);
+                        match image.start().await {
                             Ok(node) => return node,
                             Err(err) => {
                                 last_err = Some(err);

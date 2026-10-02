@@ -757,8 +757,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     #[cfg(feature = "acme")]
     {
         let base_url = config.server.resolved_public_base_url();
-        if let Some(sub_host) =
-            url::Url::parse(&base_url).ok().and_then(|u| u.host_str().map(str::to_string))
+        if let Some(sub_host) = url::Url::parse(&base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
             && sub_host != config.server.domain
         {
             tracing::warn!(
