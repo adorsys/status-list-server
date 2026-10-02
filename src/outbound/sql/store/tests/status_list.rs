@@ -1378,9 +1378,10 @@ async fn assert_update_snapshot_rolls_back(
                     default_status: None,
                 },
                 updated_at: v + 1,
+                version: base.version + 1,
                 ..base.clone()
             },
-            v,
+            base.version,
             fixtures::snapshot(
                 snapshot_id,
                 list_id,
@@ -1416,9 +1417,10 @@ async fn assert_update_snapshot_rolls_back(
                     default_status: None,
                 },
                 updated_at: v + 2,
+                version: base.version + 2,
                 ..base.clone()
             },
-            v + 1,
+            base.version + 1,
             fixtures::snapshot(
                 snapshot_id,
                 list_id,

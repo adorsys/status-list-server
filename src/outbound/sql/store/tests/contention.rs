@@ -997,9 +997,10 @@ mod database_implementation {
                             default_status: None,
                         },
                         updated_at: v + 1,
+                        version: base.version + 1,
                         ..base
                     },
-                    v,
+                    base.version,
                     StatusListHistoryRecord {
                         snapshot_id: snapshot_id.to_string(),
                         list_id: list_id.to_string(),
@@ -1013,7 +1014,7 @@ mod database_implementation {
                         sub: "sub-deadlock".to_string(),
                         iat: v + 1,
                         exp: v + 901,
-                        version: v + 1,
+                        version: base.version + 1,
                     },
                 )
                 .await
@@ -1089,8 +1090,13 @@ mod database_implementation {
             txn_a
                 .execute(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE status_lists SET sub = 'a', updated_at = $1 WHERE list_id = $2",
-                    vec![Value::from(v + 5), Value::from(list_id)],
+                    "UPDATE status_lists SET sub = 'a', updated_at = $1, version = $2 \
+                     WHERE list_id = $3",
+                    vec![
+                        Value::from(v + 5),
+                        Value::from(base.version + 1),
+                        Value::from(list_id),
+                    ],
                 ))
                 .await
                 .expect("A failed to take the row lock");
@@ -1103,6 +1109,7 @@ mod database_implementation {
                     default_status: None,
                 },
                 updated_at: v + 1,
+                version: base.version + 1,
                 ..base
             };
             let b_call = tokio::spawn(async move {
@@ -1111,7 +1118,7 @@ mod database_implementation {
                         .update_one_with_snapshot(
                             list_id,
                             updated,
-                            v,
+                            base.version,
                             StatusListHistoryRecord {
                                 snapshot_id: "snap-pinned".to_string(),
                                 list_id: list_id.to_string(),
@@ -1125,12 +1132,12 @@ mod database_implementation {
                                 sub: "sub-pinned".to_string(),
                                 iat: v + 1,
                                 exp: v + 901,
-                                version: v + 1,
+                                version: base.version + 1,
                             },
                         )
                         .await
                 } else {
-                    store_b.update_one(list_id, updated, v).await
+                    store_b.update_one(list_id, updated, base.version).await
                 }
             });
 
