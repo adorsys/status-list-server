@@ -295,6 +295,23 @@ The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-bud
 
 `status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = ttl`) vouch for a token that expires sooner.
 
+### Upgrade strategy for this release
+
+This release changes how status-list updates are fenced for concurrency: updates are now
+guarded on a dedicated `version` column (and the `meta:{id}:version` Redis marker) instead of
+the `updated_at` timestamp (and the `meta:{id}:updated` marker). The two guards are **not
+mutually compatible during a rolling deploy**: old pods guard only on `updated_at` and never
+touch `version`, while new pods guard only on `version` and can write a same-second
+`updated_at`. While both versions run they can overwrite each other's update without a
+conflict, and on the Redis path neither side's invalidation fences the other side's delayed
+fills — so a status change can be silently lost.
+
+Deploy this release with a **`Recreate` rollout strategy (or scale to one replica)** so that
+no old and new pods ever run concurrently. With `Recreate`, set the Deployment
+`strategy.type` to `Recreate` (or scale `statuslist.replicaCount`/HPA min/max to `1` during
+the upgrade) and only scale back out after all pods are on the new version. Do not use a
+default rolling update for this release.
+
 ## Verification
 
 ```bash
