@@ -40,6 +40,13 @@ statuslist:
   # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
   # controls the replica count.
   replicaCount: 1
+  # Deployment rollout strategy (apps/v1 Deployment.spec.strategy). Defaults to a plain
+  # RollingUpdate (Kubernetes default) with no maxSurge/maxUnavailable overrides. Set to
+  # `type: Recreate` when a release must never run old and new pods concurrently (for
+  # example, when a schema/concurrency change makes the two versions mutually
+  # incompatible during a rolling deploy). The full strategy object is passed through.
+  strategy:
+    type: RollingUpdate
   # Extra labels merged onto the Pod template metadata. For Azure Workload Identity,
   # specify azure.workload.identity/use: "true" (must be a quoted string, not a boolean).
   podLabels: {}

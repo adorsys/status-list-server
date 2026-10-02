@@ -306,11 +306,30 @@ touch `version`, while new pods guard only on `version` and can write a same-sec
 conflict, and on the Redis path neither side's invalidation fences the other side's delayed
 fills — so a status change can be silently lost.
 
-Deploy this release with a **`Recreate` rollout strategy (or scale to one replica)** so that
-no old and new pods ever run concurrently. With `Recreate`, set the Deployment
-`strategy.type` to `Recreate` (or scale `statuslist.replicaCount`/HPA min/max to `1` during
-the upgrade) and only scale back out after all pods are on the new version. Do not use a
-default rolling update for this release.
+Deploy this release with a **`Recreate` rollout strategy** so that no old and new pods ever
+run concurrently. The chart exposes the Deployment strategy through
+`statuslist.strategy`; set its type to `Recreate` for this upgrade:
+
+```bash
+helm upgrade --install statuslist ./deploy/helm/chart \
+  --set statuslist.strategy.type=Recreate \
+  ... # your other values
+```
+
+Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
+`maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
+two incompatible versions overlap. Scaling `statuslist.replicaCount`/HPA min/max down to `1`
+alone does **not** avoid that overlap either. If you cannot use `Recreate`, the only safe
+fallback is to scale the workload to **zero** before the upgrade and back up after (a short
+outage):
+
+```bash
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+```
+
+Only scale back out after all pods are on the new version.
 
 ## Verification
 
