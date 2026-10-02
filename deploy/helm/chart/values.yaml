@@ -130,7 +130,7 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # APP_SERVER__DOMAIN comes from statuslist.externalDnsHostname (or global.domain).
+    # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).
     # APP_SERVER__PUBLIC_BASE_URL defaults to https://{DOMAIN}/api/v1; set it only when it differs.
     # APP_SERVER__PUBLIC_BASE_URL: "https://statuslist.example.com/api/v1"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"

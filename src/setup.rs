@@ -733,17 +733,44 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
-    // A `localhost` domain only makes sense for local development: tokens signed
-    // with `sub = https://localhost/...` are rejected by every relying party.
-    if config.telemetry.environment.is_production()
-        && resolved_base_url_uses_local_host(&config.server.resolved_public_base_url())
+    // A `localhost`/loopback `sub` can never be reached by a relying party, so a
+    // production profile refuses to start rather than silently signing tokens
+    // that every relying party rejects. Private/local addresses (`.local`,
+    // private IPv4, link-local, ULA) may be valid internal setups, so those only
+    // warn with an accurate message. The Helm chart falls back to `localhost`
+    // with APP_ENV=production when no host is configured, which this catches.
+    let app_env = if config.telemetry.environment.is_production() {
+        crate::config::ENV_PRODUCTION
+    } else {
+        crate::config::ENV_DEVELOPMENT
+    };
+    let base_url = config.server.resolved_public_base_url();
+    match check_production_base_url(app_env, &base_url) {
+        Err(message) => return Err(color_eyre::eyre::eyre!(message)),
+        Ok(Some(warning)) => tracing::warn!("{warning}"),
+        Ok(None) => {}
+    }
+
+    // ACME issues a certificate only for `server.domain`; when `sub` comes from
+    // a different host, relying parties that check the token signature against
+    // the host in `sub` will reject it.
+    #[cfg(feature = "acme")]
     {
-        tracing::warn!(
-            "server.public_base_url resolves to a local address in a production profile; status \
-             list tokens will be signed with sub = {} and rejected by relying parties. Set \
-             APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) to the public host.",
-            config.server.resolved_public_base_url()
-        );
+        let base_url = config.server.resolved_public_base_url();
+        if let Some(sub_host) =
+            url::Url::parse(&base_url).ok().and_then(|u| u.host_str().map(str::to_string))
+            && sub_host != config.server.domain
+        {
+            tracing::warn!(
+                cert.host = %config.server.domain,
+                sub.host = %sub_host,
+                "server.public_base_url host differs from the ACME certificate host \
+                 (server.domain); tokens are signed with sub = {base_url} but the certificate \
+                 only covers {}. Relying parties that pin the token signature to sub's host \
+                 will reject them.",
+                config.server.domain
+            );
+        }
     }
 
     let state = AppState {
@@ -832,11 +859,10 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
-/// Whether the resolved public base URL's authority is a local-only address
-/// (localhost, loopback, or another private/local address) whose tokens every
-/// relying party would reject. `server.public_base_url` is authoritative, so
-/// this inspects it rather than `server.domain`.
-fn resolved_base_url_uses_local_host(public_base_url: &str) -> bool {
+/// Whether the resolved public base URL's authority is a localhost/loopback
+/// address that can never be reached by any relying party. `server.public_base_url`
+/// is authoritative, so this inspects it rather than `server.domain`.
+fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
         // Config validation already rejected an unparsable URL; be conservative.
         return false;
@@ -850,12 +876,63 @@ fn resolved_base_url_uses_local_host(public_base_url: &str) -> bool {
             domain == "localhost"
                 || domain.starts_with("localhost.")
                 || domain.ends_with(".localhost")
-                || domain == "local"
-                || domain.ends_with(".local")
         }
-        url::Host::Ipv4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
         url::Host::Ipv6(ip) => ip.is_loopback(),
     }
+}
+
+/// Whether the resolved public base URL's authority is a private or local
+/// address that may be valid for an internal deployment but is not generally
+/// reachable by external relying parties: `.local` domains, private IPv4,
+/// link-local addresses, and IPv6 unique-local/ULA addresses. Unlike
+/// [`resolved_base_url_is_localhost`], these are not categorically unusable, so
+/// production only warns about them.
+fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(public_base_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    match host {
+        url::Host::Domain(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "local" || domain.ends_with(".local")
+        }
+        url::Host::Ipv4(ip) => ip.is_private() || ip.is_link_local(),
+        url::Host::Ipv6(ip) => ip.is_unicast_link_local() || ip.is_unique_local(),
+    }
+}
+
+/// In a production profile the resolved base URL must be reachable by relying
+/// parties. A localhost/loopback host can never be, so it is returned as a hard
+/// startup error; a private/local host may be a valid internal deployment, so
+/// it is returned as a warning string. A public host returns `Ok(None)`.
+///
+/// Non-production profiles always return `Ok(None)`. `app_env` is passed
+/// explicitly so the decision is testable without mutating the process
+/// environment.
+fn check_production_base_url(app_env: &str, base_url: &str) -> Result<Option<String>, String> {
+    if app_env != crate::config::ENV_PRODUCTION {
+        return Ok(None);
+    }
+    if resolved_base_url_is_localhost(base_url) {
+        return Err(format!(
+            "server.public_base_url ({base_url}) resolves to localhost/loopback in a \
+             production profile; status list tokens would be signed with a `sub` that every \
+             relying party rejects. Set APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) \
+             to the public host."
+        ));
+    }
+    if resolved_base_url_is_private_or_local(base_url) {
+        return Ok(Some(format!(
+            "server.public_base_url ({base_url}) resolves to a private/local host in a \
+             production profile; internal-only relying parties may accept these tokens, but \
+             external ones may not. Confirm this host is reachable by every relying party."
+        )));
+    }
+    Ok(None)
 }
 
 #[cfg(feature = "acme")]
@@ -1652,29 +1729,48 @@ mod general_tests {
         let _ = tokio::fs::remove_dir_all(temp_dir).await;
     }
 
-    /// The local-address warning keys off the resolved public base URL, not the
-    /// `server.domain` string. Production must warn when the URL host is
-    /// localhost, loopback, or another local address, and stay quiet for a
-    /// public host — including the case where `server.domain` is localhost but
-    /// an explicit valid public URL overrides it.
+    /// The local-address checks key off the resolved public base URL, not the
+    /// `server.domain` string. `localhost`/loopback can never be reached by a
+    /// relying party, while private/local addresses (`.local`, private IPv4,
+    /// link-local, ULA) may be valid internal setups — the two must be told
+    /// apart because production fails on the former but only warns on the
+    /// latter.
     #[test]
     fn resolved_base_url_local_host_detection() {
-        use super::resolved_base_url_uses_local_host;
+        use super::{resolved_base_url_is_localhost, resolved_base_url_is_private_or_local};
 
-        for local in [
+        for localhost in [
             "https://localhost/api/v1",
             "https://localhost.localdomain/api/v1",
             "https://foo.localhost/api/v1",
             "https://127.0.0.1/api/v1",
             "https://[::1]/api/v1",
+        ] {
+            assert!(
+                resolved_base_url_is_localhost(localhost),
+                "{localhost} should be treated as localhost"
+            );
+            assert!(
+                !resolved_base_url_is_private_or_local(localhost),
+                "{localhost} must not also be classified as merely private/local"
+            );
+        }
+
+        for private_local in [
             "https://10.0.0.5/api/v1",
             "https://192.168.1.10/api/v1",
             "https://169.254.169.254/api/v1",
             "https://myhost.local/api/v1",
+            "https://[fd00::1]/api/v1",
+            "https://[fe80::1]/api/v1",
         ] {
             assert!(
-                resolved_base_url_uses_local_host(local),
-                "{local} should be treated as local"
+                !resolved_base_url_is_localhost(private_local),
+                "{private_local} should not be treated as localhost"
+            );
+            assert!(
+                resolved_base_url_is_private_or_local(private_local),
+                "{private_local} should be treated as private/local"
             );
         }
 
@@ -1683,19 +1779,23 @@ mod general_tests {
             "https://statuslist.example.org/api/v1",
         ] {
             assert!(
-                !resolved_base_url_uses_local_host(public),
-                "{public} should not be treated as local"
+                !resolved_base_url_is_localhost(public),
+                "{public} should not be treated as localhost"
+            );
+            assert!(
+                !resolved_base_url_is_private_or_local(public),
+                "{public} should not be treated as private/local"
             );
         }
     }
 
     /// A production profile with an explicit localhost `public_base_url` must
-    /// be flagged as local, while a localhost `server.domain` overridden by an
-    /// explicit public URL must not. Config validation is independent of the
-    /// warning, so these assert the resolved URL used for the warning.
+    /// be classified as localhost, while a localhost `server.domain` overridden
+    /// by an explicit public URL must not. Config validation is independent of
+    /// the startup check, so these assert the resolved URL used for it.
     #[test]
     fn production_localhost_public_base_url_detection() {
-        use super::resolved_base_url_uses_local_host;
+        use super::resolved_base_url_is_localhost;
         use crate::config::ENV_PRODUCTION;
 
         let explicit_localhost = AppConfig::load_from_overrides(&[
@@ -1705,9 +1805,7 @@ mod general_tests {
         ])
         .expect("config loads");
         assert!(
-            resolved_base_url_uses_local_host(
-                &explicit_localhost.server.resolved_public_base_url()
-            ),
+            resolved_base_url_is_localhost(&explicit_localhost.server.resolved_public_base_url()),
             "an explicit localhost public_base_url in production must be flagged"
         );
 
@@ -1721,8 +1819,74 @@ mod general_tests {
         ])
         .expect("config loads");
         assert!(
-            !resolved_base_url_uses_local_host(&overridden.server.resolved_public_base_url()),
+            !resolved_base_url_is_localhost(&overridden.server.resolved_public_base_url()),
             "a public explicit public_base_url must not be flagged even with a localhost domain"
+        );
+    }
+
+    /// The production base-URL guard: localhost/loopback is a hard startup
+    /// error, private/local is a warning, public is quiet, and non-production
+    /// profiles never fire. The decision is keyed off the explicit `app_env`
+    /// argument so it is testable without mutating the process environment.
+    #[test]
+    fn production_base_url_check() {
+        use super::check_production_base_url;
+        use crate::config::ENV_PRODUCTION;
+
+        // localhost/loopback -> hard startup error in production.
+        for url in [
+            "https://localhost/api/v1",
+            "https://localhost.localdomain/api/v1",
+            "https://foo.localhost/api/v1",
+            "https://127.0.0.1/api/v1",
+            "https://[::1]/api/v1",
+        ] {
+            let err = check_production_base_url(ENV_PRODUCTION, url)
+                .expect_err(&format!("{url} must fail in production"));
+            assert!(
+                err.contains("localhost/loopback"),
+                "unexpected error for {url}: {err}"
+            );
+        }
+
+        // private/local -> warning in production, not a failure.
+        for url in [
+            "https://10.0.0.5/api/v1",
+            "https://192.168.1.10/api/v1",
+            "https://169.254.169.254/api/v1",
+            "https://myhost.local/api/v1",
+            "https://[fd00::1]/api/v1",
+            "https://[fe80::1]/api/v1",
+        ] {
+            let warning = check_production_base_url(ENV_PRODUCTION, url)
+                .expect(&format!("{url} must not fail in production"))
+                .expect(&format!("{url} must warn in production"));
+            assert!(
+                warning.contains("private/local"),
+                "unexpected warning for {url}: {warning}"
+            );
+        }
+
+        // public -> quiet.
+        for url in [
+            "https://statuslist.example.com/api/v1",
+            "https://statuslist.example.org/api/v1",
+        ] {
+            assert!(
+                check_production_base_url(ENV_PRODUCTION, url)
+                    .expect("public host must not fail")
+                    .is_none(),
+                "{url} must not warn"
+            );
+        }
+
+        // Non-production profiles never fire.
+        let dev = crate::config::ENV_DEVELOPMENT;
+        assert!(
+            check_production_base_url(dev, "https://localhost/api/v1")
+                .expect("development never fails")
+                .is_none(),
+            "development must be quiet even for localhost"
         );
     }
 }

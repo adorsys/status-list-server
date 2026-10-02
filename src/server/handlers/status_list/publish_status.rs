@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::status_list::StatusListError;
 use crate::domain::service::PublishStatusListCommand;
 use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
@@ -30,13 +31,62 @@ impl From<StatusesRequest> for PublishStatusesRequest {
 
 /// Response body of a successful `PUT /status-lists/{list_id}/statuses`.
 ///
-/// `uri` is the absolute URI of the newly created status list — the value the
-/// issuer MUST embed as the Referenced Token's `sub` (spec §5.1/§5.2/§8.3) so
-/// relying parties can resolve the list it points at.
+/// `uri` is the absolute URI of the newly created status list. Per spec
+/// §5.1/§5.2/§8.3 the issuer MUST embed this exact URI in the Referenced
+/// Token's `status.status_list.uri`; the status list token's own `sub` carries
+/// the same URI so relying parties can resolve it.
 #[derive(Debug, Serialize)]
 pub(super) struct PublishStatusResponse {
     pub uri: String,
     pub list_id: String,
+    /// Fixed list size actually stored by the server after byte-alignment
+    /// rounding, or `None` for caller-managed (grow-on-write) lists.
+    pub size: Option<u32>,
+    /// Number of bits stored for each status entry.
+    pub bits: u8,
+}
+
+/// Parse a `list_id` path segment as a UUID, accepting only the lowercase,
+/// hyphenated form. [`uuid::Uuid::try_parse`] also accepts braced, `urn:uuid:`,
+/// no-hyphen and uppercase forms, which would otherwise be signed verbatim into
+/// the published `sub` (the braced form is not even a valid URI).
+fn parse_list_id_uuid(list_id: &str) -> Result<uuid::Uuid, String> {
+    let uuid = uuid::Uuid::try_parse(list_id).map_err(|err| err.to_string())?;
+    if uuid.hyphenated().to_string() != list_id {
+        return Err("list_id must be a lowercase, hyphenated UUID".to_string());
+    }
+    Ok(uuid)
+}
+
+/// Build the absolute `sub`/`Location` URI for a status list by appending
+/// `/status-lists/{list_id}` to the configured public base URL.
+///
+/// The base URL was normalized and validated at config load (no query,
+/// fragment, or trailing slash — except a root-path base, which normalizes to
+/// `https://host/`), so trimming a single trailing slash before appending is
+/// enough to guarantee exactly one `/` at the boundary without a double slash.
+fn build_status_list_uri(public_base_url: &str, list_id: &str) -> String {
+    format!(
+        "{}/status-lists/{list_id}",
+        public_base_url.trim_end_matches('/')
+    )
+}
+
+/// Map a publish error to an `ApiError`. A `409` conflict carries the stored
+/// list URI as the `Location` header so a racing publisher can adopt the
+/// canonical `sub` for the `list_id` it already supplied.
+async fn publish_error(appstate: &AppState, list_id: &str, err: StatusListError) -> ApiError {
+    if matches!(err, StatusListError::AlreadyExists)
+        && let Ok(record) = appstate.service.get_status_list(list_id).await
+        && let Ok(value) = axum::http::HeaderValue::try_from(&record.sub)
+    {
+        return ApiError::conflict(
+            "status_list_already_exists",
+            "Status list already exists",
+        )
+        .with_header(axum::http::header::LOCATION, value);
+    }
+    err.into()
 }
 
 /// Publish a new status list.
@@ -68,12 +118,7 @@ async fn publish_status_with_options(
     Path(list_id): Path<String>,
     Json(payload): Json<PublishStatusesRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Err(e) = uuid::Uuid::try_parse(&list_id) {
-        return Err(ApiError::bad_request(
-            "invalid_list_id",
-            format!("Invalid list_id format: {e}"),
-        ));
-    }
+    parse_list_id_uuid(&list_id).map_err(|message| ApiError::bad_request("invalid_list_id", message))?;
 
     let statuses = payload
         .statuses
@@ -82,10 +127,14 @@ async fn publish_status_with_options(
         .collect::<Vec<_>>();
     let default_status = payload.default_status.map(Into::into);
 
-    let uri = format!("{}/status-lists/{list_id}", appstate.public_base_url);
+    // Build the sub URI *before* the write: it depends only on config and
+    // `list_id`, so a failure here must never leave a stored list whose URI the
+    // issuer cannot see. The value signed into `sub` is what `record.sub` holds
+    // afterwards, so the response body echoes exactly what was stored.
+    let uri = build_status_list_uri(&appstate.public_base_url, &list_id);
 
     let policy = appstate.status_list_policy();
-    appstate
+    let record = match appstate
         .service
         .publish_status_list(
             PublishStatusListCommand {
@@ -98,12 +147,16 @@ async fn publish_status_with_options(
             },
             &policy,
         )
-        .await?;
+        .await
+    {
+        Ok(record) => record,
+        Err(err) => return Err(publish_error(&appstate, &list_id, err).await),
+    };
 
     let mut headers = HeaderMap::new();
-    let location = axum::http::HeaderValue::try_from(&uri).map_err(|err| {
+    let location = axum::http::HeaderValue::try_from(&record.sub).map_err(|err| {
         tracing::error!(
-            %uri,
+            %record.sub,
             "publish Location header is not a valid HTTP header value: {err}"
         );
         ApiError::internal("generated status list URI cannot be represented as a Location header")
@@ -113,7 +166,12 @@ async fn publish_status_with_options(
     Ok((
         StatusCode::CREATED,
         headers,
-        Json(PublishStatusResponse { uri, list_id }),
+        Json(PublishStatusResponse {
+            uri: record.sub,
+            list_id: record.list_id,
+            size: record.status_list.size,
+            bits: record.status_list.bits,
+        }),
     )
         .into_response())
 }
@@ -243,9 +301,10 @@ mod tests {
 
         // The absolute Location URI must be resolvable: its scheme/authority
         // must match the configured public base URL, and its path must be the
-        // route the GET handler serves. The router is mounted at the root, so
-        // the request below sends that path; the served token's `sub` must
-        // still equal the full absolute URI byte for byte.
+        // route the GET handler serves. The router is nested under `/api/v1` a
+        // few lines up, and `oneshot` cannot route by host, so the request
+        // below sends only the path; the served token's `sub` must still equal
+        // the full absolute URI byte for byte.
         let location_url = url::Url::parse(&location).expect("Location is a valid URL");
         let expected_base =
             url::Url::parse(&app_state.public_base_url).expect("public_base_url is a valid URL");
@@ -309,9 +368,10 @@ mod tests {
             "CWT sub must equal the publish Location byte for byte"
         );
 
-        // The AC additionally requires the *stored* whitelist row's `sub` to
-        // equal the Referenced Token's URI: the row served by the aggregation
-        // endpoint must be the same URI handed to the issuer at publish time.
+        // Compliance-matrix row 8 (§5.1) additionally requires the *stored*
+        // `sub` to equal the Referenced Token's URI: the URI listed by the
+        // aggregation endpoint must be the same one handed to the issuer at
+        // publish time.
         let page = app_state
             .service
             .status_list_repo
@@ -320,7 +380,201 @@ mod tests {
             .expect("stored rows are readable");
         assert!(
             page.status_lists.contains(&location),
-            "stored whitelist row `sub` must equal the publish Location, got {page:?}"
+            "stored `sub` must equal the publish Location, got {page:?}"
+        );
+    }
+
+    /// A configured `public_base_url` whose host differs from `server.domain`
+    /// must win for the published `sub`: the server signs the public base URL,
+    /// not the ACME domain. This builds the base URL from real config so the
+    /// test proves a non-default `public_base_url` actually reaches `sub`.
+    #[tokio::test]
+    async fn test_published_sub_uses_configured_public_base_url_over_domain() {
+        use crate::config::Config;
+        use crate::server::handlers::status_list::get_status_list::get_status_list;
+        use crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT;
+
+        let config = Config::load_from_overrides(&[
+            ("server.domain", "statuslist.example.com"),
+            (
+                "server.public_base_url",
+                "https://status.example.org/api/v1",
+            ),
+        ])
+        .expect("config loads");
+
+        let mut app_state = test_app_state(None).await;
+        app_state.public_base_url = config.server.resolved_public_base_url();
+        let router = Router::new()
+            .nest(
+                "/api/v1",
+                Router::new()
+                    .route(
+                        "/status-lists/{list_id}/statuses/",
+                        put(publish_status_route),
+                    )
+                    .route("/status-lists/{list_id}", get(get_status_list)),
+            )
+            .with_state(app_state.clone());
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!("/api/v1/status-lists/{token_id}/statuses/"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"statuses":[]}"#.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(authenticated_issuer("issuer"));
+
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let location = response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .expect("201 must carry a Location header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            location.starts_with("https://status.example.org/api/v1/status-lists/"),
+            "sub must use the configured public_base_url host, got {location}"
+        );
+        assert!(
+            !location.starts_with("https://statuslist.example.com"),
+            "sub must not fall back to server.domain, got {location}"
+        );
+
+        let location_url = url::Url::parse(&location).expect("Location is a valid URL");
+        let jwt_resp = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri(location_url.path())
+                    .header(axum::http::header::ACCEPT, ACCEPT_STATUS_LISTS_HEADER_JWT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(jwt_resp.status(), StatusCode::OK);
+        let jwt_body = to_bytes(jwt_resp.into_body(), usize::MAX).await.unwrap();
+        let claims = decode_jwt_claims(&jwt_body);
+        assert_eq!(
+            claims["sub"].as_str().unwrap(),
+            location,
+            "JWT sub must equal the publish Location byte for byte"
+        );
+    }
+
+    /// The `sub` is fixed when a list is published: rebuilding the server state
+    /// with a different `public_base_url` must not rewrite the stored `sub` of
+    /// existing lists, because issued credentials still point at the original
+    /// host. Both the served token and the aggregation listing must keep the
+    /// first base URL.
+    #[tokio::test]
+    async fn test_stored_sub_survives_public_base_url_change() {
+        use crate::server::handlers::status_list::get_status_list::get_status_list;
+        use crate::server::handlers::status_list::utils::constants::ACCEPT_STATUS_LISTS_HEADER_JWT;
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut state_original = test_app_state(None).await;
+        let mut state_rebased = state_original.clone();
+        state_original.public_base_url = "https://one.example/api/v1".to_string();
+        state_rebased.public_base_url = "https://two.example/api/v1".to_string();
+
+        // Publish under the original base URL.
+        let first_uri = {
+            let router = Router::new()
+                .nest(
+                    "/api/v1",
+                    Router::new()
+                        .route(
+                            "/status-lists/{list_id}/statuses/",
+                            put(publish_status_route),
+                        )
+                        .route("/status-lists/{list_id}", get(get_status_list)),
+                )
+                .with_state(state_original.clone());
+            let mut request = axum::http::Request::builder()
+                .method(axum::http::Method::PUT)
+                .uri(format!("/api/v1/status-lists/{token_id}/statuses/"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"statuses":[]}"#.to_string()))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(authenticated_issuer("issuer"));
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("201 must carry a Location header")
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(first_uri.starts_with("https://one.example/"));
+
+        // Rebuild the state with a different base URL but the same stored list,
+        // then serve the token and the aggregation: both must still use the
+        // original URI.
+        let rebased_router = Router::new()
+            .nest(
+                "/api/v1",
+                Router::new()
+                    .route("/status-lists/{list_id}", get(get_status_list))
+                    .route("/aggregation", get(crate::server::handlers::get_aggregation)),
+            )
+            .with_state(state_rebased.clone());
+
+        let first_path = url::Url::parse(&first_uri)
+            .expect("first URI is valid")
+            .path()
+            .to_string();
+        let jwt_resp = rebased_router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri(first_path)
+                    .header(axum::http::header::ACCEPT, ACCEPT_STATUS_LISTS_HEADER_JWT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(jwt_resp.status(), StatusCode::OK);
+        let jwt_body = to_bytes(jwt_resp.into_body(), usize::MAX).await.unwrap();
+        let claims = decode_jwt_claims(&jwt_body);
+        assert_eq!(
+            claims["sub"].as_str().unwrap(),
+            first_uri,
+            "served sub must keep the original base URL after a public_base_url change"
+        );
+
+        let agg_resp = rebased_router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/api/v1/aggregation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agg_resp.status(), StatusCode::OK);
+        let agg_body = to_bytes(agg_resp.into_body(), usize::MAX).await.unwrap();
+        let agg: serde_json::Value = serde_json::from_slice(&agg_body).unwrap();
+        assert!(
+            agg["status_lists"]
+                .as_array()
+                .map(|arr| arr.iter().any(|u| u.as_str() == Some(&first_uri)))
+                .unwrap_or(false),
+            "aggregation must keep the original URI, got {agg}"
         );
     }
 
@@ -343,6 +597,35 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Only the lowercase hyphenated UUID form is accepted as a `list_id`:
+    /// braced, `urn:uuid:`, no-hyphen and uppercase forms would otherwise be
+    /// signed verbatim into `sub` (the braced form is not even a valid URI).
+    #[tokio::test]
+    async fn test_publish_rejects_non_canonical_uuid_forms() {
+        let canonical = uuid::Uuid::new_v4().to_string();
+        let uppercase = canonical.to_uppercase();
+        let no_hyphen = canonical.replace('-', "");
+        let braced = format!("{{{canonical}}}");
+        let urn = format!("urn:uuid:{canonical}");
+
+        for bad in [uppercase.as_str(), no_hyphen.as_str(), braced.as_str(), urn.as_str()] {
+            let appstate = test_app_state(None).await;
+            let result = publish_status(
+                State(appstate),
+                authenticated_issuer("issuer"),
+                Path(bad.to_string()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+            .await;
+            let err = match result {
+                Ok(_) => panic!("expected {bad:?} to be rejected as an invalid list_id"),
+                Err(e) => e,
+            };
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(err.error, "invalid_list_id");
+        }
     }
 
     #[tokio::test]
@@ -438,6 +721,15 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["list_id"], token_id);
+        assert_eq!(
+            json["uri"],
+            "https://example.com/api/v1/status-lists/".to_string() + &token_id,
+            "body `uri` must name the created list"
+        );
+        // `size` is the rounded value actually stored (5 -> 8), not the request
+        // value, so callers learn the real list dimensions from the response.
+        assert_eq!(json["size"], 8, "size must be the rounded stored value");
+        assert_eq!(json["bits"], 1);
 
         let token = app_state.service.get_status_list(&token_id).await.unwrap();
         assert_eq!(token.status_list.size, Some(8));

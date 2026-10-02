@@ -28,9 +28,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-const AGGREGATION_ROUTE_PATH: &str = "/api/v1/aggregation";
+use crate::config::{Config, PUBLIC_API_PATH_PREFIX};
 
-use crate::config::Config;
 use crate::server::AppState;
 use crate::server::auth::auth;
 use crate::server::handlers::{
@@ -77,7 +76,7 @@ impl HttpServer {
             .route("/health/live", get(health::live))
             .route("/health/ready", get(health::ready))
             .nest(
-                "/api/v1",
+                PUBLIC_API_PATH_PREFIX,
                 api_v1_routes(
                     state.clone(),
                     strict_governor.clone(),
@@ -287,9 +286,12 @@ fn validate_aggregation_uri(config: &Config) -> color_eyre::Result<()> {
 
     let parsed = reqwest::Url::parse(uri).wrap_err("Invalid aggregation_uri: not a valid URL")?;
     let path = parsed.path();
-    if path != AGGREGATION_ROUTE_PATH {
+    // The aggregation route is served under the same shared API prefix as the
+    // rest of the status-list routes, so it is derived from that constant.
+    let expected = format!("{PUBLIC_API_PATH_PREFIX}/aggregation");
+    if path != expected {
         return Err(eyre!(
-            "Configured aggregation_uri path '{path}' does not match the actual route '{AGGREGATION_ROUTE_PATH}'"
+            "Configured aggregation_uri path '{path}' does not match the actual route '{expected}'"
         ));
     }
 

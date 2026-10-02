@@ -96,10 +96,15 @@ the created list:
 }
 ```
 
-For full spec compliance (§5.1/§5.2/§8.3), the issuer MUST embed the returned
-`uri` as the Referenced Token's `sub` when referencing a credential in this
-list, so relying parties can resolve it. The server signs exactly this URI into
-every token it issues for the list.
+For full spec compliance (§5.1/§5.2/§8.3), the issuer MUST embed this exact
+`uri` in the Referenced Token's `status.status_list.uri`; the status list
+token's own `sub` carries the same URI so relying parties can resolve it.
+
+The `uri` is fixed when the list is published: the server signs it into every
+token it issues and stores it as the list's subject. Changing
+`server.public_base_url` (or `server.domain`) only affects lists published
+after the change; existing lists keep their original URI, and the old host has
+to keep serving them, because already-issued credentials still point there.
 
 The complete OpenAPI 3.1 REST API specification is available at [OpenAPI Specification](docs/openapi.yaml).
 

@@ -258,10 +258,30 @@ impl ServerConfig {
     /// The resolved public base URL, defaulting to `https://{domain}/api/v1`.
     ///
     /// IPv6 hosts are bracketed so the result is a valid URL.
+    ///
+    /// The URL is parsed once and re-serialized, so the returned value is the
+    /// canonical form of what validation accepted: scheme/host are lowercased,
+    /// the default port is dropped, and `.`/`..` path segments are resolved.
+    /// This same normalized URL is what gets signed into `sub` and returned to
+    /// issuers, so it matches the URL that `validate_public_base_url` checked.
     pub fn resolved_public_base_url(&self) -> String {
+        // Parse once (validation guarantees it parses) and serialize back so the
+        // returned URL is normalized, not the raw string typed into config.
+        url::Url::parse(&self.raw_resolved_public_base_url())
+            .expect("resolved public base URL was validated at config load")
+            .to_string()
+    }
+
+    /// The resolved public base URL exactly as configured or derived, without
+    /// normalization. This is what validation inspects so the trailing-slash
+    /// rule sees the operator's actual input rather than the re-serialized form.
+    fn raw_resolved_public_base_url(&self) -> String {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
-            None => format!("https://{}/api/v1", url_authority_host(&self.domain)),
+            None => format!(
+                "https://{}{PUBLIC_API_PATH_PREFIX}",
+                url_authority_host(&self.domain)
+            ),
         }
     }
 }
@@ -279,7 +299,7 @@ fn url_authority_host(domain: &str) -> String {
 /// Validates `server.domain`: a bare host name or IP address with no scheme,
 /// path, userinfo, port, query, or fragment.
 fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
-    if database_host_is_ipv6(domain) {
+    if is_ipv6_host(domain) {
         return Ok(());
     }
 
@@ -306,16 +326,25 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
 }
 
 /// API path prefix under which the status-list routes are mounted. The published
-/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so
-/// `public_base_url` must carry exactly this prefix for it to resolve.
-const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
+/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so by default
+/// `public_base_url` carries this prefix for it to resolve. Operators running
+/// behind a proxy with a different path prefix may set a custom
+/// `server.public_base_url` whose path differs; the router mounts the same
+/// prefix so the two cannot drift.
+pub const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
 
-/// Validates `server.public_base_url`: an absolute `https` URL whose path is
-/// exactly the API prefix, with no query, fragment, or trailing slash.
+/// Validates `server.public_base_url`: an absolute `https` URL with a host, no
+/// userinfo, query, or fragment, and no trailing slash. The path is not
+/// constrained to a single value so the server can be served behind a proxy
+/// with a path prefix (`statuslist.ingress.path`); it only has to be a
+/// well-formed path that, once `/status-lists/{list_id}` is appended, resolves
+/// to the served route.
 fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(base_url).map_err(|err| {
+        // Do not echo the raw value: a mistyped URL may carry a password in the
+        // userinfo that the checks below would otherwise reject.
         ConfigError::Message(format!(
-            "Invalid server.public_base_url '{base_url}': not a valid URL ({err})"
+            "Invalid server.public_base_url: not a valid URL ({err})"
         ))
     })?;
     if parsed.scheme() != "https" {
@@ -348,13 +377,6 @@ fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::Message(
             "Invalid server.public_base_url: must not end with a trailing slash".to_string(),
         ));
-    }
-    if parsed.path() != PUBLIC_API_PATH_PREFIX {
-        return Err(ConfigError::Message(format!(
-            "Invalid server.public_base_url: path must be exactly '{PUBLIC_API_PATH_PREFIX}' \
-             so the published status-list URI resolves to the served route; got '{}'",
-            parsed.path()
-        )));
     }
     Ok(())
 }
@@ -792,7 +814,8 @@ fn format_database_url_host(host: &str) -> String {
     }
 }
 
-fn database_host_is_ipv6(host: &str) -> bool {
+/// Whether `host` is an IPv6 address, optionally wrapped in brackets.
+fn is_ipv6_host(host: &str) -> bool {
     host.parse::<std::net::Ipv6Addr>().is_ok()
         || host
             .strip_prefix('[')
@@ -850,7 +873,7 @@ fn validate_database_query(query: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_database_host(host: &str) -> Result<(), ConfigError> {
-    if database_host_is_ipv6(host) {
+    if is_ipv6_host(host) {
         return Ok(());
     }
 
@@ -1321,16 +1344,26 @@ pub struct StatusListConfig {
 
 /// Upper bound (in seconds) for the configured token lifetime.
 ///
-/// Values above this would effectively never expire, so they are rejected at
-/// config load. Deliberately not compared against the startup clock.
+/// Draft-21 requires `ttl` to be a positive number and §11.5 asks for reasonable
+/// ranges, so values that would effectively never expire (or push the `exp`
+/// claim past what relying parties can handle) are rejected at configuration
+/// load instead of at issuance. It deliberately does NOT compare against the
+/// startup clock, so configuration acceptance never depends on the instant the
+/// process started.
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 3600;
 
 impl StatusListConfig {
     /// Rejects token-lifetime values the spec forbids.
     ///
-    /// Enforces only static invariants: positive values within
-    /// `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. Overflow of `iat + exp` at
-    /// issuance is guarded by `checked_add` at expiry construction instead.
+    /// This enforces only static, representation-level invariants: positive
+    /// values within `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. It deliberately
+    /// does NOT compare `token_exp_secs` against the wall clock at startup:
+    /// configuration acceptance must not depend on the instant the process
+    /// started, so an otherwise-valid value would silently change behaviour one
+    /// second later. Overflow of `iat + token_exp_secs` at issuance time is
+    /// instead guarded by `checked_add` at every expiry construction, which fails
+    /// closed instead of wrapping `exp` negative (see `build_snapshot` and the
+    /// token validity window).
     fn validate(&self) -> Result<(), ConfigError> {
         validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
         validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
@@ -1345,8 +1378,10 @@ impl StatusListConfig {
     }
 }
 
-/// `secs` must be positive and at or below `MAX_TOKEN_LIFETIME_SECS`; `0` breaks
-/// the spec (ttl MUST be positive) and larger values would never expire.
+/// `secs` must be a positive number at or below `MAX_TOKEN_LIFETIME_SECS`;
+/// `0` breaks the spec (ttl MUST be positive) and values above the ceiling would
+/// produce effectively-never-expiring tokens (or an `exp` past year 9999) that
+/// relying parties cannot handle, and let revoked credentials look valid (§11.5).
 fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
     if secs == 0 {
         return Err(ConfigError::Message(format!(
@@ -1405,7 +1440,9 @@ impl Config {
         validate_server_domain(&config.server.domain)?;
         // Validate the *resolved* base URL — whether explicitly set or derived
         // from `server.domain` — so a broken fallback is caught at startup too.
-        validate_public_base_url(&config.server.resolved_public_base_url())?;
+        // The raw (un-normalized) value is inspected so the trailing-slash rule
+        // sees the operator's actual input.
+        validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
         config.cache.validate(config.telemetry.environment)?;
         config.management_auth.validate()?;
         config.status_list.validate()?;
@@ -2363,18 +2400,6 @@ mod tests {
                 "must not end with a trailing slash",
             ),
             (
-                "https://statuslist.example.com",
-                "path must be exactly '/api/v1'",
-            ),
-            (
-                "https://statuslist.example.com/api/v2",
-                "path must be exactly '/api/v1'",
-            ),
-            (
-                "https://statuslist.example.com/api/v1/status-lists/foo",
-                "path must be exactly '/api/v1'",
-            ),
-            (
                 "https://user@statuslist.example.com/api/v1",
                 "must not contain userinfo",
             ),
@@ -2401,6 +2426,22 @@ mod tests {
     }
 
     #[test]
+    fn test_public_base_url_allows_non_api_v1_path() {
+        // The path is not constrained to `/api/v1`: operators may serve the
+        // status-list routes behind a proxy with a path prefix, and the sub URI
+        // simply carries `{public_base_url}/status-lists/{list_id}`.
+        for value in [
+            "https://statuslist.example.com",
+            "https://statuslist.example.com/api/v2",
+            "https://statuslist.example.com/proxy",
+            "https://statuslist.example.com/api/v1/status-lists/foo",
+        ] {
+            Config::load_from_overrides(&[("server.public_base_url", value)])
+                .expect(&format!("public_base_url {value:?} must load"));
+        }
+    }
+
+    #[test]
     fn test_public_base_url_rejects_userinfo() {
         for (value, expected) in [
             (
@@ -2423,6 +2464,24 @@ mod tests {
                 "expected {expected:?} in: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_resolved_public_base_url_is_normalized() {
+        // The resolved URL is the canonical form of what validation accepted,
+        // not the raw string typed into config: the scheme and host are
+        // lowercased, the default port is dropped, and `.`/`..` path segments
+        // are resolved. The same normalized value is what gets signed into
+        // `sub`, so it matches the URL that `validate_public_base_url` checked.
+        let config = Config::load_from_overrides(&[(
+            "server.public_base_url",
+            "HTTPS://StatusList.Example.COM:443/api/../api/v1",
+        )])
+        .expect("config loads");
+        assert_eq!(
+            config.server.resolved_public_base_url(),
+            "https://statuslist.example.com/api/v1"
+        );
     }
 
     #[test]
