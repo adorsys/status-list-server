@@ -1914,21 +1914,18 @@ mod general_tests {
     #[test]
     fn prod_alias_fires_production_base_url_guard() {
         use super::check_production_base_url;
+        use crate::config::{ENV_PRODUCTION, classify_app_env};
 
-        let previous = std::env::var("APP_ENV").ok();
-        std::env::set_var("APP_ENV", "  prod ");
-        let app_env = crate::config::normalize_app_env();
-        assert_eq!(app_env, crate::config::ENV_PRODUCTION);
-        let result = check_production_base_url(&app_env, "https://localhost/api/v1");
-        match previous {
-            Some(value) => std::env::set_var("APP_ENV", value),
-            None => std::env::remove_var("APP_ENV"),
+        for raw in ["prod", "PROD", " production ", "PrOd"] {
+            let app_env = classify_app_env(raw);
+            assert_eq!(app_env, ENV_PRODUCTION, "{raw:?} must classify as production");
+            let result = check_production_base_url(app_env, "https://localhost/api/v1");
+            assert!(
+                result
+                    .expect_err("localhost base URL in a prod profile must be a hard error")
+                    .contains("localhost/loopback"),
+                "APP_ENV={raw:?} must be treated as production for the base-URL guard"
+            );
         }
-        assert!(
-            result
-                .expect_err("localhost base URL in a prod profile must be a hard error")
-                .contains("localhost/loopback"),
-            "APP_ENV=prod must be treated as production for the base-URL guard"
-        );
     }
 }

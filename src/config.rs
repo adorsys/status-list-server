@@ -98,12 +98,15 @@ pub const ENV_DEVELOPMENT: &str = "development";
 /// the deployment profile must use this rather than comparing the raw value,
 /// so the guard matches what config itself decided.
 pub fn normalize_app_env() -> &'static str {
-    match std::env::var("APP_ENV")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    classify_app_env(&std::env::var("APP_ENV").unwrap_or_default())
+}
+
+/// Pure classification of a raw `APP_ENV` value into the canonical
+/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] profile. Extracted from
+/// [`normalize_app_env`] so the mapping is testable without touching the
+/// process environment.
+pub fn classify_app_env(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "production" | "prod" => ENV_PRODUCTION,
         _ => ENV_DEVELOPMENT,
     }
@@ -2949,15 +2952,30 @@ mod tests {
     }
 
     #[test]
-    fn is_production_predicate_only_accepts_normalized_production() {
-        // `is_production` is the pure predicate over a value already produced by
-        // `normalize_app_env`; it must be insensitive to aliases because those
-        // are resolved to the canonical value by the normalizer first.
+    fn normalize_app_env_aliases_match_config() {
+        // The exact aliases config treats as production (`production`/`prod`,
+        // any case, surrounding whitespace) must classify as production, and
+        // everything else as development. This is the pure mapping behind
+        // `normalize_app_env`, so the deployment guard agrees with config.
+        for raw in ["production", "prod", "PRODUCTION", " Prod ", "  prod  "] {
+            assert_eq!(
+                classify_app_env(raw),
+                ENV_PRODUCTION,
+                "raw APP_ENV {raw:?} must be production"
+            );
+            assert!(is_production(classify_app_env(raw)));
+        }
+        for raw in ["development", "dev", "", "staging", "development ", "PRODx"] {
+            assert_eq!(
+                classify_app_env(raw),
+                ENV_DEVELOPMENT,
+                "raw APP_ENV {raw:?} must be development"
+            );
+            assert!(!is_production(classify_app_env(raw)));
+        }
+        // The predicate itself only matches the canonical production value.
         assert!(is_production(ENV_PRODUCTION));
-        assert!(is_production("production"));
-        assert!(!is_production(ENV_DEVELOPMENT));
         assert!(!is_production("prod"));
         assert!(!is_production(" production "));
-        assert!(!is_production(""));
     }
 }
