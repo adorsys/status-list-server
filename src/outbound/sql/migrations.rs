@@ -11,12 +11,13 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(tables::Migration),
             Box::new(add_updated_at::Migration),
-            Box::new(add_status_list_version::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
             Box::new(credentials_list_count::Migration),
             Box::new(list_quota::Migration),
             Box::new(status_list_allocations::Migration),
+            Box::new(add_status_list_version::Migration),
+            Box::new(add_status_list_history_version::Migration),
         ]
     }
 }
@@ -528,6 +529,65 @@ pub(crate) mod add_status_list_version {
 
     #[derive(Iden)]
     enum StatusLists {
+        Table,
+        Version,
+    }
+}
+
+/// Adds the `version` tie-breaker to `status_list_history`.
+///
+/// Two updates to the same list within the same second share an `iat` (since
+/// `updated_at` is a real wall-clock timestamp), so `?time=` resolution could
+/// otherwise return the pre-change snapshot. The monotonic optimistic-concurrency
+/// `version` recorded on the snapshot breaks that tie: `find_valid_at` orders by
+/// `iat DESC, version DESC` so the post-change snapshot wins.
+pub(crate) mod add_status_list_history_version {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "add_status_list_history_version"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("status_list_history", "version").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusListHistory::Table)
+                            .add_column(
+                                ColumnDef::new(StatusListHistory::Version)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(StatusListHistory::Table)
+                        .drop_column(StatusListHistory::Version)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusListHistory {
         Table,
         Version,
     }

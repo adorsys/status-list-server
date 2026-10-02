@@ -899,10 +899,12 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Intervals intentionally overlap: each update writes a fresh snapshot with
     /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
     /// original (later) `exp`, so both can match a `time` in the overlap. That is
-    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
-    /// returns the newest snapshot in effect at `time`, which is the correct
-    /// answer for "what was the status then". The memory adapter mirrors this via
-    /// `max_by_key(iat)`.
+    /// not an inconsistency — `ORDER BY iat DESC, version DESC LIMIT 1`
+    /// deterministically returns the newest snapshot in effect at `time`, which
+    /// is the correct answer for "what was the status then". The `version`
+    /// tie-breaker disambiguates two snapshots written within the same second
+    /// (identical `iat`) so the post-change snapshot wins. The memory adapter
+    /// mirrors this via `max_by_key((iat, version))`.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
@@ -916,6 +918,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 .filter(status_list_history::Column::Iat.lte(time))
                 .filter(status_list_history::Column::Exp.gt(time))
                 .order_by_desc(status_list_history::Column::Iat)
+                .order_by_desc(status_list_history::Column::Version)
                 .one(&*db)
                 .await
                 .map_err(find_err)

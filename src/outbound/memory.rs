@@ -338,7 +338,10 @@ impl StatusListSnapshotRepo for MemoryStatusListSnapshotRepo {
             let result = values
                 .values()
                 .filter(|r| r.list_id == list_id && r.iat <= time && r.exp > time)
-                .max_by_key(|r| r.iat)
+                // Mirrors the SQL adapter's `ORDER BY iat DESC, version DESC`:
+                // two snapshots written in the same second share an `iat`, so
+                // `version` breaks the tie and the post-change snapshot wins.
+                .max_by_key(|r| (r.iat, r.version as i64))
                 .cloned();
             Ok(result)
         })
@@ -994,6 +997,7 @@ mod tests {
             sub: format!("https://example/{id}"),
             iat: 0,
             exp: 900,
+            version: 1,
         };
 
         repo.create_with_snapshot(list_record("l1", "issuer"), snapshot("l1"), 1)

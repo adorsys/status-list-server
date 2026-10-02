@@ -240,7 +240,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp", "version") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
                 [
                     snapshot.snapshot_id.into(),
                     snapshot.list_id.into(),
@@ -249,6 +249,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
                     snapshot.sub.into(),
                     snapshot.iat.into(),
                     snapshot.exp.into(),
+                    snapshot.version.into(),
                 ],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
@@ -647,7 +648,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp", "version") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
                 [
                     snapshot.snapshot_id.clone().into(),
                     snapshot.list_id.clone().into(),
@@ -658,6 +659,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
                     snapshot.sub.clone().into(),
                     snapshot.iat.into(),
                     snapshot.exp.into(),
+                    snapshot.version.into(),
                 ],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
@@ -1265,6 +1267,7 @@ async fn assert_duplicate_list_id_is_conflict(
         sub: format!("sub-{list_id}"),
         iat,
         exp: iat + 900,
+        version: 1,
     };
 
     store

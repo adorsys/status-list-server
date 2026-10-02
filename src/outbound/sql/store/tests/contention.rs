@@ -105,6 +105,7 @@ mod database_implementation {
                 sub: record_a.sub.clone(),
                 iat: updated_at_a,
                 exp: updated_at_a + 900,
+                version: record_a.version,
             };
 
             store_a_clone
@@ -146,6 +147,7 @@ mod database_implementation {
                 sub: record_b.sub.clone(),
                 iat: updated_at_b,
                 exp: updated_at_b + 900,
+                version: record_b.version,
             };
 
             // This update uses the ORIGINAL base version as guard. After A
@@ -313,6 +315,7 @@ mod database_implementation {
             sub: format!("sub-{list_id}"),
             iat,
             exp: iat + 900,
+            version: 1,
         };
 
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
@@ -840,9 +843,9 @@ mod database_implementation {
             .await
             .expect("A failed to take the row lock");
 
-        // B's guard is valid — the row really is still at `v`. B fails purely
-        // because it cannot acquire the lock within its 1s budget, which is what
-        // makes this contention rather than a lost race.
+        // B's guard is valid — the row really is still at `base.version`. B fails
+        // purely because it cannot acquire the lock within its 1s budget, which is
+        // what makes this contention rather than a lost race.
         let result = store_b
             .update_one(
                 list_id,
@@ -854,9 +857,10 @@ mod database_implementation {
                         default_status: None,
                     },
                     updated_at: v + 1,
+                    version: base.version + 1,
                     ..base.clone()
                 },
-                v,
+                base.version,
             )
             .await;
 
@@ -1009,6 +1013,7 @@ mod database_implementation {
                         sub: "sub-deadlock".to_string(),
                         iat: v + 1,
                         exp: v + 901,
+                        version: v + 1,
                     },
                 )
                 .await
@@ -1120,6 +1125,7 @@ mod database_implementation {
                                 sub: "sub-pinned".to_string(),
                                 iat: v + 1,
                                 exp: v + 901,
+                                version: v + 1,
                             },
                         )
                         .await

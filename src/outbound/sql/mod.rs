@@ -253,6 +253,7 @@ impl From<models::StatusListHistoryRecord> for StatusListSnapshot {
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: u64::try_from(record.version).unwrap_or(0),
         }
     }
 }
@@ -272,6 +273,7 @@ impl From<StatusListSnapshot> for models::StatusListHistoryRecord {
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: i64::try_from(record.version).unwrap_or(i64::MAX),
         }
     }
 }

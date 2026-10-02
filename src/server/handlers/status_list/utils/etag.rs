@@ -304,6 +304,7 @@ mod tests {
             sub: "https://example.com/credentials/status/3".to_string(),
             iat: 1000,
             exp: 1900,
+            version: 1,
         }
     }
 

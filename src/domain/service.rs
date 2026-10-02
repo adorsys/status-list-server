@@ -246,7 +246,13 @@ impl Service {
         // token's `iat` into the future (RPs reject a future `iat`).
         let previous_version = existing.version;
         existing.version = next_version(previous_version);
-        existing.updated_at = current_unix_timestamp();
+        // `updated_at` stays a real wall-clock timestamp and never moves
+        // backwards, even on a replica with a slightly slow clock: two writes in
+        // the same second can therefore share an `updated_at`, which is fine
+        // because the monotonic `version` is the concurrency guard and the
+        // snapshot/history tie-breaker. Advancing it with `max(now, previous)`
+        // (rather than `previous + 1`) keeps it from drifting ahead of the clock.
+        existing.updated_at = existing.updated_at.max(current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
             let snapshot = build_snapshot(&existing, policy.token_exp_secs)?;
@@ -468,6 +474,7 @@ fn build_snapshot(
         sub: record.sub.clone(),
         iat,
         exp,
+        version: record.version,
     })
 }
 

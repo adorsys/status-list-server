@@ -116,5 +116,6 @@ pub(super) fn snapshot(
         sub: sub.to_string(),
         iat,
         exp,
+        version: 0,
     }
 }

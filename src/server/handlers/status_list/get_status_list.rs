@@ -1055,7 +1055,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_conditional_request_if_modified_since_returns_304() {
+    async fn test_conditional_request_if_modified_since_alone_returns_fresh_200() {
+        // If-Modified-Since on its own never certifies a 304: `updated_at` is a
+        // real wall-clock timestamp, so a revoke landing in the same second as
+        // the client's copy would otherwise be hidden by `updated_at <= IMS`. A
+        // 200 with a freshly signed token is always correct; the exact ETag
+        // (which includes `version`) is the revalidation mechanism.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
@@ -1097,7 +1102,15 @@ mod tests {
         .unwrap()
         .into_response();
 
-        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            res2.status(),
+            StatusCode::OK,
+            "an If-Modified-Since-only request must be served a fresh 200, never a 304"
+        );
+        let body = axum::body::to_bytes(res2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]

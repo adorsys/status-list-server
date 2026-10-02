@@ -184,7 +184,21 @@ pub(crate) fn evaluate_conditional_request(
             ConditionalResponse::Modified
         };
     }
-    evaluate_if_modified_since(if_modified_since, updated_at, now, validity)
+    // With no If-None-Match, only If-Modified-Since is present. It never
+    // certifies a 304: `updated_at` is a real wall-clock timestamp, so a revoke
+    // landing in the same second as the client's copy (or on a replica with a
+    // slightly slow clock) would otherwise be hidden by `updated_at <= IMS`. A
+    // 200 is always correct, and the exact ETag (which includes the monotonic
+    // `version`) already gives clients an efficient revalidation. The
+    // `ExpiredToken` signal is indistinguishable from a plain re-sign for the
+    // handler (both serve a fresh 200), so an IMS-only request uniformly yields
+    // `Modified` and never a `304`.
+    match evaluate_if_modified_since(if_modified_since, updated_at, now, validity) {
+        ConditionalResponse::NotModified | ConditionalResponse::ExpiredToken => {
+            ConditionalResponse::Modified
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn format_http_date(unix_timestamp: i64) -> String {
@@ -575,7 +589,11 @@ mod tests {
             now,
             TokenValidity::new(900, 300),
         );
-        assert_eq!(result, ConditionalResponse::NotModified);
+        // Without If-None-Match, If-Modified-Since alone must never certify a
+        // 304: a same-second revoke (or a slow-clocked replica) would otherwise
+        // be hidden by `updated_at <= IMS`. The exact ETag is the revalidation
+        // mechanism, so an IMS-only request is always served a fresh 200.
+        assert_eq!(result, ConditionalResponse::Modified);
     }
 
     #[test]
@@ -592,9 +610,9 @@ mod tests {
             updated_at + 901,
             TokenValidity::new(900, 300),
         );
-        // Earliest token expiry (window-anchored) is far in the past at this
-        // `now`, so the IMS revalidation must signal an expired-token re-sign.
-        assert_eq!(result, ConditionalResponse::ExpiredToken);
+        // An IMS-only request is served a fresh 200 regardless of how old the
+        // content is; the ExpiredToken signal only applies to the ETag path.
+        assert_eq!(result, ConditionalResponse::Modified);
     }
 
     #[test]

@@ -118,6 +118,10 @@ pub(crate) mod status_list_history {
         pub sub: String,
         pub iat: i64,
         pub exp: i64,
+        /// The list's optimistic-concurrency version when this snapshot was
+        /// taken; tie-breaker for `?time=` resolution when two snapshots share
+        /// an `iat` within the same second.
+        pub version: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

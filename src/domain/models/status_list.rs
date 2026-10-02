@@ -147,6 +147,11 @@ pub struct StatusListSnapshot {
     pub iat: i64,
     /// Unix timestamp (seconds) when this snapshot stops being valid.
     pub exp: i64,
+    /// The record's monotonic optimistic-concurrency version at the moment this
+    /// snapshot was taken. Two snapshots written within the same second share an
+    /// `iat`; `version` breaks that tie so `?time=` resolution returns the
+    /// post-change snapshot deterministically.
+    pub version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
