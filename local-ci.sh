@@ -17,11 +17,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 CHART_DIR="${CHART_DIR:-deploy/helm/chart}"
-TOOLS_ROOT="${LOCAL_CI_TOOLS_ROOT:-$PWD/target/local-ci-tools}"
-mkdir -p "$TOOLS_ROOT"
-TOOLS_ROOT="$(cd "$TOOLS_ROOT" && pwd)"
+TOOLS_ROOT="${LOCAL_CI_TOOLS_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/status-list-server/local-ci}"
 TOOLS_BIN="$TOOLS_ROOT/bin"
-RUNNER_TEMP="${RUNNER_TEMP:-$TOOLS_ROOT/tmp}"
+RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+GATE=""
 BOOTSTRAP=1
 MODE="default"
 
@@ -35,6 +34,7 @@ DENY_VERSION="0.20.2"
 TOMBI_VERSION="1.2.4"
 MARKDOWNLINT_VERSION="0.23.1"
 TRIVY_VERSION="0.70.0"
+TRIVY_IMAGE="aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
 TYPOS_VERSION="1.49.0"
 YAMLFMT_VERSION="v0.21.0"
 HELM_VERSION="v4.2.4"
@@ -45,12 +45,12 @@ OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector-contrib:0.158.0"
 PROMETHEUS_IMAGE="prom/prometheus:v3.11.3"
 JAEGER_IMAGE="jaegertracing/jaeger:2.20.0"
 
-export PATH="$TOOLS_BIN:$TOOLS_ROOT/node/node_modules/.bin:$TOOLS_ROOT/python/bin:$PATH"
+BASE_PATH="$PATH"
 export CHART_DIR RUNNER_TEMP
 
 usage() {
     cat <<'EOF'
-Usage: ./local-ci.sh [--full] [--no-bootstrap] [--help]
+Usage: ./local-ci.sh [--full] [--no-bootstrap] [--gate NAME] [--help]
 
 Modes:
   default       Fast day-to-day gates: fmt, build, memory/release feature checks,
@@ -63,6 +63,8 @@ Modes:
 
 Options:
   --no-bootstrap  Require matching installed CLIs; print install guidance otherwise.
+  --gate NAME     Run only: rust, wiring, style, zizmor, variants, docker,
+                  supply-chain, helm, otel, prometheus, coverage.
   --help          Show this help.
 EOF
 }
@@ -70,6 +72,11 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --full) MODE="full" ;;
+        --gate)
+            [ "$#" -ge 2 ] || { echo "--gate requires a name" >&2; exit 2; }
+            shift; GATE="$1"
+            case "$GATE" in rust|wiring|style|zizmor|variants|docker|supply-chain|helm|otel|prometheus|coverage) ;;
+                *) echo "unknown gate: $GATE" >&2; exit 2 ;; esac ;;
         --no-bootstrap) BOOTSTRAP=0 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -78,6 +85,21 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$TOOLS_BIN" "$RUNNER_TEMP"
+TOOLS_ROOT="$(cd "$TOOLS_ROOT" && pwd)"
+TOOLS_BIN="$TOOLS_ROOT/bin"
+export PATH="$TOOLS_BIN:$TOOLS_ROOT/node/node_modules/.bin:$BASE_PATH"
+RUNNER_TEMP="$(cd "$RUNNER_TEMP" && pwd)"
+RUNNER_TEMP=$(mktemp -d "$RUNNER_TEMP/local-ci.XXXXXX")
+trap 'rm -rf "$RUNNER_TEMP"' EXIT
+export RENDER_TEMP="$RUNNER_TEMP"
+export HELM_CONFIG_HOME="$TOOLS_ROOT/helm/config"
+export HELM_CACHE_HOME="$TOOLS_ROOT/helm/cache"
+export HELM_DATA_HOME="$TOOLS_ROOT/helm/data"
+export RUSTFLAGS="${RUSTFLAGS--D warnings}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/local-ci}"
+# Capture caller-provided credentials without exposing them to later build tools.
+LOCAL_ZIZMOR_TOKEN="${ZIZMOR_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+unset ZIZMOR_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN
 
 log() { printf '\n==> %s\n' "$*"; }
 run() { printf '+ %s\n' "$*"; "$@"; }
@@ -89,8 +111,8 @@ fail_missing() {
 ERROR: missing required tool: $tool
 
 $hint
-Re-run ./local-ci.sh after installing it, or omit --no-bootstrap when this script
-can install the tool without root.
+Re-run ./local-ci.sh after correcting the problem above.
+Bootstrap mode: $BOOTSTRAP (1=enabled, 0=disabled).
 EOF
     exit 127
 }
@@ -128,42 +150,52 @@ install_go_bin() {
     local bin="$1" package="$2" version="${3:-}"
     if [ -n "$version" ]; then
         version_matches "$bin" "$version" -version && return
-    elif have "$bin" && "$bin" --version 2>/dev/null | grep -Eq 'github.com/mikefarah/yq/.*version v4\.'; then
-        return
     fi
     if [ "$BOOTSTRAP" -ne 1 ]; then
         fail_missing "$bin (missing or wrong version)" "Install with: GOBIN='$TOOLS_BIN' go install $package"
     fi
+    require_tool go "Install Go to bootstrap $bin, or install $bin $version manually."
     log "Installing $bin with go"
     run env GOBIN="$TOOLS_BIN" go install "$package"
     hash -r
-    if [ -n "$version" ]; then
-        version_matches "$bin" "$version" -version || fail_missing "$bin $version" "Check the installation in $TOOLS_BIN."
-    else
-        "$bin" --version | grep -Eq 'github.com/mikefarah/yq/.*version v4\.' || fail_missing "mikefarah yq v4" "Check the installation in $TOOLS_BIN."
-    fi
+    version_matches "$bin" "$version" -version || fail_missing "$bin $version" "Check the installation in $TOOLS_BIN."
 }
 
 install_node_bin() {
     local bin="$1" version="$2"
     version_matches "$bin" "$version" --version && return
     if [ "$BOOTSTRAP" -ne 1 ]; then
-        fail_missing "$bin $version (missing or wrong version)" "Install with: npm install --prefix '$TOOLS_ROOT/node' $bin@$version"
+        fail_missing "$bin $version (missing or wrong version)" "Install with: cp scripts/local-ci/node/package*.json '$TOOLS_ROOT/node/'; npm ci --prefix '$TOOLS_ROOT/node'"
     fi
     log "Installing $bin $version with npm"
-    run npm install --prefix "$TOOLS_ROOT/node" --no-audit --no-fund --save-exact "$bin@$version"
+    mkdir -p "$TOOLS_ROOT/node"
+    cp scripts/local-ci/node/package*.json "$TOOLS_ROOT/node/"
+    run npm ci --prefix "$TOOLS_ROOT/node" --no-audit --no-fund
     hash -r
     version_matches "$bin" "$version" --version || fail_missing "$bin $version" "Check Node.js compatibility and npm's installation output."
 }
 
 bootstrap_python() {
     require_tool python3 "Install Python 3 with venv support."
-    python3 -c 'import yaml' 2>/dev/null && return
-    if [ "$BOOTSTRAP" -ne 1 ]; then
-        fail_missing PyYAML "Install PyYAML in a virtual environment, or re-run without --no-bootstrap."
+    local imports="import yaml" base_python
+    [ "${1:-}" != full ] || imports="import yaml, jsonschema"
+    base_python=$(PATH="$BASE_PATH" command -v python3)
+    if "$base_python" -c "$imports" 2>/dev/null; then
+        return
     fi
-    run python3 -m venv "$TOOLS_ROOT/python" || fail_missing python3-venv "Install Python venv support (Ubuntu: sudo apt-get install python3-venv)."
-    run "$TOOLS_ROOT/python/bin/python3" -m pip install 'PyYAML==6.0.3'
+    if "$TOOLS_ROOT/python/bin/python3" -c "$imports" 2>/dev/null; then
+        export PATH="$TOOLS_ROOT/python/bin:$PATH"
+        return
+    fi
+    [ "$BOOTSTRAP" -eq 1 ] || fail_missing "Python validation modules" "Install scripts/local-ci/requirements.txt in a venv, or omit --no-bootstrap."
+    # Never recreate a broken venv using its own interpreter.
+    rm -rf "$TOOLS_ROOT/python"
+    "$base_python" -m venv "$TOOLS_ROOT/python" || fail_missing python3-venv "Install Python venv support."
+    if ! "$TOOLS_ROOT/python/bin/python3" -m pip install --require-hashes -r scripts/local-ci/requirements.txt; then
+        rm -rf "$TOOLS_ROOT/python"
+        fail_missing "Python validation modules" "Pinned dependency installation failed; check network access and retry."
+    fi
+    export PATH="$TOOLS_ROOT/python/bin:$PATH"
     hash -r
 }
 
@@ -174,7 +206,7 @@ install_helm() {
         if [ "$current" = "$HELM_VERSION" ]; then
             return
         fi
-        echo "helm $current found, but CI uses $HELM_VERSION; installing a local copy in $TOOLS_BIN"
+        echo "helm $current found, but CI uses $HELM_VERSION"
     fi
     if [ "$BOOTSTRAP" -ne 1 ]; then
         fail_missing "helm" "Install Helm $HELM_VERSION from https://helm.sh/docs/intro/install/; the installed helm must match CI."
@@ -194,6 +226,13 @@ install_helm() {
     dir="$RUNNER_TEMP/helm-${HELM_VERSION}-${os}-${arch}"
     log "Installing helm $HELM_VERSION"
     run curl --silent --show-error --fail --location --retry 5 --retry-delay 5 --output "$archive" "$url"
+    python3 - "$archive" scripts/local-ci/helm-checksums.json <<'PY2'
+import hashlib, json, pathlib, sys
+archive, checksum = map(pathlib.Path, sys.argv[1:])
+expected = json.loads(checksum.read_text())[archive.name]
+if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+    raise SystemExit('Helm archive checksum mismatch')
+PY2
     rm -rf "$dir"
     mkdir -p "$dir"
     run tar -xzf "$archive" -C "$dir"
@@ -252,8 +291,8 @@ rust_components() {
 bootstrap_default_tools() {
     require_tool cargo "Install Rust/Cargo first: https://rustup.rs"
     require_tool rustup "Install rustup first: https://rustup.rs"
-    require_tool cmake "Install CMake with your OS package manager. CI uses: sudo apt-get install -y cmake golang-go"
-    require_tool go "Install Go with your OS package manager. CI uses: sudo apt-get install -y cmake golang-go"
+    have cmake || echo "WARNING: CMake may be needed by native Rust dependencies; install it if the build requests it." >&2
+    have go || echo "WARNING: Go may be needed by native dependencies or yamlfmt bootstrap." >&2
     require_tool jq "Install jq (Ubuntu: sudo apt-get install jq)."
     require_tool docker "Install Docker and start its daemon; the all-feature tests start containers."
     docker info >/dev/null 2>&1 || fail_missing "Docker daemon" "Start Docker and ensure your user can access it (docker info)."
@@ -264,58 +303,58 @@ bootstrap_default_tools() {
     install_helm
 }
 
-bootstrap_full_tools() {
-    [ "$(uname -s)" = Linux ] || fail_missing "Linux execution environment" "Full parity includes host-network container tests. Run on Linux; see docs/local-ci.md."
+bootstrap_node() {
     require_tool node "Install Node.js 22 or newer and npm."
     require_tool npm "Install npm alongside Node.js 22 or newer."
-    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || fail_missing "Node.js >=22" "Activate Node.js 22 or newer; CI's markdownlint-cli2 requires it."
-    bootstrap_default_tools
-    docker compose version >/dev/null 2>&1 || fail_missing "Docker Compose v2" "Install the Docker Compose plugin."
-    prepare_zizmor_auth
-    rust_components llvm-tools-preview
-    install_cargo_bin cargo-vet cargo-vet "$VET_VERSION"
-    install_cargo_bin cargo-audit cargo-audit "$AUDIT_VERSION"
-    install_cargo_bin cargo-deny cargo-deny "$DENY_VERSION"
-    install_cargo_bin cargo-llvm-cov cargo-llvm-cov "$LLVM_COV_VERSION"
-    install_cargo_bin typos typos-cli "$TYPOS_VERSION"
-    install_node_bin tombi "$TOMBI_VERSION"
-    install_go_bin yamlfmt "github.com/google/yamlfmt/cmd/yamlfmt@$YAMLFMT_VERSION" "$YAMLFMT_VERSION"
-    install_go_bin yq "github.com/mikefarah/yq/v4@latest"
-    install_node_bin markdownlint-cli2 "$MARKDOWNLINT_VERSION"
-    install_kube_linter
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || fail_missing "Node.js >=22" "Activate Node.js 22 or newer."
+}
+
+bootstrap_gate() {
+    case "$1" in
+        rust) bootstrap_default_tools; rust_version_check ;;
+        wiring) bootstrap_python ;;
+        style)
+            bootstrap_node
+            install_cargo_bin typos typos-cli "$TYPOS_VERSION"
+            install_node_bin tombi "$TOMBI_VERSION"
+            install_node_bin markdownlint-cli2 "$MARKDOWNLINT_VERSION"
+            install_go_bin yamlfmt "github.com/google/yamlfmt/cmd/yamlfmt@$YAMLFMT_VERSION" "$YAMLFMT_VERSION"
+            ;;
+        zizmor) bootstrap_python; require_tool docker "Install Docker for Zizmor." ;;
+        variants) bootstrap_python; require_tool cargo "Install Rust/Cargo."; rust_version_check ;;
+        docker) require_tool docker "Install Docker." ;;
+        supply-chain)
+            install_cargo_bin cargo-vet cargo-vet "$VET_VERSION"
+            install_cargo_bin cargo-audit cargo-audit "$AUDIT_VERSION"
+            install_cargo_bin cargo-deny cargo-deny "$DENY_VERSION"
+            ;;
+        helm|otel|prometheus)
+            bootstrap_python full
+            install_helm
+            require_tool docker "Install Docker."
+            helm_deps
+            if [ "$1" = helm ]; then install_kube_linter; fi
+            if [ "$1" = prometheus ]; then bootstrap_node; fi
+            ;;
+        coverage)
+            bootstrap_default_tools
+            rust_components llvm-tools-preview
+            install_cargo_bin cargo-llvm-cov cargo-llvm-cov "$LLVM_COV_VERSION"
+            ;;
+    esac
 }
 
 helm_deps() {
+    [ ! -f "$RUNNER_TEMP/helm-deps-ready" ] || return 0
     run helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
     run helm dependency build "$CHART_DIR"
+    touch "$RUNNER_TEMP/helm-deps-ready"
 }
 
 run_render_helm_templates_action() {
     log "Render Helm templates using .github/workflows/render-helm-templates/action.yml"
-    local script="$RUNNER_TEMP/render-helm-templates.sh"
-    python3 - "$script" <<'PY2'
-from pathlib import Path
-import sys
-out = Path(sys.argv[1])
-lines = Path('.github/workflows/render-helm-templates/action.yml').read_text().splitlines()
-start = None
-for i, line in enumerate(lines):
-    if line == '      run: |':
-        start = i + 1
-        break
-if start is None:
-    raise SystemExit('could not find render-helm-templates run block')
-block = []
-for line in lines[start:]:
-    if line.startswith('        '):
-        block.append(line[8:])
-    elif line.strip() == '':
-        block.append('')
-    else:
-        break
-out.write_text('\n'.join(block) + '\n')
-PY2
-    run bash "$script"
+    # A fresh per-run directory prevents stale render outputs and worktree clashes.
+    run python3 scripts/local-ci/run-action.py .github/workflows/render-helm-templates/action.yml
 }
 
 crate_kind_detection() {
@@ -354,7 +393,6 @@ domain_purity_check() {
 }
 
 rust_default_gates() {
-    bootstrap_default_tools
     log "Cargo format"
     run cargo fmt --all --check
     log "Cargo build"
@@ -384,8 +422,9 @@ rust_default_gates() {
 fast_wiring_checks() {
     log "Validate .trivyignore.yaml and variant parity"
     require_tool python3 "Install Python 3."
-    python3 -c 'import yaml' 2>/dev/null || fail_missing "python3-yaml" "Install PyYAML. On Ubuntu CI this is: sudo apt-get install -y python3-yaml"
     run python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+    run python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
+    if have trivy; then run sh scripts/gate-selftest.sh; fi
     run python3 scripts/check-trivyignore.py .trivyignore.yaml
     run python3 scripts/check-variant-parity.py
     log "Attestation verifier self-test"
@@ -393,19 +432,15 @@ fast_wiring_checks() {
 }
 
 prepare_zizmor_auth() {
-    # Never put a token in argv or pass it through run(), which logs arguments.
-    ZIZMOR_GITHUB_TOKEN="${ZIZMOR_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
-    if [ -z "$ZIZMOR_GITHUB_TOKEN" ] && have gh; then
-        ZIZMOR_GITHUB_TOKEN=$(gh auth token 2>/dev/null) || true
+    if [ -z "$LOCAL_ZIZMOR_TOKEN" ] && have gh; then
+        LOCAL_ZIZMOR_TOKEN=$(gh auth token 2>/dev/null) || true
     fi
-    [ -n "$ZIZMOR_GITHUB_TOKEN" ] || fail_missing "GitHub token for online audits" "Run gh auth login, or export GH_TOKEN with read access to the referenced repositories. Full mode cannot skip online security audits."
-    export ZIZMOR_GITHUB_TOKEN
+    [ -n "$LOCAL_ZIZMOR_TOKEN" ] || fail_missing "GitHub token for online audits" "Run gh auth login, or provide a fine-grained read-only GH_TOKEN."
 }
 
 zizmor_online_scan() {
-    # The action's online-audits input is not a CLI flag. A token enables online
-    # audits. The pinned container also isolates host ZIZMOR_OFFLINE settings.
-    run docker run --rm -e ZIZMOR_GITHUB_TOKEN -v "$PWD:/workspace:ro" -w /workspace "$ZIZMOR_IMAGE" --persona=regular --color=never --format=plain -- .
+    # Scope the token to this process only; never put it in argv or log it.
+    ZIZMOR_GITHUB_TOKEN="$LOCAL_ZIZMOR_TOKEN" docker run --rm -e ZIZMOR_GITHUB_TOKEN -v "$PWD:/workspace:ro" -w /workspace "$ZIZMOR_IMAGE" --persona=regular --color=never --format=plain -- .
 }
 
 zizmor_checks() {
@@ -426,32 +461,25 @@ zizmor_checks() {
     fi
     missing=""
     for rule in artipacked excessive-permissions; do
-        printf '%s' "$out" | grep -q "$rule" || missing="${missing} ${rule}"
+        [[ "$out" == *"$rule"* ]] || missing="${missing} ${rule}"
     done
     if [ -n "$missing" ]; then
         echo "ERROR: the gate failed on the fixture but did not report:${missing}" >&2
         exit 1
     fi
     log "Assert every CI.yml job is gated by ci-success"
-    require_tool yq "Install mikefarah yq v4. CI uses yq to inspect CI.yml."
-    yq -r '.jobs | keys | .[] | select(. != "ci-success")' .github/workflows/CI.yml | sort > "$RUNNER_TEMP/ci-jobs"
-    yq -r '.jobs."ci-success".needs[]' .github/workflows/CI.yml | sort > "$RUNNER_TEMP/ci-gated"
-    local ungated
-    ungated=$(comm -23 "$RUNNER_TEMP/ci-jobs" "$RUNNER_TEMP/ci-gated")
-    if [ -n "$ungated" ]; then
-        echo "ERROR: these CI.yml jobs are not in ci-success.needs:" >&2
-        printf '  %s\n' $ungated >&2
-        exit 1
-    fi
+    run python3 scripts/local-ci/workflow-data.py gated
+
 }
 
 release_variant_checks() {
     log "Release variant feature matrix"
-    run cargo check --workspace --features "postgres,aws,redis"
-    run cargo check --workspace --features "postgres,gcp,redis"
-    run cargo check --workspace --features "postgres,azure,redis"
-    run cargo check --workspace --features "postgres,vault,redis"
-    run cargo check --workspace --features "postgres,redis"
+    local features variants
+    variants=$(python3 scripts/local-ci/workflow-data.py variants)
+    while IFS= read -r features; do
+        run cargo check --workspace --features "$features"
+    done <<< "$variants"
+
 }
 
 supply_chain_checks() {
@@ -482,13 +510,13 @@ trivy_and_helm_checks() {
     run bash scripts/verify-image-reference.sh
     log "Trivy config scan"
     if version_matches trivy "$TRIVY_VERSION" --version; then
-        run trivy config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
+        run trivy config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml "$RENDER_TEMP/rendered"
     else
         require_tool docker "Install Docker or trivy. Docker is used as a no-root local fallback."
-        run docker run --rm -v "$PWD:/workspace:ro" -v /tmp/rendered:/tmp/rendered:ro -w /workspace "aquasec/trivy:$TRIVY_VERSION" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
+        run docker run --rm -v "$PWD:/workspace:ro" -v "$RENDER_TEMP/rendered:/tmp/rendered:ro" -w /workspace -v "$TOOLS_ROOT/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
     fi
     log "Helm template local values"
-    local output_file="/tmp/statuslist-local-rendered.yaml"
+    local output_file="$RUNNER_TEMP/statuslist-local-rendered.yaml"
     helm template statuslist-local "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --namespace local > "$output_file"
     if ! grep -A1 'name: APP_ENV' "$output_file" | grep -q 'value: "development"'; then
         echo "ERROR: APP_ENV=development not found in rendered template" >&2
@@ -498,22 +526,24 @@ trivy_and_helm_checks() {
         echo "ERROR: init container image 'busybox:1.38' not found in rendered template" >&2
         exit 1
     fi
+    mkdir -p "$CARGO_TARGET_DIR"
     log "KubeLinter"
     run kube-linter version
-    kube-linter --config .kube-linter.yaml lint /tmp/rendered --format sarif | tee kube-linter-results.sarif
+    kube-linter --config .kube-linter.yaml lint "$RENDER_TEMP/rendered" --format sarif | tee "$CARGO_TARGET_DIR/kube-linter-results.sarif"
 }
 
 otel_validation() {
     log "OpenTelemetry config validation"
-    run env GRAFANA_ADMIN_PASSWORD=placeholder-not-a-real-credential docker compose config
+    run python3 scripts/local-ci/validate-compose.py
     run docker manifest inspect "$JAEGER_IMAGE"
     run docker run --rm -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
     helm_deps
-    helm template statuslist "$CHART_DIR" --namespace statuslist --set-string statuslist.env.APP_DATABASE__PORT="5432" > /tmp/statuslist-rendered.yaml
+    helm template statuslist "$CHART_DIR" --namespace statuslist --set-string statuslist.env.APP_DATABASE__PORT="5432" > "$RUNNER_TEMP/statuslist-rendered.yaml"
     python3 - <<'PY2'
 from pathlib import Path
-import yaml
-rendered = Path('/tmp/statuslist-rendered.yaml')
+import os, yaml
+work = Path(os.environ['RUNNER_TEMP'])
+rendered = work / 'statuslist-rendered.yaml'
 for document in yaml.safe_load_all(rendered.read_text()):
     if not isinstance(document, dict):
         continue
@@ -522,12 +552,12 @@ for document in yaml.safe_load_all(rendered.read_text()):
         data = document.get('data', {})
         content = data.get('relay') or data.get('config.yaml')
         if content:
-            Path('/tmp/helm-otel-collector.yaml').write_text(content)
+            (work / 'helm-otel-collector.yaml').write_text(content)
             break
 else:
     raise SystemExit('rendered Helm Collector ConfigMap was not found')
 PY2
-    run docker run --rm -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
+    run docker run --rm -v "$RUNNER_TEMP/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
 }
 
 prometheus_validation() {
@@ -535,53 +565,21 @@ prometheus_validation() {
     helm_deps
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" check rules /etc/prometheus/rules/recording.rules.yml
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" check rules /etc/prometheus/rules/alerting.rules.yml
-    helm template status-list-server "$CHART_DIR" --namespace ns1 --set prometheusRule.enabled=true > /tmp/helm-render.yaml
-    python3 - <<'PY2'
-import yaml
-
-docs = [d for d in yaml.safe_load_all(open('/tmp/helm-render.yaml')) if d]
-cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
-with open('/tmp/helm-rules.yml', 'w') as f:
-    yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
-
-def rule_names(path):
-    rules = yaml.safe_load(open(path))['groups']
-    names = set()
-    for g in rules:
-        for r in g['rules']:
-            names.add(r.get('record') or r.get('alert'))
-    return names
-
-standalone = rule_names('deploy/observability/prometheus/rules/recording.rules.yml') | rule_names('deploy/observability/prometheus/rules/alerting.rules.yml')
-deployed = rule_names('/tmp/helm-rules.yml')
-if standalone != deployed:
-    raise SystemExit(
-        'DRIFT: deployed PrometheusRule rule names differ from the tested standalone rules.\n'
-        f'  only in standalone: {sorted(standalone - deployed)}\n'
-        f'  only in deployed:   {sorted(deployed - standalone)}'
-    )
-
-test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
-test['rule_files'] = ['helm-rules.yml']
-for block in test['tests']:
-    for at in block.get('alert_rule_test', []):
-        if at['alertname'] in ('Watchdog', 'StatusListMetricsAbsent'):
-            for alert in at['exp_alerts']:
-                alert['exp_labels']['namespace'] = 'ns1'
-with open('/tmp/helm-alerting.test.yml', 'w') as f:
-    yaml.safe_dump(test, f, sort_keys=False)
-PY2
-    run docker run --rm -w /tmp -v /tmp/helm-rules.yml:/tmp/helm-rules.yml:ro -v /tmp/helm-alerting.test.yml:/tmp/helm-alerting.test.yml:ro --entrypoint promtool "$PROMETHEUS_IMAGE" test rules /tmp/helm-alerting.test.yml
+    run bash scripts/check-helm-prometheus.sh
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" check config /etc/prometheus/prometheus.yml
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" check config /etc/prometheus/prometheus.production.yml
     run node deploy/observability/slo/lint-thresholds.mjs
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" test rules /etc/prometheus/tests/recording.test.yml
     run docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" "$PROMETHEUS_IMAGE" test rules /etc/prometheus/tests/alerting.test.yml
-    run bash deploy/observability/alertmanager/tests/test-alertmanager-config.sh
+    if [ "$(uname -s)" = Linux ]; then
+        run bash deploy/observability/alertmanager/tests/test-alertmanager-config.sh
+    else
+        echo "SKIPPED: Alertmanager delivery requires Linux host networking" >&2
+        touch "$RUNNER_TEMP/incomplete"
+    fi
     run test -s deploy/observability/dashboards/generated/status-list-slo.json
     run python3 -c "import json; json.load(open('deploy/observability/dashboards/generated/status-list-slo.json'))"
-    ( cd deploy/observability/dashboards/src; run env NODE_ENV=production npm install --no-audit --no-fund; run env NODE_ENV=production npm run generate-dashboards )
-    run git diff --exit-code deploy/observability/dashboards/generated/status-list-slo.json
+    run bash scripts/check-dashboard-drift.sh
 }
 
 coverage_check() {
@@ -595,36 +593,70 @@ docker_build_smoke() {
     run docker build .
 }
 
-run_default_mode() {
-    log "Running local CI default mode"
-    rust_default_gates
-    fast_wiring_checks
-    echo
-    echo "Default local CI checks passed. Run ./local-ci.sh --full for GitHub CI parity."
+rust_version_check() {
+    run rustc --version
+    local updates status=0
+    updates=$(rustup check 2>&1) || status=$?
+    printf '%s\n' "$updates"
+    if grep -qi 'update available' <<< "$updates"; then
+        echo "WARNING: Rust update available; CI uses stable. Run rustup update stable to align." >&2
+    elif [ "$status" -ne 0 ]; then
+        echo "WARNING: rustup check failed; could not determine toolchain freshness." >&2
+    fi
 }
 
-run_full_mode() {
-    log "Running local CI full/parity mode"
-    bootstrap_full_tools
-    zizmor_checks
-    rust_default_gates
-    release_variant_checks
-    docker_build_smoke
-    supply_chain_checks
-    style_config_checks
-    fast_wiring_checks
-    trivy_and_helm_checks
-    otel_validation
-    prometheus_validation
-    coverage_check
-    echo
-    echo "Full local CI parity checks passed."
+# Run each gate in a separate shell so errexit remains active even while the
+# parent collects failures. Avoid `if function`: Bash disables errexit inside it.
+execute_gate() {
+    local name="$1" status
+    set +e
+    ( set -e; dispatch_gate "$name" )
+    status=$?
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "FAILED: $name (exit $status)" >&2
+        FAILURES="$FAILURES $name"
+    fi
+}
+
+dispatch_gate() {
+    bootstrap_gate "$1"
+    case "$1" in
+        rust) rust_default_gates ;;
+        wiring) fast_wiring_checks ;;
+        style) style_config_checks ;;
+        zizmor) zizmor_checks ;;
+        variants) release_variant_checks ;;
+        docker) docker_build_smoke ;;
+        supply-chain) supply_chain_checks ;;
+        helm) trivy_and_helm_checks ;;
+        otel) otel_validation ;;
+        prometheus) prometheus_validation ;;
+        coverage) coverage_check ;;
+    esac
+}
+
+main() {
+    log "Running local CI $MODE mode${GATE:+, gate $GATE}"
+    FAILURES=""
+    if [ -n "$GATE" ]; then
+        execute_gate "$GATE"
+    elif [ "$MODE" = full ]; then
+        for gate in style wiring zizmor helm otel prometheus rust variants supply-chain docker coverage; do
+            execute_gate "$gate"
+        done
+    else
+        execute_gate wiring
+        execute_gate rust
+    fi
+    if [ -n "$FAILURES" ] || [ -f "$RUNNER_TEMP/incomplete" ]; then
+        echo "Local CI incomplete or failed. Failed gates:$FAILURES" >&2
+        exit 1
+    fi
+    echo "Local CI checks passed ($MODE${GATE:+, gate $GATE})."
 }
 
 # Sourcing exposes helpers for isolated bootstrap/failure regression tests.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    case "$MODE" in
-        default) run_default_mode ;;
-        full) run_full_mode ;;
-    esac
+    main
 fi
