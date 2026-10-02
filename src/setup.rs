@@ -498,7 +498,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Arc<dyn CertificateProvider>,
         Option<Arc<CertManager>>,
     ) = {
-        let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
+        let app_env = crate::config::normalize_app_env();
         let cert_domains = [config.server.domain.as_str()];
         let material_storage = build_crypto_storage(config).await?;
 
@@ -741,9 +741,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // with APP_ENV=production when no host is configured, which this catches.
     // `APP_ENV` is read directly (not telemetry.environment, which operators may
     // override just to change the log format) so the guard is tied to the real
-    // deployment profile.
-    let app_env =
-        std::env::var("APP_ENV").unwrap_or_else(|_| crate::config::ENV_DEVELOPMENT.to_string());
+    // deployment profile. `normalize_app_env` applies the same normalization as
+    // config (trim, lowercase, `prod`/`production`), so a production profile set
+    // with e.g. `APP_ENV=prod` is caught here exactly as config treats it.
+    let app_env = crate::config::normalize_app_env();
     let base_url = config.server.resolved_public_base_url();
     match check_production_base_url(&app_env, &base_url) {
         Err(message) => return Err(color_eyre::eyre::eyre!(message)),
@@ -1902,6 +1903,32 @@ mod general_tests {
                 .expect("development never fails")
                 .is_none(),
             "development must be quiet even for localhost"
+        );
+    }
+
+    /// A production profile set via the `prod` alias (any casing, surrounding
+    /// whitespace) must still fire the localhost base-URL guard: the guard runs
+    /// the raw `APP_ENV` through `normalize_app_env`, so it catches the same
+    /// profiles config treats as production. Regression for a guard that
+    /// compared the raw value to exactly `production`.
+    #[test]
+    fn prod_alias_fires_production_base_url_guard() {
+        use super::check_production_base_url;
+
+        let previous = std::env::var("APP_ENV").ok();
+        std::env::set_var("APP_ENV", "  prod ");
+        let app_env = crate::config::normalize_app_env();
+        assert_eq!(app_env, crate::config::ENV_PRODUCTION);
+        let result = check_production_base_url(&app_env, "https://localhost/api/v1");
+        match previous {
+            Some(value) => std::env::set_var("APP_ENV", value),
+            None => std::env::remove_var("APP_ENV"),
+        }
+        assert!(
+            result
+                .expect_err("localhost base URL in a prod profile must be a hard error")
+                .contains("localhost/loopback"),
+            "APP_ENV=prod must be treated as production for the base-URL guard"
         );
     }
 }

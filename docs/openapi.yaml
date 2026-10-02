@@ -318,9 +318,10 @@ paths:
         in: path
         required: true
         description: |
-          UUID of the status list. Only the lowercase, hyphenated UUID form is
-          accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
-          `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
+          UUID of the status list. Publish (`PUT`) restricts this to the
+          lowercase, hyphenated UUID form (see the `PUT` operation for
+          details); update (`PATCH`) accepts any form `Uuid::try_parse`
+          accepts (braced, `urn:uuid:`, no-hyphen, uppercase).
         schema:
           type: string
           format: uuid
@@ -329,6 +330,18 @@ paths:
     put:
       operationId: publishStatusList
       summary: Publish a new status list
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          description: |
+            UUID of the status list. Only the lowercase, hyphenated UUID form is
+            accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
+            `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
+          schema:
+            type: string
+            format: uuid
+            example: "477121aa-b598-419e-916f-1e74654ff38b"
       description: |
         Creates a new status list for the given `list_id`. The issuer is
         derived from the validated JWT Bearer token. The request body defines

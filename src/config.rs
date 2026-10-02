@@ -91,6 +91,30 @@ impl CacheBackend {
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
 
+/// Normalize the raw `APP_ENV` environment variable to the canonical
+/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] value. Any casing, surrounding
+/// whitespace, and both `production`/`prod` count as a production profile;
+/// anything else is treated as development. Callers outside config that need
+/// the deployment profile must use this rather than comparing the raw value,
+/// so the guard matches what config itself decided.
+pub fn normalize_app_env() -> &'static str {
+    match std::env::var("APP_ENV")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "production" | "prod" => ENV_PRODUCTION,
+        _ => ENV_DEVELOPMENT,
+    }
+}
+
+/// Whether `app_env` (a value produced by [`normalize_app_env`]) is a
+/// production profile.
+pub fn is_production(app_env: &str) -> bool {
+    app_env == ENV_PRODUCTION
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -685,7 +709,7 @@ impl DnsConfig {
     /// borrowed, so consumers need no re-validation. Synchronous and
     /// network-free by design; anything needing I/O belongs to the boot path.
     pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
-        let kind = self.provider.unwrap_or(if app_env == ENV_PRODUCTION {
+        let kind = self.provider.unwrap_or(if is_production(app_env) {
             DnsProviderKind::Route53
         } else {
             DnsProviderKind::Pebble
@@ -1468,15 +1492,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     ))]
     let default_db_backend = "memory";
 
-    let telemetry_environment = match std::env::var("APP_ENV")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "production" | "prod" => ENV_PRODUCTION,
-        _ => ENV_DEVELOPMENT,
-    };
+    let telemetry_environment = normalize_app_env();
 
     let builder = ConfigLib::builder()
         .set_default("server.host", "localhost")?
@@ -2930,5 +2946,18 @@ mod tests {
             PathBuf::from("/custom/token/path")
         );
         assert_eq!(k8s_config.vault.k8s_auth_mount, "custom-k8s");
+    }
+
+    #[test]
+    fn is_production_predicate_only_accepts_normalized_production() {
+        // `is_production` is the pure predicate over a value already produced by
+        // `normalize_app_env`; it must be insensitive to aliases because those
+        // are resolved to the canonical value by the normalizer first.
+        assert!(is_production(ENV_PRODUCTION));
+        assert!(is_production("production"));
+        assert!(!is_production(ENV_DEVELOPMENT));
+        assert!(!is_production("prod"));
+        assert!(!is_production(" production "));
+        assert!(!is_production(""));
     }
 }
