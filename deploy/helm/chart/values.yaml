@@ -130,11 +130,8 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # APP_SERVER__DOMAIN comes from statuslist.externalDnsHostname (or
-    # global.domain). APP_SERVER__PUBLIC_BASE_URL defaults to
-    # https://{APP_SERVER__DOMAIN}/api/v1 and only needs setting when the
-    # public URI differs. Must be an absolute https URL with path exactly
-    # /api/v1 and no trailing slash, query, or fragment.
+    # APP_SERVER__DOMAIN comes from statuslist.externalDnsHostname (or global.domain).
+    # APP_SERVER__PUBLIC_BASE_URL defaults to https://{DOMAIN}/api/v1; set it only when it differs.
     # APP_SERVER__PUBLIC_BASE_URL: "https://statuslist.example.com/api/v1"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"

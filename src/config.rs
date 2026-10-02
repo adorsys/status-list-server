@@ -328,6 +328,12 @@ fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
             "Invalid server.public_base_url: expected an absolute URL with a host".to_string(),
         ));
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ConfigError::Message(
+            "Invalid server.public_base_url: must not contain userinfo (username or password)"
+                .to_string(),
+        ));
+    }
     if parsed.query().is_some() {
         return Err(ConfigError::Message(
             "Invalid server.public_base_url: must not contain a query".to_string(),
@@ -2368,6 +2374,14 @@ mod tests {
                 "https://statuslist.example.com/api/v1/status-lists/foo",
                 "path must be exactly '/api/v1'",
             ),
+            (
+                "https://user@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://user:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
             ("not a url", "not a valid URL"),
         ] {
             let err = Config::load_from_overrides(&[("server.public_base_url", value)])
@@ -2384,6 +2398,31 @@ mod tests {
             "https://statuslist.example.com/api/v1",
         )])
         .expect("a valid public_base_url must load");
+    }
+
+    #[test]
+    fn test_public_base_url_rejects_userinfo() {
+        for (value, expected) in [
+            (
+                "https://user@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://user:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+            (
+                "https://:password@statuslist.example.com/api/v1",
+                "must not contain userinfo",
+            ),
+        ] {
+            let err = Config::load_from_overrides(&[("server.public_base_url", value)])
+                .expect_err(&format!("public_base_url {value:?} must be rejected"));
+            assert!(
+                err.to_string().contains(expected),
+                "expected {expected:?} in: {err}"
+            );
+        }
     }
 
     #[test]

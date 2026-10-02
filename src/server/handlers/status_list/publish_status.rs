@@ -191,10 +191,6 @@ mod tests {
         panic!("CWT payload must carry a text `sub` claim (label 2)")
     }
 
-    /// Spec §5.1/§5.2/§8.3: the token's `sub` MUST equal the URI the issuer
-    /// embedded. The publish response hands the issuer that URI (as `Location`
-    /// and as the body `uri`), so a GET of that exact URL must yield a token
-    /// whose `sub` — in both JWT and CWT form — equals it byte for byte.
     #[tokio::test]
     async fn test_published_token_sub_matches_publish_location() {
         use crate::server::handlers::status_list::get_status_list::get_status_list;
@@ -245,21 +241,38 @@ mod tests {
             "body `uri` must match the Location header"
         );
 
-        // The test router is mounted at the root, so request the path of the
-        // absolute `Location` URI; the served token's `sub` must still equal the
-        // full absolute URI byte for byte.
-        let location_path = url::Url::parse(&location)
-            .expect("Location is a valid URL")
-            .path()
-            .to_string();
+        // The absolute Location URI must be resolvable: its scheme/authority
+        // must match the configured public base URL, and its path must be the
+        // route the GET handler serves. The router is mounted at the root, so
+        // the request below sends that path; the served token's `sub` must
+        // still equal the full absolute URI byte for byte.
+        let location_url = url::Url::parse(&location).expect("Location is a valid URL");
+        let expected_base =
+            url::Url::parse(&app_state.public_base_url).expect("public_base_url is a valid URL");
+        assert_eq!(location_url.scheme(), "https");
+        assert_eq!(
+            location_url.host_str(),
+            expected_base.host_str(),
+            "Location authority must match the configured public_base_url"
+        );
+        assert_eq!(
+            location_url.port(),
+            expected_base.port(),
+            "Location port must match the configured public_base_url"
+        );
+        assert_eq!(
+            location_url.path(),
+            format!("/api/v1/status-lists/{token_id}"),
+            "Location path must map onto the served status-list route"
+        );
 
-        // GET that exact URL in JWT form and assert `sub` equals it.
+        // GET that exact URL's path in JWT form and assert `sub` equals it.
         let jwt_resp = router
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method(axum::http::Method::GET)
-                    .uri(&location_path)
+                    .uri(location_url.path())
                     .header(axum::http::header::ACCEPT, ACCEPT_STATUS_LISTS_HEADER_JWT)
                     .body(Body::empty())
                     .unwrap(),
@@ -281,7 +294,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(axum::http::Method::GET)
-                    .uri(&location_path)
+                    .uri(location_url.path())
                     .header(axum::http::header::ACCEPT, ACCEPT_STATUS_LISTS_HEADER_CWT)
                     .body(Body::empty())
                     .unwrap(),

@@ -735,11 +735,14 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     // A `localhost` domain only makes sense for local development: tokens signed
     // with `sub = https://localhost/...` are rejected by every relying party.
-    if config.server.domain.trim() == "localhost" && config.telemetry.environment.is_production() {
+    if config.telemetry.environment.is_production()
+        && resolved_base_url_uses_local_host(&config.server.resolved_public_base_url())
+    {
         tracing::warn!(
-            "server.domain is 'localhost' in a production profile; status list tokens will be \
-             signed with sub = https://localhost/... and rejected by relying parties. Set \
-             APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) to the public host."
+            "server.public_base_url resolves to a local address in a production profile; status \
+             list tokens will be signed with sub = {} and rejected by relying parties. Set \
+             APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) to the public host.",
+            config.server.resolved_public_base_url()
         );
     }
 
@@ -827,6 +830,32 @@ pub async fn setup_snapshot_cleanup_scheduler(
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
+}
+
+/// Whether the resolved public base URL's authority is a local-only address
+/// (localhost, loopback, or another private/local address) whose tokens every
+/// relying party would reject. `server.public_base_url` is authoritative, so
+/// this inspects it rather than `server.domain`.
+fn resolved_base_url_uses_local_host(public_base_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(public_base_url) else {
+        // Config validation already rejected an unparseable URL; be conservative.
+        return false;
+    };
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    match host {
+        url::Host::Domain(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "localhost"
+                || domain.starts_with("localhost.")
+                || domain.ends_with(".localhost")
+                || domain == "local"
+                || domain.ends_with(".local")
+        }
+        url::Host::Ipv4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
 }
 
 #[cfg(feature = "acme")]
@@ -1621,5 +1650,79 @@ mod general_tests {
         assert!(!rendered.contains(wrong_password));
 
         let _ = tokio::fs::remove_dir_all(temp_dir).await;
+    }
+
+    /// The local-address warning keys off the resolved public base URL, not the
+    /// `server.domain` string. Production must warn when the URL host is
+    /// localhost, loopback, or another local address, and stay quiet for a
+    /// public host — including the case where `server.domain` is localhost but
+    /// an explicit valid public URL overrides it.
+    #[test]
+    fn resolved_base_url_local_host_detection() {
+        use super::resolved_base_url_uses_local_host;
+
+        for local in [
+            "https://localhost/api/v1",
+            "https://localhost.localdomain/api/v1",
+            "https://foo.localhost/api/v1",
+            "https://127.0.0.1/api/v1",
+            "https://[::1]/api/v1",
+            "https://10.0.0.5/api/v1",
+            "https://192.168.1.10/api/v1",
+            "https://169.254.169.254/api/v1",
+            "https://myhost.local/api/v1",
+        ] {
+            assert!(
+                resolved_base_url_uses_local_host(local),
+                "{local} should be treated as local"
+            );
+        }
+
+        for public in [
+            "https://statuslist.example.com/api/v1",
+            "https://statuslist.example.org/api/v1",
+        ] {
+            assert!(
+                !resolved_base_url_uses_local_host(public),
+                "{public} should not be treated as local"
+            );
+        }
+    }
+
+    /// A production profile with an explicit localhost `public_base_url` must
+    /// be flagged as local, while a localhost `server.domain` overridden by an
+    /// explicit public URL must not. Config validation is independent of the
+    /// warning, so these assert the resolved URL used for the warning.
+    #[test]
+    fn production_localhost_public_base_url_detection() {
+        use super::resolved_base_url_uses_local_host;
+        use crate::config::ENV_PRODUCTION;
+
+        let explicit_localhost = AppConfig::load_from_overrides(&[
+            ("APP_ENV", ENV_PRODUCTION),
+            ("APP_SERVER__DOMAIN", "example.com"),
+            ("APP_SERVER__PUBLIC_BASE_URL", "https://localhost/api/v1"),
+        ])
+        .expect("config loads");
+        assert!(
+            resolved_base_url_uses_local_host(
+                &explicit_localhost.server.resolved_public_base_url()
+            ),
+            "an explicit localhost public_base_url in production must be flagged"
+        );
+
+        let overridden = AppConfig::load_from_overrides(&[
+            ("APP_ENV", ENV_PRODUCTION),
+            ("APP_SERVER__DOMAIN", "localhost"),
+            (
+                "APP_SERVER__PUBLIC_BASE_URL",
+                "https://statuslist.example.com/api/v1",
+            ),
+        ])
+        .expect("config loads");
+        assert!(
+            !resolved_base_url_uses_local_host(&overridden.server.resolved_public_base_url()),
+            "a public explicit public_base_url must not be flagged even with a localhost domain"
+        );
     }
 }
