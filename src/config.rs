@@ -298,25 +298,23 @@ fn url_authority_host(domain: &str) -> String {
 
 /// Validates `server.domain`: a bare host name or IP address with no scheme,
 /// path, userinfo, port, query, or fragment.
+///
+/// Structural rejection (scheme, port, path, userinfo, query, fragment,
+/// whitespace) uses [`url::Host::parse`], the same parser the base URL check
+/// and `resolved_public_base_url` use, so the two validations cannot drift.
+/// The WHATWG host parser deliberately accepts leading/trailing dots or
+/// hyphens, so a few hygiene rules are kept on top of it.
 fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
-    if is_ipv6_host(domain) {
-        return Ok(());
-    }
+    // `url::Host::parse` accepts bracketed IPv6 (`[::1]`) but not the bare
+    // form; `is_ipv6_host` accepts both, so it fills that gap.
+    let parsed_as_host = url::Host::parse(domain).is_ok() || is_ipv6_host(domain);
 
-    let invalid = domain.chars().any(char::is_whitespace)
-        || domain.contains("://")
-        || domain.contains('/')
-        || domain.contains('@')
-        || domain.contains('?')
-        || domain.contains('#')
-        || domain.contains(':')
-        || domain.contains('\\')
-        || domain.starts_with('-')
+    let unhygienic = domain.starts_with('-')
         || domain.ends_with('-')
         || domain.starts_with('.')
         || domain.trim_end_matches('.').is_empty();
 
-    if invalid {
+    if !parsed_as_host || unhygienic {
         return Err(ConfigError::Message(
             "Invalid server.domain: expected a bare hostname or IP address without scheme, port, path, userinfo, query, or fragment".to_string(),
         ));
@@ -2506,6 +2504,8 @@ mod tests {
 
     #[test]
     fn test_server_domain_must_be_bare_host() {
+        // Cases rejected by `url::Host::parse` — the same parser the base URL
+        // check uses — plus the extra hygiene rules kept on top of it.
         for (value, expected) in [
             (
                 "https://example.com",
@@ -2517,6 +2517,38 @@ mod tests {
             ),
             (
                 "example.com:443",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "user@example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com?x",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com#x",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com\\path",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example .com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "-example.com",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                "example.com-",
+                "scheme, port, path, userinfo, query, or fragment",
+            ),
+            (
+                ".example.com",
                 "scheme, port, path, userinfo, query, or fragment",
             ),
         ] {
