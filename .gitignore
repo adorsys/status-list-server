@@ -18,3 +18,6 @@ ipython_config.py
 
 # MacOs store files
 **/.DS_Store
+
+# Locally installed JavaScript dependencies
+node_modules/
