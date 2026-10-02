@@ -21,14 +21,18 @@
 //! Cleanup requires a live Tokio runtime and a reachable Docker daemon. SIGTERM
 //! (including nextest slow-timeouts), Ctrl-C, SIGKILL, process aborts, or
 //! `TESTCONTAINERS_COMMAND=keep` can leave containers behind without running Drop.
-//! To identify every SQL fixture from one run, set a unique run ID before testing:
+//! Under nextest, fixtures automatically use its shared `NEXTEST_RUN_ID`, printed
+//! at the start of the run. To override it (or group ordinary Cargo test fixtures),
+//! set a unique run ID before testing:
 //!
 //! ```sh
 //! export STATUS_LIST_TEST_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 //! cargo nextest run --workspace --all-targets --all-features
 //! ```
 //!
-//! After that run has stopped, inspect and remove only its SQL containers:
+//! After that run has stopped, inspect and remove only its SQL containers and
+//! anonymous data volumes. If using the automatic nextest ID, first set
+//! `STATUS_LIST_TEST_RUN_ID` in your shell to the ID printed by nextest:
 //!
 //! ```sh
 //! : "${STATUS_LIST_TEST_RUN_ID:?Set the interrupted run ID first}"
@@ -36,11 +40,11 @@
 //!   --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"
 //! for id in $(docker container ls -aq --filter label=org.adorsys.status-list-server.fixture=sql \
 //!   --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"); do
-//!   docker container rm -f "$id"
+//!   docker container rm -fv "$id"
 //! done
 //! ```
 //!
-//! Without an explicit run ID, each process generates and prints a UUID; its
+//! If neither non-empty run ID is available, each process generates a UUID; its
 //! containers still carry both labels. These filters never select Redis fixtures
 //! or containers from other projects. The cleanup regression tests additionally
 //! require the Docker CLI on PATH; ordinary fixtures use the Docker API directly.
@@ -61,6 +65,9 @@
 //! live containers under ordinary `cargo test`, regardless of test thread count.
 //! The permit is held until container cleanup completes. This is a per-process
 //! limit; nextest's group is still needed to bound its separate test processes.
+//! Each test must hold only one fixture at a time: concurrent tests retaining a
+//! fixture while awaiting another can exhaust all slots and deadlock. Open extra
+//! pools on the same fixture when multiple connections are needed.
 
 #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
 mod lifecycle {
@@ -92,6 +99,11 @@ mod lifecycle {
             let id = std::env::var("STATUS_LIST_TEST_RUN_ID")
                 .ok()
                 .filter(|id| !id.is_empty())
+                .or_else(|| {
+                    std::env::var("NEXTEST_RUN_ID")
+                        .ok()
+                        .filter(|id| !id.is_empty())
+                })
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             eprintln!("SQL fixture run ID: {id}");
             id
@@ -354,9 +366,11 @@ mod cleanup_tests {
             let labels: Vec<_> = container.splitn(3, '|').collect();
             assert_eq!(labels[1], "sql", "project label missing on {id}");
             assert!(!labels[2].is_empty(), "run label missing on {id}");
-            if let Ok(run_id) = std::env::var("STATUS_LIST_TEST_RUN_ID")
-                && !run_id.is_empty()
-            {
+            let expected_run_id = ["STATUS_LIST_TEST_RUN_ID", "NEXTEST_RUN_ID"]
+                .into_iter()
+                .filter_map(|key| std::env::var(key).ok())
+                .find(|id| !id.is_empty());
+            if let Some(run_id) = expected_run_id {
                 assert_eq!(labels[2], run_id, "wrong run label on {id}");
             }
         }
