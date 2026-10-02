@@ -761,6 +761,30 @@ fn rendered_chart_rejects_uppercase_database_backend() {
 }
 
 #[test]
+fn rendered_chart_rejects_integer_env_values() {
+    // Env vars not explicitly typed in the chart schema fall through to
+    // `additionalProperties` of type string, so an integer passed for them is
+    // rejected at render time. Without this guard, a large integer like a byte
+    // budget would be rendered by Helm in scientific notation (e.g. 2592000 ->
+    // 2.592e+06) and crash the u64 parse in the application. (The token-lifetime
+    // vars are deliberately excluded here: the schema whitelists them as
+    // integer-or-string, so valid integers are accepted.)
+    let arg = "statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY=2592000";
+    let Some(output) = render_helm_failure(&["--set", arg]) else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("got number, want string"),
+        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
+    );
+    assert!(
+        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
+        "the schema error must name the offending env key APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: {stderr}"
+    );
+}
+
+#[test]
 fn rendered_chart_rejects_non_chart_database_backends() {
     for backend in ["sqlite", "memory"] {
         let arg = format!("statuslist.env.APP_DATABASE__BACKEND={backend}");

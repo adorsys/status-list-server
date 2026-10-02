@@ -1,6 +1,7 @@
 //! Inbound HTTP web server module containing handlers, auth middleware, and shared application state.
 
 pub mod auth;
+pub mod cache;
 pub mod error;
 pub mod handlers;
 pub mod health;
@@ -52,6 +53,8 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Per-replica cache of signed status-list token bytes.
+    pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
 }
