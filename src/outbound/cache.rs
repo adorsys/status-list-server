@@ -193,23 +193,31 @@ impl StatusListCache for MokaStatusListCache {
     }
 }
 
-/// Keeps the aggregation IDs it finds. Every signed token needs its issuer's,
-/// so without this a status list served from cache would still query the
-/// database.
+/// Keeps the aggregation IDs it finds, both ways. Every signed token needs its
+/// issuer's ID and every scoped aggregation page its ID's issuer, so without
+/// this both would query the database.
 pub struct CachingCredentialRepo {
     inner: Arc<dyn CredentialRepo>,
     aggregation_ids: MokaCache<String, AggregationId>,
+    issuers: MokaCache<AggregationId, Issuer>,
 }
+
+const AGGREGATION_ID_CACHE_CAPACITY: u64 = 10_000;
+// An ID never changes once assigned. The TTL only bounds how long a credential
+// re-created directly in the database keeps its old one here.
+const AGGREGATION_ID_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 impl CachingCredentialRepo {
     pub fn new(inner: Arc<dyn CredentialRepo>) -> Self {
         Self {
             inner,
-            // An ID never changes once assigned. The TTL only bounds how long a
-            // credential re-created directly in the database keeps its old one here.
             aggregation_ids: MokaCache::builder()
-                .max_capacity(10_000)
-                .time_to_live(Duration::from_secs(3600))
+                .max_capacity(AGGREGATION_ID_CACHE_CAPACITY)
+                .time_to_live(AGGREGATION_ID_CACHE_TTL)
+                .build(),
+            issuers: MokaCache::builder()
+                .max_capacity(AGGREGATION_ID_CACHE_CAPACITY)
+                .time_to_live(AGGREGATION_ID_CACHE_TTL)
                 .build(),
         }
     }
@@ -246,13 +254,23 @@ impl CredentialRepo for CachingCredentialRepo {
         Ok(aggregation_id)
     }
 
+    /// A miss is not kept, so random IDs sent to the public endpoint can't fill
+    /// the cache.
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
     ) -> Result<Option<Issuer>, CredentialError> {
-        self.inner
+        if let Some(issuer) = self.issuers.get(&aggregation_id).await {
+            return Ok(Some(issuer));
+        }
+        let issuer = self
+            .inner
             .find_issuer_by_aggregation_id(aggregation_id)
-            .await
+            .await?;
+        if let Some(issuer) = &issuer {
+            self.issuers.insert(aggregation_id, issuer.clone()).await;
+        }
+        Ok(issuer)
     }
 }
 
@@ -584,6 +602,7 @@ mod tests {
     struct OneIssuer {
         aggregation_id: StdMutex<Option<AggregationId>>,
         aggregation_id_lookups: AtomicUsize,
+        issuer_lookups: AtomicUsize,
     }
 
     #[async_trait]
@@ -606,9 +625,11 @@ mod tests {
 
         async fn find_issuer_by_aggregation_id(
             &self,
-            _: AggregationId,
+            aggregation_id: AggregationId,
         ) -> Result<Option<Issuer>, CredentialError> {
-            Ok(None)
+            self.issuer_lookups.fetch_add(1, Ordering::SeqCst);
+            let known = *self.aggregation_id.lock().unwrap() == Some(aggregation_id);
+            Ok(known.then(|| Issuer("issuer".into())))
         }
     }
 
@@ -627,6 +648,30 @@ mod tests {
             );
         }
         assert_eq!(inner.aggregation_id_lookups.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn caching_credential_repo_keeps_only_issuers_it_found() {
+        let inner = Arc::new(OneIssuer::default());
+        let repo = CachingCredentialRepo::new(inner.clone());
+        let aggregation_id = AggregationId::generate();
+
+        assert_eq!(
+            repo.find_issuer_by_aggregation_id(aggregation_id)
+                .await
+                .unwrap(),
+            None
+        );
+        *inner.aggregation_id.lock().unwrap() = Some(aggregation_id);
+        for _ in 0..3 {
+            assert_eq!(
+                repo.find_issuer_by_aggregation_id(aggregation_id)
+                    .await
+                    .unwrap(),
+                Some(Issuer("issuer".into()))
+            );
+        }
+        assert_eq!(inner.issuer_lookups.load(Ordering::SeqCst), 2);
     }
 
     #[test]
