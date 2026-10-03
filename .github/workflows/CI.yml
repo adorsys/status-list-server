@@ -288,6 +288,46 @@ jobs:
         env:
           FEATURES: ${{ matrix.variant.features }}
 
+  single-cloud-test-compile:
+    name: Single-Cloud Test Compile (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs: cargo-build
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          # The all-features nextest job cannot catch feature-combination regressions
+          # (e.g. unused-code warnings or test gating that only appear with a single
+          # cloud backend enabled). Compile the test targets for the shipped Docker
+          # image variant feature set so those break here rather than at release.
+          - suffix: azure
+            features: "postgres,azure,redis"
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache-shared-key: "workspace"
+          cache-save-if: "false"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Cargo check single-cloud test targets
+        run: cargo check --workspace --all-targets --features "${FEATURES}"
+        env:
+          FEATURES: ${{ matrix.variant.features }}
+
   docker-build:
     name: Docker Build Smoke
     runs-on: ubuntu-latest
@@ -1099,6 +1139,7 @@ jobs:
       - cargo-fmt
       - cargo-build
       - release-variant-checks
+      - single-cloud-test-compile
       - docker-build
       - cargo-clippy
       - cargo-nextest
