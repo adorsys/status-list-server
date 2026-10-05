@@ -23,7 +23,9 @@ sudo apt-get install -y build-essential pkg-config libssl-dev cmake golang-go \
 Install Rust using rustup, Node.js 22 or newer, and Docker Engine with Compose v2
 using their supported installation instructions. Confirm `docker info` and
 `docker compose version` work for your user. All-feature tests require Docker in
-default mode too. Full mode runs on macOS too, but marks the Linux-only Alertmanager delivery
+default mode too. When Docker is unavailable, default-mode bootstrap warns and
+continues through the Rust build and lint checks; the nextest step fails with
+installation/startup guidance instead of skipping container-backed tests. Full mode runs on macOS too, but marks the Linux-only Alertmanager delivery
 test as skipped and exits non-zero. A complete parity pass requires Linux. KubeLinter's automatic archive installation supports x86_64;
 on other Linux architectures install the matching KubeLinter version manually.
 
@@ -92,7 +94,9 @@ Some versions come from pinned action implementations rather than workflow
 inputs: cargo-deny-action v2.1.1 embeds cargo-deny 0.20.2;
 markdownlint-cli2-action v24.1.0 embeds markdownlint-cli2 0.23.1;
 setup-tombi v1.2.4 defaults to Tombi 1.2.4; trivy-action v0.36.0 defaults to
-Trivy 0.70.0. Zizmor always uses the workflow's digest-pinned image. A matching
+Trivy 0.70.0. Zizmor, OpenTelemetry Collector, Prometheus, and Jaeger use the same
+digest-pinned images as CI. Multi-platform manifest digests preserve architecture
+selection while preventing mutable tags from changing the checked image. A matching
 native Trivy is accepted; otherwise the runner uses its digest-pinned container with a persistent cache.
 Helm downloads are verified against the published SHA-256 checksum. Node tools
 use a committed lockfile with `npm ci`; Python fallback dependencies use hashes

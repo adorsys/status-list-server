@@ -245,6 +245,45 @@ trivy_and_helm_checks
 """)
         self.assertEqual(result.returncode, 42, result.stderr)
 
+    def test_unavailable_docker_allows_bootstrap_and_rust_checks_before_tests(self):
+        self.stub('docker', 'exit 1')
+        for missing in (False, True):
+            with self.subTest(missing_cli=missing):
+                result = self.shell("""
+bootstrap_python() { :; }
+rust_components() { :; }
+install_cargo_bin() { :; }
+install_helm() { :; }
+""" + ('have() { [[ "$1" != docker ]]; }' if missing else '') + """
+bootstrap_default_tools
+run() { echo "$*"; }
+release_image_features_check() { :; }
+domain_purity_check() { :; }
+rust_default_gates
+echo unexpected-success
+""")
+                self.assertEqual(result.returncode, 127, result.stderr)
+                self.assertIn('WARNING: Docker is unavailable', result.stderr)
+                self.assertIn('cargo fmt --all --check', result.stdout)
+                self.assertIn('cargo build --workspace', result.stdout)
+                self.assertIn('cargo clippy --workspace', result.stdout)
+                self.assertNotIn('cargo nextest run', result.stdout)
+                self.assertNotIn('unexpected-success', result.stdout)
+                self.assertIn('Install Docker' if missing else 'Start Docker', result.stderr)
+
+    def test_container_gates_require_running_docker(self):
+        self.stub('docker', 'exit 1')
+        for gate in ('docker', 'zizmor', 'otel', 'prometheus', 'helm'):
+            with self.subTest(gate=gate):
+                result = self.shell('bootstrap_python() { :; }; install_helm() { :; }; '
+                                    + f'bootstrap_gate {gate}; echo unexpected-success')
+                self.assertEqual(result.returncode, 127, result.stderr)
+                self.assertIn('Start Docker', result.stderr)
+                self.assertNotIn('unexpected-success', result.stdout)
+        result = self.shell('coverage_check; echo unexpected-success')
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertNotIn('unexpected-success', result.stdout)
+
     def test_failed_python_install_removes_venv(self):
         self.stub('python3', """
 if [[ "$*" == '-m venv '* ]]; then
@@ -294,6 +333,8 @@ done
                     self.assertEqual(step['with']['version'], pins['HELM_VERSION'])
         for key in ['ZIZMOR_IMAGE', 'OTEL_COLLECTOR_IMAGE', 'PROMETHEUS_IMAGE', 'JAEGER_IMAGE']:
             self.assertIn(pins[key], workflow)
+            self.assertRegex(pins[key], r'@sha256:[0-9a-f]{64}$')
+        self.assertIn(pins['PROMETHEUS_IMAGE'], (ROOT / 'scripts/check-helm-prometheus.sh').read_text())
         self.assertIn('yamlfmt@' + pins['YAMLFMT_VERSION'], workflow)
         self.assertIn(pins['KUBE_LINTER_SHA256'], workflow)
         package = json.loads((ROOT / 'scripts/local-ci/node/package.json').read_text())

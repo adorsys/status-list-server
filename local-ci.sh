@@ -41,9 +41,9 @@ HELM_VERSION="v4.2.4"
 KUBE_LINTER_VERSION="v0.8.3"
 KUBE_LINTER_SHA256="1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df"
 ZIZMOR_IMAGE="ghcr.io/zizmorcore/zizmor:1.28.0@sha256:8e6b3e4fb74d1aa5d23e83ea369f386c66eced0d1fb944d32cd8b2aac100b00d"
-OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector-contrib:0.158.0"
-PROMETHEUS_IMAGE="prom/prometheus:v3.11.3"
-JAEGER_IMAGE="jaegertracing/jaeger:2.20.0"
+OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5"
+PROMETHEUS_IMAGE="prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3"
+JAEGER_IMAGE="jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8"
 
 BASE_PATH="$PATH"
 export CHART_DIR RUNNER_TEMP
@@ -291,14 +291,20 @@ rust_components() {
     done
 }
 
+require_docker() {
+    require_tool docker "Install Docker and start its daemon; this check requires containers."
+    docker info >/dev/null 2>&1 || fail_missing "Docker daemon" "Start Docker and ensure your user can access it (docker info)."
+}
+
 bootstrap_default_tools() {
     require_tool cargo "Install Rust/Cargo first: https://rustup.rs"
     require_tool rustup "Install rustup first: https://rustup.rs"
     have cmake || echo "WARNING: CMake may be needed by native Rust dependencies; install it if the build requests it." >&2
     have go || echo "WARNING: Go may be needed by native dependencies or yamlfmt bootstrap." >&2
     require_tool jq "Install jq (Ubuntu: sudo apt-get install jq)."
-    require_tool docker "Install Docker and start its daemon; the all-feature tests start containers."
-    docker info >/dev/null 2>&1 || fail_missing "Docker daemon" "Start Docker and ensure your user can access it (docker info)."
+    if ! have docker || ! docker info >/dev/null 2>&1; then
+        echo "WARNING: Docker is unavailable. Rust checks will run, but all-feature tests require Docker; install/start Docker and ensure docker info succeeds." >&2
+    fi
     bootstrap_python
     rust_components rustfmt clippy
     install_cargo_bin cargo-nextest cargo-nextest "$NEXT_VERSION"
@@ -323,9 +329,9 @@ bootstrap_gate() {
             install_node_bin markdownlint-cli2 "$MARKDOWNLINT_VERSION"
             install_go_bin yamlfmt "github.com/google/yamlfmt/cmd/yamlfmt@$YAMLFMT_VERSION" "$YAMLFMT_VERSION"
             ;;
-        zizmor) bootstrap_python; require_tool docker "Install Docker for Zizmor." ;;
+        zizmor) bootstrap_python; require_docker ;;
         variants) bootstrap_python; require_tool cargo "Install Rust/Cargo."; rust_version_check ;;
-        docker) require_tool docker "Install Docker." ;;
+        docker) require_docker ;;
         supply-chain)
             install_cargo_bin cargo-vet cargo-vet "$VET_VERSION"
             install_cargo_bin cargo-audit cargo-audit "$AUDIT_VERSION"
@@ -334,7 +340,7 @@ bootstrap_gate() {
         helm|otel|prometheus)
             bootstrap_python full
             install_helm
-            require_tool docker "Install Docker."
+            require_docker
             helm_deps
             if [ "$1" = helm ]; then install_kube_linter; fi
             if [ "$1" = prometheus ]; then bootstrap_node; fi
@@ -407,6 +413,7 @@ rust_default_gates() {
     log "Cargo clippy"
     run cargo clippy --workspace --all-targets --all-features -- -D warnings
     log "Cargo nextest"
+    require_docker
     run cargo nextest run --workspace --all-targets --all-features
     log "Cargo doc"
     run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --document-private-items
@@ -588,6 +595,7 @@ prometheus_validation() {
 
 coverage_check() {
     log "Cargo coverage"
+    require_docker
     run cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
     test -d target/llvm-cov/html || { echo "ERROR: coverage artifact directory target/llvm-cov/html was not created" >&2; exit 1; }
 }

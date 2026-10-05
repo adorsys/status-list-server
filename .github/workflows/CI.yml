@@ -764,13 +764,13 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
 
       - name: Verify Jaeger image tag exists
-        run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
+        run: docker manifest inspect jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8 >/dev/null
 
       - name: Validate Compose Collector config
         run: |
           docker run --rm \
             -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.158.0 \
+            otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5 \
             validate --config /etc/otelcol/config.yaml
 
       - name: Install Helm
@@ -825,7 +825,7 @@ jobs:
         run: |
           docker run --rm \
             -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.158.0 \
+            otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5 \
             validate --config /etc/otelcol/config.yaml
 
   prometheus-rules-validation:
@@ -854,13 +854,13 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check rules /etc/prometheus/rules/recording.rules.yml
 
       - name: Validate Prometheus alerting rules
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
         # The Helm chart ships the DEPLOYED copy of the recording+alerting rule set
@@ -875,10 +875,10 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check config /etc/prometheus/prometheus.production.yml
 
       - name: Lint SLO thresholds consistency
         run: |
@@ -888,13 +888,13 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /etc/prometheus/tests/recording.test.yml
 
       - name: Run promtool alerting rule tests
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /etc/prometheus/tests/alerting.test.yml
 
       - name: Validate Alertmanager config generation + webhook delivery
         # Proves (a) generate-alertmanager-config.sh emits an amtool-valid config

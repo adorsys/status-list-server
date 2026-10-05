@@ -147,4 +147,4 @@ docker run --rm -w /tmp \
   -v "$CHECK_TEMP/helm-rules.yml":/tmp/helm-rules.yml:ro \
   -v "$CHECK_TEMP/helm-alerting.test.yml":/tmp/helm-alerting.test.yml:ro \
   --entrypoint promtool \
-  prom/prometheus:v3.11.3 test rules /tmp/helm-alerting.test.yml
+  prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /tmp/helm-alerting.test.yml
