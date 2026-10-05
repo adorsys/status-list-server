@@ -444,12 +444,13 @@ Both tags are **multi-architecture index manifests** (each contains `linux/amd64
 
 Nothing bumps these pins. Dependabot's `docker` ecosystem reads `FROM` tags but has no mechanism for `FROM ...@sha256:<digest>` (and in any case a digest cannot be "bumped" automatically — there is no tag to watch). Renovate's regex manager would close it properly. The bump path is manual:
 
-1. **Resolve the current index digest** of each tag:
-   ```bash
-   docker buildx imagetools inspect blackdex/rust-musl:x86_64-musl    # index digest for builder-amd64
-   docker buildx imagetools inspect blackdex/rust-musl:aarch64-musl   # index digest for builder-arm64
-   ```
-   Use the `Digest:` line of the top-level (index) manifest, not any `Name:` line carrying a child `@sha256:`.
+1. **Resolve the current index digest** of each tag, taking the `Digest:` line of the top-level (index) manifest — not any `Name:` line carrying a child `@sha256:`:
+
+    ```bash
+    docker buildx imagetools inspect blackdex/rust-musl:x86_64-musl    # index digest for builder-amd64
+    docker buildx imagetools inspect blackdex/rust-musl:aarch64-musl   # index digest for builder-arm64
+    ```
+
 2. **Update the two `FROM` lines** in the `Dockerfile`, replacing the `@sha256:<digest>` suffix. The tag stays, so the `--platform=$BUILDPLATFORM` child resolution is unchanged.
 3. **Build both architectures** to confirm the new builder still produces a working image on `linux/amd64` and `linux/arm64`, and that the auditable-binary assertion still holds.
 
