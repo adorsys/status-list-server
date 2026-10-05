@@ -20,7 +20,7 @@ use database::{
     assert_sql_allocations_are_distinct_and_rollback_exhausted,
 };
 #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-use database::{assert_update_snapshot_rolls_back, roll_back_to_before_list_count};
+use database::assert_update_snapshot_rolls_back;
 
 use super::fixtures;
 #[cfg(feature = "sqlite")]
@@ -1150,9 +1150,9 @@ async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes()
 #[tokio::test]
 async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() {
     for column_already_added in [false, true] {
-        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let steps = list_count_migration_index() as u32;
+        let test_db = mysql_helpers::MysqlTestDb::start_migrated(Some(steps)).await;
         let db = test_db.connection().await;
-        roll_back_to_before_list_count(&db).await;
         assert_list_count_migration_backfills(&db, column_already_added, "MySQL").await;
     }
 }
@@ -1161,8 +1161,8 @@ async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() 
 #[tokio::test]
 async fn test_postgres_list_count_migration_backfills_and_accepts_old_pod_writes() {
     for column_already_added in [false, true] {
-        let test_db = postgres_helpers::postgres_connection().await;
-        roll_back_to_before_list_count(&test_db.db).await;
+        let steps = list_count_migration_index() as u32;
+        let test_db = postgres_helpers::postgres_connection_migrated(Some(steps)).await;
         assert_list_count_migration_backfills(&test_db.db, column_already_added, "Postgres").await;
     }
 }

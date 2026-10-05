@@ -1,6 +1,6 @@
 //! The per-issuer aggregation ID: stored at registration, resolvable both ways,
-//! kept across credential updates, and assigned on first lookup to credentials
-//! a release that predates it registered.
+//! kept across credential updates and rollbacks, and assigned on first lookup
+//! to credentials a release that predates it registered.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -21,6 +21,12 @@ use crate::outbound::sql::test_containers::mysql_helpers;
 use crate::outbound::sql::test_containers::postgres_helpers;
 
 const MIGRATION: &str = "m20260929_000001_credentials_aggregation_id";
+
+/// The migrations a release before issuer-scoped aggregation does not know.
+const AGGREGATION_MIGRATIONS: [&str; 2] = [
+    MIGRATION,
+    "m20260929_000002_status_lists_issuer_list_id_index",
+];
 
 /// SQL a failed MySQL run may already have committed, in migration order.
 const PARTIAL_MIGRATION: [&str; 2] = [
@@ -155,12 +161,47 @@ async fn assert_migration_and_backfill(
     );
 }
 
-#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-async fn roll_back_to_before_aggregation_id(db: &DatabaseConnection) {
-    let steps = Migrator::migrations().len() - migration_index();
-    Migrator::down(db, Some(steps as u32))
+/// Rolling back deletes the two migrations' records and upgrading again re-runs
+/// them; every ID must survive, or URIs already handed out return 404.
+async fn assert_rollback_keeps_aggregation_ids(db: Arc<DatabaseConnection>, backend: &str) {
+    let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
+    let registered = AggregationId::generate();
+    repo.insert(credential("issuer-registered"), registered)
         .await
-        .expect("rolling back to before aggregation_id must succeed");
+        .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-looked-up', '{}')",
+    )
+    .await
+    .unwrap();
+    let looked_up = repo
+        .find_aggregation_id("issuer-looked-up")
+        .await
+        .unwrap()
+        .expect("the first lookup must assign an ID");
+
+    fixtures::forget_migrations(&db, &AGGREGATION_MIGRATIONS).await;
+    Migrator::up(db.as_ref(), None)
+        .await
+        .unwrap_or_else(|e| panic!("upgrading again after a rollback on {backend}: {e}"));
+
+    for (issuer, aggregation_id) in [
+        ("issuer-registered", registered),
+        ("issuer-looked-up", looked_up),
+    ] {
+        assert_eq!(
+            repo.find_aggregation_id(issuer).await.unwrap(),
+            Some(aggregation_id),
+            "the rollback must keep {issuer}'s ID on {backend}"
+        );
+        assert_eq!(
+            repo.find_issuer_by_aggregation_id(aggregation_id)
+                .await
+                .unwrap(),
+            Some(Issuer(issuer.into())),
+            "{issuer}'s aggregation URI must still resolve on {backend}"
+        );
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -196,10 +237,9 @@ async fn test_sqlite_aggregation_id_migration_and_backfill() {
 #[tokio::test]
 async fn test_mysql_aggregation_id_migration_and_backfill() {
     for already_applied in 0..=PARTIAL_MIGRATION.len() {
-        let test_db = mysql_helpers::MysqlTestDb::start().await;
-        let db = test_db.connection().await;
-        roll_back_to_before_aggregation_id(&db).await;
-        assert_migration_and_backfill(db, already_applied, "MySQL").await;
+        let steps = migration_index() as u32;
+        let test_db = mysql_helpers::MysqlTestDb::start_migrated(Some(steps)).await;
+        assert_migration_and_backfill(test_db.connection().await, already_applied, "MySQL").await;
     }
 }
 
@@ -207,8 +247,28 @@ async fn test_mysql_aggregation_id_migration_and_backfill() {
 #[tokio::test]
 async fn test_postgres_aggregation_id_migration_and_backfill() {
     for already_applied in 0..=PARTIAL_MIGRATION.len() {
-        let test_db = postgres_helpers::postgres_connection().await;
-        roll_back_to_before_aggregation_id(&test_db.db).await;
+        let steps = migration_index() as u32;
+        let test_db = postgres_helpers::postgres_connection_migrated(Some(steps)).await;
         assert_migration_and_backfill(test_db.db.clone(), already_applied, "Postgres").await;
     }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_rollback_keeps_aggregation_ids() {
+    assert_rollback_keeps_aggregation_ids(fixtures::sqlite_connection().await, "SQLite").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_rollback_keeps_aggregation_ids() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    assert_rollback_keeps_aggregation_ids(test_db.connection().await, "MySQL").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_rollback_keeps_aggregation_ids() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    assert_rollback_keeps_aggregation_ids(test_db.db.clone(), "Postgres").await;
 }

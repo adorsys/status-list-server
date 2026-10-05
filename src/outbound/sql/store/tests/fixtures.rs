@@ -5,7 +5,8 @@ mod database;
 
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 pub(super) use database::{
-    NO_LIST_QUOTA, enforce_list_quota, insert_list_as_old_pod, list_count, seed_credential,
+    NO_LIST_QUOTA, enforce_list_quota, forget_migrations, insert_list_as_old_pod, list_count,
+    seed_credential,
 };
 #[cfg(feature = "sqlite")]
 pub(super) use database::{sqlite_connection, sqlite_connection_migrated};
