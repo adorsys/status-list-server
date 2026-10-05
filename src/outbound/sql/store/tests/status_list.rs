@@ -1777,18 +1777,6 @@ pub(super) fn list_count_migration_index() -> usize {
         .expect("the list_count migration must be registered")
 }
 
-#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-async fn roll_back_to_before_list_count(db: &DatabaseConnection) {
-    use sea_orm_migration::MigratorTrait;
-
-    use crate::outbound::sql::Migrator;
-
-    let steps = Migrator::migrations().len() - list_count_migration_index();
-    Migrator::down(db, Some(steps as u32))
-        .await
-        .expect("rolling back to before list_count must succeed");
-}
-
 /// The backfill counts existing lists, and old-pod credential inserts still
 /// work. `column_already_added` recreates a failed MySQL backfill: column
 /// present, migration unrecorded.
@@ -1868,9 +1856,9 @@ async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes()
 #[tokio::test]
 async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() {
     for column_already_added in [false, true] {
-        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        let steps = list_count_migration_index() as u32;
+        let test_db = mysql_helpers::MysqlTestDb::start_migrated(Some(steps)).await;
         let db = test_db.connection().await;
-        roll_back_to_before_list_count(&db).await;
         assert_list_count_migration_backfills(&db, column_already_added, "MySQL").await;
     }
 }
@@ -1879,8 +1867,8 @@ async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() 
 #[tokio::test]
 async fn test_postgres_list_count_migration_backfills_and_accepts_old_pod_writes() {
     for column_already_added in [false, true] {
-        let test_db = postgres_helpers::postgres_connection().await;
-        roll_back_to_before_list_count(&test_db.db).await;
+        let steps = list_count_migration_index() as u32;
+        let test_db = postgres_helpers::postgres_connection_migrated(Some(steps)).await;
         assert_list_count_migration_backfills(&test_db.db, column_already_added, "Postgres").await;
     }
 }

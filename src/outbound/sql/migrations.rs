@@ -44,6 +44,20 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
     }
 }
 
+/// The `docs/deployment-runbook.md` section that [`refuse_down`] points at.
+const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
+
+/// Every migration's `down`: the schema only moves forward. See
+/// `docs/adr/0003-schema-migrations-are-forward-only.md`.
+fn refuse_down(migration: &str) -> Result<(), DbErr> {
+    Err(DbErr::Migration(format!(
+        "migration '{migration}' cannot be rolled back: the schema only moves forward. \
+         To roll back a release, delete the seaql_migrations records of the migrations \
+         it does not know and keep the schema; see \"{ROLLBACK_RUNBOOK_SECTION}\" in \
+         docs/deployment-runbook.md"
+    )))
+}
+
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
@@ -311,57 +325,8 @@ pub(crate) mod tables {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Drop indexes first
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_list_id")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_sub")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_issuer")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            // Drop tables in reverse order to handle foreign key constraints
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(Credentials::Table)
-                        .to_owned(),
-                )
-                .await?;
-            Ok(())
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -432,17 +397,9 @@ pub(crate) mod add_updated_at {
                 .map(|_| ())
         }
 
-        /// Removes updated_at column from status_lists table
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusLists::Table)
-                        .drop_column(StatusLists::UpdatedAt)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -524,24 +481,8 @@ pub(crate) mod status_list_history {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_resolution")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -587,16 +528,8 @@ pub(crate) mod status_list_history_exp_index {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_exp")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -653,15 +586,8 @@ pub(crate) mod credentials_list_count {
                 .map(|_| ())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(Credentials::Table)
-                        .drop_column(Credentials::ListCount)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -736,10 +662,8 @@ pub(crate) mod list_quota {
             Ok(())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_table(Table::drop().table(ListQuota::Table).to_owned())
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -801,15 +725,8 @@ pub(crate) mod status_list_allocations {
             manager.create_table(table).await
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusListAllocations::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -878,30 +795,8 @@ pub(crate) mod credentials_aggregation_id {
             Ok(())
         }
 
-        // `has_index` rather than `if_exists()`, which sea-query cannot render
-        // for MySQL.
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if manager.has_index("credentials", INDEX).await? {
-                manager
-                    .drop_index(
-                        Index::drop()
-                            .name(INDEX)
-                            .table(Credentials::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-            }
-            if manager.has_column("credentials", "aggregation_id").await? {
-                manager
-                    .alter_table(
-                        Table::alter()
-                            .table(Credentials::Table)
-                            .drop_column(Credentials::AggregationId)
-                            .to_owned(),
-                    )
-                    .await?;
-            }
-            Ok(())
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -948,18 +843,8 @@ pub(crate) mod status_lists_issuer_list_id_index {
                 .await
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager.has_index("status_lists", INDEX).await? {
-                return Ok(());
-            }
-            manager
-                .drop_index(
-                    Index::drop()
-                        .name(INDEX)
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -1064,6 +949,15 @@ mod tests {
         assert!(
             runbook.contains(RECOUNT_LIST_COUNT_SQL),
             "docs/troubleshooting.md must quote RECOUNT_LIST_COUNT_SQL verbatim"
+        );
+    }
+
+    #[test]
+    fn refuse_down_names_a_runbook_section_that_exists() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        assert!(
+            runbook.contains(&format!("### {ROLLBACK_RUNBOOK_SECTION}")),
+            "docs/deployment-runbook.md must have the section refuse_down names"
         );
     }
 
