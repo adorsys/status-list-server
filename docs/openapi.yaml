@@ -318,10 +318,14 @@ paths:
         in: path
         required: true
         description: |
-          UUID of the status list. Publish (`PUT`) restricts this to the
-          lowercase, hyphenated UUID form (see the `PUT` operation for
-          details); update (`PATCH`) accepts any form `Uuid::try_parse`
-          accepts (braced, `urn:uuid:`, no-hyphen, uppercase).
+          UUID of the status list. For publish (`PUT`), only the lowercase,
+          hyphenated form is accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`);
+          the braced, `urn:uuid:`, no-hyphen and uppercase forms are rejected
+          with `400`. For update (`PATCH`), any well-formed UUID is accepted
+          for the lookup, but a list is only found by the exact spelling it was
+          published with: an uppercase (or otherwise differently-spelled) ID
+          for a list stored in the canonical lowercase form is not matched and
+          yields `404`.
         schema:
           type: string
           format: uuid

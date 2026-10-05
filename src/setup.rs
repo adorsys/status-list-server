@@ -51,7 +51,7 @@ use crate::cert_manager::{
 use crate::config::CacheBackend;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
-use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
+use crate::config::{DnsProviderKind, ResolvedDnsProvider};
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -519,7 +519,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .dns
             .resolve(app_env)
             .wrap_err("Invalid DNS provider configuration")?;
-        if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+        if dns_provider.kind() == DnsProviderKind::Pebble
+            && crate::config::classify_app_env(app_env).is_production()
+        {
             warn!(
                 "The 'pebble' DNS provider is a development-only fake DNS server \
                  but APP_ENV=production; ACME challenges will not succeed against a real CA"
@@ -531,7 +533,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .challenge_handler(challenge_handler)
             .acme_strategy();
 
-        if app_env == ENV_DEVELOPMENT {
+        if !crate::config::classify_app_env(app_env).is_production() {
             let root_cert = include_bytes!("../test_data/pebble.pem");
             let http_client = DefaultHttpClient::new(Some(root_cert))?;
             cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
@@ -930,7 +932,7 @@ fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
 /// explicitly so the decision is testable without mutating the process
 /// environment.
 fn check_production_base_url(app_env: &str, base_url: &str) -> Result<Option<String>, String> {
-    if app_env != crate::config::ENV_PRODUCTION {
+    if !crate::config::classify_app_env(app_env).is_production() {
         return Ok(None);
     }
     if resolved_base_url_is_localhost(base_url) {
@@ -1908,21 +1910,15 @@ mod general_tests {
 
     /// A production profile set via the `prod` alias (any casing, surrounding
     /// whitespace) must still fire the localhost base-URL guard: the guard runs
-    /// the raw `APP_ENV` through `normalize_app_env`, so it catches the same
+    /// the raw `APP_ENV` through `classify_app_env`, so it catches the same
     /// profiles config treats as production. Regression for a guard that
     /// compared the raw value to exactly `production`.
     #[test]
     fn prod_alias_fires_production_base_url_guard() {
         use super::check_production_base_url;
-        use crate::config::{ENV_PRODUCTION, classify_app_env};
 
         for raw in ["prod", "PROD", " production ", "PrOd"] {
-            let app_env = classify_app_env(raw);
-            assert_eq!(
-                app_env, ENV_PRODUCTION,
-                "{raw:?} must classify as production"
-            );
-            let result = check_production_base_url(app_env, "https://localhost/api/v1");
+            let result = check_production_base_url(raw, "https://localhost/api/v1");
             assert!(
                 result
                     .expect_err("localhost base URL in a prod profile must be a hard error")

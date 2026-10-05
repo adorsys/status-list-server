@@ -98,24 +98,27 @@ pub const ENV_DEVELOPMENT: &str = "development";
 /// the deployment profile must use this rather than comparing the raw value,
 /// so the guard matches what config itself decided.
 pub fn normalize_app_env() -> &'static str {
-    classify_app_env(&std::env::var("APP_ENV").unwrap_or_default())
-}
-
-/// Pure classification of a raw `APP_ENV` value into the canonical
-/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] profile. Extracted from
-/// [`normalize_app_env`] so the mapping is testable without touching the
-/// process environment.
-pub fn classify_app_env(raw: &str) -> &'static str {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "production" | "prod" => ENV_PRODUCTION,
-        _ => ENV_DEVELOPMENT,
+    match classify_app_env(&std::env::var("APP_ENV").unwrap_or_default()) {
+        TelemetryEnvironment::Production => ENV_PRODUCTION,
+        TelemetryEnvironment::Development => ENV_DEVELOPMENT,
     }
 }
 
-/// Whether `app_env` (a value produced by [`normalize_app_env`]) is a
-/// production profile.
-pub fn is_production(app_env: &str) -> bool {
-    app_env == ENV_PRODUCTION
+/// The single authoritative mapping from a raw `APP_ENV`-style value to a
+/// [`TelemetryEnvironment`].
+///
+/// It is lenient by design: the value is trimmed and matched case-insensitively,
+/// and anything that is not an explicit production spelling (including an unset
+/// or empty value) falls back to development. Production accepts both
+/// `production` and `prod`; this is the one place that spelling decision lives.
+///
+/// Prefer this over comparing a raw `APP_ENV` string against a literal, which
+/// silently misses `prod`/`PROD`/`Production` spellings.
+pub fn classify_app_env(raw: &str) -> TelemetryEnvironment {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "production" | "prod" => TelemetryEnvironment::Production,
+        _ => TelemetryEnvironment::Development,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,13 +246,18 @@ impl<'de> Deserialize<'de> for TelemetryEnvironment {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "development" | "dev" => Ok(Self::Development),
-            "production" | "prod" => Ok(Self::Production),
-            other => Err(serde::de::Error::unknown_variant(
-                other,
-                &["development", "dev", "production", "prod"],
-            )),
+        // Reuse classify_app_env for the production mapping; this config field is
+        // deliberately stricter than the lenient APP_ENV classifier, so reject
+        // values that classify would silently treat as development.
+        match classify_app_env(&raw) {
+            Self::Production => Ok(Self::Production),
+            Self::Development => match raw.trim().to_ascii_lowercase().as_str() {
+                "development" | "dev" => Ok(Self::Development),
+                other => Err(serde::de::Error::unknown_variant(
+                    other,
+                    &["development", "dev", "production", "prod"],
+                )),
+            },
         }
     }
 }
@@ -712,7 +720,7 @@ impl DnsConfig {
     /// borrowed, so consumers need no re-validation. Synchronous and
     /// network-free by design; anything needing I/O belongs to the boot path.
     pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
-        let kind = self.provider.unwrap_or(if is_production(app_env) {
+        let kind = self.provider.unwrap_or(if classify_app_env(app_env).is_production() {
             DnsProviderKind::Route53
         } else {
             DnsProviderKind::Pebble
@@ -2259,6 +2267,41 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_app_env() {
+        // Every accepted production spelling, in any case and with padding,
+        // classifies as production; anything else falls back to development.
+        for raw in ["production", "prod", "PRODUCTION", "PROD", "  Production "] {
+            assert!(
+                classify_app_env(raw).is_production(),
+                "{raw:?} must classify as production"
+            );
+        }
+
+        for raw in [
+            "development",
+            "dev",
+            "",
+            "   ",
+            "staging",
+            "PRODUCTIONx",
+            "development ",
+        ] {
+            assert!(
+                !classify_app_env(raw).is_production(),
+                "{raw:?} must not classify as production"
+            );
+        }
+
+        // The DNS default follows the same classifier, so a non-canonical
+        // production spelling still selects the production DNS provider.
+        let default_dns = DnsConfig::default();
+        assert_eq!(
+            default_dns.resolve("PROD").unwrap().kind(),
+            DnsProviderKind::Route53
+        );
+    }
+
+    #[test]
     fn test_management_auth_validations() {
         let zero_lifetime =
             Config::load_from_overrides(&[("management_auth.max_token_lifetime_secs", "0")]);
@@ -2960,22 +3003,18 @@ mod tests {
         for raw in ["production", "prod", "PRODUCTION", " Prod ", "  prod  "] {
             assert_eq!(
                 classify_app_env(raw),
-                ENV_PRODUCTION,
+                TelemetryEnvironment::Production,
                 "raw APP_ENV {raw:?} must be production"
             );
-            assert!(is_production(classify_app_env(raw)));
+            assert!(classify_app_env(raw).is_production());
         }
         for raw in ["development", "dev", "", "staging", "development ", "PRODx"] {
             assert_eq!(
                 classify_app_env(raw),
-                ENV_DEVELOPMENT,
+                TelemetryEnvironment::Development,
                 "raw APP_ENV {raw:?} must be development"
             );
-            assert!(!is_production(classify_app_env(raw)));
+            assert!(!classify_app_env(raw).is_production());
         }
-        // The predicate itself only matches the canonical production value.
-        assert!(is_production(ENV_PRODUCTION));
-        assert!(!is_production("prod"));
-        assert!(!is_production(" production "));
     }
 }
