@@ -336,8 +336,8 @@ async fn get_or_build_live_token(
     client_accepts_gzip: bool,
 ) -> Result<(Bytes, Option<&'static str>), ApiError> {
     let iat = key.iat;
-    let exp_secs = state.token_exp_secs as i64;
-    let validity_window = (iat, iat.saturating_add(exp_secs));
+    let exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
+    let validity_window = (iat, exp);
 
     // A hit serves cached bytes; a miss runs the builder. Config guarantees a
     // positive `token_exp_secs`, so the window is always open and a token is
@@ -2897,6 +2897,59 @@ mod tests {
         assert!(
             !jwt_verifies_under(&body, provider.signer_b.public_key_bytes()),
             "the served token must not be signed by the post-rotation snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_live_token_rejects_u64_max_token_exp_secs() {
+        // Regression for the cached live-token path. The expiry window must be
+        // derived through the same fail-closed `token_expiry` conversion as every
+        // other mint site, not via a raw `as i64` (which turns `u64::MAX` into
+        // `-1`) plus `saturating_add` (which would then produce a born-expired
+        // window `iat - 1`). A directly constructed `AppState` with
+        // `token_exp_secs = u64::MAX` must therefore make a `Modified` GET fail
+        // closed with `TokenExpiryOverflow` -> 500, never return a signed token
+        // that is already expired.
+        let mut app_state = test_app_state(None).await;
+
+        let token_id = uuid::Uuid::new_v4().to_string();
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        // Publish under the normal config; flip `token_exp_secs` to `u64::MAX`
+        // only afterwards, so the list exists while the GET exercises the
+        // fail-closed cached-token expiry conversion in isolation.
+        app_state.token_exp_secs = u64::MAX;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
+        );
+
+        // No conditional validator -> the handler takes the `Modified` path into
+        // `get_or_build_live_token`, where the expired-window guard must trip.
+        let err = get_status_list_at(
+            State(app_state),
+            token_id,
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+            1_000_000_000,
+        )
+        .await
+        .expect_err("u64::MAX token_exp_secs must fail closed on the cached path");
+
+        assert_eq!(
+            err.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a directly constructed AppState with u64::MAX token_exp_secs must error, \
+             not mint an already-expired token"
         );
     }
 }
