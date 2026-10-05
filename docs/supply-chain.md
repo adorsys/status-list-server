@@ -436,6 +436,25 @@ That matters because `rust-toolchain.toml` is `channel = "stable"`, so the toolc
 
 This is an accepted gap: a loud build failure is worse than a bump PR but better than a silently empty SBOM, and a scheduled crates.io poller would itself be unmonitored automation. Renovate's regex manager would close it properly.
 
+## Builder Image Digests
+
+The `builder-amd64` and `builder-arm64` stages of the `Dockerfile` pin their upstream bases — `blackdex/rust-musl:x86_64-musl` and `blackdex/rust-musl:aarch64-musl` — to immutable `@sha256:...` index digests. A mutable tag can change upstream without notice, which would produce non-reproducible builds, unexpected compiler differences, or supply-chain risk. Pinning by digest makes the builder byte-for-byte identical on every rebuild.
+
+Both tags are **multi-architecture index manifests** (each contains `linux/amd64` and `linux/arm64` children), and the `Dockerfile` selects the correct architecture with `--platform=$BUILDPLATFORM`. The pinned digest is therefore the **index** digest, not a per-platform child manifest digest: pinning the index keeps both architectures reproducible in a single immutable reference, and `--platform` still resolves the right child inside it. Do not pin a single child digest — that would lock every build to one architecture.
+
+Nothing bumps these pins. Dependabot's `docker` ecosystem reads `FROM` tags but has no mechanism for `FROM ...@sha256:<digest>` (and in any case a digest cannot be "bumped" automatically — there is no tag to watch). Renovate's regex manager would close it properly. The bump path is manual:
+
+1. **Resolve the current index digest** of each tag:
+   ```bash
+   docker buildx imagetools inspect blackdex/rust-musl:x86_64-musl    # index digest for builder-amd64
+   docker buildx imagetools inspect blackdex/rust-musl:aarch64-musl   # index digest for builder-arm64
+   ```
+   Use the `Digest:` line of the top-level (index) manifest, not any `Name:` line carrying a child `@sha256:`.
+2. **Update the two `FROM` lines** in the `Dockerfile`, replacing the `@sha256:<digest>` suffix. The tag stays, so the `--platform=$BUILDPLATFORM` child resolution is unchanged.
+3. **Build both architectures** to confirm the new builder still produces a working image on `linux/amd64` and `linux/arm64`, and that the auditable-binary assertion still holds.
+
+Bump both pins together: the two tags are released by the same upstream project and a compiler change that matters usually lands for both targets at once. When the `blackdex/rust-musl` project stops tagging the `-musl` variants the way it does today, re-read this section before changing anything — the pin is the reproducibility guarantee, and moving back to a mutable tag silently restores the risk this section exists to remove.
+
 ## Relationship to Source-Level Checks
 
 `cargo-audit`, `cargo-deny`, and `cargo-vet` already query RustSec against the dependency tree on every pull request. The image scan queries the same advisory database, so it will rarely surface a crate advisory that source-level CI did not.
