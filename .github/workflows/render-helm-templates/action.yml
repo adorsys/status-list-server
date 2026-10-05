@@ -306,6 +306,34 @@ runs:
         if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' /tmp/rendered/wl-prod/status-list-server/templates/deployment.yaml; then
           echo "ERROR: production AWS render must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
         fi
+        # Release-only production config: deploy.yml applies the same three overrides on top of
+        # values-aws.yaml + values-production.yaml. The wl-prod render above supplies only the two
+        # value files, so it still renders the namespaced SecretStore and cannot catch a regression
+        # in this release-only configuration. Render with the identical overrides and assert that no
+        # namespaced SecretStore is emitted and that every release ExternalSecret points at the
+        # cluster-scoped store (ClusterSecretStore datev-secret-store).
+        helm template status-list-server "$CHART_DIR" \
+          -f "$CHART_DIR"/values-aws.yaml \
+          -f "$CHART_DIR"/values-production.yaml \
+          --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
+          --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
+          --set "secretStore.enabled=false" \
+          --output-dir /tmp/rendered/prod-clusterstore
+        if [ -f /tmp/rendered/prod-clusterstore/status-list-server/templates/secret-store.yaml ]; then
+          echo "ERROR: production render with secretStore.enabled=false must not emit a namespaced SecretStore"; exit 1
+        fi
+        if [ ! -f /tmp/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml ]; then
+          echo "ERROR: production render must emit ExternalSecret resources"; exit 1
+        fi
+        PROD_ES_COUNT=$(grep -c 'kind: ExternalSecret' /tmp/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml || true)
+        if [ "$PROD_ES_COUNT" -lt 1 ]; then
+          echo "ERROR: production render must emit at least one ExternalSecret"; exit 1
+        fi
+        PROD_STORE_REF_COUNT=$(grep -c 'name: datev-secret-store' /tmp/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml || true)
+        PROD_STORE_KIND_COUNT=$(grep -c 'kind: ClusterSecretStore' /tmp/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml || true)
+        if [ "$PROD_STORE_REF_COUNT" -ne "$PROD_ES_COUNT" ] || [ "$PROD_STORE_KIND_COUNT" -ne "$PROD_ES_COUNT" ]; then
+          echo "ERROR: every production ExternalSecret must reference ClusterSecretStore/datev-secret-store (refs=$PROD_STORE_REF_COUNT kinds=$PROD_STORE_KIND_COUNT es=$PROD_ES_COUNT)"; exit 1
+        fi
         # Azure Workload Identity primary path: application pod label + application KSA distinct
         # from the External Secrets Operator identity.
         helm template status-list-server "$CHART_DIR" \
