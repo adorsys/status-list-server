@@ -241,10 +241,11 @@ An issuer's aggregation is complete in one response: the server refuses to start
 while `limits.max_lists_per_issuer` exceeds the default page size (1000), and the
 list quota holds each issuer to it. So a relying party that reads only
 `status_lists`, as draft-21 §9.3 defines it, gets every list. That holds only
-while the quota is enforced, not while an operator runs with
-`limits.list_quota_transition`, and an issuer that had more lists before the
-quota was enforced keeps paging. Pages are read by a keyset scan on
-`(issuer, list_id)` and there is no total count.
+while the quota is enforced. While an operator runs with
+`limits.list_quota_transition`, publishes past the cap are accepted, so tokens
+carry no `aggregation_uri` until the quota is enforced. An issuer that had more
+lists before the quota was enforced keeps paging. Pages are read by a keyset
+scan on `(issuer, list_id)` and there is no total count.
 
 An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
 finds out instead of caching an empty aggregation. Responses carry a weak `ETag`

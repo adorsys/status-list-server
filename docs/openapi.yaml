@@ -272,7 +272,8 @@ paths:
         default page size, and the list quota holds each issuer to it. The
         exceptions are an issuer that had more lists before the quota was
         enforced, and any issuer while an operator runs the quota unenforced
-        during an upgrade. Those page as described under `getAggregation`.
+        during an upgrade, when tokens don't advertise this URI. Those page as
+        described under `getAggregation`.
       security: []
       parameters:
         - name: aggregation_id
@@ -640,7 +641,9 @@ paths:
             response. `304 Not Modified` is returned only while the client's
             cached token still has more than `ttl` seconds of validity remaining
             (i.e. within `exp - ttl` of the list's last modification); otherwise
-            the server returns a freshly signed `200 OK` token.
+            the server returns a freshly signed `200 OK` token. Ignored when the
+            server advertises `aggregation_uri`, which `Last-Modified` does not
+            reflect; `If-None-Match` still applies.
           schema:
             type: string
             example: "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -1038,7 +1041,8 @@ components:
           description: |
             The issuing issuer's Status List Aggregation URI (draft-21 §4.2,
             §4.3). Present when the server has `server.aggregation_uri`
-            configured, unless looking up the issuer's aggregation ID failed.
+            configured and the list quota is enforced, unless looking up the
+            issuer's aggregation ID failed.
             Tokens served before issuer scoping carried the unscoped URI, which
             still resolves.
           example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"

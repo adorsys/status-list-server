@@ -141,9 +141,12 @@ async fn get_status_list_at(
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|h| h.to_str().ok());
+    // `Last-Modified` tracks the list only, not the `aggregation_uri` the token
+    // carries, so with aggregation configured only the ETag may certify a 304.
     let if_modified_since = headers
         .get(header::IF_MODIFIED_SINCE)
-        .and_then(|h| h.to_str().ok());
+        .and_then(|h| h.to_str().ok())
+        .filter(|_| state.aggregation_uri.is_none());
 
     let status_record = fetch_status_record(&list_id, &state).await?;
     let aggregation_uri = issuer_aggregation_uri(&state, &status_record.issuer).await;
@@ -155,15 +158,11 @@ async fn get_status_list_at(
         aggregation_uri.as_deref(),
         token_window(now, validity).0,
     )?;
-    let last_modified_ts = status_record.updated_at;
-    let last_modified = format_http_date(last_modified_ts);
-    let cache_control = build_cache_control(state.token_ttl_secs);
-
     match evaluate_conditional_request(
         if_none_match,
         if_modified_since,
         &current_etag,
-        last_modified_ts,
+        status_record.updated_at,
         now,
         validity,
     ) {
@@ -171,6 +170,8 @@ async fn get_status_list_at(
             revalidation_metrics()
                 .total
                 .add(1, &[KeyValue::new("outcome", "not_modified")]);
+            let last_modified = format_http_date(status_record.updated_at);
+            let cache_control = build_cache_control(state.token_ttl_secs);
             Ok((
                 StatusCode::NOT_MODIFIED,
                 [
@@ -192,8 +193,6 @@ async fn get_status_list_at(
                 status_record,
                 aggregation_uri,
                 &current_etag,
-                &last_modified,
-                &cache_control,
                 client_accepts_gzip,
             )
             .await
@@ -213,8 +212,6 @@ async fn get_status_list_at(
                 status_record,
                 aggregation_uri,
                 &current_etag,
-                &last_modified,
-                &cache_control,
                 client_accepts_gzip,
             )
             .await
@@ -222,20 +219,20 @@ async fn get_status_list_at(
     }
 }
 
-/// Build a freshly signed `200 OK` status-list token response, reusing the
-/// current validator and freshness headers. Shared by the content-change
-/// (`Modified`) and expiry-forced re-sign (`ExpiredToken`) paths.
-#[allow(clippy::too_many_arguments)]
+/// Build a freshly signed `200 OK` status-list token response. `current_etag`
+/// must be the validator computed for this record and `aggregation_uri`, so the
+/// headers and the signed token describe the same representation; the other
+/// headers are derived here from the record and state.
 async fn build_fresh_200_response(
     state: &AppState,
     accept_type: AcceptType,
     status_record: StatusListRecord,
     aggregation_uri: Option<String>,
     current_etag: &str,
-    last_modified: &str,
-    cache_control: &str,
     client_accepts_gzip: bool,
 ) -> Result<Response, ApiError> {
+    let last_modified = format_http_date(status_record.updated_at);
+    let cache_control = build_cache_control(state.token_ttl_secs);
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
@@ -256,11 +253,11 @@ async fn build_fresh_200_response(
     h.insert(header::ETAG, HeaderValue::from_str(current_etag).unwrap());
     h.insert(
         header::LAST_MODIFIED,
-        HeaderValue::from_str(last_modified).unwrap(),
+        HeaderValue::from_str(&last_modified).unwrap(),
     );
     h.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_str(cache_control).unwrap(),
+        HeaderValue::from_str(&cache_control).unwrap(),
     );
     h.insert(
         header::VARY,
@@ -817,53 +814,59 @@ mod tests {
     }
 
     /// A token that gains the claim is a new representation, so a client
-    /// holding one without it gets the new token instead of a 304.
+    /// holding one without it gets the new token instead of a 304, whichever
+    /// validator it revalidates with.
     #[tokio::test]
     async fn test_revalidation_serves_a_new_token_once_it_carries_aggregation_uri() {
-        let mut app_state = test_app_state(None).await;
-        register_issuer(&app_state.service, "issuer1").await;
-        let token_id = uuid::Uuid::new_v4().to_string();
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let revalidate = |app_state: AppState, etag: HeaderValue| {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::IF_NONE_MATCH, etag);
-            get_status_list_at(
-                State(app_state),
+        for (condition, validator) in [
+            (header::IF_NONE_MATCH, header::ETAG),
+            (header::IF_MODIFIED_SINCE, header::LAST_MODIFIED),
+        ] {
+            let mut app_state = test_app_state(None).await;
+            register_issuer(&app_state.service, "issuer1").await;
+            let token_id = uuid::Uuid::new_v4().to_string();
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1"),
+                Path(token_id.clone()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+            .await
+            .unwrap();
+            let now = OffsetDateTime::now_utc().unix_timestamp();
+            let revalidate = |app_state: AppState, value: HeaderValue| {
+                let mut headers = HeaderMap::new();
+                headers.insert(condition.clone(), value);
+                get_status_list_at(
+                    State(app_state),
+                    token_id.clone(),
+                    Ok(Query(StatusListQuery { time: None })),
+                    headers,
+                    now,
+                )
+            };
+
+            let first = get_status_list_at(
+                State(app_state.clone()),
                 token_id.clone(),
                 Ok(Query(StatusListQuery { time: None })),
-                headers,
+                HeaderMap::new(),
                 now,
             )
-        };
-
-        let first = get_status_list_at(
-            State(app_state.clone()),
-            token_id.clone(),
-            Ok(Query(StatusListQuery { time: None })),
-            HeaderMap::new(),
-            now,
-        )
-        .await
-        .unwrap()
-        .into_response();
-        let etag = first.headers().get(header::ETAG).unwrap().clone();
-        let unchanged = revalidate(app_state.clone(), etag.clone())
             .await
             .unwrap()
             .into_response();
-        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+            let value = first.headers().get(&validator).unwrap().clone();
+            let unchanged = revalidate(app_state.clone(), value.clone())
+                .await
+                .unwrap()
+                .into_response();
+            assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED, "{condition}");
 
-        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
-        let with_claim = revalidate(app_state, etag).await.unwrap().into_response();
-        assert_eq!(with_claim.status(), StatusCode::OK);
+            app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+            let with_claim = revalidate(app_state, value).await.unwrap().into_response();
+            assert_eq!(with_claim.status(), StatusCode::OK, "{condition}");
+        }
     }
 
     struct UnavailableCredentials;

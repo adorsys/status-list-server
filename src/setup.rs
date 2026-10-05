@@ -400,6 +400,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
+    // False only while an upgrade runs with `limits.list_quota_transition`.
+    let list_quota_enforced: bool;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -412,6 +414,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             {
                 db_arc = None;
             }
+            list_quota_enforced = true;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -446,7 +449,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      above for the fix.",
             )?;
 
-            match list_quota::on_startup(
+            list_quota_enforced = match list_quota::on_startup(
                 &db,
                 fresh,
                 config.limits.list_quota_transition,
@@ -455,20 +458,25 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .await
             .wrap_err("Startup aborted: the list quota is not enforced")?
             {
-                StartupState::Enforced => {}
-                StartupState::EnforcedWithTransitionSet => tracing::warn!(
-                    "limits.list_quota_transition is set, but the list quota is already \
-                     enforced; remove APP_LIMITS__LIST_QUOTA_TRANSITION."
-                ),
-                StartupState::Transition => tracing::error!(
-                    "limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition \
-                     is set, so an issuer's aggregation may not fit in one page. Once no pod \
-                     of the previous release is left, run \
-                     `status-list-server list-quota recount`, then \
-                     `status-list-server list-quota enable`, then remove \
-                     APP_LIMITS__LIST_QUOTA_TRANSITION."
-                ),
-            }
+                StartupState::Enforced => true,
+                StartupState::EnforcedWithTransitionSet => {
+                    tracing::warn!(
+                        "limits.list_quota_transition is set, but the list quota is already \
+                         enforced; remove APP_LIMITS__LIST_QUOTA_TRANSITION."
+                    );
+                    true
+                }
+                StartupState::Transition => {
+                    tracing::error!(
+                        "limits.max_lists_per_issuer is NOT enforced: \
+                         limits.list_quota_transition is set. Once no pod of the previous \
+                         release is left, run `status-list-server list-quota recount`, then \
+                         `status-list-server list-quota enable`, then remove \
+                         APP_LIMITS__LIST_QUOTA_TRANSITION."
+                    );
+                    false
+                }
+            };
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
@@ -737,7 +745,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let state = AppState {
         service,
         server_domain: config.server.domain.clone(),
-        aggregation_uri: config.server.aggregation_uri()?,
+        aggregation_uri: advertised_aggregation_uri(config, list_quota_enforced)?,
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -757,6 +765,25 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         Ok((state,))
     }
+}
+
+/// The aggregation URI tokens advertise. Without the list quota an issuer's
+/// aggregation can outgrow one page, which a draft-21 §9.3 client takes as
+/// complete, so tokens leave the claim out until the quota is enforced.
+fn advertised_aggregation_uri(
+    config: &AppConfig,
+    list_quota_enforced: bool,
+) -> EyeResult<Option<url::Url>> {
+    let uri = config
+        .server
+        .aggregation_uri(config.telemetry.environment)?;
+    if uri.is_some() && !list_quota_enforced {
+        tracing::warn!(
+            "server.aggregation_uri is not advertised in tokens until the list quota is enforced"
+        );
+        return Ok(None);
+    }
+    Ok(uri)
 }
 
 pub async fn setup_snapshot_cleanup_scheduler(
@@ -1089,6 +1116,19 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+
+    /// In quota transition publishes past the cap are accepted, so an issuer can
+    /// outgrow one aggregation page while tokens would still point at it.
+    #[test]
+    fn aggregation_uri_is_withheld_until_the_list_quota_is_enforced() {
+        let config = AppConfig::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/api/v1/aggregation",
+        )])
+        .unwrap();
+        assert!(advertised_aggregation_uri(&config, true).unwrap().is_some());
+        assert_eq!(advertised_aggregation_uri(&config, false).unwrap(), None);
+    }
 
     /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.

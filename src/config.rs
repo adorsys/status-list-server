@@ -268,15 +268,38 @@ const AGGREGATION_PATH: &str = "/api/v1/aggregation";
 
 impl ServerConfig {
     /// The aggregation endpoint's public URL, `None` when not configured.
-    /// Tokens advertise it with `/<aggregation_id>` appended, so it must point
-    /// at the endpoint itself, with no query or fragment.
-    pub fn aggregation_uri(&self) -> Result<Option<Url>, ConfigError> {
+    /// Tokens advertise it with `/<aggregation_id>` appended for relying parties
+    /// to fetch, so it must be the endpoint itself: http(s) without credentials,
+    /// https in production, and no query or fragment.
+    pub fn aggregation_uri(
+        &self,
+        environment: TelemetryEnvironment,
+    ) -> Result<Option<Url>, ConfigError> {
         let Some(uri) = trim_non_empty(self.aggregation_uri.as_deref()) else {
             return Ok(None);
         };
         let uri = Url::parse(uri).map_err(|e| {
             ConfigError::Message(format!("server.aggregation_uri is not a valid URL: {e}"))
         })?;
+        match uri.scheme() {
+            "https" => {}
+            "http" if !environment.is_production() => {}
+            "http" => {
+                return Err(ConfigError::Message(
+                    "server.aggregation_uri must use https in production".to_string(),
+                ));
+            }
+            _ => {
+                return Err(ConfigError::Message(
+                    "server.aggregation_uri must be an http or https URL".to_string(),
+                ));
+            }
+        }
+        if !uri.username().is_empty() || uri.password().is_some() {
+            return Err(ConfigError::Message(
+                "server.aggregation_uri must not contain credentials".to_string(),
+            ));
+        }
         if uri.path() != AGGREGATION_PATH {
             return Err(ConfigError::Message(format!(
                 "server.aggregation_uri path '{}' does not match the aggregation route \
@@ -1352,7 +1375,9 @@ impl Config {
         config.management_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
-        config.server.aggregation_uri()?;
+        config
+            .server
+            .aggregation_uri(config.telemetry.environment)?;
         Ok(config)
     }
 }
@@ -2286,10 +2311,18 @@ mod tests {
     }
 
     fn aggregation_uri(uri: &str) -> Result<Option<Url>, ConfigError> {
-        Config::load_from_overrides(&[("server.aggregation_uri", uri)]).map(|config| {
+        aggregation_uri_in("development", uri)
+    }
+
+    fn aggregation_uri_in(environment: &str, uri: &str) -> Result<Option<Url>, ConfigError> {
+        Config::load_from_overrides(&[
+            ("telemetry.environment", environment),
+            ("server.aggregation_uri", uri),
+        ])
+        .map(|config| {
             config
                 .server
-                .aggregation_uri()
+                .aggregation_uri(config.telemetry.environment)
                 .expect("a config that loaded has a valid aggregation_uri")
         })
     }
@@ -2306,14 +2339,34 @@ mod tests {
     #[test]
     fn test_aggregation_uri_unset_or_blank_is_none() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        assert_eq!(config.server.aggregation_uri().unwrap(), None);
+        assert_eq!(
+            config
+                .server
+                .aggregation_uri(config.telemetry.environment)
+                .unwrap(),
+            None
+        );
         assert_eq!(aggregation_uri("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn test_aggregation_uri_allows_plain_http_only_outside_production() {
+        let uri = "http://localhost:8000/api/v1/aggregation";
+        assert!(aggregation_uri(uri).unwrap().is_some());
+        let err = aggregation_uri_in("production", uri)
+            .expect_err("plain http must be rejected in production")
+            .to_string();
+        assert!(err.contains("https in production"), "{err}");
     }
 
     #[test]
     fn test_aggregation_uri_rejects_anything_but_the_endpoint_url() {
         for uri in [
             "not a url",
+            "file:///api/v1/aggregation",
+            "ftp://statuslist.example.com/api/v1/aggregation",
+            "https://user:secret@statuslist.example.com/api/v1/aggregation",
+            "https://user@statuslist.example.com/api/v1/aggregation",
             "https://statuslist.example.com/statuslists/aggregation",
             "https://statuslist.example.com/api/v1/aggregation/",
             "https://statuslist.example.com/api/v1/aggregation?aggregation_id=x",

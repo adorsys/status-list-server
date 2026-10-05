@@ -285,10 +285,11 @@ podDisruptionBudget:
 
 Set `APP_SERVER__AGGREGATION_URI` to the aggregation endpoint's public URL, for
 example `https://statuslist.example.com/api/v1/aggregation`, to advertise it in
-status list tokens. Its path must be `/api/v1/aggregation`, and it must have no
-query or fragment: each token carries its issuer's URI, the configured one plus
-`/<aggregation_id>`. Pods refuse to start otherwise. Unset, tokens carry no
-`aggregation_uri`. The endpoints are served either way.
+status list tokens. It must be an `https` URL (`http` is accepted outside
+production) with no credentials, its path must be `/api/v1/aggregation`, and it
+must have no query or fragment: each token carries its issuer's URI, the
+configured one plus `/<aggregation_id>`. Pods refuse to start otherwise. Unset,
+tokens carry no `aggregation_uri`. The endpoints are served either way.
 
 Setting it lets anyone who holds one of an issuer's tokens list all of that
 issuer's status lists; see
@@ -299,8 +300,10 @@ server shared by several issuers.
 page size. That keeps every issuer's aggregation complete in one response, for
 relying parties that do not page; pods refuse to start above it (see
 [troubleshooting](troubleshooting.md#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
-It only holds while the list quota is enforced: with
-`APP_LIMITS__LIST_QUOTA_TRANSITION` set, any issuer can outgrow one page.
+It only holds while the list quota is enforced. With
+`APP_LIMITS__LIST_QUOTA_TRANSITION` set, publishes past the cap are accepted and
+an issuer can outgrow one page, so tokens carry no `aggregation_uri` until the
+quota is enforced.
 
 ### Upgrading to issuer-scoped aggregation
 
@@ -308,9 +311,10 @@ Before the upgrade:
 
 - Make sure `APP_LIMITS__MAX_LISTS_PER_ISSUER` is at most `1000`.
 - Find issuers at or near 1000 lists. Those above it keep their lists, and their
-  aggregation spans several pages, but **every further publish is refused** with
-  `400 list_quota_exceeded` until they are back under the cap, which only
-  deleting lists does. Those near it reach it sooner than under a higher cap:
+  aggregation spans several pages. While the quota is enforced, **every further
+  publish is refused** with `400 list_quota_exceeded` until they are back under
+  the cap, which only deleting lists does. Those near it reach it sooner than
+  under a higher cap:
 
   ```sql
   SELECT issuer, COUNT(*) AS lists FROM status_lists

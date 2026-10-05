@@ -817,7 +817,7 @@ quota starts off on such a database, and a pod does not serve without it unless 
 
 1. Deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`. Pods then start with the quota off and log
    `limits.max_lists_per_issuer is NOT enforced` at `ERROR` on every start; `list_quota_enforced`
-   reads `0`. Until step 2, an issuer's aggregation may no longer fit in one page.
+   reads `0`. Until step 2, tokens carry no `aggregation_uri`.
 2. Once the rollout has finished and **no pod of an older release is left**, run
    `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
 3. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
@@ -968,9 +968,10 @@ For quick grep, the application emits these verbatim:
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`
 - `limits.max_lists_per_issuer must be greater than 0`
 - `limits.max_lists_per_issuer (N) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: ...`
-- `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri path '...' does not match the aggregation route '/api/v1/aggregation'` / `server.aggregation_uri must not have a query or fragment`
+- `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri must be an http or https URL` / `server.aggregation_uri must use https in production` / `server.aggregation_uri must not contain credentials` / `server.aggregation_uri path '...' does not match the aggregation route '/api/v1/aggregation'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
-- `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set, so an issuer's aggregation may not fit in one page. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
+- `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
+- `server.aggregation_uri is not advertised in tokens until the list quota is enforced` (WARN)
 - `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,
