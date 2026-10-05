@@ -305,6 +305,11 @@ jobs:
           # image variant feature set so those break here rather than at release.
           - suffix: azure
             features: "postgres,azure,redis"
+          # Azure-only (no Postgres) so regressions that only surface with azure alone
+          # (e.g. unused-code warnings on acme-gated modules) are caught, matching the
+          # original `--features azure` acceptance criterion.
+          - suffix: azure-only
+            features: "azure"
 
     steps:
       - name: Fetch Repository

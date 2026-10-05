@@ -28,15 +28,6 @@ impl DefaultAzureCredential {
         let tenant_id = std::env::var("AZURE_TENANT_ID");
         let client_id = std::env::var("AZURE_CLIENT_ID");
         let client_secret = std::env::var("AZURE_CLIENT_SECRET");
-        let any_present = tenant_id.is_ok() || client_id.is_ok() || client_secret.is_ok();
-        let all_present = tenant_id.is_ok() && client_id.is_ok() && client_secret.is_ok();
-        if any_present && !all_present {
-            return Err(azure_core::Error::with_message(
-                azure_core::error::ErrorKind::Other,
-                "incomplete Azure service principal configuration: \
-                 AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET must be set together",
-            ));
-        }
         if let (Ok(tenant_id), Ok(client_id), Ok(client_secret)) =
             (tenant_id, client_id, client_secret)
         {
@@ -98,5 +89,42 @@ impl TokenCredential for DefaultAzureCredential {
                 "all Azure credentials in default chain failed to acquire a token",
             )
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap()
+    }
+
+    #[test]
+    fn tenant_and_client_id_without_secret_is_not_an_incomplete_config_error() {
+        let _guard = lock_env();
+        unsafe {
+            std::env::set_var("AZURE_TENANT_ID", "tenant");
+            std::env::set_var("AZURE_CLIENT_ID", "client");
+            std::env::remove_var("AZURE_CLIENT_SECRET");
+        }
+
+        let result = DefaultAzureCredential::new();
+        if let Err(err) = result {
+            assert!(
+                !err.to_string()
+                    .contains("incomplete Azure service principal"),
+                "tenant + client ID without secret must fall through to Workload \
+                 Identity, not fail as an incomplete service principal: {err}"
+            );
+        }
+
+        unsafe {
+            std::env::remove_var("AZURE_TENANT_ID");
+            std::env::remove_var("AZURE_CLIENT_ID");
+        }
     }
 }

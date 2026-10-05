@@ -155,6 +155,14 @@ impl AzureKeyVaultClientBuilder {
             .map_err(|e| {
                 StorageError::Backend(eyre!("failed to create Azure ClientSecretCredential: {e}"))
             })?
+        } else if self.tenant_id.is_some()
+            || self.client_id.is_some()
+            || self.client_secret.is_some()
+        {
+            return Err(StorageError::Backend(eyre!(
+                "incomplete Azure service principal configuration: \
+                 tenant_id, client_id and client_secret must be set together"
+            )));
         } else {
             DefaultAzureCredential::new().map_err(|e| {
                 StorageError::Backend(eyre!("failed to create DefaultAzureCredential: {e}"))
