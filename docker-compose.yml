@@ -98,12 +98,13 @@ services:
   filesystem-cert:
     image: alpine:3.24
     profiles: ["fscert"]
+    network_mode: none
     command:
       - /bin/sh
       - -ec
       - |
-        cp /sample/emulator.crt /certs/tls.crt
-        cp /sample/emulator.key /certs/tls.key
+        cp /sample/dev.crt /certs/tls.crt
+        cp /sample/dev.key /certs/tls.key
         chown 65534:65534 /certs/tls.crt /certs/tls.key
         chmod 0644 /certs/tls.crt
         chmod 0600 /certs/tls.key
@@ -129,18 +130,18 @@ services:
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
+      # Enabling telemetry requires the observability profile so the collector exists.
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-false}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
       APP_DATABASE__BACKEND: ${APP_DATABASE__BACKEND:-memory}
-      APP_SERVER__CERT__PROVISIONING_STRATEGY: ${APP_SERVER__CERT__PROVISIONING_STRATEGY:-store}
-      APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/emulator.crt}
-      APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/emulator.key}
+      APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/dev.crt}
+      APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/dev.key}
       APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
       APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
       APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
-      - 8000:8000
+      - 127.0.0.1:8000:8000
     volumes:
       - ./test_data/certs:/etc/status-list/sample-certs:ro
       - certdata:/etc/status-list/generated:ro
