@@ -53,7 +53,7 @@ node deploy/observability/slo/lint-thresholds.mjs
 # The DEPLOYED rule copy (the Helm `PrometheusRule`, `prometheusRule.enabled: true`)
 # is rendered and run through the same `promtool test rules` suite in CI, and a
 # drift guard asserts it defines exactly the same rule names as these tested
-# standalone files. See `.github/workflows/CI.yml` -> `prometheus-rules-validation`.
+# standalone files. See `.github/workflows/helm-checks.yml` -> `prometheus-rules-validation`.
 
 # Full stack
 docker compose up -d   # brings up app + otel-collector + prometheus + grafana

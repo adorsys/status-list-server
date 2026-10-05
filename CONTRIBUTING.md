@@ -78,22 +78,26 @@ repository rulesets to require the status check named
 unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
-They must also require **`CI Success`**, and require _only_ that check from
-`CI.yml`. The jobs in `CI.yml` form several independent chains — the Rust jobs hang
+They must also require **`CI Success`** and **`Helm Checks Success`**, and require
+_only_ those checks from `CI.yml` and `helm-checks.yml`. The jobs in `CI.yml` form
+several independent chains — the Rust jobs hang
 off `cargo-build`, the linters and scanners stand alone — deliberately, so that a
 network-dependent scanner is not the root of every Rust job. No single job therefore
 represents the suite; `ci-success` is what aggregates them, and it is the only thing
-that can represent the whole suite to branch protection.
+that can represent the whole suite to branch protection. Helm chart rendering,
+linting and Kubernetes templating validation live in `helm-checks.yml`, gated by its
+own `helm-success` aggregate, so pure Rust changes do not pay for Helm feedback.
 
 As of this writing the `Rules` ruleset on `develop` requires exactly one status
 check — `Conventional Commits` — and the `main branch guards` ruleset requires none.
 Nothing in `CI.yml` blocks a merge today, so adding `CI Success` closes a real gap
 rather than reshuffling an existing list:
 
-1. Merge the PR that introduces `ci-success`.
-2. Add **`CI Success`** to the required status checks on both rulesets.
-3. If individual `CI.yml` job names are ever added to a ruleset, remove them only
-   _after_ `CI Success` is required — doing it in the other order leaves a window
+1. Merge the PR that introduces `ci-success` (and, alongside it, `helm-checks.yml`).
+2. Add **`CI Success`** and **`Helm Checks Success`** to the required status checks on both rulesets.
+3. If individual workflow job names are ever added to a ruleset, remove them only
+   _after_ `CI Success` and `Helm Checks Success` are required — doing it in the
+   other order leaves a window
    where a failing job blocks nothing.
 
 `ci-success` fails if any job it needs reported `failure` or `cancelled`. It also

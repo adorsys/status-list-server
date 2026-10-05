@@ -79,8 +79,9 @@ jobs:
         # deployed variant fails as itself rather than reporting on a subset.
         run: |
           set -eu
-          # apt rather than pip, matching CI.yml: the runner's PyYAML comes from the
-          # distribution, and the guard is here because its presence is not a promise.
+          # apt rather than pip, matching helm-checks.yml's trivy-config: the runner's
+          # PyYAML comes from the distribution, and the guard is here because its presence
+          # is not a promise.
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
           python3 scripts/check-variant-parity.py
 
@@ -617,10 +618,10 @@ jobs:
           echo "merged ${runs} run(s) into merged.sarif"
 
       - name: Upload SARIF to code scanning
-        # No `continue-on-error`, unlike CI.yml's kube-linter upload: that allows for
-        # fork pull requests withholding write scopes, which a scheduled run does not
-        # have. Here a failed upload is a failure of the durable sink this workflow
-        # exists to provide.
+        # No `continue-on-error`, unlike helm-checks.yml's kube-linter upload: that
+        # allows for fork pull requests withholding write scopes, which a scheduled run
+        # does not have. Here a failed upload is a failure of the durable sink this
+        # workflow exists to provide.
         if: ${{ always() && steps.sarif.outputs.present == 'true' }}
         # No `category` input: each run's `automationDetails.id` already sets it, and
         # the Action never overwrites one that is present.
@@ -646,8 +647,9 @@ jobs:
           status=0
 
           # The script exits 1 on a missing PyYAML, which is indistinguishable from
-          # "nothing is expiring" downstream. CI.yml guards the same import for the
-          # same reason: the runner image ships it, but that is not a promise.
+          # "nothing is expiring" downstream. helm-checks.yml's trivy-config guards the
+          # same import for the same reason: the runner image ships it, but that is not a
+          # promise.
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
 
           python3 scripts/check-trivyignore.py .trivyignore.yaml \
