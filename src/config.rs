@@ -720,11 +720,13 @@ impl DnsConfig {
     /// borrowed, so consumers need no re-validation. Synchronous and
     /// network-free by design; anything needing I/O belongs to the boot path.
     pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
-        let kind = self.provider.unwrap_or(if classify_app_env(app_env).is_production() {
-            DnsProviderKind::Route53
-        } else {
-            DnsProviderKind::Pebble
-        });
+        let kind = self
+            .provider
+            .unwrap_or(if classify_app_env(app_env).is_production() {
+                DnsProviderKind::Route53
+            } else {
+                DnsProviderKind::Pebble
+            });
 
         let missing = |section: &str| {
             ConfigError::Message(format!(
