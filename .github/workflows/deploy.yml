@@ -987,7 +987,11 @@ jobs:
           fi
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
-          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
+          # A pod of the new release may have migrated the database before the upgrade
+          # failed. The release Helm restores then cannot start a new pod until the
+          # migration records are deleted, even though the rollback itself succeeds and
+          # its running pods keep serving, so say so where the operator is looking.
+          if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
@@ -1000,7 +1004,12 @@ jobs:
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
             --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
             --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
-            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"; then
+            if [ -n "$PREV_REVISION" ]; then
+              echo "::error title=Check for migrations the restored release does not know::The upgrade failed and Helm rolled back to revision $PREV_REVISION. If a pod of the new release started, it may have migrated the database, and then every pod of the restored release that starts from now on (restart, scale-up, node drain) crash-loops until the migration records are deleted, even though the rollback looks clean. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
+            fi
+            exit 1
+          fi
 
       - name: Verify application rollout
         run: |
@@ -1055,6 +1064,7 @@ jobs:
             if [ -n "$prev_rev" ]; then
               helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m || \
                 echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
+              echo "::error title=Check for migrations the restored release does not know::Rolled back to revision $prev_rev after a successful upgrade, so every migration the new release carries has already run. If it carries any, the restored release cannot start a new pod, and this rollback stalls, until their records are deleted. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
             else
               # Fresh install: nothing to roll back to, so remove the release entirely.
               helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 5m || \
