@@ -410,6 +410,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_rejects_partial_service_principal() {
+        let endpoint = Url::parse("https://my-vault.vault.azure.net/").unwrap();
+        let builder = AzureKeyVaultClient::builder(endpoint).service_principal(
+            Some("tenant-123"),
+            None,
+            None,
+        );
+
+        let err = match builder.build() {
+            Ok(_) => panic!("partial SP config must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("incomplete Azure service principal"),
+            "expected an incomplete-service-principal error, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_qualify_key() {
         assert_eq!(
             AzureKeyVaultClient::qualify_key("keys-status.example.com"),

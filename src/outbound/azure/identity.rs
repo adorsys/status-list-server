@@ -104,27 +104,38 @@ mod tests {
     }
 
     #[test]
-    fn tenant_and_client_id_without_secret_is_not_an_incomplete_config_error() {
+    fn tenant_and_client_id_without_secret_falls_through_to_workload_identity() {
         let _guard = lock_env();
+
+        let dir = std::env::temp_dir().join(format!("sls-azure-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let token_file = dir.join("federated-token");
+        std::fs::write(&token_file, "dummy-token").expect("write federated token file");
+
         unsafe {
             std::env::set_var("AZURE_TENANT_ID", "tenant");
             std::env::set_var("AZURE_CLIENT_ID", "client");
+            std::env::set_var("AZURE_FEDERATED_TOKEN_FILE", &token_file);
             std::env::remove_var("AZURE_CLIENT_SECRET");
         }
 
-        let result = DefaultAzureCredential::new();
-        if let Err(err) = result {
-            assert!(
-                !err.to_string()
-                    .contains("incomplete Azure service principal"),
-                "tenant + client ID without secret must fall through to Workload \
-                 Identity, not fail as an incomplete service principal: {err}"
-            );
-        }
+        let credential = DefaultAzureCredential::new().expect("credential chain should build");
+        let names: Vec<&'static str> = credential.sources.iter().map(|(name, _)| *name).collect();
+        assert!(
+            names.contains(&"WorkloadIdentityCredential"),
+            "tenant + client ID without secret must fall through to Workload Identity, \
+             got sources: {names:?}"
+        );
+        assert!(
+            !names.contains(&"EnvironmentClientSecretCredential"),
+            "no secret set, so the client secret credential must not be in the chain: {names:?}"
+        );
 
         unsafe {
             std::env::remove_var("AZURE_TENANT_ID");
             std::env::remove_var("AZURE_CLIENT_ID");
+            std::env::remove_var("AZURE_FEDERATED_TOKEN_FILE");
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
