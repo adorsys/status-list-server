@@ -412,9 +412,6 @@ rust_default_gates() {
     domain_purity_check
     log "Cargo clippy"
     run cargo clippy --workspace --all-targets --all-features -- -D warnings
-    log "Cargo nextest"
-    require_docker
-    run cargo nextest run --workspace --all-targets --all-features
     log "Cargo doc"
     run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --document-private-items
     require_tool jq "Install jq. CI uses jq for crate type detection."
@@ -427,6 +424,9 @@ rust_default_gates() {
     fi
     log "Cargo machete"
     run cargo machete --with-metadata
+    log "Cargo nextest"
+    require_docker
+    run cargo nextest run --workspace --all-targets --all-features
 }
 
 fast_wiring_checks() {
@@ -546,6 +546,8 @@ trivy_and_helm_checks() {
 otel_validation() {
     log "OpenTelemetry config validation"
     run python3 scripts/local-ci/validate-compose.py
+    # Compose pulls the tag; check it separately from the immutable CI reference.
+    run docker manifest inspect "${JAEGER_IMAGE%@*}"
     run docker manifest inspect "$JAEGER_IMAGE"
     run docker run --rm -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
     helm_deps

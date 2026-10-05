@@ -259,6 +259,7 @@ bootstrap_default_tools
 run() { echo "$*"; }
 release_image_features_check() { :; }
 domain_purity_check() { :; }
+crate_kind_detection() { CRATE_IS_LIB=true; }
 rust_default_gates
 echo unexpected-success
 """)
@@ -267,6 +268,9 @@ echo unexpected-success
                 self.assertIn('cargo fmt --all --check', result.stdout)
                 self.assertIn('cargo build --workspace', result.stdout)
                 self.assertIn('cargo clippy --workspace', result.stdout)
+                self.assertIn('cargo doc --workspace', result.stdout)
+                self.assertIn('cargo test --doc --workspace', result.stdout)
+                self.assertIn('cargo machete --with-metadata', result.stdout)
                 self.assertNotIn('cargo nextest run', result.stdout)
                 self.assertNotIn('unexpected-success', result.stdout)
                 self.assertIn('Install Docker' if missing else 'Start Docker', result.stderr)

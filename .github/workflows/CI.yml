@@ -764,6 +764,9 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
 
       - name: Verify Jaeger image tag exists
+        run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
+
+      - name: Verify pinned Jaeger image digest exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8 >/dev/null
 
       - name: Validate Compose Collector config

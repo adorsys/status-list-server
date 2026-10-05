@@ -24,7 +24,8 @@ Install Rust using rustup, Node.js 22 or newer, and Docker Engine with Compose v
 using their supported installation instructions. Confirm `docker info` and
 `docker compose version` work for your user. All-feature tests require Docker in
 default mode too. When Docker is unavailable, default-mode bootstrap warns and
-continues through the Rust build and lint checks; the nextest step fails with
+runs the Rust build, lint, documentation, doc-test, and cargo-machete checks before
+reaching nextest. If Docker is still unavailable, nextest fails with
 installation/startup guidance instead of skipping container-backed tests. Full mode runs on macOS too, but marks the Linux-only Alertmanager delivery
 test as skipped and exits non-zero. A complete parity pass requires Linux. KubeLinter's automatic archive installation supports x86_64;
 on other Linux architectures install the matching KubeLinter version manually.
@@ -76,7 +77,7 @@ The runner uses repository configurations unless an explicit flag is shown.
 | Helm rendering                      | Full    | Helm repository/dependency setup, all shared steps from `.github/workflows/render-helm-templates/action.yml`, `scripts/verify-image-reference.sh`, CRD validation, and local-values assertions                                                        |
 | Trivy                               | Full    | `trivy config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered`                                                                                                                                                    |
 | KubeLinter                          | Full    | `kube-linter --config .kube-linter.yaml lint /tmp/rendered --format sarif`                                                                                                                                                                            |
-| OpenTelemetry                       | Full    | Compose model validation, Jaeger manifest lookup, Collector `validate` for Compose and extracted Helm configs                                                                                                                                         |
+| OpenTelemetry                       | Full    | Compose model validation, Jaeger tag and pinned-digest manifest lookups, Collector `validate` for Compose and extracted Helm configs                                                                                                                  |
 | Prometheus and dashboards           | Full    | Pinned promtool rule/config checks and rule tests, shared Helm rule-name/behavior checks (standalone minus Watchdog), SLO threshold lint, Alertmanager config/delivery tests, dashboard JSON validation, both regeneration diffs, and copy comparison |
 | Coverage                            | Full    | `cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html`                                                                                                                                                          |
 
