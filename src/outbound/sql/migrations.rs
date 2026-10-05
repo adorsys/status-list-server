@@ -20,13 +20,68 @@ impl MigratorTrait for Migrator {
             Box::new(status_lists_issuer_list_id_index::Migration),
         ]
     }
+
+    /// Drops every table without running any `down`, so it is refused with them.
+    async fn fresh<'c, C>(_db: C) -> Result<(), DbErr>
+    where
+        C: IntoSchemaManagerConnection<'c>,
+    {
+        Err(forward_only("dropping every table is refused"))
+    }
 }
 
 /// Applies pending migrations; returns whether none had been applied before.
 pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, DbErr> {
-    let fresh = Migrator::get_applied_migrations(db).await?.is_empty();
-    Migrator::up(db, None).await?;
-    Ok(fresh)
+    apply_migrations::<Migrator>(db).await
+}
+
+/// [`run_migrations`] for any migrator, so tests can stand in for an earlier
+/// release with a migrator that knows only the first migrations.
+pub(crate) async fn apply_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<bool, DbErr> {
+    let applied = async {
+        let fresh = M::get_applied_migrations(db).await?.is_empty();
+        M::up(db, None).await?;
+        Ok(fresh)
+    }
+    .await;
+    match applied {
+        Ok(fresh) => Ok(fresh),
+        Err(err) => Err(name_unknown_migrations::<M>(db, err).await),
+    }
+}
+
+/// After migrating failed, names the migrations the database records that `M`
+/// does not know: what stops a rolled-back release from starting. Returns
+/// `err` unchanged when there are none or the records cannot be read, so it
+/// never stops a start that would otherwise have succeeded.
+async fn name_unknown_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+    err: DbErr,
+) -> DbErr {
+    let Ok(records) = M::get_migration_models(db).await else {
+        return err;
+    };
+    let known: Vec<String> = M::migrations()
+        .iter()
+        .map(|migration| migration.name().to_owned())
+        .collect();
+    let unknown: Vec<String> = records
+        .into_iter()
+        .map(|record| record.version)
+        .filter(|version| !known.contains(version))
+        .collect();
+    if unknown.is_empty() {
+        return err;
+    }
+    DbErr::Migration(format!(
+        "the database records migrations this release does not know: {}. A newer release \
+         migrated it, and this release cannot start until those records are deleted. Check \
+         that each is safe to leave in place, then follow \"{ROLLBACK_RUNBOOK_SECTION}\" in \
+         docs/deployment-runbook.md. ({err})",
+        unknown.join(", ")
+    ))
 }
 
 /// Recomputes every issuer's `credentials.list_count`. Used as the migration
@@ -44,18 +99,25 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
     }
 }
 
-/// The `docs/deployment-runbook.md` section that [`refuse_down`] points at.
+/// The `docs/deployment-runbook.md` section the refusals and the startup error
+/// point at.
 const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
 
 /// Every migration's `down`: the schema only moves forward. See
 /// `docs/adr/0003-schema-migrations-are-forward-only.md`.
 fn refuse_down(migration: &str) -> Result<(), DbErr> {
-    Err(DbErr::Migration(format!(
-        "migration '{migration}' cannot be rolled back: the schema only moves forward. \
-         To roll back a release, delete the seaql_migrations records of the migrations \
-         it does not know and keep the schema; see \"{ROLLBACK_RUNBOOK_SECTION}\" in \
-         docs/deployment-runbook.md"
+    Err(forward_only(&format!(
+        "migration '{migration}' cannot be rolled back"
     )))
+}
+
+/// The refusal every path back returns, naming what was refused.
+fn forward_only(refused: &str) -> DbErr {
+    DbErr::Migration(format!(
+        "{refused}: the schema only moves forward. To roll back a release, delete the \
+         seaql_migrations records of the migrations it does not know and keep the schema; \
+         see \"{ROLLBACK_RUNBOOK_SECTION}\" in docs/deployment-runbook.md"
+    ))
 }
 
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
