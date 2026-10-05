@@ -49,23 +49,27 @@ pub struct HttpServer {
     router: Router,
 }
 
+/// Shared browser policy for public token retrieval and cache revalidation.
+pub(crate) fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_origin(Any)
+        .allow_headers(Any)
+        .expose_headers([hyper::header::ETAG])
+}
+
 impl HttpServer {
     pub async fn new(
         config: &Config,
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let cors = CorsLayer::new()
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::OPTIONS,
-            ])
-            .allow_origin(Any)
-            .allow_headers(Any);
-
         let max_body_size = config.limits.max_body_size_bytes;
 
         let (strict_governor, issuer_governor, permissive_governor) =
@@ -91,7 +95,7 @@ impl HttpServer {
             )
             .layer(CatchPanicLayer::new())
             .layer(middleware::from_fn(track_http_metrics))
-            .layer(cors)
+            .layer(cors_layer())
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
             .with_state(state);
@@ -179,6 +183,12 @@ fn build_governor_configs(
     Ok((strict, issuer, permissive))
 }
 
+pub(crate) fn public_read_routes() -> Router<AppState> {
+    Router::new()
+        .route("/aggregation", get(get_aggregation))
+        .route("/status-lists/{list_id}", get(get_status_list))
+}
+
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
@@ -203,10 +213,7 @@ fn api_v1_routes(
         .route("/credentials", post(credential_handler))
         .layer(GovernorLayer::new(strict_governor));
 
-    let public_reads = Router::new()
-        .route("/aggregation", get(get_aggregation))
-        .route("/status-lists/{list_id}", get(get_status_list))
-        .layer(GovernorLayer::new(permissive_governor));
+    let public_reads = public_read_routes().layer(GovernorLayer::new(permissive_governor));
 
     Router::new()
         .merge(protected)

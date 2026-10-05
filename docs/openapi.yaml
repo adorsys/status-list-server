@@ -233,7 +233,7 @@ paths:
         `next_cursor` for the following page.
 
         **Paging.** Pages are ordered by `list_id` and hold at most `limit`
-        URIs (default and maximum 1000). While `next_cursor` is non-null, pass
+        URIs (default and maximum 1000). While `next_cursor` is present, pass
         it back as `cursor` to fetch the next page; the same next page is also
         advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
         returns exactly once every list that existed when the walk started
@@ -960,7 +960,6 @@ components:
         structure; `next_cursor` is an extension for paging.
       required:
         - status_lists
-        - next_cursor
       properties:
         status_lists:
           type: array
@@ -973,12 +972,10 @@ components:
             - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
             - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
         next_cursor:
-          type:
-            - string
-            - "null"
+          type: string
           description: |
-            Opaque cursor for the next page, to pass back as `cursor`. Always
-            present; `null` on the last page.
+            Opaque cursor for the next page, to pass back as `cursor`.
+            Omitted on the last page.
           example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
     ErrorResponse:

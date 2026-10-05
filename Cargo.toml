@@ -131,7 +131,8 @@ uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
-flate2 = "1.1"
+# Match the draft-21 Appendix C reference encoder byte-for-byte.
+flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"

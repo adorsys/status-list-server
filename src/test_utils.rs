@@ -26,6 +26,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Real self-signed certificate for the shared ES256 fixture key.
+pub(crate) fn test_certificate() -> &'static str {
+    use base64::{Engine as _, prelude::BASE64_STANDARD};
+    static CERT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CERT.get_or_init(|| {
+        let key = rcgen::KeyPair::from_pem(include_str!("../test_data/ec-private.pem")).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["example.com".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        BASE64_STANDARD.encode(cert.der())
+    })
+}
+
 pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
     AuthenticatedIssuer::new(crate::domain::models::credential::Issuer(issuer.into()))
 }
@@ -101,7 +115,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         None,
         Arc::new(TestCertProvider {
             key_pem: include_str!("../test_data/ec-private.pem").to_string(),
-            cert_chain: Some(vec!["ZHVtbXlfY2VydA==".into()]),
+            cert_chain: Some(vec![test_certificate().to_owned()]),
         }),
     ));
 
@@ -252,7 +266,7 @@ async fn build_test_app_state(
     let status_list_cache = Arc::new(TestStatusListCache::default());
     let cert_provider = Arc::new(TestCertProvider {
         key_pem,
-        cert_chain: Some(vec!["ZHVtbXlfY2VydA==".into()]),
+        cert_chain: Some(vec![test_certificate().to_owned()]),
     });
 
     let service = Arc::new(Service::from_arcs(
