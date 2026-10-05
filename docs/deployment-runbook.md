@@ -146,7 +146,7 @@ helm upgrade --install statuslist ./deploy/helm/chart \
   -f ./my-deployment-values.yaml
 ```
 
-Use `helm upgrade --install` rather than `helm install` so the same command both creates and later updates the release. `--rollback-on-failure --wait --timeout 10m` makes failed upgrades roll back automatically during the pipeline. (This is the Helm 4 name; Helm 3 also accepts the legacy `--atomic` flag.)
+Use `helm upgrade --install` rather than `helm install` so the same command both creates and later updates the release. `--rollback-on-failure --wait --timeout 10m` makes failed upgrades roll back automatically during the pipeline. (This is the Helm 4 name; Helm 3 also accepts the legacy `--atomic` flag.) If the failed upgrade had already migrated the database, the rolled-back pods cannot start; see [Rolling back across migrations](#rolling-back-across-migrations).
 
 ### Expose the service (Ingress)
 
@@ -352,8 +352,9 @@ During the upgrade:
 
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Remove
-the two records first. The schema changes stay, which the previous release
-ignores, and so do the aggregation IDs:
+the two records as described in
+[Rolling back across migrations](#rolling-back-across-migrations). The schema
+changes stay, which the previous release ignores, and so do the aggregation IDs:
 
 ```sql
 DELETE FROM seaql_migrations WHERE version IN (
@@ -366,11 +367,14 @@ Upgrading again re-runs both migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
-**Never run the down migration of `credentials.aggregation_id`**, nor restore a
-backup taken before it, once tokens with scoped URIs have been served: the IDs
-are lost, new ones are assigned, and every URI already in tokens or issuer
-metadata returns `404`. Deleting an issuer's credential in the database and
-registering it again does the same to that issuer.
+**Never undo `credentials.aggregation_id`** once tokens with scoped URIs have
+been served. The server refuses its down migration; do not drop the column by
+hand either. The IDs are lost, new ones are assigned, and every URI already in
+tokens or issuer metadata returns `404`. Restoring a backup taken before it
+does the same and loses status changes too; see
+[Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
+Deleting an issuer's credential in the database and registering it again does
+the same to that issuer.
 
 ### Metrics
 
@@ -416,6 +420,99 @@ kubectl rollout status deployment/statuslist-status-list-server-deployment -n <n
 ```
 
 Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest (not a mutable tag) determines the running image. When upgrading, pass both `tag` and `digest` explicitly (or clear the digest with `--set statuslist.image.digest=null`); `helm upgrade --reuse-values` with only a changed tag will not move the image because the stored digest still wins.
+
+The release workflow (`deploy.yml`) also rolls back on its own, with `helm rollback`, when the release's ExternalSecrets do not sync after a successful upgrade. Any of these rollbacks that crosses a migration needs the recovery below.
+
+### Rolling back across migrations
+
+A pod will not start while the database records a migration its release does
+not know. It exits with:
+
+```text
+Failed to run database migrations
+...
+Migration file of version '<version>' is missing, this migration has been applied but its file is missing
+```
+
+So a rollback past a release that ran a migration leaves the previous release
+unable to start a pod. That includes the automatic rollbacks above: a failed
+upgrade whose first new pod had already migrated the database, and the release
+workflow's rollback after a successful upgrade, by which point every migration
+has run. Pods of the previous release that are still running keep serving, but
+a restart, scale-up or node drain replaces them with pods that crash-loop. The
+rollback itself stalls, and `helm rollback --wait` times out: the pods it starts
+never become ready, so the rolling update keeps the newer release's pods
+serving, except that from four replicas up it takes a quarter of them down.
+
+The recovery is to delete the records of the migrations the previous release
+does not know, and keep the schema. The newer release's pods keep serving
+throughout.
+
+1. Find the versions. A crash-looping pod's log names each one
+   (`kubectl logs <pod> -n <namespace> --previous`). Otherwise list the
+   records, newest first; the ones the newer release applied are the ones to
+   delete:
+
+   ```sql
+   SELECT version, applied_at FROM seaql_migrations ORDER BY applied_at DESC;
+   ```
+
+2. Check in the newer release's notes that each of them is safe to leave in
+   place: the previous release must run on the schema it leaves. Migrations
+   that only add tables, nullable or defaulted columns, or indexes are. If one
+   is not, stop and follow that release's rollback procedure instead.
+3. Delete the records:
+
+   ```sql
+   DELETE FROM seaql_migrations WHERE version IN ('<version>', '<version>');
+   ```
+
+4. Delete the crash-looping pods, so their replacements start without waiting
+   out the back-off. As they become ready, the rollout finishes and removes the
+   newer release's pods.
+5. Once the rollout has finished, run the query from step 1 again. A pod of the
+   newer release that restarted before then ran the migrations again and
+   recorded them; delete the records again and repeat step 4.
+
+Do not scale the newer release down first: until the previous release's pods
+are ready, its pods are the only ones serving.
+
+Upgrading again re-runs the deleted migrations, which find their changes
+already made and skip them. Steps a particular release needs on top of this
+still apply, such as `list-quota disable` before rolling back past the list
+quota (see [troubleshooting](troubleshooting.md#upgrading-to-the-list-quota)).
+
+There is no other way back. The server refuses to run down migrations
+([ADR 0003](adr/0003-schema-migrations-are-forward-only.md)), and undoing a
+migration by hand can lose data nothing can recreate, such as the
+[aggregation IDs](#rolling-back).
+
+#### Restoring a backup taken before the upgrade
+
+Only when the database itself is damaged and the recovery above cannot work.
+
+**It turns revoked credentials valid again.** Everything written after the
+backup was taken is lost: status changes, revocations included, as well as new
+lists and newly registered issuers. Relying parties then see credentials
+revoked since the backup as valid. Before restoring:
+
+1. Dump the current `status_lists` table if it is still readable
+   (`pg_dump --data-only --table=status_lists <database>`, or
+   `mysqldump --no-create-info <database> status_lists`). It holds every
+   list's statuses as of now, so comparing it with the restored rows finds the
+   changes the restore loses, rather than depending on issuers' own records.
+   `status_list_history` is no substitute: its rows come back with the backup
+   and stop at the same moment.
+2. Record the backup's exact timestamp and send it to every issuer, so they
+   re-apply each status change they made after it.
+
+It also regenerates aggregation IDs: every one assigned after the backup, and
+all of them if the backup predates `credentials.aggregation_id`. Issuers read
+their new ID from `GET /api/v1/credentials` and update any issuer metadata
+that carries the old URI. Status list tokens are signed on each request, so
+those served afterwards carry the new URI. Only what relying parties and
+caches already hold keeps the old one: tokens until their `exp`, and
+historical responses, served `immutable`, until their `max-age`.
 
 ## Failure Triage
 

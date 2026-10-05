@@ -81,7 +81,8 @@ The following indexes are created on the `status_lists` table to speed up lookup
 are keyset scans on `list_id` within one issuer. It makes
 `idx_status_lists_issuer` redundant. Dropping that is left to a migration of its
 own, because on Postgres `DROP INDEX` blocks reads of `status_lists` while it
-waits for its lock.
+waits for its lock. On MySQL it backs `fk_status_lists_issuer`, so it can only
+be dropped while another index led by `issuer` exists.
 
 ### `status_list_history`
 
