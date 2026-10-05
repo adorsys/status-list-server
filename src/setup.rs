@@ -49,7 +49,7 @@ use crate::cert_manager::{
     storage::{CryptoCachePolicy, Storage},
 };
 use crate::config::CacheBackend;
-use crate::config::{Config as AppConfig, DatabaseBackend};
+use crate::config::{Config as AppConfig, DatabaseBackend, TelemetryEnvironment};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ResolvedDnsProvider};
 use crate::domain::{
@@ -533,7 +533,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .challenge_handler(challenge_handler)
             .acme_strategy();
 
-        if !crate::config::classify_app_env(app_env).is_production() {
+        if crate::config::classify_app_env(app_env)
+            == crate::config::TelemetryEnvironment::Development
+        {
             let root_cert = include_bytes!("../test_data/pebble.pem");
             let http_client = DefaultHttpClient::new(Some(root_cert))?;
             cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
