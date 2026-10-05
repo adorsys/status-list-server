@@ -96,6 +96,9 @@ export HELM_CONFIG_HOME="$TOOLS_ROOT/helm/config"
 export HELM_CACHE_HOME="$TOOLS_ROOT/helm/cache"
 export HELM_DATA_HOME="$TOOLS_ROOT/helm/data"
 export RUSTFLAGS="${RUSTFLAGS--D warnings}"
+if ! [[ "$RUSTFLAGS" =~ (^|[[:space:]])-D[[:space:]]*warnings($|[[:space:]]) ]]; then
+    echo "WARNING: RUSTFLAGS overrides the CI default without -D warnings; compiler warnings may not fail locally. Add -D warnings to match CI." >&2
+fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/local-ci}"
 # Capture caller-provided credentials without exposing them to later build tools.
 LOCAL_ZIZMOR_TOKEN="${ZIZMOR_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
@@ -513,7 +516,8 @@ trivy_and_helm_checks() {
         run trivy config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml "$RENDER_TEMP/rendered"
     else
         require_tool docker "Install Docker or trivy. Docker is used as a no-root local fallback."
-        run docker run --rm -v "$PWD:/workspace:ro" -v "$RENDER_TEMP/rendered:/tmp/rendered:ro" -w /workspace -v "$TOOLS_ROOT/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
+        mkdir -p "$TOOLS_ROOT/trivy"
+        run docker run --rm --user "$(id -u):$(id -g)" -e TRIVY_CACHE_DIR=/tmp/trivy-cache -v "$PWD:/workspace:ro" -v "$RENDER_TEMP/rendered:/tmp/rendered:ro" -w /workspace -v "$TOOLS_ROOT/trivy:/tmp/trivy-cache" "$TRIVY_IMAGE" config --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml /tmp/rendered
     fi
     log "Helm template local values"
     local output_file="$RUNNER_TEMP/statuslist-local-rendered.yaml"
@@ -598,9 +602,9 @@ rust_version_check() {
     local updates status=0
     updates=$(rustup check 2>&1) || status=$?
     printf '%s\n' "$updates"
-    if grep -qi 'update available' <<< "$updates"; then
+    if grep -qiE '^stable-[^[:space:]]+[[:space:]]+-[[:space:]]+update available' <<< "$updates"; then
         echo "WARNING: Rust update available; CI uses stable. Run rustup update stable to align." >&2
-    elif [ "$status" -ne 0 ]; then
+    elif [ "$status" -ne 0 ] && ! grep -qiE '^stable-[^[:space:]]+[[:space:]]+-[[:space:]]+up to date' <<< "$updates"; then
         echo "WARNING: rustup check failed; could not determine toolchain freshness." >&2
     fi
 }

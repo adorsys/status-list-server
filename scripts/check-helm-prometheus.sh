@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+CHART_DIR="${CHART_DIR:-deploy/helm/chart}"
 export CHECK_TEMP
 CHECK_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/helm-prometheus.XXXXXX")
 trap 'rm -rf "$CHECK_TEMP"' EXIT

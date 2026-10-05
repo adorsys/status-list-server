@@ -189,7 +189,7 @@ printf 'corrupt archive' > "$2"
 
     def test_rustup_update_is_reported_even_with_nonzero_status(self):
         self.stub('rustc', 'echo rustc-test-version')
-        self.stub('rustup', "echo 'stable - update available'; exit 1")
+        self.stub('rustup', "echo 'stable-x86_64-unknown-linux-gnu - Update available : 1.90.0 -> 1.91.0'; exit 1")
         result = self.shell('rust_version_check')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('rustc-test-version', result.stdout)
@@ -203,6 +203,47 @@ printf 'corrupt archive' > "$2"
         self.env['RUSTFLAGS'] = ''
         result = self.shell('printf "%s" "$RUSTFLAGS"')
         self.assertEqual(result.stdout, '')
+
+    def test_other_toolchain_updates_do_not_warn_about_stable(self):
+        self.stub('rustc', 'echo rustc-test-version')
+        self.stub('rustup', """
+echo 'stable-x86_64-unknown-linux-gnu - Up to date : 1.91.0'
+echo 'nightly-x86_64-unknown-linux-gnu - Update available : old -> new'
+echo 'rustup - Update available : 1.28.1 -> 1.28.2'
+exit 1
+""")
+        result = self.shell('rust_version_check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Run rustup update stable', result.stderr)
+        self.assertNotIn('could not determine', result.stderr)
+
+    def test_custom_rust_flags_warn_without_changing_them(self):
+        for flags, warning in [('', True), ('-C target-cpu=native', True),
+                               ('-C target-cpu=native -D warnings', False),
+                               ('-Dwarnings', False), ('-D warnings-extra', True)]:
+            with self.subTest(flags=flags):
+                self.env['RUSTFLAGS'] = flags
+                result = self.shell('printf "%s" "$RUSTFLAGS"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, flags)
+                self.assertEqual('RUSTFLAGS overrides' in result.stderr, warning)
+
+    def test_trivy_container_uses_caller_and_writable_cache(self):
+        self.stub('trivy', 'echo Version: 0.0.0')
+        self.stub('docker', """
+[[ "$*" == *"--user $(id -u):$(id -g)"* ]] || exit 90
+[[ "$*" == *'-e TRIVY_CACHE_DIR=/tmp/trivy-cache'* ]] || exit 91
+[[ "$*" == *"$LOCAL_CI_TOOLS_ROOT/trivy:/tmp/trivy-cache"* ]] || exit 92
+[[ -d "$LOCAL_CI_TOOLS_ROOT/trivy" && -w "$LOCAL_CI_TOOLS_ROOT/trivy" ]] || exit 93
+exit 42
+""")
+        result = self.shell("""
+helm_deps() { :; }
+run_render_helm_templates_action() { :; }
+run() { if [[ "$1" == bash ]]; then return; fi; "$@"; }
+trivy_and_helm_checks
+""")
+        self.assertEqual(result.returncode, 42, result.stderr)
 
     def test_failed_python_install_removes_venv(self):
         self.stub('python3', """

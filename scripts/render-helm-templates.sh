@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export RENDER_TEMP="${RENDER_TEMP:-/tmp}"
-set -euo pipefail
 CHART_DIR="deploy/helm/chart"
 mkdir -p "${RENDER_TEMP}/rendered"
 CHART_APP_VERSION=$(helm show chart "$CHART_DIR" | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')

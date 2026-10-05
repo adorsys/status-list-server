@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export RENDER_TEMP="${RENDER_TEMP:-/tmp}"
-set -euo pipefail
 python3 -c 'import jsonschema'
 
 crd=${RENDER_TEMP}/crd-alertmanagerconfigs-91.4.0.yaml
