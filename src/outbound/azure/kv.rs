@@ -423,7 +423,8 @@ mod tests {
             Err(err) => err,
         };
         assert!(
-            err.to_string().contains("incomplete Azure service principal"),
+            err.to_string()
+                .contains("incomplete Azure service principal"),
             "expected an incomplete-service-principal error, got: {err}"
         );
     }
