@@ -60,8 +60,8 @@ docker compose exec prometheus promtool check rules /etc/prometheus/rules/record
 Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first.
 
 ```bash
-FEATURES=postgres,aws,redis APP_DATABASE__BACKEND=postgres \
-  APP_SERVER__CERT__PROVISIONING_STRATEGY=acme APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
+  APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```

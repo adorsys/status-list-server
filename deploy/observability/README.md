@@ -56,7 +56,8 @@ node deploy/observability/slo/lint-thresholds.mjs
 # standalone files. See `.github/workflows/CI.yml` -> `prometheus-rules-validation`.
 
 # Server + observability stack (set GRAFANA_ADMIN_PASSWORD first)
-docker compose --profile observability up -d
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d
 ```
 
 Dashboard generation is documented in `dashboards/README.md`.

@@ -50,20 +50,22 @@ docker compose up --build                       # Server only
 docker compose --profile postgres up -d         # Server + PostgreSQL
 docker compose --profile mysql up -d            # Server + MySQL
 docker compose --profile redis up -d            # Server + Redis
-docker compose --profile observability up -d    # Server + telemetry stack
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d  # Server + telemetry stack
 ```
 
 Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and their matching application settings:
 
 ```bash
-FEATURES=postgres,aws,redis APP_DATABASE__BACKEND=postgres \
-  APP_SERVER__CERT__PROVISIONING_STRATEGY=acme APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
+  APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 
-See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles,
-including MySQL and filesystem certificates.
+The `aws` feature includes ACME certificate provisioning, so local AWS builds need both the `aws` and `acme` profiles.
+
+See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles, including MySQL and filesystem certificates.
 
 ## API Overview
 

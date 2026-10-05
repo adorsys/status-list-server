@@ -95,14 +95,15 @@ profile adds the OpenTelemetry Collector, Prometheus, Jaeger, Alertmanager,
 Grafana, and Pushgateway. Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first:
 
 ```bash
-docker compose --profile observability up -d
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d
 ```
 
 To add PostgreSQL, ACME, and AWS services and enable their matching app features:
 
 ```bash
-FEATURES=postgres,aws,redis APP_DATABASE__BACKEND=postgres \
-  APP_SERVER__CERT__PROVISIONING_STRATEGY=acme APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
+  APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
