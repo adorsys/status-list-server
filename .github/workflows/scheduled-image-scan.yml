@@ -79,7 +79,7 @@ jobs:
         # deployed variant fails as itself rather than reporting on a subset.
         run: |
           set -eu
-          # apt rather than pip, matching helm-checks.yml's trivy-config: the runner's
+          # apt rather than pip, matching CI.yml's config-guards: the runner's
           # PyYAML comes from the distribution, and the guard is here because its presence
           # is not a promise.
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
@@ -647,7 +647,7 @@ jobs:
           status=0
 
           # The script exits 1 on a missing PyYAML, which is indistinguishable from
-          # "nothing is expiring" downstream. helm-checks.yml's trivy-config guards the
+          # "nothing is expiring" downstream. CI.yml's config-guards guards the
           # same import for the same reason: the runner image ships it, but that is not a
           # promise.
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml

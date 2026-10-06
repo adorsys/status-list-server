@@ -3,13 +3,21 @@ name: "Helm Checks"
 # Helm chart rendering, linting and Kubernetes templating validation. Extracted
 # from CI.yml so that pure Rust changes do not pay for Helm/observability
 # feedback, and so Helm failures surface on the PRs that touch the chart.
+#
+# The workflow runs on *every* pull request -- not path-gated -- so that the
+# `helm-success` aggregate always reports and can be a required branch-protection
+# check. A path-filtered trigger would leave a pure-Rust PR with `helm-success`
+# stuck in "Expected -- Waiting for status to be reported", blocking the merge.
+# The expensive jobs are gated on the `changes` job instead, so a PR that touches
+# no Helm file skips them (GitHub treats skipped jobs as non-blocking) while
+# `helm-success` still reports a green aggregate. Pushes stay path-gated: they are
+# not a required check, and a push that touches no Helm file has no Helm feedback
+# to give. `workflow_call` (from deploy.yml) must always run Helm checks, which is
+# why the job gates are `helm changed OR event is not pull_request`.
 on:
   workflow_dispatch:
   workflow_call:
   pull_request:
-    paths:
-      - 'deploy/helm/**'
-      - '.github/workflows/helm-checks.yml'
   push:
     branches:
       - develop
@@ -29,9 +37,40 @@ env:
   CHART_DIR: deploy/helm/chart
 
 jobs:
+  # Lightweight gate that decides whether the expensive Helm jobs below run. It
+  # always executes and always reports, so the `helm-success` aggregate can depend
+  # on it and be a required check without a path-filtered trigger withholding it.
+  # On a pull_request it detects changes against the PR base; on push, workflow_call
+  # and workflow_dispatch it runs too, but its output only gates the PR case (the
+  # jobs below force-run whenever the event is not a pull_request).
+  changes:
+    name: Detect Helm Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      helm: ${{ steps.filter.outputs.helm }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            helm:
+              - 'deploy/helm/**'
+              - '.github/workflows/helm-checks.yml'
+
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
 
     steps:
       - name: Fetch Repository
@@ -73,6 +112,8 @@ jobs:
   helm-template-local:
     name: Helm Template Check (Local Values)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
     permissions:
       contents: read
 
@@ -116,6 +157,8 @@ jobs:
   kube-linter:
     name: KubeLinter Scan (Helm Chart)
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
     permissions:
       contents: read
       # For the SARIF upload below. deploy.yml's `ci` job must grant this too -- a
@@ -194,6 +237,8 @@ jobs:
   otel-config-validation:
     name: OpenTelemetry Config Validation
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
 
     steps:
       - name: Fetch Repository
@@ -272,6 +317,8 @@ jobs:
   prometheus-rules-validation:
     name: Prometheus Rules & Dashboard Validation
     runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
     permissions:
       contents: read
 
@@ -364,10 +411,18 @@ jobs:
 
   # The single required status check for this workflow, mirroring CI.yml's
   # ci-success so branch protection keeps a one-check-per-workflow model.
+  #
+  # `if: always()` plus `if: ${{ contains(...) }}` below keeps this reporting on
+  # every PR, including a pure-Rust one: the five Helm jobs are gated on the
+  # `changes` job, so on a PR that touches no Helm file they are skipped, and
+  # `contains(needs.*.result, ...)` treats a `skipped` job as neither a failure
+  # nor a cancellation. That is what lets `Helm Checks Success` be a required
+  # check without a path-filtered trigger leaving it in "Expected -- Waiting".
   helm-success:
     name: Helm Checks Success
     if: always()
     needs:
+      - changes
       - trivy-config
       - helm-template-local
       - kube-linter

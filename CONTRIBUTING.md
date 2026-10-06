@@ -85,8 +85,14 @@ off `cargo-build`, the linters and scanners stand alone — deliberately, so tha
 network-dependent scanner is not the root of every Rust job. No single job therefore
 represents the suite; `ci-success` is what aggregates them, and it is the only thing
 that can represent the whole suite to branch protection. Helm chart rendering,
-linting and Kubernetes templating validation live in `helm-checks.yml`, gated by its
-own `helm-success` aggregate, so pure Rust changes do not pay for Helm feedback.
+linting and Kubernetes templating validation live in `helm-checks.yml`, aggregated by
+its own `helm-success` job. `helm-checks.yml` runs on every pull request — the
+expensive Helm jobs are gated on a lightweight `changes` gate rather than a
+path-filtered trigger — so `helm-success` always reports a status, which is what
+lets it be a required check without stranding pure-Rust merges in "Expected —
+Waiting for status to be reported". On a PR that touches no file under
+`deploy/helm/**` or the workflow itself, the Helm jobs are skipped and `helm-success`
+reports green; a pure Rust change therefore does not pay for Helm feedback.
 
 As of this writing the `Rules` ruleset on `develop` requires exactly one status
 check — `Conventional Commits` — and the `main branch guards` ruleset requires none.
