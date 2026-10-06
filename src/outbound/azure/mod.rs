@@ -1,6 +1,6 @@
 //! Azure outbound adapters: shared identity credential chain and Key Vault secret storage.
 
 pub(crate) mod identity;
-pub mod kv;
+mod kv;
 
 pub use kv::{AzureKeyVaultClient, AzureKeyVaultClientBuilder};

@@ -1,5 +1,6 @@
 //! Shared Azure identity helpers for Azure-backed adapters.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +9,7 @@ use azure_core::credentials::{
 };
 use azure_identity::{
     ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
-    WorkloadIdentityCredential,
+    WorkloadIdentityCredential, WorkloadIdentityCredentialOptions,
 };
 use tracing::{debug, warn};
 
@@ -23,18 +24,33 @@ pub(crate) struct DefaultAzureCredential {
 impl DefaultAzureCredential {
     /// Create a new [`DefaultAzureCredential`] chain with available credential sources.
     pub(crate) fn new() -> azure_core::Result<Arc<Self>> {
+        Self::new_from_env(
+            std::env::var("AZURE_TENANT_ID").ok(),
+            std::env::var("AZURE_CLIENT_ID").ok(),
+            std::env::var("AZURE_CLIENT_SECRET").ok(),
+            std::env::var("AZURE_FEDERATED_TOKEN_FILE").ok(),
+        )
+    }
+
+    /// Build the credential chain from explicit environment values.
+    ///
+    /// Split out from [`Self::new`] so the selection logic is testable without
+    /// mutating process-global environment variables.
+    fn new_from_env(
+        tenant_id: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        federated_token_file: Option<String>,
+    ) -> azure_core::Result<Arc<Self>> {
         let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
 
-        let tenant_id = std::env::var("AZURE_TENANT_ID");
-        let client_id = std::env::var("AZURE_CLIENT_ID");
-        let client_secret = std::env::var("AZURE_CLIENT_SECRET");
-        if let (Ok(tenant_id), Ok(client_id), Ok(client_secret)) =
-            (tenant_id, client_id, client_secret)
+        if let (Some(tenant_id), Some(client_id), Some(client_secret)) =
+            (tenant_id.as_ref(), client_id.as_ref(), client_secret.as_ref())
         {
             match ClientSecretCredential::new(
                 tenant_id.as_str(),
-                client_id,
-                AzureSecret::new(client_secret),
+                client_id.clone(),
+                AzureSecret::new(client_secret.clone()),
                 None,
             ) {
                 Ok(cred) => sources.push(("EnvironmentClientSecretCredential", cred)),
@@ -44,8 +60,21 @@ impl DefaultAzureCredential {
                 ),
             }
         }
-        if let Ok(cred) = WorkloadIdentityCredential::new(None) {
-            sources.push(("WorkloadIdentityCredential", cred));
+        if let (Some(tenant_id), Some(client_id), Some(federated_token_file)) =
+            (tenant_id.as_ref(), client_id.as_ref(), federated_token_file.as_ref())
+        {
+            match WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions {
+                client_id: Some(client_id.clone()),
+                tenant_id: Some(tenant_id.clone()),
+                token_file_path: Some(PathBuf::from(federated_token_file.clone())),
+                ..Default::default()
+            })) {
+                Ok(cred) => sources.push(("WorkloadIdentityCredential", cred)),
+                Err(err) => warn!(
+                    "AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_FEDERATED_TOKEN_FILE are set, but the \
+                     WorkloadIdentityCredential could not be constructed: {err}"
+                ),
+            }
         }
         if let Ok(cred) = ManagedIdentityCredential::new(None) {
             sources.push(("ManagedIdentityCredential", cred));
@@ -95,32 +124,26 @@ impl TokenCredential for DefaultAzureCredential {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_env() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap()
+    fn source_names(credential: &DefaultAzureCredential) -> Vec<&'static str> {
+        credential.sources.iter().map(|(name, _)| *name).collect()
     }
 
     #[test]
     fn tenant_and_client_id_without_secret_falls_through_to_workload_identity() {
-        let _guard = lock_env();
-
         let dir = std::env::temp_dir().join(format!("sls-azure-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let token_file = dir.join("federated-token");
         std::fs::write(&token_file, "dummy-token").expect("write federated token file");
 
-        unsafe {
-            std::env::set_var("AZURE_TENANT_ID", "tenant");
-            std::env::set_var("AZURE_CLIENT_ID", "client");
-            std::env::set_var("AZURE_FEDERATED_TOKEN_FILE", &token_file);
-            std::env::remove_var("AZURE_CLIENT_SECRET");
-        }
-
-        let credential = DefaultAzureCredential::new().expect("credential chain should build");
-        let names: Vec<&'static str> = credential.sources.iter().map(|(name, _)| *name).collect();
+        let credential = DefaultAzureCredential::new_from_env(
+            Some("tenant".into()),
+            Some("client".into()),
+            None,
+            Some(token_file.to_string_lossy().into_owned()),
+        )
+        .expect("credential chain should build");
+        let names = source_names(&credential);
         assert!(
             names.contains(&"WorkloadIdentityCredential"),
             "tenant + client ID without secret must fall through to Workload Identity, \
@@ -131,11 +154,23 @@ mod tests {
             "no secret set, so the client secret credential must not be in the chain: {names:?}"
         );
 
-        unsafe {
-            std::env::remove_var("AZURE_TENANT_ID");
-            std::env::remove_var("AZURE_CLIENT_ID");
-            std::env::remove_var("AZURE_FEDERATED_TOKEN_FILE");
-        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn complete_service_principal_uses_environment_client_secret() {
+        let credential = DefaultAzureCredential::new_from_env(
+            Some("tenant".into()),
+            Some("client".into()),
+            Some("secret".into()),
+            None,
+        )
+        .expect("credential chain should build");
+        let names = source_names(&credential);
+        assert!(
+            names.contains(&"EnvironmentClientSecretCredential"),
+            "all three service-principal vars set, so the client secret credential must be in \
+             the chain: {names:?}"
+        );
     }
 }
