@@ -144,9 +144,8 @@ mod tests {
 
     #[test]
     fn tenant_and_client_id_without_secret_falls_through_to_workload_identity() {
-        let dir = std::env::temp_dir().join(format!("sls-azure-identity-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let token_file = dir.join("federated-token");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let token_file = dir.path().join("federated-token");
         std::fs::write(&token_file, "dummy-token").expect("write federated token file");
 
         let credential = DefaultAzureCredential::new_from_env(
@@ -166,8 +165,41 @@ mod tests {
             !names.contains(&"EnvironmentClientSecretCredential"),
             "no secret set, so the client secret credential must not be in the chain: {names:?}"
         );
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn dual_source_keeps_client_secret_before_workload_identity() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let token_file = dir.path().join("federated-token");
+        std::fs::write(&token_file, "dummy-token").expect("write federated token file");
+
+        let credential = DefaultAzureCredential::new_from_env(
+            Some("tenant".into()),
+            Some("client".into()),
+            Some("secret".into()),
+            Some(token_file.to_string_lossy().into_owned()),
+        )
+        .expect("credential chain should build");
+        let names = source_names(&credential);
+        let secret_pos = names
+            .iter()
+            .position(|name| *name == "EnvironmentClientSecretCredential");
+        let workload_pos = names
+            .iter()
+            .position(|name| *name == "WorkloadIdentityCredential");
+        assert!(
+            secret_pos.is_some(),
+            "full SP env must include the client secret credential: {names:?}"
+        );
+        assert!(
+            workload_pos.is_some(),
+            "a federated token file must also add Workload Identity: {names:?}"
+        );
+        assert!(
+            secret_pos < workload_pos,
+            "EnvironmentClientSecretCredential must be attempted before Workload Identity, \
+             got sources: {names:?}"
+        );
     }
 
     #[test]
