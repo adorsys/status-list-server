@@ -55,10 +55,7 @@ APP_TELEMETRY__ENABLED=true \
   docker compose --profile observability up -d  # Server + telemetry stack
 ```
 
-Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use
-PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and
-their matching application settings. The compiled database feature selects the
-default database backend:
+Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and their matching application settings. The compiled database feature selects the default database backend:
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \

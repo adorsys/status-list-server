@@ -2,12 +2,7 @@
 
 ## Docker Compose profiles
 
-`docker compose up --build` starts only the server. It uses in-memory storage
-and a checked-in local test certificate. This file requires Docker Compose
-2.24.0 or later. The server starts with every profile; each profile adds only
-the selected optional services. Starting a profile does not reconfigure the
-server to use that service: select the matching build feature and application
-settings when integration is required.
+`docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
 
 - `postgres`: Add PostgreSQL (`db`) only.
 - `mysql`: Add MySQL (`mysql`) only.
@@ -70,11 +65,7 @@ APP_SERVER__CERT__STORE__CERTIFICATE_PATH=/etc/status-list/generated/tls.crt \
   docker compose --profile fscert up -d --build
 ```
 
-The `certdata` named volume persists across ordinary `docker compose down` and
-`up` cycles. `docker compose down --volumes` removes it together with the other
-Compose-managed data volumes. The material comes from test data and is for
-local development only. Never use the checked-in certificate and private key
-with `APP_ENV=production`.
+The `certdata` named volume persists across ordinary `docker compose down` and `up` cycles. `docker compose down --volumes` removes it together with the other Compose-managed data volumes. The material comes from test data and is for local development only. Never use the checked-in certificate and private key with `APP_ENV=production`.
 
 To use MySQL, use `FEATURES=mysql`, set the `APP_DATABASE__*` values for MySQL in `.env`, and activate only the `mysql` database profile. See
 [Database Backends](database-backends.md).
