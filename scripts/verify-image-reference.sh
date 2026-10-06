@@ -11,11 +11,11 @@
 # working tree before pushing, and so the workflow reads as one named check rather than
 # seventy lines of shell. Same reasoning as scripts/vuln-gate.sh.
 #
-# Requires `helm` and `yq`. Run from the repository root; takes no arguments.
+# Requires `helm` and Python 3 with PyYAML. Run from the repository root; takes no arguments.
 # Exit status is 0 when every expectation holds, 1 when any does not.
 set -euo pipefail
 
-for tool in helm yq; do
+for tool in helm python3; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "::error::$tool is required by $0 but was not found on PATH."
         exit 1
@@ -34,14 +34,16 @@ echo "chart appVersion: ${app_version}"
 
 # Selected by container name rather than by whether the image happens to be
 # quoted, so adding or quoting an initContainer cannot silently retarget it.
-# `tr` strips any quoting yq adds and the CR from a CRLF checkout.
 render() {
     helm template status-list-server deploy/helm/chart -s templates/deployment.yaml "$@" \
-        | yq '.spec.template.spec.containers[]
-              | select(.name == "status-list-server")
-              | (.image, .imagePullPolicy)' \
-        | tr -d '"\r' \
-        | tr '\n' '|'
+        | python3 -c '
+import sys, yaml
+for document in yaml.safe_load_all(sys.stdin):
+    for container in document["spec"]["template"]["spec"]["containers"]:
+        if container["name"] == "status-list-server":
+            print(container["image"] + "|" + container["imagePullPolicy"] + "|", end="")
+'
+
 }
 
 expect() {
