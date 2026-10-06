@@ -1,5 +1,12 @@
 use color_eyre::eyre::{Context, Result};
 use opentelemetry::metrics::MeterProvider as _;
+// Cert-rotation metrics (record_rotation / TARGET_TOKEN_SIGNING_KEY) are only
+// compiled in when the file-watcher cert rotation that emits them is reachable.
+// That rotation is gated on not(acme) in setup.rs (under the acme feature the
+// cert manager owns rotation, not the file watcher), so under acme-only feature
+// sets such as azure these symbols are dead and must be cfg'd out to avoid
+// unused-code warnings. The predicate also includes the SQL features for the
+// database-rotation metrics that share the same instruments.
 #[cfg(any(
     not(feature = "acme"),
     feature = "sqlite",
