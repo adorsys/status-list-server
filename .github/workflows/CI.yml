@@ -130,7 +130,7 @@ jobs:
           # finding and silently stopped raising the other would still exit in-band.
           missing=""
           for rule in artipacked excessive-permissions; do
-            printf '%s' "$out" | grep -q "$rule" || missing="${missing} ${rule}"
+            [[ "$out" == *"$rule"* ]] || missing="${missing} ${rule}"
           done
 
           if [ -n "$missing" ]; then
@@ -558,6 +558,43 @@ jobs:
       - name: Run yamlfmt
         run: yamlfmt --lint .
 
+  config-guards:
+    name: Config Guards (trivyignore + variant parity)
+    runs-on: ubuntu-latest
+
+    # These are repo-wide guards, not Helm-specific, so they live in CI.yml and run on
+    # every pull request. They were originally steps on the trivy-config job; when that
+    # job moved to the deploy/helm-path-gated helm-checks.yml, a pure-Rust PR would no
+    # longer exercise either guard. Kept here so a malformed .trivyignore.yaml or an
+    # image-variant drift fails for whoever introduces it, while they are looking at it.
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate .trivyignore.yaml
+        # Before the scan that consumes the file, so a malformed entry fails in seconds
+        # as itself rather than later as a scanner error on an unrelated change.
+        run: |
+          set -eu
+          # apt rather than pip: the runner's PyYAML comes from the distribution, so
+          # this pulls no unpinned dependency into every pull request.
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          python3 scripts/check-trivyignore.py .trivyignore.yaml
+
+      - name: Assert the image variant lists agree across workflows
+        # GitHub does not expose `env` to `strategy.matrix`, so the variant list is
+        # restated in deploy.yml's three fan-out matrices and again in the scheduled
+        # re-scan. The drift is asymmetric and one half is invisible: a variant added
+        # to deploy.yml but not to the re-scan is built, promoted, deployed and never
+        # re-scanned, with nothing going red.
+        #
+        # Checked here rather than only in the nightly so it fails for whoever adds the
+        # variant, while they are looking at it, rather than at 03:37 the next night.
+        run: python3 scripts/check-variant-parity.py
+
   compose-validation:
     name: Docker Compose Validation
     runs-on: ubuntu-latest
@@ -716,6 +753,26 @@ jobs:
           path: target/llvm-cov/html
           if-no-files-found: error
 
+  local-ci-tests:
+    name: Local CI runner tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+      - name: Install test prerequisites
+        run: |
+          sudo apt-get install -y python3-yaml
+          go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0
+      - name: Test local CI runner
+        run: python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
+
   # The single required status check. The jobs above form several independent chains
   # rather than one, so no individual job represents the suite. Rollout order:
   # CONTRIBUTING.md, "Branch Protection".
@@ -741,8 +798,10 @@ jobs:
       - markdown-lint
       - attestation-selftest
       - yaml-lint
+      - config-guards
       - compose-validation
       - cargo-coverage
+      - local-ci-tests
     runs-on: ubuntu-latest
     permissions: {}
     steps:

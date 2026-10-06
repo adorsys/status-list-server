@@ -4,8 +4,8 @@
 Two problems this catches, both of which currently fail late and confusingly:
 
 1. A malformed file. `.trivyignore.yaml` is read by the `trivy-config` job (in
-   `.github/workflows/helm-checks.yml`) on every
-   pull request and by the image scan in `deploy.yml` on every release. A YAML error
+   `.github/workflows/helm-checks.yml`) and validated by CI.yml's `config-guards` job on
+   every pull request, and by the image scan in `deploy.yml` on every release. A YAML error
    or an unknown top-level key added under time pressure breaks pull request CI for
    the whole repository, and it surfaces as a scanner failure rather than as "you
    broke the ignore file".
