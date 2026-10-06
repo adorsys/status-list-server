@@ -745,8 +745,8 @@ jobs:
       - name: Run yamlfmt
         run: yamlfmt --lint .
 
-  otel-config-validation:
-    name: OpenTelemetry Config Validation
+  compose-validation:
+    name: Docker Compose Validation
     runs-on: ubuntu-latest
 
     steps:
@@ -756,12 +756,129 @@ jobs:
           persist-credentials: false
 
       - name: Validate Docker Compose model
-        # docker-compose.yml requires GRAFANA_ADMIN_PASSWORD (no insecure admin
-        # default); supply a placeholder here because this step only validates the
-        # compose model, not the real credential.
-        run: docker compose config
-        env:
-          GRAFANA_ADMIN_PASSWORD: placeholder-not-a-real-credential
+        run: docker compose --profile "*" config --quiet
+
+      - name: Validate profiles and application defaults
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          expected = {
+              None: {"app"},
+              "postgres": {"app", "db"},
+              "mysql": {"app", "mysql"},
+              "observability": {"app", "otel-collector", "jaeger", "prometheus", "alertmanager", "grafana", "pushgateway"},
+              "acme": {"app", "pebble", "challtestsrv"},
+              "fscert": {"app", "filesystem-cert"},
+              "aws": {"app", "localstack"},
+              "redis": {"app", "redis"},
+          }
+          for profile, services in expected.items():
+              command = ["docker", "compose"]
+              if profile is not None:
+                  command.extend(["--profile", profile])
+              command.extend(["config", "--services"])
+              actual = set(subprocess.check_output(command, text=True).splitlines())
+              if actual != services:
+                  raise SystemExit(f"{profile or 'default'}: expected {services}, got {actual}")
+
+          for label, compose_args in (
+              ("default", []),
+              (".env.template", ["--env-file", ".env.template"]),
+          ):
+              app_config = json.loads(subprocess.check_output(
+                  ["docker", "compose", *compose_args, "config", "--format", "json"],
+                  text=True,
+              ))["services"]["app"]
+              environment = app_config["environment"]
+              if any(dependency["required"] for dependency in app_config["depends_on"].values()):
+                  raise SystemExit(f"{label}: app dependencies must remain optional")
+              if app_config["build"]["args"]["FEATURES"] != "memory":
+                  raise SystemExit(f"{label}: default app build must support in-memory startup")
+              if "APP_DATABASE__BACKEND" in environment:
+                  raise SystemExit(f"{label}: compiled features must select the default database backend")
+              if environment["APP_TELEMETRY__ENABLED"] != "false":
+                  raise SystemExit(f"{label}: telemetry must remain disabled by default")
+              if environment["APP_SERVER__ENABLE_METRICS"] != "true":
+                  raise SystemExit(f"{label}: the local metrics endpoint must remain enabled")
+              if "APP_SERVER__CERT__PROVISIONING_STRATEGY" in environment:
+                  raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
+              if app_config["ports"][0].get("host_ip") != "127.0.0.1":
+                  raise SystemExit(f"{label}: the local server port must bind to loopback")
+
+          postgres_config = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
+              env={**os.environ, "FEATURES": "postgres"},
+              text=True,
+          ))
+          postgres_app = postgres_config["services"]["app"]
+          postgres_environment = postgres_app["environment"]
+          if postgres_app["build"]["args"]["FEATURES"] != "postgres":
+              raise SystemExit("postgres: app image must compile the postgres feature")
+          if "APP_DATABASE__BACKEND" in postgres_environment:
+              raise SystemExit("postgres: Compose must not override the feature-selected backend")
+          if postgres_environment["APP_DATABASE__HOST"] != "db":
+              raise SystemExit("postgres: app must address the Compose PostgreSQL service")
+
+          all_profiles = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "*", "config", "--format", "json"],
+              text=True,
+          ))
+          for service_name, service in all_profiles["services"].items():
+              for port in service.get("ports", []):
+                  if port.get("host_ip") != "127.0.0.1":
+                      raise SystemExit(f"{service_name}: published ports must bind to loopback by default")
+
+          remote_profiles = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "*", "config", "--format", "json"],
+              env={**os.environ, "BIND_ADDR": "0.0.0.0"},
+              text=True,
+          ))
+          for service_name, service in remote_profiles["services"].items():
+              for port in service.get("ports", []):
+                  if port.get("host_ip") != "0.0.0.0":
+                      raise SystemExit(f"{service_name}: BIND_ADDR must override published interfaces")
+          PY
+
+      - name: Smoke-test default application startup
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            docker compose down --volumes --remove-orphans
+          }
+          trap cleanup EXIT
+
+          wait_until_ready() {
+            for _ in $(seq 1 60); do
+              if curl --fail --silent --show-error http://127.0.0.1:8000/health/ready >/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            docker compose ps
+            docker compose logs app
+            return 1
+          }
+
+          docker compose up -d --build
+          wait_until_ready
+          docker compose down --volumes --remove-orphans
+
+          docker compose --env-file .env.template up -d
+          wait_until_ready
+
+  otel-config-validation:
+    name: OpenTelemetry Config Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Verify Jaeger image tag exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
@@ -1007,6 +1124,7 @@ jobs:
       - kube-linter
       - prometheus-rules-validation
       - yaml-lint
+      - compose-validation
       - otel-config-validation
       - cargo-coverage
     runs-on: ubuntu-latest

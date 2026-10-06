@@ -1,10 +1,11 @@
 services:
   db:
     image: postgres:18.4
+    profiles: ["postgres"]
     restart: always
     container_name: status-list-db
     ports:
-      - 5432:5432
+      - "${BIND_ADDR:-127.0.0.1}:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -25,7 +26,7 @@ services:
     container_name: status-list-mysql
     profiles: ["mysql"]
     ports:
-      - 3306:3306
+      - "${BIND_ADDR:-127.0.0.1}:3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-status-list}
@@ -44,8 +45,9 @@ services:
   localstack:
     container_name: localstack
     image: localstack/localstack:4.14
+    profiles: ["aws"]
     ports:
-      - 4566:4566
+      - "${BIND_ADDR:-127.0.0.1}:4566:4566"
     environment:
       - SERVICES=secretsmanager
     healthcheck:
@@ -60,8 +62,7 @@ services:
     image: redis:8.10-alpine
     restart: always
     container_name: status-list-redis
-    profiles:
-      - redis
+    profiles: ["redis"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -72,18 +73,20 @@ services:
 
   challtestsrv:
     image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10
+    profiles: ["acme"]
     command: -http01 "" -https01 "" -tlsalpn01 ""
     ports:
-      - 8055:8055
+      - "${BIND_ADDR:-127.0.0.1}:8055:8055"
     networks:
       - status-list-network
 
   pebble:
     image: ghcr.io/letsencrypt/pebble:2.10
+    profiles: ["acme"]
     command: -config /test/pebble_config.json -strict -dnsserver challtestsrv:8053
     ports:
-      - 14000:14000
-      - 15000:15000
+      - "${BIND_ADDR:-127.0.0.1}:14000:14000"
+      - "${BIND_ADDR:-127.0.0.1}:15000:15000"
     depends_on:
       challtestsrv:
         condition: service_started
@@ -92,12 +95,30 @@ services:
     volumes:
       - ./test_data/pebble_config.json:/test/pebble_config.json
 
+  filesystem-cert:
+    image: alpine:3.24
+    profiles: ["fscert"]
+    network_mode: none
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cp /sample/dev.crt /certs/tls.crt
+        cp /sample/dev.key /certs/tls.key
+        chown 65534:65534 /certs/tls.crt /certs/tls.key
+        chmod 0644 /certs/tls.crt
+        chmod 0600 /certs/tls.key
+    volumes:
+      - ./test_data/certs/dev.crt:/sample/dev.crt:ro
+      - ./test_data/certs/dev.key:/sample/dev.key:ro
+      - certdata:/certs
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        FEATURES: ${FEATURES:-postgres,aws,redis}
+        FEATURES: ${FEATURES:-memory}
     container_name: status-list-server
     env_file:
       - path: .env.template
@@ -110,38 +131,57 @@ services:
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
+      # Enabling telemetry requires the observability profile so the collector exists.
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
-      APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-true}
+      APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-false}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
+      APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/dev.crt}
+      APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/dev.key}
       APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
       APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
       APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
-      - 8000:8000
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
+      - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro
+      - certdata:/etc/status-list/generated:ro
     depends_on:
       db:
         condition: service_healthy
+        required: false
+      mysql:
+        condition: service_healthy
+        required: false
       pebble:
         condition: service_started
+        required: false
+      filesystem-cert:
+        condition: service_completed_successfully
+        required: false
       localstack:
         condition: service_healthy
-      pushgateway:
-        condition: service_started
+        required: false
       otel-collector:
         condition: service_started
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
     networks:
       - status-list-network
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.158.0
+    profiles: ["observability"]
     container_name: otel-collector
     command: ["--config", "/etc/otelcol/config.yaml"]
     volumes:
       - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml
     ports:
-      - 4317:4317
-      - 4318:4318
-      - 8889:8889
+      - "${BIND_ADDR:-127.0.0.1}:4317:4317"
+      - "${BIND_ADDR:-127.0.0.1}:4318:4318"
+      - "${BIND_ADDR:-127.0.0.1}:8889:8889"
     depends_on:
       jaeger:
         condition: service_started
@@ -150,18 +190,19 @@ services:
 
   jaeger:
     image: jaegertracing/jaeger:2.20.0
+    profiles: ["observability"]
     container_name: jaeger
     ports:
-      - 16686:16686
-      - "4317"
+      - "${BIND_ADDR:-127.0.0.1}:16686:16686"
     networks:
       - status-list-network
 
   prometheus:
     image: prom/prometheus:v3.11.3
+    profiles: ["observability"]
     container_name: prometheus
     ports:
-      - 9092:9090
+      - "${BIND_ADDR:-127.0.0.1}:9092:9090"
     volumes:
       - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./deploy/observability/prometheus/rules:/etc/prometheus/rules
@@ -181,10 +222,11 @@ services:
 
   alertmanager:
     image: prom/alertmanager:v0.28.1
+    profiles: ["observability"]
     container_name: alertmanager
     restart: unless-stopped
     ports:
-      - 9093:9093
+      - "${BIND_ADDR:-127.0.0.1}:9093:9093"
     environment:
       # Webhook-based alert notifications (ticket #446). Select the target
       # channel with ALERTMANAGER_PLATFORM (webhook|discord|slack|teams|
@@ -220,12 +262,13 @@ services:
 
   grafana:
     image: grafana/grafana:12.0.0
+    profiles: ["observability"]
     container_name: grafana
     restart: unless-stopped
     ports:
-      - 3000:3000
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./deploy/observability/dashboards/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
@@ -234,14 +277,19 @@ services:
     depends_on:
       prometheus:
         condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - ': "$${GF_SECURITY_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD before starting Grafana}"; exec /run.sh'
     networks:
       - status-list-network
 
   pushgateway:
     image: prom/pushgateway:v1.11.2
+    profiles: ["observability"]
     container_name: pushgateway
     ports:
-      - 9091:9091
+      - "${BIND_ADDR:-127.0.0.1}:9091:9091"
     networks:
       - status-list-network
 
@@ -250,6 +298,8 @@ networks:
     driver: bridge
 
 volumes:
+  certdata:
+    driver: local
   pgdata:
     driver: local
   mysqldata:
