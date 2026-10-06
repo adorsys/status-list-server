@@ -752,6 +752,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import os
           import subprocess
 
           expected = {
@@ -786,8 +787,8 @@ jobs:
                   raise SystemExit(f"{label}: app dependencies must remain optional")
               if app_config["build"]["args"]["FEATURES"] != "memory":
                   raise SystemExit(f"{label}: default app build must support in-memory startup")
-              if environment["APP_DATABASE__BACKEND"] != "memory":
-                  raise SystemExit(f"{label}: default app must use in-memory storage")
+              if "APP_DATABASE__BACKEND" in environment:
+                  raise SystemExit(f"{label}: compiled features must select the default database backend")
               if environment["APP_TELEMETRY__ENABLED"] != "false":
                   raise SystemExit(f"{label}: telemetry must remain disabled by default")
               if environment["APP_SERVER__ENABLE_METRICS"] != "true":
@@ -796,6 +797,39 @@ jobs:
                   raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
               if app_config["ports"][0].get("host_ip") != "127.0.0.1":
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
+
+          postgres_config = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
+              env={**os.environ, "FEATURES": "postgres"},
+              text=True,
+          ))
+          postgres_app = postgres_config["services"]["app"]
+          postgres_environment = postgres_app["environment"]
+          if postgres_app["build"]["args"]["FEATURES"] != "postgres":
+              raise SystemExit("postgres: app image must compile the postgres feature")
+          if "APP_DATABASE__BACKEND" in postgres_environment:
+              raise SystemExit("postgres: Compose must not override the feature-selected backend")
+          if postgres_environment["APP_DATABASE__HOST"] != "db":
+              raise SystemExit("postgres: app must address the Compose PostgreSQL service")
+
+          all_profiles = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "*", "config", "--format", "json"],
+              text=True,
+          ))
+          for service_name, service in all_profiles["services"].items():
+              for port in service.get("ports", []):
+                  if port.get("host_ip") != "127.0.0.1":
+                      raise SystemExit(f"{service_name}: published ports must bind to loopback by default")
+
+          remote_profiles = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "*", "config", "--format", "json"],
+              env={**os.environ, "BIND_ADDR": "0.0.0.0"},
+              text=True,
+          ))
+          for service_name, service in remote_profiles["services"].items():
+              for port in service.get("ports", []):
+                  if port.get("host_ip") != "0.0.0.0":
+                      raise SystemExit(f"{service_name}: BIND_ADDR must override published interfaces")
           PY
 
       - name: Smoke-test default application startup

@@ -5,7 +5,7 @@ services:
     restart: always
     container_name: status-list-db
     ports:
-      - 5432:5432
+      - "${BIND_ADDR:-127.0.0.1}:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -26,7 +26,7 @@ services:
     container_name: status-list-mysql
     profiles: ["mysql"]
     ports:
-      - 3306:3306
+      - "${BIND_ADDR:-127.0.0.1}:3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-status-list}
@@ -47,7 +47,7 @@ services:
     image: localstack/localstack:4.14
     profiles: ["aws"]
     ports:
-      - 4566:4566
+      - "${BIND_ADDR:-127.0.0.1}:4566:4566"
     environment:
       - SERVICES=secretsmanager
     healthcheck:
@@ -76,7 +76,7 @@ services:
     profiles: ["acme"]
     command: -http01 "" -https01 "" -tlsalpn01 ""
     ports:
-      - 8055:8055
+      - "${BIND_ADDR:-127.0.0.1}:8055:8055"
     networks:
       - status-list-network
 
@@ -85,8 +85,8 @@ services:
     profiles: ["acme"]
     command: -config /test/pebble_config.json -strict -dnsserver challtestsrv:8053
     ports:
-      - 14000:14000
-      - 15000:15000
+      - "${BIND_ADDR:-127.0.0.1}:14000:14000"
+      - "${BIND_ADDR:-127.0.0.1}:15000:15000"
     depends_on:
       challtestsrv:
         condition: service_started
@@ -109,7 +109,8 @@ services:
         chmod 0644 /certs/tls.crt
         chmod 0600 /certs/tls.key
     volumes:
-      - ./test_data/certs:/sample:ro
+      - ./test_data/certs/dev.crt:/sample/dev.crt:ro
+      - ./test_data/certs/dev.key:/sample/dev.key:ro
       - certdata:/certs
 
   app:
@@ -134,16 +135,16 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-false}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_DATABASE__BACKEND: ${APP_DATABASE__BACKEND:-memory}
       APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/dev.crt}
       APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/dev.key}
       APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
       APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
       APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
-      - 127.0.0.1:8000:8000
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
     volumes:
-      - ./test_data/certs:/etc/status-list/sample-certs:ro
+      - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
+      - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro
       - certdata:/etc/status-list/generated:ro
     depends_on:
       db:
@@ -178,9 +179,9 @@ services:
     volumes:
       - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml
     ports:
-      - 4317:4317
-      - 4318:4318
-      - 8889:8889
+      - "${BIND_ADDR:-127.0.0.1}:4317:4317"
+      - "${BIND_ADDR:-127.0.0.1}:4318:4318"
+      - "${BIND_ADDR:-127.0.0.1}:8889:8889"
     depends_on:
       jaeger:
         condition: service_started
@@ -192,8 +193,7 @@ services:
     profiles: ["observability"]
     container_name: jaeger
     ports:
-      - 16686:16686
-      - "4317"
+      - "${BIND_ADDR:-127.0.0.1}:16686:16686"
     networks:
       - status-list-network
 
@@ -202,7 +202,7 @@ services:
     profiles: ["observability"]
     container_name: prometheus
     ports:
-      - 9092:9090
+      - "${BIND_ADDR:-127.0.0.1}:9092:9090"
     volumes:
       - ./deploy/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./deploy/observability/prometheus/rules:/etc/prometheus/rules
@@ -226,7 +226,7 @@ services:
     container_name: alertmanager
     restart: unless-stopped
     ports:
-      - 9093:9093
+      - "${BIND_ADDR:-127.0.0.1}:9093:9093"
     environment:
       # Webhook-based alert notifications (ticket #446). Select the target
       # channel with ALERTMANAGER_PLATFORM (webhook|discord|slack|teams|
@@ -266,7 +266,7 @@ services:
     container_name: grafana
     restart: unless-stopped
     ports:
-      - 3000:3000
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -289,7 +289,7 @@ services:
     profiles: ["observability"]
     container_name: pushgateway
     ports:
-      - 9091:9091
+      - "${BIND_ADDR:-127.0.0.1}:9091:9091"
     networks:
       - status-list-network
 

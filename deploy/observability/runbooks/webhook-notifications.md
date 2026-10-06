@@ -60,8 +60,7 @@ export GRAFANA_ADMIN_PASSWORD='choose-a-local-password'
 
 ```bash
 # from the repository root
-FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
-  APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```

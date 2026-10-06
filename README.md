@@ -43,7 +43,8 @@ curl -i http://localhost:8000/health/live
 ### Option 2: Docker Compose
 
 Start the server with in-memory storage and the checked-in local test
-certificate. Optional services are selected with profiles:
+certificate. Profiles start optional services beside the server; using one from
+the application also requires its matching build feature and configuration:
 
 ```bash
 docker compose up --build                       # Server only
@@ -54,11 +55,13 @@ APP_TELEMETRY__ENABLED=true \
   docker compose --profile observability up -d  # Server + telemetry stack
 ```
 
-Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and their matching application settings:
+Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use
+PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and
+their matching application settings. The compiled database feature selects the
+default database backend:
 
 ```bash
-FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
-  APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```

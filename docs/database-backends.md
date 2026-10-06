@@ -103,16 +103,14 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 ## Compose Profiles
 
 `docker compose up --build` starts the server with in-memory storage. The
-`postgres` and `mysql` profiles select one database engine. Set the matching
-Cargo feature and `APP_DATABASE__BACKEND` to use that database:
+`postgres` and `mysql` profiles start one database engine. Build with the
+matching Cargo feature to make it the server's default backend:
 
 ```bash
-FEATURES=postgres APP_DATABASE__BACKEND=postgres \
-  docker compose --profile postgres up --build
+FEATURES=postgres docker compose --profile postgres up --build
 
 # Put the MySQL host, port, username, password, and database name in .env first.
-FEATURES=mysql APP_DATABASE__BACKEND=mysql \
-  docker compose --profile mysql up --build
+FEATURES=mysql docker compose --profile mysql up --build
 ```
 
 The `redis` profile adds Redis. Set `FEATURES=redis` and

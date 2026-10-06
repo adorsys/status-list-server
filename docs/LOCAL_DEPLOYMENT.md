@@ -4,7 +4,10 @@
 
 `docker compose up --build` starts only the server. It uses in-memory storage
 and a checked-in local test certificate. This file requires Docker Compose
-2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services.
+2.24.0 or later. The server starts with every profile; each profile adds only
+the selected optional services. Starting a profile does not reconfigure the
+server to use that service: select the matching build feature and application
+settings when integration is required.
 
 - `postgres`: Add PostgreSQL (`db`) only.
 - `mysql`: Add MySQL (`mysql`) only.
@@ -17,7 +20,7 @@ and a checked-in local test certificate. This file requires Docker Compose
 
 > **NOTE**: The `postgres` and `mysql` profiles are alternatives. Do not activate both for the same application instance.
 
-Start the server with one optional subsystem:
+Start one optional subsystem beside the default in-memory server:
 
 ```bash
 docker compose --profile postgres up -d
@@ -45,8 +48,7 @@ APP_TELEMETRY__ENABLED=true \
 Profiles can be combined. To configure the server to use PostgreSQL and ACME, and export telemetry, set `GRAFANA_ADMIN_PASSWORD` and run:
 
 ```bash
-FEATURES=postgres,aws APP_DATABASE__BACKEND=postgres \
-  APP_TELEMETRY__ENABLED=true \
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
   docker compose --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
@@ -56,6 +58,10 @@ therefore need both the `aws` and `acme` profiles.
 
 Dependencies are optional so the unprofiled server can start by itself. When a selected dependency is unhealthy, Compose may warn and still start the app. Check `docker compose ps`, the relevant service logs, and `/health/ready` before assuming the selected stack is ready.
 
+Published ports bind to `127.0.0.1` by default. For development on a remote
+machine, set `BIND_ADDR` to the required host interface and protect that
+interface appropriately; the bundled services use development credentials.
+
 The `fscert` tool copies the local ES256 development certificate into a shared volume with private key permissions restricted to the server user. To use that copy instead of the directly mounted sample files:
 
 ```bash
@@ -64,7 +70,11 @@ APP_SERVER__CERT__STORE__CERTIFICATE_PATH=/etc/status-list/generated/tls.crt \
   docker compose --profile fscert up -d --build
 ```
 
-The `certdata` named volume persists across ordinary `docker compose down` and `up` cycles. `docker compose down --volumes` removes it together with the other Compose-managed data volumes. The material comes from test data and is for local development only.
+The `certdata` named volume persists across ordinary `docker compose down` and
+`up` cycles. `docker compose down --volumes` removes it together with the other
+Compose-managed data volumes. The material comes from test data and is for
+local development only. Never use the checked-in certificate and private key
+with `APP_ENV=production`.
 
 To use MySQL, use `FEATURES=mysql`, set the `APP_DATABASE__*` values for MySQL in `.env`, and activate only the `mysql` database profile. See
 [Database Backends](database-backends.md).
