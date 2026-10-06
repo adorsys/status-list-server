@@ -547,8 +547,8 @@ otel_validation() {
     log "OpenTelemetry config validation"
     run python3 scripts/local-ci/validate-compose.py
     # Compose pulls the tag; check it separately from the immutable CI reference.
-    run docker manifest inspect "${JAEGER_IMAGE%@*}"
-    run docker manifest inspect "$JAEGER_IMAGE"
+    run docker manifest inspect "${JAEGER_IMAGE%@*}" >/dev/null
+    run docker manifest inspect "$JAEGER_IMAGE" >/dev/null
     run docker run --rm -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
     helm_deps
     helm template statuslist "$CHART_DIR" --namespace statuslist --set-string statuslist.env.APP_DATABASE__PORT="5432" > "$RUNNER_TEMP/statuslist-rendered.yaml"
