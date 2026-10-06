@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ### Upgrade notes
 
+- **Breaking: aggregation terminal pages omit `next_cursor`.** Clients of `GET /api/v1/aggregation` must treat a missing cursor (as well as legacy `null`) as the end of pagination, or follow `Link: rel="next"` until absent. Update strict response schemas before deploying. Repository consumers use optional cursors; external consumers cannot be verified from this repository and need an operator compatibility check.
+- Status-list compression intentionally changes from miniz to pinned bundled zlib 1.3.2 to meet #577's exact draft-21 vectors. Newly created or re-encoded lists can have different `lst` bytes and ETags even when their statuses are unchanged. During rollout, expect conditional requests to return fresh `200` responses and caches to refill; byte equality across old/new encoders is not guaranteed. Existing compressed lists remain readable. This is an explicit compatibility tradeoff of the exact-output requirement, not a new draft requirement on all conforming encoders.
+
 - Fixed-size status-list metadata is stored inside the status-list document. Do not run this release side by side with older pods: an older pod that updates a fixed-size list can write the document back without `size` and `default_status`, turning that list into a caller-managed list. Complete the rollout before sending fixed-size publish or allocation traffic.
 - `limits.max_lists_per_issuer` is new and enforced. Fresh installs enforce it from the first start. When upgrading an existing SQL database, pods refuse to start until it is enabled: deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`, then, once no pod of the previous release is left, run `status-list-server list-quota recount` and `status-list-server list-quota enable`, and remove the setting. See `docs/troubleshooting.md`, "Upgrading to the list quota".
 

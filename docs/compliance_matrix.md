@@ -60,7 +60,7 @@ signature tests live in `src/server/handlers/status_list/utils/token.rs`.
 | Tokens       | Exact §4.3 CBOR and Appendix C.1/C.2 strings                                                                                              | `draft21_section_4_3_cbor_vector`, `draft21_appendix_c_1_and_c_2_vectors`                                          |
 | Content-Type | JWT, CWT and aggregation media types; no CWT gzip even when requested                                                                     | All three GET conformance tests                                                                                    |
 | CORS         | OPTIONS allows any origin and GET on both public routes                                                                                   | `cors_preflight_allows_public_get`                                                                                 |
-| CORS         | Browser clients can read ETag for conditional requests                                                                                    | `jwt_get_conforms_with_and_without_aggregation_uri`; production `cors_layer()` exposes `ETag`                      |
+| CORS         | Browser clients can read ETag for conditional requests                                                                                    | `jwt_get_conforms_with_and_without_aggregation_uri`; production `cors_layer()` exposes `ETag` and `Link`           |
 | Aggregation  | Exact terminal-page JSON object, empty array, resolving URIs with matching subjects                                                       | `aggregation_body_and_list_uris_conform`                                                                           |
 
 Aggregation retains its existing pagination extension: nonterminal pages include
@@ -76,3 +76,15 @@ change token bytes and ETags, while existing compressed lists remain readable.
 Documentation follow-up for #8: Appendix C.3 and C.4 use reserved status values
 rejected since #557. These vectors cannot be reproduced through the supported
 status model; they are intentionally excluded, without bypassing validation.
+
+Review follow-up for #605: exact-vector tests also decompress both the generated
+and reference lists and check all 2^20 status entries, including zero-filled gaps.
+`libz-sys = 1.1.29` enables `static` and `stock-zlib` to build bundled zlib 1.3.2
+on the supported Linux/macOS targets rather than selecting a host pkg-config
+library. Do not override `LIBZ_SYS_STATIC=0`; dependency upgrades must rerun the
+exact vectors. The production byte change is intentional to meet #577; cache
+rollout effects and the breaking terminal cursor change are in the changelog.
+`browser_can_follow_aggregation_link_to_terminal_page` verifies that CORS exposes
+`Link` and that a browser can follow it to a terminal response. Repository searches
+found no client requiring the terminal `null` key; external compatibility remains
+an operator release check, not something these tests establish.

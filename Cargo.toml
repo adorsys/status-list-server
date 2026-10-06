@@ -3,6 +3,10 @@ name = "status-list-server"
 version = "1.0.1"
 edition = "2024"
 
+# Direct dependency enables/pins the backend used transitively by flate2.
+[package.metadata.cargo-machete]
+ignored = ["libz-sys"]
+
 [features]
 default = ["memory"]
 memory = []
@@ -131,8 +135,10 @@ uuid = { version = "1.23", features = ["v4"] }
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
-# Match the draft-21 Appendix C reference encoder byte-for-byte.
+# Intentional wire-byte change for #577; see CHANGELOG.md upgrade notes.
 flate2 = { version = "1.1", default-features = false, features = ["zlib"] }
+# Pin bundled stock zlib (1.3.2), not pkg-config's host library.
+libz-sys = { version = "=1.1.29", default-features = false, features = ["static", "stock-zlib"] }
 x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"

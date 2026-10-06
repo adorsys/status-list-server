@@ -5634,6 +5634,7 @@ dependencies = [
  "hyper-util",
  "instant-acme",
  "jsonwebtoken 11.1.0",
+ "libz-sys",
  "metrics-process",
  "moka",
  "notify",

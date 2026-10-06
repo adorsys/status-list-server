@@ -60,7 +60,7 @@ pub(crate) fn cors_layer() -> CorsLayer {
         ])
         .allow_origin(Any)
         .allow_headers(Any)
-        .expose_headers([hyper::header::ETAG])
+        .expose_headers([hyper::header::ETAG, hyper::header::LINK])
 }
 
 impl HttpServer {

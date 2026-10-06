@@ -98,13 +98,14 @@ fn verified_jwt(body: &[u8]) -> serde_json::Value {
     assert_eq!(header.x5c.as_ref().unwrap(), &[test_certificate()]);
     let der = BASE64_STANDARD.decode(&header.x5c.unwrap()[0]).unwrap();
     let key = jsonwebtoken::DecodingKey::from_ec_der(&certificate_key(&der));
-    jsonwebtoken::decode(
-        token,
-        &key,
-        &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256),
-    )
-    .unwrap()
-    .claims
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    // Verify the signature independently of wall-clock time; check claim ordering below.
+    validation.validate_exp = false;
+    let claims: serde_json::Value = jsonwebtoken::decode(token, &key, &validation)
+        .unwrap()
+        .claims;
+    assert!(claims["iat"].as_i64().unwrap() < claims["exp"].as_i64().unwrap());
+    claims
 }
 
 fn field(map: &Value, key: Value) -> &Value {
@@ -145,7 +146,7 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
         );
         assert!(!response.headers().contains_key("content-encoding"));
         assert_eq!(response.headers()["access-control-allow-origin"], "*");
-        assert_eq!(response.headers()["access-control-expose-headers"], "etag");
+        assert_exposed_headers(&response);
         let claims = verified_jwt(&bytes(response).await);
         assert_eq!(claims["sub"], uri);
         assert!(claims["iat"].as_i64().unwrap() < claims["exp"].as_i64().unwrap());
@@ -295,4 +296,64 @@ async fn cors_preflight_allows_public_get() {
                 .any(|method| method.trim() == "GET")
         );
     }
+}
+
+fn assert_exposed_headers(response: &Response) {
+    let exposed: Vec<_> = response.headers()["access-control-expose-headers"]
+        .to_str()
+        .unwrap()
+        .split(',')
+        .map(str::trim)
+        .collect();
+    for name in ["etag", "link"] {
+        assert!(
+            exposed
+                .iter()
+                .any(|header| header.eq_ignore_ascii_case(name)),
+            "browser must be able to read {name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn browser_can_follow_aggregation_link_to_terminal_page() {
+    let state = test_app_state(None).await;
+    let mut expected = vec![publish(&state).await, publish(&state).await];
+    expected.sort();
+    let app = router(state);
+    let mut uri = url::Url::parse("https://example.com/api/v1/aggregation?limit=1").unwrap();
+    let mut seen = Vec::new();
+    for page_index in 0..2 {
+        let response = get(&app, uri.as_str(), "application/json", "identity").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert_exposed_headers(&response);
+        let link = response
+            .headers()
+            .get("link")
+            .map(|value| value.to_str().unwrap().to_owned());
+        let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
+        assert_eq!(body["status_lists"].as_array().unwrap().len(), 1);
+        seen.push(body["status_lists"][0].as_str().unwrap().to_owned());
+        if page_index == 0 {
+            let link = link.expect("nonterminal page must advertise the next page");
+            let target = link
+                .strip_prefix('<')
+                .unwrap()
+                .strip_suffix(">; rel=\"next\"")
+                .unwrap();
+            uri = uri.join(target).unwrap();
+            assert_eq!(
+                uri.query_pairs()
+                    .find(|(key, _)| key == "cursor")
+                    .unwrap()
+                    .1,
+                body["next_cursor"].as_str().unwrap()
+            );
+        } else {
+            assert!(link.is_none());
+            assert_eq!(body, json!({"status_lists": [expected[1]]}));
+        }
+    }
+    assert_eq!(seen, expected);
 }

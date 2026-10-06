@@ -437,6 +437,16 @@ mod tests {
         }
     }
 
+    fn inflate_vector(lst: &str) -> Vec<u8> {
+        use std::io::Read as _;
+        let compressed = base64::prelude::BASE64_URL_SAFE_NO_PAD.decode(lst).unwrap();
+        let mut bytes = Vec::new();
+        flate2::read::ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
     #[test]
     fn draft21_section_4_3_cbor_vector() {
         use crate::domain::models::status_list::{Status, StatusEntry};
@@ -453,6 +463,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
+        assert_eq!(inflate_vector(&list.token_lst().unwrap().1), [0xb9, 0xa3]);
         assert_eq!(
             hex::encode(cwt_status_list(&list, None).unwrap().to_vec().unwrap()),
             "a2646269747301636c73744a78dadbb918000217015d"
@@ -462,6 +473,10 @@ mod tests {
     #[test]
     fn draft21_appendix_c_1_and_c_2_vectors() {
         use crate::domain::models::status_list::{Status, StatusEntry};
+        // Indices, status values, and expected lst strings are from the specification:
+        // draft-ietf-oauth-status-list-21, Appendix C.1 (1-bit) and C.2 (2-bit).
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.1
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.2
         let indices = [
             0, 1993, 25460, 159495, 495669, 554353, 645645, 723232, 854545, 934534, 1000345,
         ];
@@ -497,7 +512,31 @@ mod tests {
                 status: Status::Valid,
             });
             let list = StatusList::create(entries).unwrap();
-            assert_eq!(list.token_lst().unwrap(), (bits, expected.to_owned()));
+            let (actual_bits, actual) = list.token_lst().unwrap();
+            assert_eq!(actual_bits, bits);
+            let raw = inflate_vector(&actual);
+            assert_eq!(
+                raw,
+                inflate_vector(expected),
+                "decompressed reference bytes"
+            );
+            assert_eq!(raw.len(), (1 << 20) * usize::from(bits) / 8);
+            // Check every entry, including the zero-filled gaps and trailing VALID entry.
+            let mask = (1u8 << bits) - 1;
+            for index in 0..(1 << 20) {
+                let bit_offset = index as usize * usize::from(bits);
+                let status = (raw[bit_offset / 8] >> (bit_offset % 8)) & mask;
+                let expected_status = indices
+                    .iter()
+                    .position(|&i| i == index)
+                    .map_or(0, |position| values[position]);
+                assert_eq!(
+                    status, expected_status,
+                    "{bits}-bit status at index {index}"
+                );
+            }
+            // Keep the ticket's byte-exact requirement in addition to semantic checks.
+            assert_eq!(actual, expected);
         }
     }
 
