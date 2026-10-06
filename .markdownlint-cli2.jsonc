@@ -8,6 +8,8 @@
   },
   "ignores": [
     "CHANGELOG.md",
-    "**/target"
+    "**/target",
+    "**/node_modules",
+    "**/.venv"
   ]
 }
