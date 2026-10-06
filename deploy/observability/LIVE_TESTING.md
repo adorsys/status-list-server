@@ -57,8 +57,12 @@ docker compose exec prometheus promtool check rules /etc/prometheus/rules/record
 
 ## 3. Bring up the observability stack
 
+Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first.
+
 ```bash
-docker compose up -d
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
+  docker compose --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
 ```
 
 Service name / host port (from the resolved `docker compose config`):
@@ -328,8 +332,7 @@ sli:error_budget:success:30d         1           # full budget
 
 ## 8. View the Grafana dashboard
 
-Open `http://localhost:3000` (login using `GRAFANA_ADMIN_PASSWORD` configured in `docker-compose.yml`) -> **Status List SLO**
-(direct: `http://localhost:3000/d/status-list-slo/status-list-slo`).
+Open `http://localhost:3000` (login using your `GRAFANA_ADMIN_PASSWORD`) -> **Status List SLO** (direct: `http://localhost:3000/d/status-list-slo/status-list-slo`).
 
 Panels (all query `sli:*` recording rules):
 

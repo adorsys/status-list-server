@@ -944,6 +944,8 @@ fn rendered_chart_rejects_zero_string_token_lifetime() {
 fn rendered_chart_rejects_numeric_zero_token_lifetime() {
     // A numeric `0` (via `--set`, not `--set-string`) must be rejected by the
     // schema's `minimum: 1` integer constraint. Regression for the numeric path.
+    // Helm versions describe that constraint as either "minimum" or
+    // "Must be greater than or equal to 1".
     let Some(output) =
         render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0"])
     else {
@@ -951,7 +953,9 @@ fn rendered_chart_rejects_numeric_zero_token_lifetime() {
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TOKEN_EXP_SECS") && stderr.contains("minimum"),
+        stderr.contains("TOKEN_EXP_SECS")
+            && (stderr.contains("minimum")
+                || stderr.contains("Must be greater than or equal to 1")),
         "helm should reject numeric APP_STATUS_LIST__TOKEN_EXP_SECS=0, stderr: {stderr}"
     );
 
@@ -962,7 +966,9 @@ fn rendered_chart_rejects_numeric_zero_token_lifetime() {
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TOKEN_TTL_SECS") && stderr.contains("minimum"),
+        stderr.contains("TOKEN_TTL_SECS")
+            && (stderr.contains("minimum")
+                || stderr.contains("Must be greater than or equal to 1")),
         "helm should reject numeric APP_STATUS_LIST__TOKEN_TTL_SECS=0, stderr: {stderr}"
     );
 }

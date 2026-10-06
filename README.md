@@ -40,15 +40,32 @@ Verify that the service is running:
 curl -i http://localhost:8000/health/live
 ```
 
-### Option 2: Docker Compose (Full Stack)
+### Option 2: Docker Compose
 
-To run the server alongside PostgreSQL, LocalStack (AWS Secrets Manager), Pebble ACME test server, OpenTelemetry collector, Jaeger, and Prometheus:
+Start the server with in-memory storage and the checked-in local test
+certificate. Profiles start optional services beside the server; using one from
+the application also requires its matching build feature and configuration:
 
 ```bash
-docker compose up --build
+docker compose up --build                       # Server only
+docker compose --profile postgres up -d         # Server + PostgreSQL
+docker compose --profile mysql up -d            # Server + MySQL
+docker compose --profile redis up -d            # Server + Redis
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d  # Server + telemetry stack
 ```
 
-Refer to the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for compose service details and testing configurations.
+Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and their matching application settings. The compiled database feature selects the default database backend:
+
+```bash
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
+  docker compose --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
+```
+
+The `aws` feature includes ACME certificate provisioning, so local AWS builds need both the `aws` and `acme` profiles.
+
+See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles, including MySQL and filesystem certificates.
 
 ## API Overview
 
@@ -189,12 +206,17 @@ Verify zero-infrastructure in-memory compilation:
 cargo check --no-default-features --features memory
 ```
 
-Run the complete local CI verification suite (formatting, clippy, tests, and dependency auditing):
+Run the daily local CI checks (formatting, builds, Clippy, tests, and documentation):
 
 ```bash
-# Requires cargo-nextest: cargo install cargo-nextest
 ./local-ci.sh
+
+# Add security, configuration, container, and coverage gates:
+./local-ci.sh --full
 ```
+
+Missing tools are bootstrapped locally. See [Local CI](docs/local-ci.md) for
+prerequisites, the complete command inventory, and verification instructions.
 
 Run markdown linting:
 
