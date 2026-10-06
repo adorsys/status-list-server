@@ -1,0 +1,762 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export RENDER_TEMP="${RENDER_TEMP:-/tmp}"
+CHART_DIR="deploy/helm/chart"
+mkdir -p "${RENDER_TEMP}/rendered"
+CHART_APP_VERSION=$(helm show chart "$CHART_DIR" | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
+CHART_BASE_VERSION="${CHART_APP_VERSION%-fscert}"
+EXPECTED_AWS_TAG="${CHART_BASE_VERSION}-aws"
+helm lint "$CHART_DIR"
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir "${RENDER_TEMP}/rendered/rotation"
+helm template status-list-server "$CHART_DIR" --set serviceAccount.create=false --output-dir "${RENDER_TEMP}/rendered/no-sa"
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=aws \
+  --set statuslist.aws.mountCredentials=true \
+  --output-dir "${RENDER_TEMP}/rendered/legacy-creds"
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=vault \
+  --set secretStore.vault.server=https://vault.example.com \
+  --output-dir "${RENDER_TEMP}/rendered/vault"
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=gcp \
+  --set secretStore.gcp.projectID=my-project-id \
+  --output-dir "${RENDER_TEMP}/rendered/gcp"
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=gcp \
+  --set secretStore.gcp.projectID=my-project-id \
+  --set-string 'externalSecret.spec.data[0].secretKey=postgres_password' \
+  --set-string 'externalSecret.spec.data[0].remoteRef.key=statuslist-database-password' \
+  --set-string 'externalSecret.spec.data[0].remoteRef.version=latest' \
+  --set-string 'externalSecret.spec.data[0].remoteRef.decodingStrategy=None' \
+  --set-string 'externalSecret.spec.data[0].remoteRef.conversionStrategy=Default' \
+  --output-dir "${RENDER_TEMP}/rendered/gcp-remote-ref"
+GCP_PASSWORD_FETCHES=$(grep -c 'key: statuslist-database-password' "${RENDER_TEMP}/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml" || true)
+if [ "$GCP_PASSWORD_FETCHES" -ne 1 ]; then
+  echo "ERROR: GCP ExternalSecret must fetch the database password once and template both Kubernetes Secret keys"; exit 1
+fi
+# Azure Workload Identity: ESO uses its own ServiceAccount, not the app KSA.
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=azure \
+  --set secretStore.azure.authType=WorkloadIdentity \
+  --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+  --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+  --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+  --output-dir "${RENDER_TEMP}/rendered/azure"
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=raw \
+  --set-string 'secretStore.raw.webhook.severity=high' \
+  --output-dir "${RENDER_TEMP}/rendered/raw"
+# raw renders the provider body directly under spec.provider (no extra
+# nested 'provider' key, which would produce an invalid spec.provider.provider.*).
+if grep -qE '^\s{4}provider:\s*$' "${RENDER_TEMP}/rendered/raw/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: raw render must place the provider body directly under spec.provider (found nested provider under provider)"; exit 1
+fi
+if ! grep -qE '^\s{4}webhook:' "${RENDER_TEMP}/rendered/raw/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: raw render missing webhook provider from secretStore.raw"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml --output-dir "${RENDER_TEMP}/rendered/aws"
+if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" "${RENDER_TEMP}/rendered/aws/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" \
+  --set postgres.enabled=false \
+  --set statuslist.env.APP_DATABASE__BACKEND=mysql \
+  --set statuslist.env.APP_DATABASE__HOST=mysql.example.internal \
+  --set statuslist.networkPolicy.enabled=true \
+  --set statuslist.networkPolicy.databaseEgress[0].podSelector.matchLabels.app\\.kubernetes\\.io/name=external-mysql \
+  --set statuslist.image.repository=example.com/status-list-server \
+  --set statuslist.image.tag=mysql \
+  --output-dir "${RENDER_TEMP}/rendered/mysql"
+if ! grep -q 'until nc -z mysql.example.internal 3306; do' "${RENDER_TEMP}/rendered/mysql/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: MySQL render must use the explicit database host and default MySQL port"; exit 1
+fi
+if ! grep -q 'key: postgres-password' "${RENDER_TEMP}/rendered/mysql/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: MySQL render must preserve the configured database password Secret key"; exit 1
+fi
+if ! grep -q 'app.kubernetes.io/name: external-mysql' "${RENDER_TEMP}/rendered/mysql/status-list-server/templates/network-policy.yaml"; then
+  echo "ERROR: MySQL NetworkPolicy render must use statuslist.networkPolicy.databaseEgress"; exit 1
+fi
+if ! grep -q 'value: "3306"' "${RENDER_TEMP}/rendered/mysql/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: MySQL render must default APP_DATABASE__PORT from mysql.service.port"; exit 1
+fi
+if grep -q 'service.beta.kubernetes.io/aws-load-balancer' "${RENDER_TEMP}/rendered/aws/status-list-server/templates/service.yaml"; then
+  echo "ERROR: AWS ingress overlay must not render direct AWS load balancer annotations"; exit 1
+fi
+if [ ! -f "${RENDER_TEMP}/rendered/aws/status-list-server/templates/ingress.yaml" ]; then
+  echo "ERROR: AWS ingress overlay must render Ingress"; exit 1
+fi
+if ! grep -q '^  tls:' "${RENDER_TEMP}/rendered/aws/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: AWS ingress overlay must render a tls block for cert-manager ingress-shim"; exit 1
+fi
+if [ ! -f "${RENDER_TEMP}/rendered/external-secrets/status-list-server/templates/external-secrets.yaml" ]; then
+  echo "ERROR: values-external-secrets.yaml must render ExternalSecret resources"; exit 1
+fi
+if [ -f "${RENDER_TEMP}/rendered/external-secrets/status-list-server/templates/secret.yaml" ]; then
+  echo "ERROR: values-external-secrets.yaml must disable fallback Secret"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-aws-nlb.yaml --output-dir "${RENDER_TEMP}/rendered/aws-nlb"
+if ! grep -q 'service.beta.kubernetes.io/aws-load-balancer-type' "${RENDER_TEMP}/rendered/aws-nlb/status-list-server/templates/service.yaml"; then
+  echo "ERROR: AWS NLB overlay must render AWS load balancer annotations"; exit 1
+fi
+if [ -f "${RENDER_TEMP}/rendered/aws-nlb/status-list-server/templates/ingress.yaml" ]; then
+  echo "ERROR: AWS NLB overlay must disable Ingress to avoid parallel public exposure"; exit 1
+fi
+# Default mode is provider-neutral and self-contained: no SecretStore/ExternalSecret,
+# but it does render the fallback statuslist-secret used by the app and PostgreSQL.
+if [ -f "${RENDER_TEMP}/rendered/default/status-list-server/templates/secret-store.yaml" ]; then
+  echo "ERROR: default render must not produce a SecretStore"; exit 1
+fi
+if [ -f "${RENDER_TEMP}/rendered/default/status-list-server/templates/external-secrets.yaml" ]; then
+  echo "ERROR: default render must not produce an ExternalSecret"; exit 1
+fi
+if grep -q 'service.beta.kubernetes.io/aws-load-balancer' "${RENDER_TEMP}/rendered/default/status-list-server/templates/service.yaml"; then
+  echo "ERROR: default render must not include AWS Service annotations"; exit 1
+fi
+if grep -qE 'cert-manager.io/cluster-issuer|nginx.ingress.kubernetes.io/(force-)?ssl-redirect' "${RENDER_TEMP}/rendered/default/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: default localhost Ingress must not force TLS or request cert-manager without tls hosts"; exit 1
+fi
+if grep -q '^  tls:' "${RENDER_TEMP}/rendered/default/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: default localhost Ingress must not render a tls block"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" --set-string statuslist.ingress.tls.secretName=statuslist-tls --output-dir "${RENDER_TEMP}/rendered/tls-secret-default-host"
+if ! grep -q '^  tls:' "${RENDER_TEMP}/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: explicit ingress TLS secretName must render a tls block even when tls.hosts is empty"; exit 1
+fi
+if ! grep -q '    - "localhost"' "${RENDER_TEMP}/rendered/tls-secret-default-host/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: explicit ingress TLS secretName must default tls.hosts to the rendered ingress host"; exit 1
+fi
+if grep -qE 'APP_SERVER__CERT__(EMAIL|ORGANIZATION)' "${RENDER_TEMP}/rendered/default/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: default render must not inject blank certificate identity env vars"; exit 1
+fi
+if ! grep -q 'name: local-signing-material' "${RENDER_TEMP}/rendered/local/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: values-local.yaml must mount local signing material for the default fscert image"; exit 1
+fi
+if ! grep -q 'APP_SERVER__CERT__STORE__CERTIFICATE_PATH' "${RENDER_TEMP}/rendered/local/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__CERTIFICATE_PATH"; exit 1
+fi
+if ! grep -q 'APP_SERVER__CERT__STORE__SIGNING_KEY_PATH' "${RENDER_TEMP}/rendered/local/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: values-local.yaml must set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH"; exit 1
+fi
+if grep -q 'storageClassName:' "${RENDER_TEMP}/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml"; then
+  echo "ERROR: default render must use the cluster default StorageClass"; exit 1
+fi
+if [ ! -f "${RENDER_TEMP}/rendered/default/status-list-server/templates/secret.yaml" ]; then
+  echo "ERROR: default render must emit fallback statuslist-secret"; exit 1
+fi
+if ! grep -q 'name: statuslist-secret' "${RENDER_TEMP}/rendered/default/status-list-server/templates/secret.yaml"; then
+  echo "ERROR: default fallback Secret must be named statuslist-secret"; exit 1
+fi
+if ! grep -q 'secretName: statuslist-secret' "${RENDER_TEMP}/rendered/default/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: default Deployment Secret volume must reference rendered statuslist-secret"; exit 1
+fi
+if ! grep -A3 'name: POSTGRES_PASSWORD' "${RENDER_TEMP}/rendered/default/status-list-server/charts/postgres/templates/statefulset.yaml" | grep -q 'name: statuslist-secret'; then
+  echo "ERROR: default PostgreSQL POSTGRES_PASSWORD secretKeyRef must reference rendered statuslist-secret"; exit 1
+fi
+if ! grep -q 'name: statuslist-db-credentials' "${RENDER_TEMP}/rendered/rotation/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: rotation example must render the statuslist-db-credentials ExternalSecret"; exit 1
+fi
+if ! grep -q 'name: statuslist-api-keys' "${RENDER_TEMP}/rendered/rotation/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: rotation example must render the statuslist-api-keys ExternalSecret"; exit 1
+fi
+# serviceAccount.create=false must render no application ServiceAccount.
+if [ -f "${RENDER_TEMP}/rendered/no-sa/status-list-server/templates/serviceaccount.yaml" ]; then
+  echo "ERROR: serviceAccount.create=false must not render an application ServiceAccount"; exit 1
+fi
+# mountCredentials=true renders the static AWS credential env vars and volume.
+if ! grep -q 'AWS_SHARED_CREDENTIALS_FILE' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: mountCredentials=true must render AWS_SHARED_CREDENTIALS_FILE"; exit 1
+fi
+if ! grep -q 'aws-credentials-volume' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: mountCredentials=true must render the aws-credentials-volume"; exit 1
+fi
+# Full wiring: mountCredentials=true must ALSO render the ExternalSecret that creates
+# "aws-credentials-secret" (the volume's secret), with credentials + config keys, so a
+# first release never mounts a Secret nothing creates.
+if ! grep -q 'name: statuslist-external-secret-aws-credentials' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: mountCredentials=true must render the aws-credentials ExternalSecret"; exit 1
+fi
+if ! grep -qE 'name: aws-credentials-secret' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: aws-credentials ExternalSecret must target aws-credentials-secret"; exit 1
+fi
+if ! grep -A2 'secretKey: credentials' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml" | grep -q 'remoteRef'; then
+  echo "ERROR: aws-credentials ExternalSecret missing credentials remoteRef"; exit 1
+fi
+if ! grep -A2 'secretKey: config' "${RENDER_TEMP}/rendered/legacy-creds/status-list-server/templates/external-secrets.yaml" | grep -q 'remoteRef'; then
+  echo "ERROR: aws-credentials ExternalSecret missing config remoteRef"; exit 1
+fi
+# Each advertised provider renders its own SecretStore provider body.
+if ! grep -qE '^\s+vault:' "${RENDER_TEMP}/rendered/vault/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: vault provider SecretStore missing vault block"; exit 1
+fi
+if ! grep -qE '^\s+gcpsm:' "${RENDER_TEMP}/rendered/gcp/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: gcp provider SecretStore missing gcpsm block"; exit 1
+fi
+if ! grep -q 'version: latest' "${RENDER_TEMP}/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: ExternalSecret remoteRef.version must be rendered"; exit 1
+fi
+if ! grep -q 'decodingStrategy: None' "${RENDER_TEMP}/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: ExternalSecret remoteRef.decodingStrategy must be rendered"; exit 1
+fi
+if ! grep -q 'conversionStrategy: Default' "${RENDER_TEMP}/rendered/gcp-remote-ref/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: ExternalSecret remoteRef.conversionStrategy must be rendered"; exit 1
+fi
+if ! grep -qE '^\s+azurekv:' "${RENDER_TEMP}/rendered/azure/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: azure provider SecretStore missing azurekv block"; exit 1
+fi
+# File-based secret env paths are explicit and do not require volume items.
+# When APP_DATABASE__PASSWORD_FILE is configured, the chart must not also
+# inject APP_DATABASE__PASSWORD from a startup SecretKeyRef.
+helm template status-list-server "$CHART_DIR" \
+  --set-string 'statuslist.secretMounts[0].name=database-credentials' \
+  --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
+  --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
+  --set-string 'statuslist.secretMounts[0].fileEnv.APP_DATABASE__PASSWORD_FILE=password' \
+  --output-dir "${RENDER_TEMP}/rendered/file-env-no-items"
+if ! grep -q 'name: APP_DATABASE__PASSWORD_FILE' "${RENDER_TEMP}/rendered/file-env-no-items/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: fileEnv must render APP_DATABASE__PASSWORD_FILE"; exit 1
+fi
+if grep -q 'name: APP_DATABASE__PASSWORD$' "${RENDER_TEMP}/rendered/file-env-no-items/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: APP_DATABASE__PASSWORD must not render when APP_DATABASE__PASSWORD_FILE is configured"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+  --set-string 'statuslist.secretMounts[0].name=database-credentials' \
+  --set-string 'statuslist.secretMounts[0].secretName=postgres-access' \
+  --set-string 'statuslist.secretMounts[0].mountPath=/etc/secrets/database' \
+  --set-string 'statuslist.secretMounts[0].items[0].key=password' \
+  --set-string 'statuslist.secretMounts[0].items[0].path=password' \
+  --set-string 'statuslist.secretMounts[0].fileEnv.APP_DATABASE__PASSWORD_FILE=pwd' \
+  >"${RENDER_TEMP}/rendered/file-env-mismatch.out" 2>&1; then
+  echo "ERROR: fileEnv must fail when it does not match a declared items path"; exit 1
+fi
+if ! grep -q 'references "pwd", but items mounts only: password' "${RENDER_TEMP}/rendered/file-env-mismatch.out"; then
+  echo "ERROR: fileEnv mismatch failure did not explain the missing items path"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=false \
+  --set statuslist.fallbackSecret.enabled=true \
+  --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+  --output-dir "${RENDER_TEMP}/rendered/fallback"
+# Scaling readiness: opt-in HPA + PDB. In HPA mode the Deployment omits
+# `replicas`, so use maxUnavailable (not minAvailable) to satisfy
+# kube-linter's pdb-min-available check (minAvailable must be < replicas).
+helm template status-list-server "$CHART_DIR" \
+  --set autoscaling.enabled=true \
+  --set podDisruptionBudget.enabled=true \
+  --set podDisruptionBudget.maxUnavailable=1 \
+  --set podDisruptionBudget.minAvailable=null \
+  --output-dir "${RENDER_TEMP}/rendered/scaling"
+# Primary Workload Identity path: a non-default application ServiceAccount with a
+# cloud role binding (EKS IRSA annotation). Assert the SA + annotation are rendered
+# and the Deployment references the custom SA, not the default.
+helm template status-list-server "$CHART_DIR" \
+  --set serviceAccount.name=statuslist-app-sa \
+  --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/statuslist-irsa' \
+  --set externalSecret.enabled=false \
+  --set statuslist.fallbackSecret.enabled=true \
+  --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+  --output-dir "${RENDER_TEMP}/rendered/wl-app"
+if ! grep -q 'name: statuslist-app-sa' "${RENDER_TEMP}/rendered/wl-app/status-list-server/templates/serviceaccount.yaml"; then
+  echo "ERROR: workload-identity render missing application ServiceAccount statuslist-app-sa"; exit 1
+fi
+if ! grep -q 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/statuslist-irsa' "${RENDER_TEMP}/rendered/wl-app/status-list-server/templates/serviceaccount.yaml"; then
+  echo "ERROR: workload-identity render missing IRSA role annotation"; exit 1
+fi
+if ! grep -q 'serviceAccountName: statuslist-app-sa' "${RENDER_TEMP}/rendered/wl-app/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: Deployment must reference application ServiceAccount statuslist-app-sa"; exit 1
+fi
+# Production path: deploy.yml applies values-aws.yaml then values-production.yaml.
+# It explicitly keeps the ESO-mounted credential path and renders no Workload
+# Identity IRSA annotation.
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml \
+  --output-dir "${RENDER_TEMP}/rendered/wl-prod"
+if [ -f "${RENDER_TEMP}/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml" ] && grep -q 'eks.amazonaws.com/role-arn:' "${RENDER_TEMP}/rendered/wl-prod/status-list-server/templates/serviceaccount.yaml"; then
+  echo "ERROR: production AWS render must not render an IRSA role annotation (ESO-mounted production path)"; exit 1
+fi
+if ! grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials-volume' "${RENDER_TEMP}/rendered/wl-prod/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: production AWS render must mount the ESO-provisioned AWS credentials (mountCredentials=true production path)"; exit 1
+fi
+# Release-only production config: deploy.yml applies the same three overrides on top of
+# values-aws.yaml + values-production.yaml. The wl-prod render above supplies only the two
+# value files, so it still renders the namespaced SecretStore and cannot catch a regression
+# in this release-only configuration. Render with the identical overrides and assert that no
+# namespaced SecretStore is emitted and that every release ExternalSecret points at the
+# cluster-scoped store (ClusterSecretStore datev-secret-store).
+helm template status-list-server "$CHART_DIR" \
+  -f "$CHART_DIR"/values-aws.yaml \
+  -f "$CHART_DIR"/values-production.yaml \
+  --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
+  --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
+  --set "secretStore.enabled=false" \
+  --output-dir "${RENDER_TEMP}/rendered/prod-clusterstore"
+if [ -f "${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/secret-store.yaml" ]; then
+  echo "ERROR: production render with secretStore.enabled=false must not emit a namespaced SecretStore"; exit 1
+fi
+if [ ! -f "${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml" ]; then
+  echo "ERROR: production render must emit ExternalSecret resources"; exit 1
+fi
+PROD_ES_COUNT=$(grep -c 'kind: ExternalSecret' "${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml" || true)
+if [ "$PROD_ES_COUNT" -lt 1 ]; then
+  echo "ERROR: production render must emit at least one ExternalSecret"; exit 1
+fi
+PROD_STORE_REF_COUNT=$(grep -c 'name: datev-secret-store' "${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml" || true)
+PROD_STORE_KIND_COUNT=$(grep -c 'kind: ClusterSecretStore' "${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml" || true)
+if [ "$PROD_STORE_REF_COUNT" -ne "$PROD_ES_COUNT" ] || [ "$PROD_STORE_KIND_COUNT" -ne "$PROD_ES_COUNT" ]; then
+  echo "ERROR: every production ExternalSecret must reference ClusterSecretStore/datev-secret-store (refs=$PROD_STORE_REF_COUNT kinds=$PROD_STORE_KIND_COUNT es=$PROD_ES_COUNT)"; exit 1
+fi
+# Azure Workload Identity primary path: application pod label + application KSA distinct
+# from the External Secrets Operator identity.
+helm template status-list-server "$CHART_DIR" \
+  --set serviceAccount.name=azure-app-sa \
+  --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=azure \
+  --set secretStore.azure.authType=WorkloadIdentity \
+  --set secretStore.azure.serviceAccountRef.name=eso-controller-sa \
+  --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+  --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+  --set-string 'statuslist.podLabels.azure\.workload\.identity/use=true' \
+  --output-dir "${RENDER_TEMP}/rendered/wl-azure"
+if ! grep -qE 'azure\.workload\.identity/use:\s*"true"$' "${RENDER_TEMP}/rendered/wl-azure/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: Azure WI app pod label azure.workload.identity/use=\"true\" (string, not boolean) missing"; exit 1
+fi
+if ! grep -q 'azure.workload.identity/client-id: 11111111-2222-3333-4444-555555555555' "${RENDER_TEMP}/rendered/wl-azure/status-list-server/templates/serviceaccount.yaml"; then
+  echo "ERROR: Azure WI app ServiceAccount missing azure.workload.identity/client-id annotation"; exit 1
+fi
+if ! grep -q 'serviceAccountName: azure-app-sa' "${RENDER_TEMP}/rendered/wl-azure/status-list-server/templates/deployment.yaml"; then
+  echo "ERROR: Azure WI Deployment must reference application ServiceAccount azure-app-sa"; exit 1
+fi
+# ESO identity must be distinct from the application KSA on the Azure WI path.
+if [ "$(grep -A2 'serviceAccountRef:' "${RENDER_TEMP}/rendered/wl-azure/status-list-server/templates/secret-store.yaml" | grep 'name:' | head -1 | sed -E 's/.*name: ([^ ]+).*/\1/')" = "azure-app-sa" ]; then
+  echo "ERROR: ESO serviceAccountRef must be distinct from the application ServiceAccount"; exit 1
+fi
+# Azure ManagedIdentity path: renders identityId + authType, no serviceAccountRef.
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=azure \
+  --set secretStore.azure.authType=ManagedIdentity \
+  --set secretStore.azure.identityId=00000000-0000-0000-0000-000000000000 \
+  --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+  --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+  --output-dir "${RENDER_TEMP}/rendered/azure-mi"
+if ! grep -qE '^\s+authType: "ManagedIdentity"' "${RENDER_TEMP}/rendered/azure-mi/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ManagedIdentity render missing authType=ManagedIdentity"; exit 1
+fi
+if ! grep -qE '^\s+identityId:' "${RENDER_TEMP}/rendered/azure-mi/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ManagedIdentity render missing identityId field"; exit 1
+fi
+if grep -qE 'serviceAccountRef:' "${RENDER_TEMP}/rendered/azure-mi/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ManagedIdentity render must not include serviceAccountRef"; exit 1
+fi
+# Azure ServicePrincipal path: renders authType + authSecretRef, no serviceAccountRef.
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=azure \
+  --set secretStore.azure.authType=ServicePrincipal \
+  --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+  --set secretStore.azure.vaultUrl=https://example.vault.azure.net \
+  --set-string 'secretStore.azure.authSecretRef.clientId.name=azure-client-id' \
+  --set-string 'secretStore.azure.authSecretRef.clientId.key=client-id' \
+  --set-string 'secretStore.azure.authSecretRef.clientSecret.name=azure-client-secret' \
+  --set-string 'secretStore.azure.authSecretRef.clientSecret.key=client-secret' \
+  --output-dir "${RENDER_TEMP}/rendered/azure-sp"
+if ! grep -qE '^\s+authType: "ServicePrincipal"' "${RENDER_TEMP}/rendered/azure-sp/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ServicePrincipal render missing authType=ServicePrincipal"; exit 1
+fi
+if ! grep -qE '^\s+authSecretRef:' "${RENDER_TEMP}/rendered/azure-sp/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ServicePrincipal render missing authSecretRef block"; exit 1
+fi
+if grep -qE 'serviceAccountRef:' "${RENDER_TEMP}/rendered/azure-sp/status-list-server/templates/secret-store.yaml"; then
+  echo "ERROR: Azure ServicePrincipal render must not include serviceAccountRef"; exit 1
+fi
+
+# Negative render tests: invalid provider and empty raw:{} must fail closed.
+if helm template status-list-server "$CHART_DIR" --set secretStore.provider=invalid >/dev/null 2>&1; then
+  echo "ERROR: provider=invalid should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" --set secretStore.provider=raw >/dev/null 2>&1; then
+  echo "ERROR: provider=raw with empty secretStore.raw should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" --set statuslist.service.type=ExternalName >/dev/null 2>&1; then
+  echo "ERROR: statuslist.service.type=ExternalName should fail because the chart does not render ExternalName Services"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" --set-string global.domain=Example.COM --output-dir "${RENDER_TEMP}/rendered/uppercase-domain"
+if ! grep -q 'host: statuslist.example.com' "${RENDER_TEMP}/rendered/uppercase-domain/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: mixed-case global.domain must render as a lowercase Ingress host"; exit 1
+fi
+if grep -q 'Example.COM' "${RENDER_TEMP}/rendered/uppercase-domain/status-list-server/templates/ingress.yaml"; then
+  echo "ERROR: mixed-case global.domain must not render uppercase hostnames"; exit 1
+fi
+# Fail-closed provider fields: mandatory fields must be provided, not empty defaults.
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=vault >/dev/null 2>&1; then
+  echo "ERROR: provider=vault with empty secretStore.vault.server should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=gcp >/dev/null 2>&1; then
+  echo "ERROR: provider=gcp with empty secretStore.gcp.projectID should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=azure \
+    --set secretStore.azure.authType=WorkloadIdentity \
+    --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+  echo "ERROR: provider=azure WorkloadIdentity without serviceAccountRef.name should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=azure \
+    --set secretStore.azure.tenantId=00000000-0000-0000-0000-000000000000 \
+    --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+  echo "ERROR: provider=azure without identity configuration should fail"; exit 1
+fi
+# authType is an enum per the ESO AzureKVProvider CRD; an invalid value must fail.
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=azure \
+    --set secretStore.azure.authType=ClientSecret \
+    --set secretStore.azure.tenantId=t \
+    --set secretStore.azure.vaultUrl=https://example.vault.azure.net >/dev/null 2>&1; then
+  echo "ERROR: provider=azure with invalid authType=ClientSecret should fail"; exit 1
+fi
+# Contradictory modes: ESO disabled but SecretStore enabled must not render a SecretStore.
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=false \
+    --set secretStore.enabled=true 2>/dev/null | grep "kind: SecretStore" >/dev/null; then
+  echo "ERROR: no-ESO mode must not render a SecretStore CR"; exit 1
+fi
+# Inverse: an ExternalSecret must not render without a SecretStore (dangling secretStoreRef).
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=false >/dev/null 2>&1; then
+  echo "ERROR: externalSecret.enabled with secretStore.enabled=false should fail (dangling secretStoreRef)"; exit 1
+fi
+# Fail-closed scaling: HPA must reject minReplicas > maxReplicas.
+if helm template status-list-server "$CHART_DIR" \
+    --set autoscaling.enabled=true \
+    --set autoscaling.minReplicas=5 \
+    --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
+  echo "ERROR: autoscaling.minReplicas > maxReplicas should fail"; exit 1
+fi
+# Fail-closed scaling: PDB must reject both minAvailable and maxUnavailable set.
+if helm template status-list-server "$CHART_DIR" \
+    --set podDisruptionBudget.enabled=true \
+    --set podDisruptionBudget.minAvailable=1 \
+    --set podDisruptionBudget.maxUnavailable=1 >/dev/null 2>&1; then
+  echo "ERROR: PDB with both minAvailable and maxUnavailable should fail"; exit 1
+fi
+# Fail-closed scaling: PDB must reject neither minAvailable nor maxUnavailable set.
+if helm template status-list-server "$CHART_DIR" \
+    --set podDisruptionBudget.enabled=true \
+    --set podDisruptionBudget.minAvailable=null \
+    --set podDisruptionBudget.maxUnavailable=null >/dev/null 2>&1; then
+  echo "ERROR: PDB with neither minAvailable nor maxUnavailable should fail"; exit 1
+fi
+# An explicit minAvailable: 0 is a valid PDB setting (prevents voluntary disruptions)
+# and must be preserved as an integer, NOT treated as unset (0 is falsy in Go templates).
+if ! helm template status-list-server "$CHART_DIR" \
+    --set podDisruptionBudget.enabled=true \
+    --set podDisruptionBudget.minAvailable=0 \
+    --set podDisruptionBudget.maxUnavailable=null 2>/dev/null \
+  | grep -E '^\s+minAvailable: 0$' >/dev/null; then
+  echo "ERROR: PDB with minAvailable: 0 must render minAvailable: 0 (explicit zero preserved)"; exit 1
+fi
+# Conversely an explicit maxUnavailable: 0 must render as maxUnavailable: 0.
+if ! helm template status-list-server "$CHART_DIR" \
+    --set podDisruptionBudget.enabled=true \
+    --set podDisruptionBudget.minAvailable=null \
+    --set podDisruptionBudget.maxUnavailable=0 2>/dev/null \
+  | grep -E '^\s+maxUnavailable: 0$' >/dev/null; then
+  echo "ERROR: PDB with maxUnavailable: 0 must render maxUnavailable: 0 (explicit zero preserved)"; exit 1
+fi
+
+# Upgrade render test: legacy secretStore.aws.region must be preserved for APP_AWS__REGION.
+REGION=$(helm template status-list-server "$CHART_DIR" \
+  --set secretStore.provider=aws \
+  --set secretStore.aws.region=us-west-2 \
+  | grep -A1 'name: APP_AWS__REGION' | grep 'value:' | sed -E 's/.*value: "?([^"]*)"?.*/\1/' || true)
+if [ "$REGION" != "us-west-2" ]; then
+  echo "ERROR: APP_AWS__REGION should fall back to legacy secretStore.aws.region, got '$REGION'"; exit 1
+fi
+# Upgrade render test: the fallback Secret consumes the same single supported name the
+# Deployment's POSTGRES_PASSWORD secretKeyRef references (statuslist-secret). Assert the
+# actual secretKeyRef name, not a loose global grep.
+PGREF=$(helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=false \
+    --set statuslist.fallbackSecret.enabled=true \
+    --set-string statuslist.fallbackSecret.stringData.postgres-password=x 2>/dev/null \
+  | grep -A3 'name: POSTGRES_PASSWORD' | grep 'name:' | tail -1 | sed -E 's/.*name: ([a-zA-Z0-9-]+)$/\1/')
+if [ "$PGREF" != "statuslist-secret" ]; then
+  echo "ERROR: POSTGRES_PASSWORD secretKeyRef must reference statuslist-secret, got '$PGREF'"; exit 1
+fi
+# ESO one-name invariant: every consumer shares the single name statuslist-secret, so a
+# custom externalSecret.spec.target.name must fail at render time.
+if helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=aws \
+    --set externalSecret.spec.target.name=custom-eso-secret >/dev/null 2>&1; then
+  echo "ERROR: externalSecret.spec.target.name other than statuslist-secret should fail"; exit 1
+fi
+# In ESO mode the ExternalSecret target name must equal the app/PostgreSQL secret name.
+if ! helm template status-list-server "$CHART_DIR" \
+    --set externalSecret.enabled=true \
+    --set statuslist.fallbackSecret.enabled=false \
+    --set secretStore.enabled=true \
+    --set secretStore.provider=aws 2>/dev/null | grep -A1 '^  target:' | grep 'name: statuslist-secret' >/dev/null; then
+  echo "ERROR: ExternalSecret target.name must be statuslist-secret"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" \
+  --set externalSecret.enabled=true \
+  --set statuslist.fallbackSecret.enabled=false \
+  --set secretStore.enabled=true \
+  --set secretStore.provider=aws \
+  --set-json 'externalSecret.spec.target.template.templateFrom=[{"configMap":{"name":"statuslist-secret-template","items":[{"key":"secret.tpl"}]}}]' \
+  --output-dir "${RENDER_TEMP}/rendered/eso-template-from"
+if ! grep -q 'templateFrom:' "${RENDER_TEMP}/rendered/eso-template-from/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: ExternalSecret target.template.templateFrom must render"; exit 1
+fi
+if ! grep -q 'database-password:' "${RENDER_TEMP}/rendered/eso-template-from/status-list-server/templates/external-secrets.yaml"; then
+  echo "ERROR: ExternalSecret target.template.data must still emit database-password"; exit 1
+fi
+# MySQL is external-only: explicit disable overlays must not fail, but enabling
+# a bundled mysql subchart, omitting the host, or relying on the default image must.
+helm template status-list-server "$CHART_DIR" --set mysql.enabled=false --output-dir "${RENDER_TEMP}/rendered/mysql-disabled"
+if helm template status-list-server "$CHART_DIR" \
+    --set mysql.enabled=true >"${RENDER_TEMP}/rendered/mysql-enabled-fail.out" 2>&1; then
+  echo "ERROR: mysql.enabled=true should fail because this chart does not vendor MySQL"; exit 1
+fi
+if ! grep -q 'mysql.enabled is not supported' "${RENDER_TEMP}/rendered/mysql-enabled-fail.out"; then
+  echo "ERROR: mysql.enabled=true failure did not explain the unsupported bundled MySQL subchart"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set postgres.enabled=false \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+    --set-string statuslist.image.tag=mysql >"${RENDER_TEMP}/rendered/mysql-missing-host-fail.out" 2>&1; then
+  echo "ERROR: MySQL without APP_DATABASE__HOST should fail"; exit 1
+fi
+if ! grep -q 'statuslist.env.APP_DATABASE__HOST must be set' "${RENDER_TEMP}/rendered/mysql-missing-host-fail.out"; then
+  echo "ERROR: MySQL missing-host failure did not explain APP_DATABASE__HOST"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set postgres.enabled=false \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=mysql \
+    --set-string statuslist.env.APP_DATABASE__HOST=mysql.example.internal >"${RENDER_TEMP}/rendered/mysql-missing-image-fail.out" 2>&1; then
+  echo "ERROR: MySQL without an explicit image tag or digest should fail"; exit 1
+fi
+if ! grep -q 'requires an explicit MySQL-capable image tag or digest' "${RENDER_TEMP}/rendered/mysql-missing-image-fail.out"; then
+  echo "ERROR: MySQL missing-image failure did not explain tag or digest"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set-string statuslist.env.APP_DATABASE__BACKEND=sqlite >"${RENDER_TEMP}/rendered/sqlite-backend-fail.out" 2>&1; then
+  echo "ERROR: sqlite backend should fail in the Helm chart"; exit 1
+fi
+if ! grep -q 'must be either postgres or mysql' "${RENDER_TEMP}/rendered/sqlite-backend-fail.out"; then
+  echo "ERROR: sqlite backend failure did not explain supported Helm backends"; exit 1
+fi
+# NetworkPolicy is opt-in: the default must NOT render a NetworkPolicy (an open
+# port-only ingress rule would equal no ingress restriction).
+if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep 'kind: NetworkPolicy' >/dev/null; then
+  echo "ERROR: default render must NOT emit a NetworkPolicy (networkPolicy.enabled defaults to false)"; exit 1
+fi
+# When enabled, internal egress must be scoped to the target pods, not any pod.
+if ! helm template status-list-server "$CHART_DIR" \
+    --set statuslist.networkPolicy.enabled=true 2>/dev/null \
+  | grep -E 'app\.kubernetes\.io/name: postgres' >/dev/null; then
+  echo "ERROR: NetworkPolicy egress must scope PostgreSQL to its pods (app.kubernetes.io/name: postgres)"; exit 1
+fi
+if ! helm template status-list-server "$CHART_DIR" \
+    --set statuslist.networkPolicy.enabled=true 2>/dev/null \
+  | grep -E '^\s+- podSelector:\s*$' >/dev/null; then
+  echo "ERROR: NetworkPolicy egress internal rule must have a to:/podSelector (not any pod)"; exit 1
+fi
+
+# --- Cluster-wide kube-prometheus-stack alignment (issue 460) ---
+# 1. PromQL must be namespace-scoped: every raw selector carries
+#    namespace="<release namespace>" and the absence alert is namespace
+#    scoped (never cluster-global). Render in a non-default namespace to be
+#    sure the matcher reflects the actual release namespace, not a hardcoded one.
+helm template status-list-server "$CHART_DIR" \
+  --namespace statuslist-prod \
+  --set externalSecret.enabled=false \
+  --set statuslist.fallbackSecret.enabled=true \
+  --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
+  --set prometheusRule.enabled=true \
+  --output-dir "${RENDER_TEMP}/rendered/scoped-rules"
+RULES="${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates/prometheusrule.yaml"
+if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
+  echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
+fi
+if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
+  echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
+fi
+if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
+  echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
+fi
+# Every alert must carry team routing ownership (shared Alertmanager contract).
+ALERTS=$(grep -c -- '- alert:' "$RULES")
+TEAMS=$(grep -c 'team: statuslist' "$RULES")
+if [ "$ALERTS" -ne "$TEAMS" ]; then
+  echo "ERROR: every alert must have team: statuslist ($TEAMS of $ALERTS alerts have it)"; exit 1
+fi
+# 2. Grafana dashboard ConfigMap is opt-in (default off) and labelled for the
+#    central Grafana sidecar when enabled.
+if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'kind: ConfigMap' \
+    && helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'grafana_dashboard'; then
+  echo "ERROR: default render must NOT emit the Grafana dashboard ConfigMap"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" \
+  --set grafanaDashboard.enabled=true \
+  --output-dir "${RENDER_TEMP}/rendered/dashboard"
+if [ ! -f "${RENDER_TEMP}/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml" ]; then
+  echo "ERROR: grafanaDashboard.enabled=true must render dashboard-configmap.yaml"; exit 1
+fi
+if ! grep -q 'grafana_dashboard: "1"' "${RENDER_TEMP}/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml"; then
+  echo "ERROR: dashboard ConfigMap must be labelled grafana_dashboard: \"1\""; exit 1
+fi
+if ! grep -q '"uid": "status-list-slo"' "${RENDER_TEMP}/rendered/dashboard/status-list-server/templates/dashboard-configmap.yaml"; then
+  echo "ERROR: dashboard ConfigMap must embed the generated SLO dashboard JSON"; exit 1
+fi
+# 3. prometheus.io/* Pod annotations are opt-in (ServiceMonitor is the
+#    authoritative discovery method in kube-prometheus-stack, not annotations).
+if helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -q 'prometheus.io/scrape'; then
+  echo "ERROR: default render must NOT emit prometheus.io/scrape Pod annotations"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" \
+  --set statuslist.prometheusAnnotations=true 2>/dev/null \
+  | grep -q 'prometheus.io/scrape: "true"' \
+  || { echo "ERROR: statuslist.prometheusAnnotations=true must render prometheus.io/scrape"; exit 1; }
+
+# Fail-closed alerting render tests:
+# 1. alerting.enabled=true with unsupported platform fails.
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=unsupported >/dev/null 2>&1; then
+  echo "ERROR: alerting.enabled=true with unsupported platform should fail"; exit 1
+fi
+# 2. alerting.enabled=true with missing webhookUrl fails for webhook platforms.
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=slack >/dev/null 2>&1; then
+  echo "ERROR: alerting.enabled=true with platform=slack and missing webhookUrl should fail"; exit 1
+fi
+# 3. alerting.enabled=true with platform=email and missing email.to, smtpHost or smtpFrom fails.
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=email \
+    --set alerting.email.smtpHost=smtp.example.com \
+    --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
+  echo "ERROR: alerting.platform=email with missing email.to should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=email \
+    --set alerting.email.to=ops@example.com \
+    --set alerting.email.smtpFrom=alerts@example.com >/dev/null 2>&1; then
+  echo "ERROR: alerting.platform=email with missing email.smtpHost should fail"; exit 1
+fi
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=email \
+    --set alerting.email.to=ops@example.com \
+    --set alerting.email.smtpHost=smtp.example.com >/dev/null 2>&1; then
+  echo "ERROR: alerting.platform=email with missing email.smtpFrom should fail"; exit 1
+fi
+
+# Positive alerting render tests:
+# Webhook platform renders AlertmanagerConfig and Secret.
+helm template status-list-server "$CHART_DIR" \
+  --set alerting.enabled=true \
+  --set alerting.platform=slack \
+  --set alerting.webhookUrl=https://hooks.slack.com/services/XXX \
+  --output-dir "${RENDER_TEMP}/rendered/alerting-slack"
+if [ ! -f "${RENDER_TEMP}/rendered/alerting-slack/status-list-server/templates/alertmanagerconfig.yaml" ]; then
+  echo "ERROR: alerting.enabled=true must render AlertmanagerConfig"; exit 1
+fi
+if [ ! -f "${RENDER_TEMP}/rendered/alerting-slack/status-list-server/templates/alerting-secret.yaml" ]; then
+  echo "ERROR: alerting.enabled=true without existingSecret must render Secret"; exit 1
+fi
+
+# Email platform renders to/from/smarthost as plain CRD strings (host:port),
+# stores only the optional SMTP password in the Secret.
+helm template status-list-server "$CHART_DIR" \
+  --set alerting.enabled=true \
+  --set alerting.platform=email \
+  --set alerting.email.to=ops@example.com \
+  --set alerting.email.smtpHost=smtp.example.com \
+  --set-string alerting.email.smtpPort=587 \
+  --set alerting.email.smtpFrom=alerts@example.com \
+  --set alerting.email.smtpPassword=secretpw \
+  --output-dir "${RENDER_TEMP}/rendered/alerting-email"
+if ! grep -q 'smarthost: "smtp.example.com:587"' "${RENDER_TEMP}/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml"; then
+  echo "ERROR: alerting.platform=email must render smarthost as host:port in AlertmanagerConfig"; exit 1
+fi
+if ! grep -q 'to: "ops@example.com"' "${RENDER_TEMP}/rendered/alerting-email/status-list-server/templates/alertmanagerconfig.yaml"; then
+  echo "ERROR: alerting.platform=email must render `to` as a plain string in AlertmanagerConfig"; exit 1
+fi
+if ! grep -q 'smtp-password: "secretpw"' "${RENDER_TEMP}/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml"; then
+  echo "ERROR: alerting.platform=email must store the SMTP password in the Secret"; exit 1
+fi
+if grep -Eq 'email-to|smtp-host|smtp-from' "${RENDER_TEMP}/rendered/alerting-email/status-list-server/templates/alerting-secret.yaml"; then
+  echo "ERROR: email to/smarthost/from must NOT be stored in the Secret (they are plain CRD strings)"; exit 1
+fi
+# Email without smtpPassword/dmsWebhookUrl must NOT render an empty Secret.
+if helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=email \
+    --set alerting.email.to=ops@example.com \
+    --set alerting.email.smtpHost=smtp.example.com \
+    --set alerting.email.smtpFrom=alerts@example.com \
+  | grep -q 'kind: Secret' && \
+    helm template status-list-server "$CHART_DIR" \
+    --set alerting.enabled=true \
+    --set alerting.platform=email \
+    --set alerting.email.to=ops@example.com \
+    --set alerting.email.smtpHost=smtp.example.com \
+    --set alerting.email.smtpFrom=alerts@example.com \
+  | grep -q -- '-alerting'; then
+  echo "ERROR: email without smtpPassword/dmsWebhookUrl must not render an empty alerting Secret"; exit 1
+fi

@@ -133,7 +133,7 @@ jobs:
           # finding and silently stopped raising the other would still exit in-band.
           missing=""
           for rule in artipacked excessive-permissions; do
-            printf '%s' "$out" | grep -q "$rule" || missing="${missing} ${rule}"
+            [[ "$out" == *"$rule"* ]] || missing="${missing} ${rule}"
           done
 
           if [ -n "$missing" ]; then
@@ -573,6 +573,8 @@ jobs:
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Build Helm dependencies
         run: |
@@ -581,6 +583,8 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build "$CHART_DIR"
 
+      - name: Install CRD validator
+        run: sudo apt-get install -y python3-jsonschema
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
 
@@ -612,6 +616,8 @@ jobs:
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Build Helm dependencies
         run: |
@@ -656,12 +662,16 @@ jobs:
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build "$CHART_DIR"
 
+      - name: Install CRD validator
+        run: sudo apt-get install -y python3-jsonschema
       - name: Render Helm templates
         uses: ./.github/workflows/render-helm-templates
 
@@ -873,15 +883,20 @@ jobs:
       - name: Verify Jaeger image tag exists
         run: docker manifest inspect jaegertracing/jaeger:2.20.0 >/dev/null
 
+      - name: Verify pinned Jaeger image digest exists
+        run: docker manifest inspect jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8 >/dev/null
+
       - name: Validate Compose Collector config
         run: |
           docker run --rm \
             -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.158.0 \
+            otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5 \
             validate --config /etc/otelcol/config.yaml
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Install YAML parser
         run: |
@@ -930,7 +945,7 @@ jobs:
         run: |
           docker run --rm \
             -v "/tmp/helm-otel-collector.yaml:/etc/otelcol/config.yaml:ro" \
-            otel/opentelemetry-collector-contrib:0.158.0 \
+            otel/opentelemetry-collector-contrib:0.158.0@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5 \
             validate --config /etc/otelcol/config.yaml
 
   prometheus-rules-validation:
@@ -947,6 +962,8 @@ jobs:
 
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
 
       - name: Build Helm dependencies
         run: |
@@ -957,13 +974,13 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/recording.rules.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check rules /etc/prometheus/rules/recording.rules.yml
 
       - name: Validate Prometheus alerting rules
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check rules /etc/prometheus/rules/alerting.rules.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
         # The Helm chart ships the DEPLOYED copy of the recording+alerting rule set
@@ -972,158 +989,16 @@ jobs:
         # suite -- so the artifact that actually reaches production is behaviorally
         # verified, not just syntactically checked, and (c) it defines exactly the
         # same rule names as the standalone tested rules so neither copy can drift.
-        run: |
-          helm template status-list-server "$CHART_DIR" \
-            --namespace ns1 \
-            --set prometheusRule.enabled=true > /tmp/helm-render.yaml
-          python3 - <<'EOF'
-          import subprocess, yaml
-
-          # Extract the rendered PrometheusRule groups (the deployed rule copy).
-          docs = [d for d in yaml.safe_load_all(open('/tmp/helm-render.yaml')) if d]
-          cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
-          with open('/tmp/helm-rules.yml', 'w') as f:
-              yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
-
-          # Drift guard: the deployed copy must define the same rule names as the
-          # standalone, promtool-tested rules EXCEPT for the one intentional
-          # difference — Watchdog. kube-prometheus-stack 91.4.0 already ships its own
-          # always-firing Watchdog, so a per-release copy would duplicate it and, with
-          # the optional app AlertmanagerConfig disabled in production, page the
-          # platform's matcher-free fallback as a normal notification. The deployed
-          # rule therefore omits Watchdog (StatusListMetricsAbsent covers application
-          # scrape health); only the standalone Docker rules retain their own
-          # Watchdog. Thresholds are parameterized via values, so compare names, not
-          # numeric values.
-          def rule_names(path):
-              rules = yaml.safe_load(open(path))['groups']
-              names = set()
-              for g in rules:
-                  for r in g['rules']:
-                      names.add(r.get('record') or r.get('alert'))
-              return names
-          standalone = rule_names('deploy/observability/prometheus/rules/recording.rules.yml') | rule_names('deploy/observability/prometheus/rules/alerting.rules.yml')
-          deployed = rule_names('/tmp/helm-rules.yml')
-          expected = standalone - {'Watchdog'}
-          if deployed != expected:
-              raise SystemExit(
-                  f"DRIFT: deployed PrometheusRule rule names differ from the tested standalone rules.\n"
-                  f"  expected (standalone minus the intentional Watchdog omission): {sorted(expected)}\n"
-                  f"  only in standalone: {sorted(standalone - deployed)}\n"
-                  f"  only in deployed:   {sorted(deployed - standalone)}"
-              )
-
-          # Unit-test the deployed copy with the same alerting suite used for the
-          # standalone rules, adjusted for the differences introduced by the Helm
-          # template -- and rule_files. The deployed copy differs from the
-          # standalone rules in exactly these ways:
-          #   1. It ships NO Watchdog (see the drift-guard note above), so any
-          #      Watchdog expectations from the standalone suite are dropped.
-          #   2. Every remaining alert carries a static `namespace: ns1` label (it
-          #      is namespaced to the release), so StatusListMetricsAbsent
-          #      expectations gain `namespace: ns1`.
-          #   3. StatusListMetricsAbsent is based on the scrape-generated `up`
-          #      series selected by `service` (the rendered ServiceMonitor
-          #      Service), not the standalone job/target selector or the app's
-          #      otel_scope_name label, so its expected label set has only
-          #      namespace/service/static labels and its description namespaces
-          #      the message.
-          #
-          # Rather than maintaining a second copy of the suite for the deployed
-          # rules, we rewrite the fixture to match the deployed semantics: any
-          # standalone `up{job="status_list_server",instance="app:8000"}` input
-          # series becomes the deployed `up{namespace="ns1",service="status-list-server-service"}`
-          # selector, the Watchdog expectations are removed, and the
-          # StatusListMetricsAbsent expectations are normalized.
-          test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
-          test['rule_files'] = ['helm-rules.yml']
-          deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
-          standalone_up = 'up{job="status_list_server",instance="app:8000"}'
-          for block in test['tests']:
-              for series in block.get('input_series', []):
-                  if isinstance(series, dict) and 'up{' in str(series.get('series', '')):
-                      series['series'] = series['series'].replace(
-                          standalone_up, deployed_up)
-              # Drop the standalone Watchdog expectations: the deployed rule omits
-              # Watchdog by design (kube-prometheus-stack provides the platform one).
-              block['alert_rule_test'] = [
-                  at for at in block.get('alert_rule_test', [])
-                  if at.get('alertname') != 'Watchdog'
-              ]
-              for at in block.get('alert_rule_test', []):
-                  for alert in at.get('exp_alerts', []):
-                      if at['alertname'] == 'StatusListMetricsAbsent':
-                          alert['exp_labels'].pop('job', None)
-                          alert['exp_labels'].pop('instance', None)
-                          alert['exp_labels'].pop('otel_scope_name', None)
-                          alert['exp_labels']['namespace'] = 'ns1'
-                      # The deployed Helm rules keep namespace context in their
-                      # descriptions (namespace {{ $labels.namespace }}: ...),
-                      # while the standalone descriptions no longer carry the
-                      # empty-namespace prefix. Prepend the ns1 namespace to
-                      # every deployed description except RedisCacheErrors, whose
-                      # description has no namespace prefix in either copy.
-                      if at['alertname'] != 'RedisCacheErrors':
-                          d = alert.get('exp_annotations', {}).get('description', '')
-                          alert['exp_annotations']['description'] = 'namespace ns1: ' + d
-
-          # Behavioral cross-namespace isolation (the reviewer-requested outcome
-          # test, not just substring greps). The ns1 rule copy must never consume
-          # ns2 series, and loss of the expected ns1 scrape target must not be
-          # masked by a healthy ns2 target. Feed ONLY ns2 data (firing 5xx series,
-          # Redis cache errors, and a healthy ns2 `up`) and assert (a) ns1 SLO
-          # alerts stay silent, (b) ns1's own absence still pages despite ns2
-          # being healthy, and (c) the ns1 RedisCacheErrors alert does not fire
-          # from ns2's Redis error series.
-          ns2_up = 'up{namespace="ns2",service="status-list-server-service"}'
-          test['tests'].append({
-              'interval': '1m',
-              'input_series': [
-                  {'series': 'http_server_requests_total{otel_scope_name="status-list-server",namespace="ns2",method="GET",route="/x",status_class="5xx"}',
-                   'values': '0+100x400'},
-                  {'series': 'http_server_requests_total{otel_scope_name="status-list-server",namespace="ns2",method="GET",route="/x",status_class="2xx"}',
-                   'values': '0+900x400'},
-                  {'series': 'status_list_cache_errors_total{otel_scope_name="status-list-server",namespace="ns2",cache="status_list",backend="redis",operation="get"}',
-                   'values': '0+60x10'},
-                  {'series': ns2_up, 'values': '1x410'},
-              ],
-              'alert_rule_test': [
-                  {'eval_time': '400m', 'alertname': 'ErrorRateFastBurn',
-                   'exp_alerts': []},
-                  {'eval_time': '400m', 'alertname': 'ErrorRateSlowBurn',
-                   'exp_alerts': []},
-                  {'eval_time': '10m', 'alertname': 'RedisCacheErrors',
-                   'exp_alerts': []},
-                  {'eval_time': '10m', 'alertname': 'StatusListMetricsAbsent',
-                   'exp_alerts': [{'exp_labels': {
-                                   'service': 'status-list-server',
-                                   'severity': 'page',
-                                   'team': 'statuslist',
-                                   'namespace': 'ns1'},
-                                   'exp_annotations': {
-                                   'summary': 'status-list-server metrics absent for 5m (target down or not scraped)',
-                                   'description': 'namespace ns1: Status List /metrics target is unreachable or absent (up == 0 or no up series for 5m)',
-                                   'runbook_url': 'https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/README.md',
-                                   'dashboard_url': 'http://localhost:3000/d/status-list-slo'}}]},
-              ],
-          })
-          with open('/tmp/helm-alerting.test.yml', 'w') as f:
-              yaml.safe_dump(test, f, sort_keys=False)
-          EOF
-          docker run --rm -w /tmp \
-            -v /tmp/helm-rules.yml:/tmp/helm-rules.yml:ro \
-            -v /tmp/helm-alerting.test.yml:/tmp/helm-alerting.test.yml:ro \
-            --entrypoint promtool \
-            prom/prometheus:v3.11.3 test rules /tmp/helm-alerting.test.yml
+        run: bash scripts/check-helm-prometheus.sh
 
       - name: Validate Prometheus config (dev and production)
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check config /etc/prometheus/prometheus.yml
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 check config /etc/prometheus/prometheus.production.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check config /etc/prometheus/prometheus.production.yml
 
       - name: Lint SLO thresholds consistency
         run: |
@@ -1133,13 +1008,13 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/recording.test.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /etc/prometheus/tests/recording.test.yml
 
       - name: Run promtool alerting rule tests
         run: |
           docker run --rm --entrypoint promtool \
             -v "$PWD/deploy/observability/prometheus:/etc/prometheus:ro" \
-            prom/prometheus:v3.11.3 test rules /etc/prometheus/tests/alerting.test.yml
+            prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /etc/prometheus/tests/alerting.test.yml
 
       - name: Validate Alertmanager config generation + webhook delivery
         # Proves (a) generate-alertmanager-config.sh emits an amtool-valid config
@@ -1161,13 +1036,7 @@ jobs:
         # canonical JSON AND the chart-local copy the Helm ConfigMap embeds; a
         # byte-for-byte comparison of both guards against a deployed dashboard
         # that drifts from the reviewed source.
-        run: |
-          cd deploy/observability/dashboards/src
-          npm install --no-audit --no-fund
-          npm run generate-dashboards
-          git diff --exit-code ../generated/status-list-slo.json
-          git diff --exit-code ../../../helm/chart/observability/dashboards/generated/status-list-slo.json
-          cmp ../generated/status-list-slo.json ../../../helm/chart/observability/dashboards/generated/status-list-slo.json
+        run: bash scripts/check-dashboard-drift.sh
         env:
           # The generator has no side effects beyond writing this directory.
           NODE_ENV: production
@@ -1205,6 +1074,26 @@ jobs:
           path: target/llvm-cov/html
           if-no-files-found: error
 
+  local-ci-tests:
+    name: Local CI runner tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+          cache: false
+      - name: Install test prerequisites
+        run: |
+          sudo apt-get install -y python3-yaml
+          go install github.com/google/yamlfmt/cmd/yamlfmt@v0.21.0
+      - name: Test local CI runner
+        run: python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
+
   # The single required status check. The jobs above form several independent chains
   # rather than one, so no individual job represents the suite. Rollout order:
   # CONTRIBUTING.md, "Branch Protection".
@@ -1213,6 +1102,7 @@ jobs:
     if: always()
     needs:
       - zizmor-security
+      - local-ci-tests
       - cargo-fmt
       - cargo-build
       - release-variant-checks

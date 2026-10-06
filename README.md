@@ -206,12 +206,17 @@ Verify zero-infrastructure in-memory compilation:
 cargo check --no-default-features --features memory
 ```
 
-Run the complete local CI verification suite (formatting, clippy, tests, and dependency auditing):
+Run the daily local CI checks (formatting, builds, Clippy, tests, and documentation):
 
 ```bash
-# Requires cargo-nextest: cargo install cargo-nextest
 ./local-ci.sh
+
+# Add security, configuration, container, and coverage gates:
+./local-ci.sh --full
 ```
+
+Missing tools are bootstrapped locally. See [Local CI](docs/local-ci.md) for
+prerequisites, the complete command inventory, and verification instructions.
 
 Run markdown linting:
 
