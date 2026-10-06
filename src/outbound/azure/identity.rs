@@ -11,7 +11,7 @@ use azure_identity::{
     ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
     WorkloadIdentityCredential, WorkloadIdentityCredentialOptions,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Chained token credential that evaluates supported ambient Azure identity
 /// sources in order: Environment client secret -> Workload Identity ->
@@ -93,6 +93,15 @@ impl DefaultAzureCredential {
                 "no Azure credential sources could be constructed",
             ));
         }
+
+        info!(
+            "using Azure identity chain: {}",
+            sources
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        );
 
         Ok(Arc::new(Self { sources }))
     }
