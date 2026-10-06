@@ -357,3 +357,11 @@ AWS_SECRET_ACCESS_KEY=test
 APP_AWS__REGION=us-east-1
 APP_SERVER__CERT__SIGNING_KEY_CACHE_TTL=0
 ```
+
+For local AWS emulation, start Floci with `docker compose up -d --wait floci`.
+Set `AWS_ENDPOINT_URL=http://localhost:4566` for host processes, or
+`AWS_ENDPOINT_URL=http://floci:4566` for the Compose app. The test credentials
+above are sufficient. Floci stores secrets in memory for this development setup;
+restarting it clears them. Remove the endpoint override and use real AWS
+credentials in production. See [Local AWS emulation](LOCAL_DEPLOYMENT.md#local-aws-emulation-with-floci)
+for CLI checks and integration test commands.

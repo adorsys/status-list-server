@@ -42,16 +42,22 @@ services:
     networks:
       - status-list-network
 
-  localstack:
-    container_name: localstack
-    image: localstack/localstack:4.14
+  floci:
+    container_name: floci
+    image: floci/floci:2.1.0
     profiles: ["aws"]
     ports:
       - "${BIND_ADDR:-127.0.0.1}:4566:4566"
     environment:
-      - SERVICES=secretsmanager
+      FLOCI_DEFAULT_REGION: us-east-1
+      FLOCI_STORAGE_MODE: memory
+      FLOCI_SERVICES_SECRETSMANAGER_ENABLED: "true"
+      FLOCI_SERVICES_ROUTE53_ENABLED: "true"
+      FLOCI_SERVICES_S3_ENABLED: "true"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:4566/"]
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      start_interval: 250ms
+      start_period: 2s
       interval: 5s
       timeout: 5s
       retries: 5
@@ -159,7 +165,7 @@ services:
       filesystem-cert:
         condition: service_completed_successfully
         required: false
-      localstack:
+      floci:
         condition: service_healthy
         required: false
       otel-collector:
