@@ -44,9 +44,11 @@ impl DefaultAzureCredential {
     ) -> azure_core::Result<Arc<Self>> {
         let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
 
-        if let (Some(tenant_id), Some(client_id), Some(client_secret)) =
-            (tenant_id.as_ref(), client_id.as_ref(), client_secret.as_ref())
-        {
+        if let (Some(tenant_id), Some(client_id), Some(client_secret)) = (
+            tenant_id.as_ref(),
+            client_id.as_ref(),
+            client_secret.as_ref(),
+        ) {
             match ClientSecretCredential::new(
                 tenant_id.as_str(),
                 client_id.clone(),
@@ -60,9 +62,11 @@ impl DefaultAzureCredential {
                 ),
             }
         }
-        if let (Some(tenant_id), Some(client_id), Some(federated_token_file)) =
-            (tenant_id.as_ref(), client_id.as_ref(), federated_token_file.as_ref())
-        {
+        if let (Some(tenant_id), Some(client_id), Some(federated_token_file)) = (
+            tenant_id.as_ref(),
+            client_id.as_ref(),
+            federated_token_file.as_ref(),
+        ) {
             match WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions {
                 client_id: Some(client_id.clone()),
                 tenant_id: Some(tenant_id.clone()),
