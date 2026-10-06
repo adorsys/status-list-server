@@ -111,11 +111,5 @@ mod tests {
             "structurally different chains that share a concatenated byte stream \
              must not collide in the signer fingerprint"
         );
-
-        // The chain count must also be framed: ["YWJj", "ZGVm"] differs from
-        // ["YWJjZGVm"] only in count after the first entry; a correct framing
-        // already distinguishes them, and this guards regressions to the count.
-        let fp_split_repeat = signer_fingerprint(&split);
-        assert_eq!(fp_split_repeat, fp_split, "deterministic");
     }
 }

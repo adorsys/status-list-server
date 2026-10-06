@@ -1357,13 +1357,10 @@ impl CacheConfig {
     }
 }
 
-/// Configuration for the per-replica cache of fully signed status-list token
-/// bytes.
-///
-/// This is deliberately separate from [`CacheConfig`] (which governs the cached
-/// *status list items*): a token cache entry must outlive the status-list item
-/// cache so that an unchanged list reuses a single sign for the whole token
-/// window.
+/// Configuration for the per-replica, byte-bounded cache of fully signed
+/// status-list token bytes. Entries expire at their window boundary, and a
+/// zero capacity disables reuse; capacity pressure may evict an entry and
+/// cause a re-sign within the same window.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenBytesCacheConfig {
     /// Byte budget bounding resident signed-token entries; `0` disables the cache.
@@ -1496,7 +1493,6 @@ impl Config {
         config.management_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
-        config.status_list.validate()?;
         Ok(config)
     }
 }

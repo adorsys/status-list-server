@@ -108,7 +108,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        token_bytes_cache: crate::server::cache::TokenBytesCache::new(100),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -151,7 +151,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        token_bytes_cache: crate::server::cache::TokenBytesCache::new(100),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -184,7 +184,7 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        token_bytes_cache: crate::server::cache::TokenBytesCache::new(100),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
 }
@@ -364,7 +364,7 @@ async fn build_test_app_state(
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        token_bytes_cache: crate::server::cache::TokenBytesCache::new(100),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: Readiness::default(),
     }
 }
