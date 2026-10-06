@@ -317,7 +317,15 @@ paths:
       - name: list_id
         in: path
         required: true
-        description: UUID of the status list.
+        description: |
+          UUID of the status list. For publish (`PUT`), only the lowercase,
+          hyphenated form is accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`);
+          the braced, `urn:uuid:`, no-hyphen and uppercase forms are rejected
+          with `400`. For update (`PATCH`), any well-formed UUID is accepted
+          for the lookup, but a list is only found by the exact spelling it was
+          published with: an uppercase (or otherwise differently-spelled) ID
+          for a list stored in the canonical lowercase form is not matched and
+          yields `404`.
         schema:
           type: string
           format: uuid
@@ -326,10 +334,28 @@ paths:
     put:
       operationId: publishStatusList
       summary: Publish a new status list
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          description: |
+            UUID of the status list. Only the lowercase, hyphenated UUID form is
+            accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
+            `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
+          schema:
+            type: string
+            format: uuid
+            example: "477121aa-b598-419e-916f-1e74654ff38b"
       description: |
         Creates a new status list for the given `list_id`. The issuer is
         derived from the validated JWT Bearer token. The request body defines
         the initial status entries for the list.
+
+        On success the response `Location` header and the `uri` member of the
+        body carry the absolute URI of the created status list. For full spec
+        compliance (§5.1/§5.2/§8.3) the issuer MUST embed that exact URI in the
+        Referenced Token's `status.status_list.uri`; the status list token's own
+        `sub` carries the same URI so relying parties can resolve it.
 
         Each issuer may hold at most `limits.max_lists_per_issuer` status lists
         (default 1000). A publish past that is refused with `400`
@@ -355,10 +381,26 @@ paths:
       responses:
         "201":
           description: Status list created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                Absolute URI of the newly created status list, e.g.
+                `https://statuslist.example.com/api/v1/status-lists/{list_id}`.
+                This is the value the issuer MUST embed in the Referenced
+                Token's `status.status_list.uri`; the status list token's own
+                `sub` carries the same URI.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusPublishResponse"
+              example:
+                uri: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+                list_id: "477121aa-b598-419e-916f-1e74654ff38b"
+                size: 100000
+                bits: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -808,10 +850,27 @@ components:
 
     StatusPublishResponse:
       type: object
+      description: |
+        Response body of a successful `PUT /api/v1/status-lists/{list_id}/statuses`.
+        `uri` is the absolute URI of the newly created status list — the value
+        the issuer MUST embed in the Referenced Token's `status.status_list.uri`
+        (spec §5.1/§5.2/§8.3). It is identical to the `Location` header.
       required:
+        - uri
+        - list_id
         - size
         - bits
       properties:
+        uri:
+          type: string
+          format: uri
+          description: Absolute URI of the created status list.
+          example: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+        list_id:
+          type: string
+          format: uuid
+          description: The `list_id` the status list was published under.
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
         size:
           type:
             - integer
@@ -1165,7 +1224,9 @@ components:
 
         `status_list_already_exists` — a list with this `list_id` is already
         published. **Retrying will never succeed**; choose a different `list_id`
-        or update the existing list instead.
+        or update the existing list instead. When the stored list can be read, a
+        `Location` header carries its canonical URI (the same `sub` the list
+        already uses), so a racing publisher can adopt it instead of guessing.
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -1173,6 +1234,15 @@ components:
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
       headers:
+        Location:
+          description: |
+            Present only for `status_list_already_exists`, when the stored list
+            is readable: the canonical URI of the existing list — the `sub` the
+            list already uses.
+          required: false
+          schema:
+            type: string
+            format: uri
         Retry-After:
           description: |
             Present only for `write_contention`. Seconds to wait before

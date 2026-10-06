@@ -98,7 +98,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
 
     AppState {
         service,
-        server_domain: "example.com".to_string(),
+        public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
         token_exp_secs: 900,
         token_ttl_secs: 300,
@@ -141,7 +141,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
 
     AppState {
         service,
-        server_domain: "example.com".to_string(),
+        public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
         token_exp_secs: 900,
         token_ttl_secs: 300,
@@ -174,7 +174,7 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
 
     AppState {
         service,
-        server_domain: "example.com".to_string(),
+        public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
         token_exp_secs: 900,
         token_ttl_secs: 300,
@@ -354,7 +354,7 @@ async fn build_test_app_state(
 
     AppState {
         service,
-        server_domain: "example.com".to_string(),
+        public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri,
         token_exp_secs: 900,
         token_ttl_secs: 300,

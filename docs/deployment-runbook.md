@@ -158,6 +158,17 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 
 The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
 
+**Certificate host vs. token `sub` host.** With ACME, the server obtains a
+certificate for `server.domain` (derived from `statuslist.ingress.externalDnsHostname`).
+The status list `sub` URI, however, is built from `server.public_base_url`
+(defaulting to `https://{server.domain}/api/v1`). If you set `APP_SERVER__PUBLIC_BASE_URL`
+to a different host than `server.domain`, the certificate will not cover the
+host in `sub`, and relying parties that pin the token signature to the host in
+`sub` will reject the tokens. Keep the two hosts the same unless you have a
+separate TLS-terminating layer covering the public URL. If the service is
+reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
+(e.g. `https://host:8443/api/v1`), since `server.domain` cannot carry a port.
+
 ### Content negotiation at the edge
 
 The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
@@ -379,6 +390,12 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 - `/health/ready` reports a failing backing store.
 - Check database readiness (PostgreSQL pod/connection), the ExternalSecret/SecretStore status (if ESO), and application env values.
+
+### Pod crash-loops at startup in a production profile
+
+- The pod exits before it becomes ready, with a log line like `server.public_base_url (https://localhost/api/v1) resolves to localhost/loopback in a production profile`.
+- This is a deliberate startup guard: a `localhost`/loopback `sub` can never be reached by a relying party, so a production profile (`APP_ENV=production`) refuses to start rather than silently signing tokens every relying party rejects. The Helm chart falls back to `localhost` when no host is configured, which is why an unconfigured upgrade hits this.
+- Set `APP_SERVER__DOMAIN` (or `APP_SERVER__PUBLIC_BASE_URL`) to the public host and redeploy. The guard keys off `APP_ENV`, so it only blocks production profiles; private/local hosts (`.local`, private IPv4, link-local, ULA) warn instead of stopping.
 
 ### Secret not synced (ESO)
 
