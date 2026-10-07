@@ -141,6 +141,7 @@ x509-parser = "0.18"
 public-suffix = "0.1"
 tokio-cron-scheduler = "0.15"
 url = { version = "2.5", features = ["serde"] }
+dashmap = "6.2"
 
 # Database and ORM
 [dependencies.sea-orm]
@@ -205,7 +206,7 @@ wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
 [dev-dependencies.testcontainers-modules]
 version = "0.15"
-features = ["hashicorp_vault", "localstack", "mysql", "postgres"]
+features = ["hashicorp_vault", "http_wait", "mysql", "postgres"]
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
