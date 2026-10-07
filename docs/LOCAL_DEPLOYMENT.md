@@ -70,29 +70,6 @@ The `certdata` named volume persists across ordinary `docker compose down` and `
 To use MySQL, use `FEATURES=mysql`, set the `APP_DATABASE__*` values for MySQL in `.env`, and activate only the `mysql` database profile. See
 [Database Backends](database-backends.md).
 
-## Local AWS emulation with Floci
-
-Start Floci with `docker compose up -d --wait floci`, or include it beside the
-app with the `aws` profile. It stores resources in memory; restarting it clears
-them.
-
-Use `AWS_ENDPOINT_URL=http://localhost:4566` for host processes, or
-`AWS_ENDPOINT_URL=http://floci:4566` for the Compose app. Use the development
-credentials `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test`, with region
-`us-east-1`. Remove the endpoint override and use real credentials for AWS.
-
-With Docker running, test certificate provisioning using:
-
-```bash
-cargo test --test cert_provisioning --features aws
-# Include Vault and OpenBao:
-cargo test --test cert_provisioning --features aws,vault
-```
-
-The `aws` feature is required; without it this test target runs zero tests.
-The suite retains Pebble and challtestsrv for ACME/DNS and uses Floci for
-Secrets Manager.
-
 ## Minikube quickstart
 
 Lean checklist for running the status-list-server chart on Minikube.
