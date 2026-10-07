@@ -182,15 +182,28 @@ async fn get_status_list_at(
     // Select the appropriate pre-computed encoding and ETag from the cache.
     // The cache stores both identity and gzip (for JWT) variants with their
     // strong ETags, so no re-compression is needed even for 304 responses.
-    let (served_bytes, served_encoding, current_etag) = if client_accepts_gzip && accept_type == AcceptType::Jwt {
-        // Use pre-computed gzip bytes and ETag.
-        let gzip_bytes = cached.gzip_bytes.as_ref().expect("gzip bytes must be present for JWT").clone();
-        let gzip_etag = cached.gzip_etag.as_ref().expect("gzip ETag must be present for JWT").clone();
-        (gzip_bytes, Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER), gzip_etag)
-    } else {
-        // Use identity (uncompressed) bytes and ETag.
-        (cached.bytes.clone(), None, cached.identity_etag.clone())
-    };
+    let (served_bytes, served_encoding, current_etag) =
+        if client_accepts_gzip && accept_type == AcceptType::Jwt {
+            // Use pre-computed gzip bytes and ETag.
+            let gzip_bytes = cached
+                .gzip_bytes
+                .as_ref()
+                .expect("gzip bytes must be present for JWT")
+                .clone();
+            let gzip_etag = cached
+                .gzip_etag
+                .as_ref()
+                .expect("gzip ETag must be present for JWT")
+                .clone();
+            (
+                gzip_bytes,
+                Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER),
+                gzip_etag,
+            )
+        } else {
+            // Use identity (uncompressed) bytes and ETag.
+            (cached.bytes.clone(), None, cached.identity_etag.clone())
+        };
 
     // Recheck the clock after async work. If the request crossed the token's
     // expiry boundary, we must recompute the window and validator for the
@@ -218,14 +231,9 @@ async fn get_status_list_at(
         let new_exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
         let validity_window = (iat, new_exp);
 
-        let (key, signing_material) = build_token_cache_key(
-            &state,
-            accept_type,
-            &status_record,
-            &list_id,
-            window_start,
-        )
-        .await?;
+        let (key, signing_material) =
+            build_token_cache_key(&state, accept_type, &status_record, &list_id, window_start)
+                .await?;
         let cached = get_or_build_live_token(
             &state,
             accept_type,
@@ -242,13 +250,26 @@ async fn get_status_list_at(
             .await;
 
         // Select the appropriate pre-computed encoding and ETag for the new window.
-        let (served_bytes, served_encoding, current_etag) = if client_accepts_gzip && accept_type == AcceptType::Jwt {
-            let gzip_bytes = cached.gzip_bytes.as_ref().expect("gzip bytes must be present for JWT").clone();
-            let gzip_etag = cached.gzip_etag.as_ref().expect("gzip ETag must be present for JWT").clone();
-            (gzip_bytes, Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER), gzip_etag)
-        } else {
-            (cached.bytes.clone(), None, cached.identity_etag.clone())
-        };
+        let (served_bytes, served_encoding, current_etag) =
+            if client_accepts_gzip && accept_type == AcceptType::Jwt {
+                let gzip_bytes = cached
+                    .gzip_bytes
+                    .as_ref()
+                    .expect("gzip bytes must be present for JWT")
+                    .clone();
+                let gzip_etag = cached
+                    .gzip_etag
+                    .as_ref()
+                    .expect("gzip ETag must be present for JWT")
+                    .clone();
+                (
+                    gzip_bytes,
+                    Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER),
+                    gzip_etag,
+                )
+            } else {
+                (cached.bytes.clone(), None, cached.identity_etag.clone())
+            };
         (current_etag, served_bytes, served_encoding, new_exp)
     } else {
         (current_etag, served_bytes, served_encoding, exp)
@@ -365,32 +386,32 @@ async fn get_or_build_live_token(
     // returns the uncompressed token; the client's encoding is applied later.
     state
         .token_bytes_cache
-        .get_or_build(key, || {
-            let signing_material = signing_material.clone();
-            // The record is cloned only when the builder actually runs (a cache
-            // miss); a hit serves cached bytes without touching it.
-            let status_record = status_record.clone();
-            async move {
-                let (bytes, _enc) = build_status_list_token(
-                    state,
-                    accept_type,
-                    status_record,
-                    Some(*validity_window),
-                    false,
-                    signing_material,
-                )
-                .await?;
-                let format = match accept_type {
-                    AcceptType::Cwt => "cwt",
-                    AcceptType::Jwt => "jwt",
-                };
-                Ok::<CachedToken, ApiError>(CachedToken::new(
-                    Bytes::from(bytes),
-                    format,
-                    now,
-                ))
-            }
-        }, now)
+        .get_or_build(
+            key,
+            || {
+                let signing_material = signing_material.clone();
+                // The record is cloned only when the builder actually runs (a cache
+                // miss); a hit serves cached bytes without touching it.
+                let status_record = status_record.clone();
+                async move {
+                    let (bytes, _enc) = build_status_list_token(
+                        state,
+                        accept_type,
+                        status_record,
+                        Some(*validity_window),
+                        false,
+                        signing_material,
+                    )
+                    .await?;
+                    let format = match accept_type {
+                        AcceptType::Cwt => "cwt",
+                        AcceptType::Jwt => "jwt",
+                    };
+                    Ok::<CachedToken, ApiError>(CachedToken::new(Bytes::from(bytes), format, now))
+                }
+            },
+            now,
+        )
         .await
 }
 

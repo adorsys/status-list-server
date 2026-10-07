@@ -403,7 +403,10 @@ impl TokenBytesCache {
         // has been registered (e.g., via invalidate_superseded), this build is
         // stale and should not be cached. Invalidate it from the cold tier.
         let window_end = window_end(key);
-        let mut latest_gen = self.latest_generation.entry(key.list_id.clone()).or_insert(0);
+        let mut latest_gen = self
+            .latest_generation
+            .entry(key.list_id.clone())
+            .or_insert(0);
         if key.version < *latest_gen {
             // Stale generation: remove from cold tier and don't promote.
             self.cold.invalidate(key).await;
@@ -432,7 +435,10 @@ impl TokenBytesCache {
 
         // Atomically check and update the latest generation for this list.
         let mut is_latest = false;
-        let mut latest_gen = self.latest_generation.entry(key.list_id.clone()).or_insert(0);
+        let mut latest_gen = self
+            .latest_generation
+            .entry(key.list_id.clone())
+            .or_insert(0);
         if key.version >= *latest_gen {
             *latest_gen = key.version;
             is_latest = true;
@@ -475,13 +481,17 @@ impl TokenBytesCache {
     /// it again.
     pub(crate) async fn invalidate_superseded(&self, list_id: &str, version: u64, now: i64) {
         // Update the latest generation tracker.
-        let mut latest_gen = self.latest_generation.entry(list_id.to_string()).or_insert(0);
+        let mut latest_gen = self
+            .latest_generation
+            .entry(list_id.to_string())
+            .or_insert(0);
         if version > *latest_gen {
             *latest_gen = version;
         }
 
         // Remove from protected tier.
-        self.protected.retain(|k, _| !(k.list_id == list_id && k.version < version));
+        self.protected
+            .retain(|k, _| !(k.list_id == list_id && k.version < version));
 
         // Remove from cold tier by iterating.
         let stale_keys: Vec<TokenCacheKey> = self
@@ -609,18 +619,22 @@ mod tests {
             let format = key.format.clone();
             handles.push(tokio::spawn(async move {
                 cache
-                    .get_or_build(&key, || {
-                        let builds = builds.clone();
-                        let format = format.clone();
-                        async move {
-                            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, std::convert::Infallible>(CachedToken::new(
-                                Bytes::from(vec![7u8, 8, 9]),
-                                &format,
-                                TEST_WINDOW_START,
-                            ))
-                        }
-                    }, TEST_WINDOW_START)
+                    .get_or_build(
+                        &key,
+                        || {
+                            let builds = builds.clone();
+                            let format = format.clone();
+                            async move {
+                                builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                Ok::<_, std::convert::Infallible>(CachedToken::new(
+                                    Bytes::from(vec![7u8, 8, 9]),
+                                    &format,
+                                    TEST_WINDOW_START,
+                                ))
+                            }
+                        },
+                        TEST_WINDOW_START,
+                    )
                     .await
                     .expect("infallible")
             }));
@@ -671,21 +685,25 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 cache
-                    .get_or_build(&key, || {
-                        let builds = builds.clone();
-                        let format = format.clone();
-                        async move {
-                            // Hold the build open long enough for the churn keys
-                            // to occupy and evict the single data slot.
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, std::convert::Infallible>(CachedToken::new(
-                                Bytes::from(vec![7u8, 8, 9]),
-                                &format,
-                                TEST_WINDOW_START,
-                            ))
-                        }
-                    }, TEST_WINDOW_START)
+                    .get_or_build(
+                        &key,
+                        || {
+                            let builds = builds.clone();
+                            let format = format.clone();
+                            async move {
+                                // Hold the build open long enough for the churn keys
+                                // to occupy and evict the single data slot.
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                Ok::<_, std::convert::Infallible>(CachedToken::new(
+                                    Bytes::from(vec![7u8, 8, 9]),
+                                    &format,
+                                    TEST_WINDOW_START,
+                                ))
+                            }
+                        },
+                        TEST_WINDOW_START,
+                    )
                     .await
                     .expect("infallible")
             }));
@@ -701,15 +719,19 @@ mod tests {
                 };
                 let format = k.format.clone();
                 cache
-                    .get_or_build(&k, || async {
-                        let format = format.clone();
-                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        Ok::<_, std::convert::Infallible>(CachedToken::new(
-                            Bytes::from(vec![1u8, 2, 3]),
-                            &format,
-                            TEST_WINDOW_START,
-                        ))
-                    }, TEST_WINDOW_START)
+                    .get_or_build(
+                        &k,
+                        || async {
+                            let format = format.clone();
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            Ok::<_, std::convert::Infallible>(CachedToken::new(
+                                Bytes::from(vec![1u8, 2, 3]),
+                                &format,
+                                TEST_WINDOW_START,
+                            ))
+                        },
+                        TEST_WINDOW_START,
+                    )
                     .await
                     .expect("infallible")
             }));
@@ -745,18 +767,22 @@ mod tests {
         // A: miss, runs builder (build #1), goes to protected tier (latest gen, within window).
         let format_a = key_a.format.clone();
         let a1 = cache
-            .get_or_build(&key_a, {
-                let builds = builds.clone();
-                let format = format_a.clone();
-                || async move {
-                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![1u8]),
-                        &format,
-                        TEST_WINDOW_START,
-                    ))
-                }
-            }, TEST_WINDOW_START)
+            .get_or_build(
+                &key_a,
+                {
+                    let builds = builds.clone();
+                    let format = format_a.clone();
+                    || async move {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![1u8]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    }
+                },
+                TEST_WINDOW_START,
+            )
             .await
             .expect("infallible");
         assert_eq!(*a1.bytes, vec![1]);
@@ -770,36 +796,47 @@ mod tests {
             };
             let format = key.format.clone();
             cache
-                .get_or_build(&key, || async {
-                    let format = format.clone();
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![9u8]),
-                        &format,
-                        TEST_WINDOW_START,
-                    ))
-                }, TEST_WINDOW_START)
+                .get_or_build(
+                    &key,
+                    || async {
+                        let format = format.clone();
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![9u8]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    },
+                    TEST_WINDOW_START,
+                )
                 .await
                 .expect("infallible");
         }
 
         // A must still be in protected tier, served without re-signing.
-        let a2 = cache.get(&key_a, TEST_WINDOW_START).await.expect("protected entry must be present");
+        let a2 = cache
+            .get(&key_a, TEST_WINDOW_START)
+            .await
+            .expect("protected entry must be present");
         assert_eq!(*a2.bytes, vec![1]);
 
         // A again via get_or_build: still a hit, no re-sign.
         let a3 = cache
-            .get_or_build(&key_a, {
-                let builds = builds.clone();
-                let format = format_a.clone();
-                || async move {
-                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![3u8]),
-                        &format,
-                        TEST_WINDOW_START,
-                    ))
-                }
-            }, TEST_WINDOW_START)
+            .get_or_build(
+                &key_a,
+                {
+                    let builds = builds.clone();
+                    let format = format_a.clone();
+                    || async move {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![3u8]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    }
+                },
+                TEST_WINDOW_START,
+            )
             .await
             .expect("infallible");
         assert_eq!(*a3.bytes, vec![1]);
@@ -842,16 +879,20 @@ mod tests {
         let builds_v1_clone = builds_v1.clone();
         let slow_build = tokio::spawn(async move {
             cache_clone
-                .get_or_build(&key_v1_clone, || async move {
-                    // Slow build to allow invalidation to happen first.
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    builds_v1_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![1u8]),
-                        &format_v1,
-                        TEST_WINDOW_START,
-                    ))
-                }, TEST_WINDOW_START)
+                .get_or_build(
+                    &key_v1_clone,
+                    || async move {
+                        // Slow build to allow invalidation to happen first.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        builds_v1_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![1u8]),
+                            &format_v1,
+                            TEST_WINDOW_START,
+                        ))
+                    },
+                    TEST_WINDOW_START,
+                )
                 .await
         });
 
@@ -862,20 +903,26 @@ mod tests {
         let format_v2 = key_v2.format.clone();
         let builds_v2_clone = builds_v2.clone();
         let v2_result = cache
-            .get_or_build(&key_v2, || async move {
-                builds_v2_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok::<_, std::convert::Infallible>(CachedToken::new(
-                    Bytes::from(vec![2u8]),
-                    &format_v2,
-                    TEST_WINDOW_START,
-                ))
-            }, TEST_WINDOW_START)
+            .get_or_build(
+                &key_v2,
+                || async move {
+                    builds_v2_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![2u8]),
+                        &format_v2,
+                        TEST_WINDOW_START,
+                    ))
+                },
+                TEST_WINDOW_START,
+            )
             .await
             .expect("infallible");
         assert_eq!(*v2_result.bytes, vec![2]);
 
         // Invalidate v1 (simulating a content update that bumps version to 2).
-        cache.invalidate_superseded(&list_id, 2, TEST_WINDOW_START).await;
+        cache
+            .invalidate_superseded(&list_id, 2, TEST_WINDOW_START)
+            .await;
 
         // Wait for the slow v1 build to complete.
         slow_build.await.expect("slow build task");
@@ -903,7 +950,10 @@ mod tests {
         );
 
         // v2 should be in protected tier.
-        let v2_cached = cache.get(&key_v2, TEST_WINDOW_START).await.expect("v2 must be cached");
+        let v2_cached = cache
+            .get(&key_v2, TEST_WINDOW_START)
+            .await
+            .expect("v2 must be cached");
         assert_eq!(*v2_cached.bytes, vec![2]);
     }
 
@@ -1003,13 +1053,19 @@ mod tests {
         cache
             .insert(
                 other_list_key.clone(),
-                CachedToken::new(Bytes::from(vec![9u8]), &other_list_key.format, TEST_WINDOW_START),
+                CachedToken::new(
+                    Bytes::from(vec![9u8]),
+                    &other_list_key.format,
+                    TEST_WINDOW_START,
+                ),
                 TEST_WINDOW_START,
             )
             .await;
 
         // Supersede everything strictly older than v3.
-        cache.invalidate_superseded(&list, 3, TEST_WINDOW_START).await;
+        cache
+            .invalidate_superseded(&list, 3, TEST_WINDOW_START)
+            .await;
 
         assert!(
             cache.get(&key_v1, TEST_WINDOW_START).await.is_none(),
@@ -1024,7 +1080,10 @@ mod tests {
             "the current generation must be retained"
         );
         assert!(
-            cache.get(&other_list_key, TEST_WINDOW_START).await.is_some(),
+            cache
+                .get(&other_list_key, TEST_WINDOW_START)
+                .await
+                .is_some(),
             "a different list's entries must not be reclaimed"
         );
     }
@@ -1069,7 +1128,12 @@ mod tests {
                 .await;
             assert!(cache.get(&cache_key, TEST_WINDOW_START).await.is_some());
             assert!(cache.get(&cache_key, TEST_WINDOW_START).await.is_some()); // hit again
-            assert!(cache.get(&base_key(TEST_WINDOW_START), TEST_WINDOW_START).await.is_none());
+            assert!(
+                cache
+                    .get(&base_key(TEST_WINDOW_START), TEST_WINDOW_START)
+                    .await
+                    .is_none()
+            );
         });
 
         let mut buffer = Vec::new();
@@ -1110,42 +1174,53 @@ mod tests {
 
         // First request: miss, builds, goes to protected tier.
         let out1 = cache
-            .get_or_build(&key, {
-                let builds = builds.clone();
-                let format = format.clone();
-                || async move {
-                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![7u8, 8, 9]),
-                        &format,
-                        TEST_WINDOW_START,
-                    ))
-                }
-            }, TEST_WINDOW_START)
+            .get_or_build(
+                &key,
+                {
+                    let builds = builds.clone();
+                    let format = format.clone();
+                    || async move {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![7u8, 8, 9]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    }
+                },
+                TEST_WINDOW_START,
+            )
             .await
             .expect("infallible");
         assert_eq!(out1.bytes.as_ref(), &[7u8, 8, 9][..]);
 
         // Second request: hit in protected tier, no re-sign.
         let out2 = cache
-            .get_or_build(&key, {
-                let builds = builds.clone();
-                let format = format.clone();
-                || async move {
-                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken::new(
-                        Bytes::from(vec![1u8, 2, 3]),
-                        &format,
-                        TEST_WINDOW_START,
-                    ))
-                }
-            }, TEST_WINDOW_START)
+            .get_or_build(
+                &key,
+                {
+                    let builds = builds.clone();
+                    let format = format.clone();
+                    || async move {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![1u8, 2, 3]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    }
+                },
+                TEST_WINDOW_START,
+            )
             .await
             .expect("infallible");
         assert_eq!(out2.bytes.as_ref(), &[7u8, 8, 9][..]);
 
         // Third request: still a hit.
-        let out3 = cache.get(&key, TEST_WINDOW_START).await.expect("protected entry must be present");
+        let out3 = cache
+            .get(&key, TEST_WINDOW_START)
+            .await
+            .expect("protected entry must be present");
         assert_eq!(out3.bytes.as_ref(), &[7u8, 8, 9][..]);
 
         assert_eq!(
