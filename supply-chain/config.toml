@@ -1858,10 +1858,6 @@ criteria = "safe-to-deploy"
 version = "1.0.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.tempfile]]
-version = "3.27.0"
-criteria = "safe-to-run"
-
 [[exemptions.testcontainers]]
 version = "0.27.3"
 criteria = "safe-to-run"
