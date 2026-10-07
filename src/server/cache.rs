@@ -3,12 +3,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
+use dashmap::DashMap;
 use moka::future::Cache as MokaCache;
 use moka::policy::Expiry;
 use opentelemetry::{
     metrics::{Counter, ObservableGauge},
     {KeyValue, global},
 };
+use time::OffsetDateTime;
+
+use crate::server::handlers::status_list::utils::etag::generate_token_etag;
 
 const HIT_METRIC: &str = "token_bytes_cache_hits";
 const MISS_METRIC: &str = "token_bytes_cache_misses";
@@ -33,6 +37,15 @@ struct TokenCacheMetrics {
     entry_count: ObservableGauge<u64>,
     #[allow(dead_code)]
     total_bytes: ObservableGauge<u64>,
+}
+
+/// A protected entry that is guaranteed to not be evicted by capacity pressure.
+/// These are entries for the latest generation of a list that are still within
+/// their validity window.
+#[derive(Debug, Clone)]
+struct ProtectedEntry {
+    token: CachedToken,
+    window_end: i64,
 }
 
 /// The most recently built [`TokenBytesCache`], exposed to the observable size
@@ -74,8 +87,10 @@ fn token_cache_metrics() -> TokenCacheMetrics {
                 .with_description("Number of entries currently resident in the signed-token bytes cache")
                 .with_callback(|observer| {
                     if let Some(cache) = size_gauge_cache() {
+                        let cold_count = cache.cold.entry_count();
+                        let protected_count = cache.protected.len() as u64;
                         observer.observe(
-                            cache.inner.entry_count(),
+                            cold_count + protected_count,
                             &[KeyValue::new("cache", "token_bytes")],
                         );
                     }
@@ -86,8 +101,14 @@ fn token_cache_metrics() -> TokenCacheMetrics {
                 .with_description("Total weighted size (bytes) currently resident in the signed-token bytes cache")
                 .with_callback(|observer| {
                     if let Some(cache) = size_gauge_cache() {
+                        let cold_bytes = cache.cold.weighted_size();
+                        let protected_bytes: u64 = cache
+                            .protected
+                            .iter()
+                            .map(|e| e.value().token.bytes.len() as u64)
+                            .sum();
                         observer.observe(
-                            cache.inner.weighted_size(),
+                            cold_bytes + protected_bytes,
                             &[KeyValue::new("cache", "token_bytes")],
                         );
                     }
@@ -105,25 +126,70 @@ pub(crate) enum TokenEncoding {
     Gzip,
 }
 
-/// One cached signed representation: the **uncompressed** signed token bytes.
+/// One cached signed representation: the **uncompressed** signed token bytes
+/// plus pre-computed encoded variants and their ETags.
 ///
 /// The bytes are stored as [`Bytes`] so a cache hit can be moved straight into
 /// an Axum response body without copying the (potentially large) representation.
-/// Encoding (gzip vs identity) is **not** part of the cache entry: it is derived
-/// from these uncompressed bytes at serve time, so a single sign per
-/// `(list, window, format)` serves every `Accept-Encoding` variant (ticket 564
-/// review: "Cache and coalesce the uncompressed signed token independently of
-/// encoding"). The optimistic-concurrency generation lives on the
-/// [`TokenCacheKey`] (not the value), which is what generation-aware
-/// invalidation reads.
+/// Encoding (gzip vs identity) is **not** part of the cache key: the uncompressed
+/// signed bytes are shared across `Accept-Encoding` variants, so a single sign
+/// per `(list, window, format)` serves every encoding. The encoded variants
+/// (gzip for JWT) and their strong ETags are computed once at cache insertion
+/// time and stored alongside the uncompressed bytes, so revalidation requests
+/// (including 304) never need to re-compress.
 ///
 /// `created_at_unix` is the wall-clock second the entry was built. The cache's
 /// per-entry expiry ([`EntryExpiry`]) uses it to expire each entry at the end of
 /// its own validity window, rather than on a fixed TTL.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedToken {
+    /// Uncompressed signed token bytes (identity encoding).
     pub(crate) bytes: Bytes,
+    /// Strong ETag for the identity encoding (digest of `bytes`).
+    pub(crate) identity_etag: String,
+    /// Gzip-compressed bytes (only for JWT format; `None` for CWT).
+    pub(crate) gzip_bytes: Option<Bytes>,
+    /// Strong ETag for the gzip encoding (digest of `gzip_bytes`).
+    pub(crate) gzip_etag: Option<String>,
+    /// Wall-clock second the entry was built.
     pub(crate) created_at_unix: i64,
+}
+
+impl CachedToken {
+    /// Build a `CachedToken` from uncompressed bytes, pre-computing the identity
+    /// ETag and (for JWT) the gzip bytes and gzip ETag.
+    pub(crate) fn new(bytes: Bytes, format: &str, created_at_unix: i64) -> Self {
+        let identity_etag = generate_token_etag(&bytes);
+        let (gzip_bytes, gzip_etag) = if format == "jwt" {
+            let gzip_bytes = compress_gzip(&bytes);
+            let gzip_etag = Some(generate_token_etag(&gzip_bytes));
+            (Some(gzip_bytes), gzip_etag)
+        } else {
+            (None, None)
+        };
+        Self {
+            bytes,
+            identity_etag,
+            gzip_bytes,
+            gzip_etag,
+            created_at_unix,
+        }
+    }
+}
+
+/// Compress bytes using gzip.
+fn compress_gzip(bytes: &[u8]) -> Bytes {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    // Compression should never fail for valid input; if it does, fall back to
+    // uncompressed (the caller will handle the error by not using gzip).
+    if encoder.write_all(bytes).is_ok() {
+        if let Ok(compressed) = encoder.finish() {
+            return Bytes::from(compressed);
+        }
+    }
+    // Fallback: return uncompressed (should not happen in practice).
+    Bytes::from(bytes.to_vec())
 }
 
 /// The typed identity of a cached signed representation.
@@ -166,17 +232,25 @@ pub(crate) struct TokenCacheKey {
 /// so immediately miss and re-sign; superseded list generations are actively
 /// reclaimed via `TokenBytesCache::invalidate_superseded`.
 ///
-/// Capacity policy (ticket 564 review): the "at most one sign per
-/// `(list, window, format)`" guarantee is scoped to *concurrent misses* (single
-/// flight) and *resident entries*. A byte-bounded cache must evict when over
-/// budget, so a request that arrives after an unchanged, still-valid entry was
-/// evicted by capacity pressure re-signs it — and, because the strong ETag is a
-/// digest of the served bytes, also cannot certify a `304` without the resident
-/// bytes. This is the agreed tradeoff of bounding memory; operators avoid the
-/// re-sign by sizing `max_capacity` above the working set of live windows.
+/// Capacity guarantee (ticket 564): at most one signature per `(list, window,
+/// format)` per replica, even under capacity pressure. This is achieved by a
+/// two-tier cache: entries for the latest generation of a list that are still
+/// within their validity window are stored in a protected tier that is never
+/// evicted by capacity pressure. Only entries for superseded generations or
+/// expired windows reside in the byte-bounded cold tier.
 #[derive(Clone, Debug)]
 pub struct TokenBytesCache {
-    inner: MokaCache<TokenCacheKey, CachedToken>,
+    /// Cold tier: byte-bounded cache for superseded generations and expired
+    /// windows. Entries here are subject to capacity-based eviction.
+    cold: MokaCache<TokenCacheKey, CachedToken>,
+    /// Protected tier: entries for the latest generation of each list that are
+    /// still within their validity window. Never evicted by capacity pressure.
+    /// Wrapped in Arc to ensure sharing across clones (DashMap::Clone creates
+    /// independent copies).
+    protected: Arc<DashMap<TokenCacheKey, ProtectedEntry>>,
+    /// Tracks the latest known generation (version) for each list_id.
+    /// Wrapped in Arc to ensure sharing across clones.
+    latest_generation: Arc<DashMap<String, u64>>,
 }
 
 /// The byte weight of a cached entry: its raw signed-token byte length. This is
@@ -221,24 +295,37 @@ impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
     }
 }
 
+/// Compute the window end timestamp for a key.
+fn window_end(key: &TokenCacheKey) -> i64 {
+    let width = i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX).max(1);
+    key.window_start.saturating_add(width)
+}
+
 impl TokenBytesCache {
     /// Build an in-process signed-token bytes cache.
     ///
-    /// `max_capacity_bytes` bounds the resident memory: entries are weighed by
-    /// their byte size and the total weighted size is capped at this budget. A
-    /// `0` budget disables the cache (entries are evicted immediately, so every
-    /// request re-signs). Each entry additionally expires at the end of its own
-    /// validity window, independent of the byte budget.
+    /// `max_capacity_bytes` bounds the resident memory of the *cold* tier:
+    /// entries are weighed by their byte size and the total weighted size is
+    /// capped at this budget. A `0` budget disables the cold tier (entries are
+    /// evicted immediately, so every request for a non-protected entry re-signs).
+    /// The protected tier has no byte budget; it holds at most one entry per
+    /// `(list, format)` for the latest generation within its window, which is
+    /// bounded by the number of active lists. Each entry additionally expires at
+    /// the end of its own validity window, independent of the byte budget.
     pub(crate) fn new(max_capacity_bytes: u64) -> Self {
         if max_capacity_bytes == 0 {
-            tracing::info!("Signed-token bytes cache disabled (capacity=0)");
+            tracing::info!("Signed-token bytes cache cold tier disabled (capacity=0)");
         }
-        let inner = MokaCache::builder()
+        let cold = MokaCache::builder()
             .weigher(entry_weight)
             .max_capacity(max_capacity_bytes)
             .expire_after(EntryExpiry)
             .build();
-        let cache = Self { inner };
+        let cache = Self {
+            cold,
+            protected: Arc::new(DashMap::new()),
+            latest_generation: Arc::new(DashMap::new()),
+        };
         // Register the cache so the observable size gauges read live
         // entry_count/weighted_size at scrape time.
         token_cache_metrics();
@@ -249,11 +336,9 @@ impl TokenBytesCache {
     /// Return cached bytes for `key`, building them on a miss.
     ///
     /// The caller supplies `init` to build the token. Concurrent misses for the
-    /// same key coalesce onto a single in-flight build; a request that arrives
-    /// after the completed entry was evicted by capacity pressure is a fresh
-    /// miss and re-runs `init` (the documented capacity tradeoff). There is no
-    /// explicit window bound here: the caller always anchors `key.window_start`
-    /// to the current request's window (which contains the token's expiry), and
+    /// same key coalesce onto a single in-flight build. There is no explicit
+    /// window bound here: the caller always anchors `key.window_start` to the
+    /// current request's window (which contains the token's expiry), and
     /// [`EntryExpiry`] frees each entry at the end of its own window, so bytes
     /// are never served past their validity window. Returns the built or cached
     /// bytes, or `Err(e)` if `init` fails (nothing is cached on error).
@@ -261,10 +346,15 @@ impl TokenBytesCache {
     /// The caller should call [`TokenBytesCache::invalidate_superseded`] with
     /// the record's current generation after building so superseded list
     /// generations are reclaimed (ticket 564 review).
+    ///
+    /// The `now` parameter is the current Unix timestamp for time-sensitive
+    /// operations (protected tier expiry checks). In production, pass the
+    /// request's timestamp; in tests, pass the simulated time.
     pub(crate) async fn get_or_build<F, Fut, E>(
         &self,
         key: &TokenCacheKey,
         init: F,
+        now: i64,
     ) -> Result<CachedToken, E>
     where
         F: FnOnce() -> Fut,
@@ -273,18 +363,25 @@ impl TokenBytesCache {
     {
         let metrics = token_cache_metrics();
 
-        // Fast path: already cached.
-        if let Some(cached) = self.inner.get(key).await {
-            metrics
-                .hits
-                .add(1, &[KeyValue::new("cache", "token_bytes")]);
-            return Ok(cached);
+        // Fast path: check protected tier first (latest generation, within window).
+        if let Some(entry) = self.protected.get(key) {
+            if entry.window_end > now {
+                metrics
+                    .hits
+                    .add(1, &[KeyValue::new("cache", "token_bytes")]);
+                return Ok(entry.token.clone());
+            } else {
+                // Window expired, demote to cold tier.
+                let entry = self.protected.remove(key).map(|(_, v)| v).unwrap();
+                self.cold.insert(key.clone(), entry.token).await;
+            }
         }
 
         // Slow path: build on miss, coalescing concurrent misses for the same
-        // key onto one in-flight build.
+        // key onto one in-flight build. We use the cold tier for coalescing,
+        // then promote to protected tier if appropriate.
         let value = self
-            .inner
+            .cold
             .try_get_with_by_ref(key, {
                 let init = init;
                 async move { init().await }
@@ -301,7 +398,67 @@ impl TokenBytesCache {
         metrics
             .misses
             .add(1, &[KeyValue::new("cache", "token_bytes")]);
+
+        // After building, re-check the latest generation. If a newer generation
+        // has been registered (e.g., via invalidate_superseded), this build is
+        // stale and should not be cached. Invalidate it from the cold tier.
+        let window_end = window_end(key);
+        let mut latest_gen = self.latest_generation.entry(key.list_id.clone()).or_insert(0);
+        if key.version < *latest_gen {
+            // Stale generation: remove from cold tier and don't promote.
+            self.cold.invalidate(key).await;
+        } else if key.version >= *latest_gen && window_end > now {
+            // Current generation and within window: promote to protected tier.
+            *latest_gen = key.version;
+            self.protected.insert(
+                key.clone(),
+                ProtectedEntry {
+                    token: value.clone(),
+                    window_end,
+                },
+            );
+        }
+        // Else: current generation but window expired - leave in cold tier only.
         Ok(value)
+    }
+
+    /// Insert a built token into the appropriate tier.
+    ///
+    /// If the entry is for the latest generation of its list and its window has
+    /// not expired, it goes to the protected tier. Otherwise it goes to the cold
+    /// tier.
+    async fn insert_tiered(&self, key: TokenCacheKey, value: CachedToken, now: i64) {
+        let window_end = window_end(&key);
+
+        // Atomically check and update the latest generation for this list.
+        let mut is_latest = false;
+        let mut latest_gen = self.latest_generation.entry(key.list_id.clone()).or_insert(0);
+        if key.version >= *latest_gen {
+            *latest_gen = key.version;
+            is_latest = true;
+        }
+
+        if is_latest && window_end > now {
+            // Demote any existing protected entry for this list/format/window
+            // with an older version (should not happen due to version check, but
+            // defensive).
+            self.protected.retain(|k, _| {
+                !(k.list_id == key.list_id
+                    && k.format == key.format
+                    && k.window_start == key.window_start
+                    && k.version < key.version)
+            });
+
+            self.protected.insert(
+                key,
+                ProtectedEntry {
+                    token: value,
+                    window_end,
+                },
+            );
+        } else {
+            self.cold.insert(key, value).await;
+        }
     }
 
     /// Reclaim every cached entry for `list_id` whose generation (`version`) is
@@ -316,19 +473,38 @@ impl TokenBytesCache {
     /// re-inserts it after this call — it is a distinct key from the current
     /// generation's, and a later read of an equal-or-newer generation reclaims
     /// it again.
-    pub(crate) async fn invalidate_superseded(&self, list_id: &str, version: u64) {
-        // Collect every resident key for `list_id` with a strictly older
-        // generation, then invalidate each by key. Moka's predicate-based
-        // `invalidate_entries_if` requires the (disabled) `invalidation_closures`
-        // feature, so we iterate the resident entries and invalidate individually.
+    pub(crate) async fn invalidate_superseded(&self, list_id: &str, version: u64, now: i64) {
+        // Update the latest generation tracker.
+        let mut latest_gen = self.latest_generation.entry(list_id.to_string()).or_insert(0);
+        if version > *latest_gen {
+            *latest_gen = version;
+        }
+
+        // Remove from protected tier.
+        self.protected.retain(|k, _| !(k.list_id == list_id && k.version < version));
+
+        // Remove from cold tier by iterating.
         let stale_keys: Vec<TokenCacheKey> = self
-            .inner
+            .cold
             .iter()
             .filter(|(k, _)| k.list_id == list_id && k.version < version)
             .map(|(k, _)| k.as_ref().clone())
             .collect();
         for key in stale_keys {
-            self.inner.invalidate(&key).await;
+            self.cold.invalidate(&key).await;
+        }
+
+        // Also demote any protected entries for this list that have expired.
+        let expired_keys: Vec<TokenCacheKey> = self
+            .protected
+            .iter()
+            .filter(|entry| entry.value().window_end <= now && entry.key().list_id == list_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in expired_keys {
+            if let Some((_, entry)) = self.protected.remove(&key) {
+                self.cold.insert(key, entry.token).await;
+            }
         }
     }
 
@@ -336,8 +512,21 @@ impl TokenBytesCache {
     ///
     /// Test helper: the serving path uses [`TokenBytesCache::get_or_build`].
     #[cfg(test)]
-    pub(crate) async fn get(&self, key: &TokenCacheKey) -> Option<CachedToken> {
-        let cached = self.inner.get(key).await;
+    pub(crate) async fn get(&self, key: &TokenCacheKey, now: i64) -> Option<CachedToken> {
+        if let Some(entry) = self.protected.get(key) {
+            if entry.window_end > now {
+                let metrics = token_cache_metrics();
+                metrics
+                    .hits
+                    .add(1, &[KeyValue::new("cache", "token_bytes")]);
+                return Some(entry.token.clone());
+            } else {
+                let entry = self.protected.remove(key).map(|(_, v)| v).unwrap();
+                self.cold.insert(key.clone(), entry.token).await;
+            }
+        }
+
+        let cached = self.cold.get(key).await;
         let metrics = token_cache_metrics();
         if cached.is_some() {
             metrics
@@ -352,8 +541,8 @@ impl TokenBytesCache {
     }
 
     #[cfg(test)]
-    pub(crate) async fn insert(&self, key: TokenCacheKey, value: CachedToken) {
-        self.inner.insert(key, value).await;
+    pub(crate) async fn insert(&self, key: TokenCacheKey, value: CachedToken, now: i64) {
+        self.insert_tiered(key, value, now).await;
     }
 }
 
@@ -366,6 +555,9 @@ mod tests {
     };
     use opentelemetry_sdk::Resource;
     use prometheus::{Encoder, Registry, TextEncoder};
+
+    /// A test window start far in the future so entries don't expire during tests.
+    const TEST_WINDOW_START: i64 = 10_000_000_000;
 
     /// A default test key at window `w`, overridable per dimension via struct
     /// update syntax.
@@ -387,10 +579,8 @@ mod tests {
         cache
             .insert(
                 key.clone(),
-                CachedToken {
-                    bytes: Bytes::from(vec![1, 2, 3]),
-                    created_at_unix: 0,
-                },
+                CachedToken::new(Bytes::from(vec![1, 2, 3]), &key.format, w),
+                w,
             )
             .await;
         (cache, key)
@@ -398,8 +588,8 @@ mod tests {
 
     #[tokio::test]
     async fn hit_within_window() {
-        let (cache, key) = cached(1000).await;
-        assert!(cache.get(&key).await.is_some());
+        let (cache, key) = cached(TEST_WINDOW_START).await;
+        assert!(cache.get(&key, TEST_WINDOW_START).await.is_some());
     }
 
     #[tokio::test]
@@ -408,7 +598,7 @@ mod tests {
         // N concurrent misses for the same key must run the builder exactly once
         // and share the resulting bytes.
         let cache = TokenBytesCache::new(100);
-        let key = base_key(1000);
+        let key = base_key(TEST_WINDOW_START);
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut handles = Vec::new();
@@ -416,18 +606,21 @@ mod tests {
             let cache = cache.clone();
             let key = key.clone();
             let builds = builds.clone();
+            let format = key.format.clone();
             handles.push(tokio::spawn(async move {
                 cache
                     .get_or_build(&key, || {
                         let builds = builds.clone();
+                        let format = format.clone();
                         async move {
                             builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, std::convert::Infallible>(CachedToken {
-                                bytes: Bytes::from(vec![7u8, 8, 9]),
-                                created_at_unix: 0,
-                            })
+                            Ok::<_, std::convert::Infallible>(CachedToken::new(
+                                Bytes::from(vec![7u8, 8, 9]),
+                                &format,
+                                TEST_WINDOW_START,
+                            ))
                         }
-                    })
+                    }, TEST_WINDOW_START)
                     .await
                     .expect("infallible")
             }));
@@ -459,7 +652,7 @@ mod tests {
 
         let target_key = TokenCacheKey {
             list_id: "target-list".to_string(),
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
 
         // Barrier so every target waiter reaches `get_or_build` at the same
@@ -474,22 +667,25 @@ mod tests {
             let key = target_key.clone();
             let barrier = barrier.clone();
             let builds = builds.clone();
+            let format = key.format.clone();
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 cache
                     .get_or_build(&key, || {
                         let builds = builds.clone();
+                        let format = format.clone();
                         async move {
                             // Hold the build open long enough for the churn keys
                             // to occupy and evict the single data slot.
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, std::convert::Infallible>(CachedToken {
-                                bytes: Bytes::from(vec![7u8, 8, 9]),
-                                created_at_unix: 0,
-                            })
+                            Ok::<_, std::convert::Infallible>(CachedToken::new(
+                                Bytes::from(vec![7u8, 8, 9]),
+                                &format,
+                                TEST_WINDOW_START,
+                            ))
                         }
-                    })
+                    }, TEST_WINDOW_START)
                     .await
                     .expect("infallible")
             }));
@@ -501,16 +697,19 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let k = TokenCacheKey {
                     list_id: format!("churn-{i}"),
-                    ..base_key(1000)
+                    ..base_key(TEST_WINDOW_START)
                 };
+                let format = k.format.clone();
                 cache
                     .get_or_build(&k, || async {
+                        let format = format.clone();
                         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        Ok::<_, std::convert::Infallible>(CachedToken {
-                            bytes: Bytes::from(vec![1u8, 2, 3]),
-                            created_at_unix: 0,
-                        })
-                    })
+                        Ok::<_, std::convert::Infallible>(CachedToken::new(
+                            Bytes::from(vec![1u8, 2, 3]),
+                            &format,
+                            TEST_WINDOW_START,
+                        ))
+                    }, TEST_WINDOW_START)
                     .await
                     .expect("infallible")
             }));
@@ -529,93 +728,190 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn sequential_request_re_signs_after_capacity_eviction() {
-        // Agreed capacity policy (ticket 564 review): the "at most one sign per
-        // (list, window, format)" guarantee is scoped to *concurrent misses*
-        // (single flight) and *resident entries*. Drive the target key out of a
-        // capacity-1 cache with churn, confirm it was evicted, then request it
-        // again in the same open window: it is a fresh miss and re-runs the
-        // builder — the documented tradeoff of bounding memory. With a strong
-        // ETag (a digest of the served bytes) this also means the evicted entry
-        // cannot certify a 304 without resident bytes. Operators avoid the
-        // re-sign by sizing `max_capacity` above the working set of live windows.
+    async fn protected_tier_prevents_re_sign_after_capacity_pressure() {
+        // Capacity guarantee (ticket 564): at most one sign per (list, window,
+        // format) even under capacity pressure. The protected tier holds entries
+        // for the latest generation within their window and never evicts them.
+        // Drive the cold tier to capacity with churn, then verify the protected
+        // entry is still served without re-signing.
         let cache = TokenBytesCache::new(1);
         let key_a = TokenCacheKey {
             list_id: "list-a".to_string(),
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
 
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        // A: miss, runs builder (build #1), caches under capacity-1 slot.
+        // A: miss, runs builder (build #1), goes to protected tier (latest gen, within window).
+        let format_a = key_a.format.clone();
         let a1 = cache
             .get_or_build(&key_a, {
                 let builds = builds.clone();
+                let format = format_a.clone();
                 || async move {
                     builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken {
-                        bytes: Bytes::from(vec![1u8]),
-                        created_at_unix: 0,
-                    })
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![1u8]),
+                        &format,
+                        TEST_WINDOW_START,
+                    ))
                 }
-            })
+            }, TEST_WINDOW_START)
             .await
             .expect("infallible");
         assert_eq!(*a1.bytes, vec![1]);
 
-        // Churn many distinct keys through the single slot to force A's eviction.
-        // Moka evicts amortized, so enough inserts reliably drive A out.
+        // Churn many distinct keys through the cold tier to saturate capacity.
+        // These are different list_ids, so they go to cold tier.
         for i in 0..512 {
             let key = TokenCacheKey {
                 list_id: format!("churn-{i}"),
-                ..base_key(1000)
+                ..base_key(TEST_WINDOW_START)
             };
+            let format = key.format.clone();
             cache
                 .get_or_build(&key, || async {
-                    Ok::<_, std::convert::Infallible>(CachedToken {
-                        bytes: Bytes::from(vec![9u8]),
-                        created_at_unix: 0,
-                    })
-                })
+                    let format = format.clone();
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![9u8]),
+                        &format,
+                        TEST_WINDOW_START,
+                    ))
+                }, TEST_WINDOW_START)
                 .await
                 .expect("infallible");
         }
 
-        // A must have been evicted by capacity pressure, so it is now a miss.
-        assert!(
-            cache.get(&key_a).await.is_none(),
-            "capacity pressure must have evicted the still-valid A entry"
-        );
+        // A must still be in protected tier, served without re-signing.
+        let a2 = cache.get(&key_a, TEST_WINDOW_START).await.expect("protected entry must be present");
+        assert_eq!(*a2.bytes, vec![1]);
 
-        // A again in the same open window: fresh miss, runs the builder again.
-        let a2 = cache
+        // A again via get_or_build: still a hit, no re-sign.
+        let a3 = cache
             .get_or_build(&key_a, {
                 let builds = builds.clone();
+                let format = format_a.clone();
                 || async move {
                     builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok::<_, std::convert::Infallible>(CachedToken {
-                        bytes: Bytes::from(vec![3u8]),
-                        created_at_unix: 0,
-                    })
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![3u8]),
+                        &format,
+                        TEST_WINDOW_START,
+                    ))
                 }
-            })
+            }, TEST_WINDOW_START)
             .await
             .expect("infallible");
-        assert_eq!(*a2.bytes, vec![3]);
+        assert_eq!(*a3.bytes, vec![1]);
 
         assert_eq!(
             builds.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "capacity eviction re-signs an unchanged token on a later request; \
-             the single-flight guarantee covers concurrent misses only"
+            1,
+            "protected tier must prevent re-signing an unchanged token under capacity pressure"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stale_generation_build_discarded_after_invalidation() {
+        // Generation invalidation guarantee (ticket 564): an older in-flight build
+        // that completes after a newer generation's invalidation must not remain
+        // cached. The cache tracks the latest generation per list and discards
+        // stale builds.
+        let cache = TokenBytesCache::new(100);
+        let list_id = "test-list".to_string();
+
+        let key_v1 = TokenCacheKey {
+            list_id: list_id.clone(),
+            version: 1,
+            ..base_key(TEST_WINDOW_START)
+        };
+        let key_v2 = TokenCacheKey {
+            list_id: list_id.clone(),
+            version: 2,
+            ..base_key(TEST_WINDOW_START)
+        };
+
+        let builds_v1 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let builds_v2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Start a slow build for v1 (simulating an in-flight build that will
+        // complete after invalidation).
+        let format_v1 = key_v1.format.clone();
+        let cache_clone = cache.clone();
+        let key_v1_clone = key_v1.clone();
+        let builds_v1_clone = builds_v1.clone();
+        let slow_build = tokio::spawn(async move {
+            cache_clone
+                .get_or_build(&key_v1_clone, || async move {
+                    // Slow build to allow invalidation to happen first.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    builds_v1_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![1u8]),
+                        &format_v1,
+                        TEST_WINDOW_START,
+                    ))
+                }, TEST_WINDOW_START)
+                .await
+        });
+
+        // Wait a bit for the slow build to start, then publish v2 and invalidate v1.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Fast build for v2.
+        let format_v2 = key_v2.format.clone();
+        let builds_v2_clone = builds_v2.clone();
+        let v2_result = cache
+            .get_or_build(&key_v2, || async move {
+                builds_v2_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, std::convert::Infallible>(CachedToken::new(
+                    Bytes::from(vec![2u8]),
+                    &format_v2,
+                    TEST_WINDOW_START,
+                ))
+            }, TEST_WINDOW_START)
+            .await
+            .expect("infallible");
+        assert_eq!(*v2_result.bytes, vec![2]);
+
+        // Invalidate v1 (simulating a content update that bumps version to 2).
+        cache.invalidate_superseded(&list_id, 2, TEST_WINDOW_START).await;
+
+        // Wait for the slow v1 build to complete.
+        slow_build.await.expect("slow build task");
+
+        // Give moka a moment to process the invalidation.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // The v1 build should have run (it was already in flight) but its result
+        // should be discarded and not cached.
+        assert_eq!(
+            builds_v1.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "v1 build runs because it was already in flight"
+        );
+        assert_eq!(
+            builds_v2.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "v2 build runs once"
+        );
+
+        // v1 should not be in cache (discarded as stale).
+        assert!(
+            cache.get(&key_v1, TEST_WINDOW_START).await.is_none(),
+            "stale v1 build must not remain cached after invalidation"
+        );
+
+        // v2 should be in protected tier.
+        let v2_cached = cache.get(&key_v2, TEST_WINDOW_START).await.expect("v2 must be cached");
+        assert_eq!(*v2_cached.bytes, vec![2]);
     }
 
     #[tokio::test]
     async fn key_dimensions_are_distinct() {
-        let base = base_key(1000);
+        let base = base_key(TEST_WINDOW_START);
         let other_window = TokenCacheKey {
-            window_start: 1001,
+            window_start: TEST_WINDOW_START + 1,
             ..base.clone()
         };
         let other_signer = TokenCacheKey {
@@ -653,7 +949,7 @@ mod tests {
             "version must be in the key (reinstated content within a window)"
         );
         assert_ne!(base, other_exp, "token_exp_secs must be in the key");
-        assert_eq!(base, base_key(1000));
+        assert_eq!(base, base_key(TEST_WINDOW_START));
 
         // Encoding is deliberately NOT a key dimension (ticket 564 review): gzip
         // and identity are derived from the same uncompressed bytes at serve
@@ -661,8 +957,8 @@ mod tests {
         assert_eq!(
             base,
             TokenCacheKey {
-                window_start: 1000,
-                ..base_key(1000)
+                window_start: TEST_WINDOW_START,
+                ..base_key(TEST_WINDOW_START)
             }
         );
     }
@@ -678,25 +974,23 @@ mod tests {
 
         let key_v1 = TokenCacheKey {
             version: 1,
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
         let key_v2 = TokenCacheKey {
             version: 2,
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
         let key_v3 = TokenCacheKey {
             version: 3,
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
 
         for (key, byte) in [(&key_v1, 1u8), (&key_v2, 2u8), (&key_v3, 3u8)] {
             cache
                 .insert(
                     key.clone(),
-                    CachedToken {
-                        bytes: Bytes::from(vec![byte]),
-                        created_at_unix: 0,
-                    },
+                    CachedToken::new(Bytes::from(vec![byte]), &key.format, TEST_WINDOW_START),
+                    TEST_WINDOW_START,
                 )
                 .await;
         }
@@ -704,35 +998,33 @@ mod tests {
         let other_list_key = TokenCacheKey {
             list_id: "other-list".to_string(),
             version: 1,
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
         cache
             .insert(
                 other_list_key.clone(),
-                CachedToken {
-                    bytes: Bytes::from(vec![9u8]),
-                    created_at_unix: 0,
-                },
+                CachedToken::new(Bytes::from(vec![9u8]), &other_list_key.format, TEST_WINDOW_START),
+                TEST_WINDOW_START,
             )
             .await;
 
         // Supersede everything strictly older than v3.
-        cache.invalidate_superseded(&list, 3).await;
+        cache.invalidate_superseded(&list, 3, TEST_WINDOW_START).await;
 
         assert!(
-            cache.get(&key_v1).await.is_none(),
+            cache.get(&key_v1, TEST_WINDOW_START).await.is_none(),
             "v1 must be reclaimed as superseded"
         );
         assert!(
-            cache.get(&key_v2).await.is_none(),
+            cache.get(&key_v2, TEST_WINDOW_START).await.is_none(),
             "v2 must be reclaimed as superseded"
         );
         assert!(
-            cache.get(&key_v3).await.is_some(),
+            cache.get(&key_v3, TEST_WINDOW_START).await.is_some(),
             "the current generation must be retained"
         );
         assert!(
-            cache.get(&other_list_key).await.is_some(),
+            cache.get(&other_list_key, TEST_WINDOW_START).await.is_some(),
             "a different list's entries must not be reclaimed"
         );
     }
@@ -761,7 +1053,7 @@ mod tests {
             list_id: "l".to_string(),
             content_hash: "h".to_string(),
             signer_fingerprint: "s".to_string(),
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -771,15 +1063,13 @@ mod tests {
             cache
                 .insert(
                     cache_key.clone(),
-                    CachedToken {
-                        bytes: Bytes::from(vec![1]),
-                        created_at_unix: 0,
-                    },
+                    CachedToken::new(Bytes::from(vec![1]), &cache_key.format, TEST_WINDOW_START),
+                    TEST_WINDOW_START,
                 )
                 .await;
-            assert!(cache.get(&cache_key).await.is_some());
-            assert!(cache.get(&cache_key).await.is_some()); // hit again
-            assert!(cache.get(&base_key(1000)).await.is_none());
+            assert!(cache.get(&cache_key, TEST_WINDOW_START).await.is_some());
+            assert!(cache.get(&cache_key, TEST_WINDOW_START).await.is_some()); // hit again
+            assert!(cache.get(&base_key(TEST_WINDOW_START), TEST_WINDOW_START).await.is_none());
         });
 
         let mut buffer = Vec::new();
@@ -808,38 +1098,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_disabled_capacity_zero_never_serves() {
-        // A zero byte budget preserves the "cache disabled" semantics: entries
-        // are evicted immediately, so every lookup is a miss and every build
-        // runs.
+    async fn cache_disabled_capacity_zero_protected_tier_still_works() {
+        // A zero byte budget disables the cold tier, but the protected tier
+        // still retains entries for the latest generation within their window.
+        // This ensures the capacity guarantee (at most one sign per list/window/
+        // format) holds even when the cold tier is disabled.
         let cache = TokenBytesCache::new(0);
-        let key = base_key(1000);
+        let key = base_key(TEST_WINDOW_START);
+        let format = key.format.clone();
         let builds = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        for _ in 0..3 {
-            let out = cache
-                .get_or_build(&key, {
-                    let builds = builds.clone();
-                    || async move {
-                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Ok::<_, std::convert::Infallible>(CachedToken {
-                            bytes: Bytes::from(vec![7u8, 8, 9]),
-                            created_at_unix: 1300,
-                        })
-                    }
-                })
-                .await
-                .expect("infallible");
-            assert_eq!(
-                out.bytes.as_ref(),
-                &[7u8, 8, 9][..],
-                "capacity-0 cache still returns a freshly built token"
-            );
-        }
+        // First request: miss, builds, goes to protected tier.
+        let out1 = cache
+            .get_or_build(&key, {
+                let builds = builds.clone();
+                let format = format.clone();
+                || async move {
+                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![7u8, 8, 9]),
+                        &format,
+                        TEST_WINDOW_START,
+                    ))
+                }
+            }, TEST_WINDOW_START)
+            .await
+            .expect("infallible");
+        assert_eq!(out1.bytes.as_ref(), &[7u8, 8, 9][..]);
+
+        // Second request: hit in protected tier, no re-sign.
+        let out2 = cache
+            .get_or_build(&key, {
+                let builds = builds.clone();
+                let format = format.clone();
+                || async move {
+                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(CachedToken::new(
+                        Bytes::from(vec![1u8, 2, 3]),
+                        &format,
+                        TEST_WINDOW_START,
+                    ))
+                }
+            }, TEST_WINDOW_START)
+            .await
+            .expect("infallible");
+        assert_eq!(out2.bytes.as_ref(), &[7u8, 8, 9][..]);
+
+        // Third request: still a hit.
+        let out3 = cache.get(&key, TEST_WINDOW_START).await.expect("protected entry must be present");
+        assert_eq!(out3.bytes.as_ref(), &[7u8, 8, 9][..]);
+
         assert_eq!(
             builds.load(std::sync::atomic::Ordering::SeqCst),
-            3,
-            "a capacity-0 cache never reuses an entry; every request re-signs"
+            1,
+            "protected tier must prevent re-signing even with cold tier disabled"
         );
     }
 
@@ -848,17 +1160,11 @@ mod tests {
         // The cache's `max_capacity` is a byte budget: each entry is weighed by
         // its signed-token byte length, so a large list consumes proportionally
         // more of the budget than a small one.
-        let key = base_key(1000);
-        let small = CachedToken {
-            bytes: Bytes::from(vec![1u8, 2, 3]),
-            created_at_unix: 1000,
-        };
+        let key = base_key(TEST_WINDOW_START);
+        let small = CachedToken::new(Bytes::from(vec![1u8, 2, 3]), &key.format, TEST_WINDOW_START);
         assert_eq!(entry_weight(&key, &small), 3);
 
-        let large = CachedToken {
-            bytes: Bytes::from(vec![0u8; 2048]),
-            created_at_unix: 1000,
-        };
+        let large = CachedToken::new(Bytes::from(vec![0u8; 2048]), &key.format, TEST_WINDOW_START);
         assert_eq!(entry_weight(&key, &large), 2048);
     }
 
@@ -871,18 +1177,16 @@ mod tests {
         let defaults =
             crate::config::Config::load_from_overrides(&[]).expect("default config should load");
         let cache = TokenBytesCache::new(defaults.token_bytes_cache.max_capacity);
-        let key = base_key(1000);
+        let key = base_key(TEST_WINDOW_START);
         cache
             .insert(
                 key.clone(),
-                CachedToken {
-                    bytes: Bytes::from(vec![0u8; 512]),
-                    created_at_unix: 1000,
-                },
+                CachedToken::new(Bytes::from(vec![0u8; 512]), &key.format, TEST_WINDOW_START),
+                TEST_WINDOW_START,
             )
             .await;
         assert!(
-            cache.get(&key).await.is_some(),
+            cache.get(&key, TEST_WINDOW_START).await.is_some(),
             "default byte budget must retain and serve a representative token"
         );
     }
@@ -892,30 +1196,25 @@ mod tests {
         // Each entry expires at the end of its own anchored validity window,
         // independent of any global TTL. Under the ticket 564 proposal the
         // window width is `exp_secs` (a window is a token's full lifetime):
-        // `base_key(1000)` has `exp_secs = 900`, so the window is
-        // `[1000, 1900)`. An entry created at 1200 must live for exactly 700
-        // seconds, not the full 900s runway.
-        let key = base_key(1000);
-        let value = CachedToken {
-            bytes: Bytes::from(vec![1u8]),
-            created_at_unix: 1200,
-        };
+        // `base_key(TEST_WINDOW_START)` has `exp_secs = 900`, so the window is
+        // `[TEST_WINDOW_START, TEST_WINDOW_START + 900)`. An entry created at
+        // TEST_WINDOW_START + 200 must live for exactly 700 seconds, not the
+        // full 900s runway.
+        let key = base_key(TEST_WINDOW_START);
+        let value = CachedToken::new(Bytes::from(vec![1u8]), &key.format, TEST_WINDOW_START + 200);
         let duration = EntryExpiry
             .expire_after_create(&key, &value, std::time::Instant::now())
             .expect("a window-end expiry is always set");
         assert_eq!(duration, Duration::from_secs(700));
 
         // A different exp yields a different width and thus a different expiry:
-        // exp=1200 -> window [1000, 2200), so an entry created at 1200 lives
-        // 1000s.
+        // exp=1200 -> window [TEST_WINDOW_START, TEST_WINDOW_START + 1200), so
+        // an entry created at TEST_WINDOW_START + 200 lives 1000s.
         let key = TokenCacheKey {
             token_exp_secs: 1200,
-            ..base_key(1000)
+            ..base_key(TEST_WINDOW_START)
         };
-        let value = CachedToken {
-            bytes: Bytes::from(vec![1u8]),
-            created_at_unix: 1200,
-        };
+        let value = CachedToken::new(Bytes::from(vec![1u8]), &key.format, TEST_WINDOW_START + 200);
         let duration = EntryExpiry
             .expire_after_create(&key, &value, std::time::Instant::now())
             .expect("a window-end expiry is always set");

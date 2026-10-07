@@ -598,27 +598,28 @@ paths:
           in: header
           required: false
           description: |
-            Conditional validator: the weak `W/"..."` `ETag` previously returned by
-            this endpoint. The ETag is opaque to clients — it is derived from the
-            live representation's identity, not from the signed token bytes (ECDSA
-            signatures are randomized, so a bytes-derived validator would change on
-            every cold-cache request, restart, and across replicas). It is stable
-            for the whole token window (capped at `min(exp - ttl, ttl)` seconds)
-            and identical on every replica for the same content, signer and
-            configuration. It changes whenever the live representation or its
-            validity window changes — a content update, key/certificate rotation,
-            a window roll-over, a token-format/encoding change, a change to the
-            aggregation URI or token lifetime settings, or a mid-window content
-            revert (which changes the token's `iat`, part of the ETag identity). A
-            match tells the server the client holds the current-window token; it
-            responds `304 Not Modified` only while that cached token still has
-            more than `ttl` seconds of remaining validity, so the `304`'s
-            advertised `max-age = ttl` never outlives the token it vouches for.
-            Otherwise it returns a freshly signed `200 OK` token instead of a
-            body-less `304`.
+            Conditional validator: the strong `"..."` `ETag` previously returned by
+            this endpoint. The ETag is opaque to clients — it is a SHA-256 digest
+            of the exact served representation bytes (RFC 9110 §8.8.3.1). Because
+            ES256 signatures are randomized, the bytes differ across replicas,
+            restarts, cold caches and window roll-overs; the strong ETag therefore
+            differs across replicas — this is a documented, accepted deviation from
+            cross-replica ETag equality (ticket 564 acceptance criterion: "two
+            replicas return matching ETags *or the issue documents why they don't*").
+            Within a single replica the ETag is stable for the whole token window,
+            so a client revalidating against the same replica gets a `304` with no
+            signing. The token window is exactly the token's full lifetime
+            (`exp_secs`); the ETag changes on content update, key/certificate
+            rotation, window roll-over, token-format/encoding change, aggregation
+            URI or token lifetime change, or mid-window content revert. A matching
+            `If-None-Match` proves the client holds the current window's token; the
+            server certifies `304` only while that token remains valid beyond the
+            advertised `max-age = min(ttl, exp - now)`, so the `304` never extends
+            a cached token past its `exp`. Otherwise a freshly signed `200 OK`
+            token is returned.
           schema:
             type: string
-            example: 'W/"9f2d..."'
+            example: '"a1b2c3d4..."'
         - name: If-Modified-Since
           in: header
           required: false
@@ -693,9 +694,9 @@ paths:
 
             A matching `If-None-Match` proves the client holds the current-window
             token; the server certifies the `304` only while that token is still
-            valid beyond the advertised `max-age = ttl`, so the `304` never
-            strands the relying party with a token that is about to expire or
-            already expired (RFC 9110 §8.8.1).
+            valid beyond the advertised `max-age = min(ttl, exp - now)`, so the
+            `304` never strands the relying party with a token that is about to
+            expire or already expired (RFC 9110 §8.8.1).
 
             An `If-Modified-Since`-only request never gets a `304`; it always
             receives a freshly signed `200 OK` token.
@@ -704,12 +705,13 @@ paths:
               schema:
                 type: string
               description: |
-                The current weak validator for the live representation. It is
-                stable for the whole token window and identical across replicas
-                serving the same content with the same signer and configuration,
-                and it changes whenever the live representation or its validity
-                window changes (content, key/certificate, window roll-over, format
-                or encoding, aggregation URI, token lifetime settings).
+                The current strong validator for the live representation. It is a
+                SHA-256 digest of the served representation bytes, stable for the
+                whole token window on a single replica. It differs across replicas
+                (due to randomized ES256 signatures) and changes whenever the live
+                representation or its validity window changes (content,
+                key/certificate, window roll-over, format or encoding, aggregation
+                URI, token lifetime settings).
             Last-Modified:
               schema:
                 type: string
@@ -719,8 +721,8 @@ paths:
               schema:
                 type: string
               description: |
-                Caching directive for intermediaries (e.g. `max-age=<ttl>`). The
-                live token is not marked `immutable`: it expires and its validator
+                Caching directive for intermediaries (e.g. `max-age=<min(ttl, exp - now)>`).
+                The live token is not marked `immutable`: it expires and its validator
                 rotates, so freshness-honouring caches/browsers must revalidate to
                 obtain an unexpired token.
             Vary:

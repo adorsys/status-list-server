@@ -1,7 +1,7 @@
-pub(super) mod conditional;
-pub(super) mod constants;
-pub(super) mod etag;
-pub(super) mod negotiation;
-pub(super) mod request;
-pub(super) mod token;
-pub(super) mod token_cache;
+pub(crate) mod conditional;
+pub(crate) mod constants;
+pub(crate) mod etag;
+pub(crate) mod negotiation;
+pub(crate) mod request;
+pub(crate) mod token;
+pub(crate) mod token_cache;

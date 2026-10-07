@@ -176,18 +176,85 @@ async fn get_status_list_at(
     // Reclaim any superseded (older-generation) entries for this list.
     state
         .token_bytes_cache
-        .invalidate_superseded(&list_id, key.version)
+        .invalidate_superseded(&list_id, key.version, now)
         .await;
 
-    let (served_bytes, served_encoding) =
-        apply_encoding(cached.bytes, accept_type, client_accepts_gzip);
-    let current_etag = generate_token_etag(&served_bytes);
+    // Select the appropriate pre-computed encoding and ETag from the cache.
+    // The cache stores both identity and gzip (for JWT) variants with their
+    // strong ETags, so no re-compression is needed even for 304 responses.
+    let (served_bytes, served_encoding, current_etag) = if client_accepts_gzip && accept_type == AcceptType::Jwt {
+        // Use pre-computed gzip bytes and ETag.
+        let gzip_bytes = cached.gzip_bytes.as_ref().expect("gzip bytes must be present for JWT").clone();
+        let gzip_etag = cached.gzip_etag.as_ref().expect("gzip ETag must be present for JWT").clone();
+        (gzip_bytes, Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER), gzip_etag)
+    } else {
+        // Use identity (uncompressed) bytes and ETag.
+        (cached.bytes.clone(), None, cached.identity_etag.clone())
+    };
+
+    // Recheck the clock after async work. If the request crossed the token's
+    // expiry boundary, we must recompute the window and validator for the
+    // current window to avoid certifying a 304 for an expired token.
+    let now_after = OffsetDateTime::now_utc().unix_timestamp();
+    let exp_after = if now_after >= exp {
+        let window_start_after = token_window(now_after, validity).0;
+        let iat_after = window_start_after;
+        crate::domain::service::token_expiry(iat_after, state.token_exp_secs)?
+    } else {
+        exp
+    };
 
     let last_modified_ts = status_record.updated_at;
     let last_modified = format_http_date(last_modified_ts);
-    let cache_control = build_cache_control(state.token_ttl_secs, exp, now);
+    let cache_control = build_cache_control(state.token_ttl_secs, exp_after, now_after);
 
-    match evaluate_conditional_request(if_none_match, &current_etag) {
+    // If the window rolled over during the request, the ETag we computed from
+    // the old window's bytes is stale; we must fetch the current-window token
+    // and recompute the validator before evaluating the conditional.
+    let (final_etag, final_bytes, final_encoding, _final_exp) = if now_after >= exp {
+        let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
+        let window_start = token_window(now_after, validity).0;
+        let iat = window_start;
+        let new_exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
+        let validity_window = (iat, new_exp);
+
+        let (key, signing_material) = build_token_cache_key(
+            &state,
+            accept_type,
+            &status_record,
+            &list_id,
+            window_start,
+        )
+        .await?;
+        let cached = get_or_build_live_token(
+            &state,
+            accept_type,
+            &status_record,
+            &key,
+            &signing_material,
+            &validity_window,
+            now_after,
+        )
+        .await?;
+        state
+            .token_bytes_cache
+            .invalidate_superseded(&list_id, key.version, now_after)
+            .await;
+
+        // Select the appropriate pre-computed encoding and ETag for the new window.
+        let (served_bytes, served_encoding, current_etag) = if client_accepts_gzip && accept_type == AcceptType::Jwt {
+            let gzip_bytes = cached.gzip_bytes.as_ref().expect("gzip bytes must be present for JWT").clone();
+            let gzip_etag = cached.gzip_etag.as_ref().expect("gzip ETag must be present for JWT").clone();
+            (gzip_bytes, Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER), gzip_etag)
+        } else {
+            (cached.bytes.clone(), None, cached.identity_etag.clone())
+        };
+        (current_etag, served_bytes, served_encoding, new_exp)
+    } else {
+        (current_etag, served_bytes, served_encoding, exp)
+    };
+
+    match evaluate_conditional_request(if_none_match, &final_etag) {
         ConditionalResponse::NotModified => {
             revalidation_metrics()
                 .total
@@ -195,7 +262,7 @@ async fn get_status_list_at(
             Ok((
                 StatusCode::NOT_MODIFIED,
                 [
-                    (header::ETAG, current_etag.as_str()),
+                    (header::ETAG, final_etag.as_str()),
                     (header::LAST_MODIFIED, last_modified.as_str()),
                     (header::CACHE_CONTROL, cache_control.as_str()),
                     (header::VARY, "Accept, Accept-Encoding"),
@@ -208,10 +275,10 @@ async fn get_status_list_at(
                 .total
                 .add(1, &[KeyValue::new("outcome", "modified")]);
             Ok(build_ok_response(
-                served_bytes,
-                served_encoding,
+                final_bytes,
+                final_encoding,
                 accept_type,
-                &current_etag,
+                &final_etag,
                 &last_modified,
                 &cache_control,
             ))
@@ -313,12 +380,17 @@ async fn get_or_build_live_token(
                     signing_material,
                 )
                 .await?;
-                Ok::<CachedToken, ApiError>(CachedToken {
-                    bytes: Bytes::from(bytes),
-                    created_at_unix: now,
-                })
+                let format = match accept_type {
+                    AcceptType::Cwt => "cwt",
+                    AcceptType::Jwt => "jwt",
+                };
+                Ok::<CachedToken, ApiError>(CachedToken::new(
+                    Bytes::from(bytes),
+                    format,
+                    now,
+                ))
             }
-        })
+        }, now)
         .await
 }
 
