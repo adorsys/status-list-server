@@ -44,7 +44,7 @@ services:
 
   floci:
     container_name: floci
-    image: floci/floci:2.1.0
+    image: floci/floci:2.2.0
     profiles: ["aws"]
     ports:
       - "${BIND_ADDR:-127.0.0.1}:4566:4566"
@@ -53,7 +53,8 @@ services:
       FLOCI_STORAGE_MODE: memory
       FLOCI_SERVICES_SECRETSMANAGER_ENABLED: "true"
       FLOCI_SERVICES_ROUTE53_ENABLED: "true"
-      FLOCI_SERVICES_S3_ENABLED: "true"
+      # Floci enables S3 by default; this project does not use it.
+      FLOCI_SERVICES_S3_ENABLED: "false"
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       start_interval: 250ms

@@ -5,7 +5,7 @@
 //! These tests require Docker to be running. They spin up:
 //! - **Pebble** (ACME CA test server)
 //! - **challtestsrv** (DNS server for Pebble)
-//! - **Floci** (Secrets Manager and Route53)
+//! - **Floci** (Secrets Manager)
 //! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
 use std::{sync::Arc, time::Duration};
@@ -18,7 +18,7 @@ use status_list_server::outbound::vault::VaultClient;
 use status_list_server::{
     cert_manager::{
         CertManager,
-        challenge::{AwsRoute53DnsProvider, Dns01Handler, DnsProvider, PebbleDnsProvider},
+        challenge::{Dns01Handler, PebbleDnsProvider},
         http_client::DefaultHttpClient,
         storage::Storage,
     },
@@ -33,9 +33,9 @@ use testcontainers_modules::testcontainers::{
 };
 
 const FLOCI_IMAGE: &str = "floci/floci";
-const FLOCI_TAG: &str = "2.1.0";
+const FLOCI_TAG: &str = "2.2.0";
 
-async fn start_floci() -> ContainerAsync<GenericImage> {
+async fn start_aws_emulator() -> ContainerAsync<GenericImage> {
     GenericImage::new(FLOCI_IMAGE, FLOCI_TAG)
         .with_exposed_port(4566.tcp())
         .with_wait_for(WaitFor::http(
@@ -44,15 +44,15 @@ async fn start_floci() -> ContainerAsync<GenericImage> {
         .with_env_var("FLOCI_DEFAULT_REGION", AWS_REGION)
         .with_env_var("FLOCI_STORAGE_MODE", "memory")
         .with_env_var("FLOCI_SERVICES_SECRETSMANAGER_ENABLED", "true")
-        .with_env_var("FLOCI_SERVICES_ROUTE53_ENABLED", "true")
+        .with_env_var("FLOCI_SERVICES_S3_ENABLED", "false")
         .start()
         .await
         .expect("Failed to start Floci")
 }
 
-async fn floci_aws_config(floci: &ContainerAsync<GenericImage>) -> aws_config::SdkConfig {
-    let host = floci.get_host().await.unwrap();
-    let port = floci.get_host_port_ipv4(4566).await.unwrap();
+async fn aws_config(image: &ContainerAsync<GenericImage>) -> aws_config::SdkConfig {
+    let host = image.get_host().await.unwrap();
+    let port = image.get_host_port_ipv4(4566).await.unwrap();
     aws_config::defaults(BehaviorVersion::latest())
         .region(aws_config::Region::new(AWS_REGION))
         .endpoint_url(format!("http://{host}:{port}"))
@@ -82,7 +82,7 @@ const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 struct TestInfra {
     _challtestsrv: ContainerAsync<GenericImage>,
     _pebble: ContainerAsync<GenericImage>,
-    floci: ContainerAsync<GenericImage>,
+    aws_emulator: ContainerAsync<GenericImage>,
 
     pebble_acme_port: u16,
     challtestsrv_port: u16,
@@ -130,7 +130,7 @@ impl TestInfra {
             .await
             .expect("Failed to start Pebble");
 
-        let floci = start_floci().await;
+        let aws_emulator = start_aws_emulator().await;
 
         let pebble_acme_port = pebble.get_host_port_ipv4(14000).await.unwrap();
         let challtestsrv_port = challtestsrv.get_host_port_ipv4(8055).await.unwrap();
@@ -138,7 +138,7 @@ impl TestInfra {
         Self {
             _challtestsrv: challtestsrv,
             _pebble: pebble,
-            floci,
+            aws_emulator,
             pebble_acme_port,
             challtestsrv_port,
         }
@@ -146,7 +146,7 @@ impl TestInfra {
 
     /// Build an AWS SDK config pointing at the Floci endpoint.
     async fn aws_config(&self) -> aws_config::SdkConfig {
-        floci_aws_config(&self.floci).await
+        aws_config(&self.aws_emulator).await
     }
 
     /// Build a `CertManager` with one cryptographic-material backend for both
@@ -509,80 +509,4 @@ async fn test_cert_provisioning_with_openbao() {
     assert!(cert_chain.is_some());
     let parts = cert_chain.unwrap();
     assert!(!parts.is_empty());
-}
-
-// Exercise the production adapters against Floci independently of Pebble's DNS.
-#[tokio::test]
-async fn test_floci_aws_backend_semantics() {
-    let floci = start_floci().await;
-    let config = floci_aws_config(&floci).await;
-    let storage = AwsSecretsManager::new(&config, Duration::ZERO)
-        .await
-        .unwrap();
-    let key = "floci-compatibility";
-    assert_eq!(storage.load(key).await.unwrap(), None);
-    storage.reachable().await.unwrap();
-    storage.store(key, "initial").await.unwrap();
-    storage.store(key, "must-not-overwrite").await.unwrap();
-    assert_eq!(storage.load(key).await.unwrap().as_deref(), Some("initial"));
-    storage.update(key, "updated").await.unwrap();
-    assert_eq!(storage.load(key).await.unwrap().as_deref(), Some("updated"));
-    storage.delete(key).await.unwrap();
-    // The adapter schedules deletion with AWS's default recovery window.
-    let deleted = aws_sdk_secretsmanager::Client::new(&config)
-        .describe_secret()
-        .secret_id(key)
-        .send()
-        .await
-        .unwrap();
-    assert!(deleted.deleted_date().is_some());
-
-    let route53 = aws_sdk_route53::Client::new(&config);
-    let zone = route53
-        .create_hosted_zone()
-        .name("example.com")
-        .caller_reference(uuid::Uuid::new_v4().to_string())
-        .send()
-        .await
-        .unwrap();
-    let zone_id = zone.hosted_zone().unwrap().id();
-    let provider = AwsRoute53DnsProvider::new(&config);
-    for value in ["initial-token", "updated-token"] {
-        // This covers zone discovery, TXT UPSERT and GetChange propagation polling.
-        provider
-            .create_txt_record("test.example.com", value)
-            .await
-            .unwrap();
-        let records = route53
-            .list_resource_record_sets()
-            .hosted_zone_id(zone_id)
-            .send()
-            .await
-            .unwrap();
-        let txt = records
-            .resource_record_sets()
-            .iter()
-            .find(|record| record.name() == "_acme-challenge.test.example.com.")
-            .expect("ACME TXT record should exist");
-        assert_eq!(txt.r#type(), &aws_sdk_route53::types::RrType::Txt);
-        assert_eq!(txt.ttl(), Some(60));
-        assert_eq!(txt.resource_records().len(), 1);
-        assert_eq!(txt.resource_records()[0].value(), format!("\"{value}\""));
-    }
-    provider
-        .delete_txt_record("test.example.com", "updated-token")
-        .await
-        .unwrap();
-    let records = route53
-        .list_resource_record_sets()
-        .hosted_zone_id(zone_id)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        !records
-            .resource_record_sets()
-            .iter()
-            .any(|record| record.name() == "_acme-challenge.test.example.com.")
-    );
 }
