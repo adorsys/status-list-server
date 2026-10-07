@@ -193,12 +193,12 @@ fn entry_weight(_key: &TokenCacheKey, value: &CachedToken) -> u32 {
 /// do not extend the expiry.
 ///
 /// The window end is `window_start + token_exp_secs` — the same width used by
-/// `token_window` (see
-/// `handlers::status_list::utils::conditional::token_window`, which is
-/// `exp_secs` under the ticket 564 proposal of expiry-sized windows). A token
-/// anchored to `[window_start, window_start + exp_secs)` is never read after
-/// the window rolls at `window_start + exp_secs`, so expiring there frees a
-/// closed window's bytes promptly.
+/// the handler's `token_window` (expiry-sized windows under the ticket 564
+/// proposal). A token anchored to `[window_start, window_start + exp_secs)` is
+/// never read after the window rolls at `window_start + exp_secs`, so expiring
+/// there frees a closed window's bytes promptly. The width is derived directly
+/// from the key's `token_exp_secs` here (rather than calling a handler-module
+/// helper) so the cache stays independent of the status-list handler.
 #[derive(Debug, Clone, Copy, Default)]
 struct EntryExpiry;
 
@@ -209,18 +209,12 @@ impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
         value: &CachedToken,
         _created_at: Instant,
     ) -> Option<Duration> {
-        // The window width comes from the same helper `token_window` uses
-        // (`handlers::status_list::utils::conditional::window_width`), so the
-        // cache frees a closed window's bytes at exactly the instant the window
-        // rolls over. Keeping the two in lockstep means an entry can never
-        // silently outlive (or be freed before) the window it is anchored to.
-        let validity = crate::server::handlers::status_list::TokenValidity::new(
-            key.token_exp_secs,
-            // Freshness is a serve-time concern; the cache only needs the
-            // window width, which is `exp_secs`. A zero ttl here is harmless.
-            0,
-        );
-        let width = crate::server::handlers::status_list::window_width(validity);
+        // Window width is `exp_secs` clamped to `>= 1` — the same formula the
+        // handler's `token_window` uses (expiry-sized windows), so the cache
+        // frees a closed window's bytes at exactly the instant the window rolls
+        // over. Keeping the two in lockstep means an entry can never silently
+        // outlive (or be freed before) the window it is anchored to.
+        let width = i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX).max(1);
         let window_end = key.window_start.saturating_add(width);
         let secs = (window_end - value.created_at_unix).max(1) as u64;
         Some(Duration::from_secs(secs))
