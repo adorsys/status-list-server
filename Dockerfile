@@ -1,11 +1,6 @@
 ARG APP_NAME=status-list-server
 
 # Use buildx's automatic platform detection.
-#
-# Builder bases pinned to immutable @sha256 index digests for reproducible builds.
-# Both tags are multi-arch index manifests, so --platform=$BUILDPLATFORM picks the
-# correct child. Dependabot bumps these; see docs/supply-chain.md, "Builder Image
-# Digests".
 FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl@sha256:875ccf23ed478f7edee9be54d3dd6556dbca067e9af8e33f22f6b316226a5d5e AS builder-amd64
 FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl@sha256:9f1f5a00c2ef54ab851b8cbf4e5a843c74314679a2f7f4af5664b3a7ce21bce8 AS builder-arm64
 
