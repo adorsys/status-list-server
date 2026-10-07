@@ -1,60 +1,30 @@
 use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
-use crate::server::cache::{TokenCacheKey, TokenEncoding};
+use crate::server::cache::TokenEncoding;
 use sha2::{Digest, Sha256};
 
-/// Weak ETag for the live representation, derived from the *representation
-/// identity* rather than the signed bytes themselves.
+/// Strong ETag for the live representation, derived from the *served
+/// representation bytes* (proposal #3 of ticket 564).
 ///
-/// A strong ETag must change whenever the bytes change (RFC 9110 §8.8.3.1), but
-/// ES256 signatures are randomized: the signed bytes for a token differ between
-/// requests on a cold cache, across replicas, across restarts, and on capacity
-/// eviction. A digest of the signed bytes would therefore make the ETag only as
-/// stable as this replica's cache — a client holding a valid token would get a
-/// `200` (and a fresh sign) instead of a `304` whenever the entry wasn't cached
-/// here. That defeats the very conditional GET this validator exists to serve.
+/// A strong ETag must change whenever the representation bytes change (RFC 9110
+/// §8.8.3.1), so this digests the exact bytes served to the client. Within a
+/// window the signed bytes are cached and reused, so the digest — and therefore
+/// the ETag — is stable for the whole window: a client revalidating with that
+/// ETag gets a `304` with no signing, and a matching ETag proves the client
+/// holds the current window's token for this content and signer.
 ///
-/// Instead the ETag is a **weak** validator (`W/"..."`) over the dimensions that
-/// pin the representation identity: `(list_id, content_hash, signer_fingerprint,
-/// window_start, iat, version, format, encoding, aggregation_uri, token_ttl_secs,
-/// token_exp_secs)`. It is identical across replicas, never requires a sign to
-/// answer a `304`, and changes exactly when the served representation's identity
-/// changes (content, signing key, window, minted `iat`, optimistic-concurrency
-/// generation, format, encoding, aggregation URI, or token ttl/exp). A matching
-/// weak ETag proves the client holds a current-window token from the current
-/// signer for this content — the guarantee the conditional logic needs to
-/// certify a `304`.
-pub(crate) fn generate_token_etag(key: &TokenCacheKey) -> String {
+/// Because ES256 (and the other supported algorithms) randomize their
+/// signatures, the signed bytes differ across replicas, restarts, cold caches
+/// and window rollovers. The ETag therefore differs across replicas: this is a
+/// documented, accepted deviation from cross-replica ETag equality (ticket 564
+/// acceptance criterion: "two replicas return matching ETags *or the issue
+/// documents why they don't*"). The randomized signature is precisely why the
+/// validator must be strong — it proves the exact byte-for-byte token the
+/// client holds — rather than a weak validator that only certifies the
+/// representation identity.
+pub(crate) fn generate_token_etag(representation_bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    // Canonical encoding: strings are length-prefixed and integers are
-    // fixed-width, so a raw concatenation can never collide across distinct
-    // keys (e.g. aggregation_uri="https://a/1", ttl=2, exp=34 vs
-    // aggregation_uri="https://a/", ttl=12, exp=34).
-    write_len_prefixed(&mut hasher, key.list_id.as_bytes());
-    write_len_prefixed(&mut hasher, key.content_hash.as_bytes());
-    write_len_prefixed(&mut hasher, key.signer_fingerprint.as_bytes());
-    hasher.update(key.window_start.to_be_bytes());
-    hasher.update(key.iat.to_be_bytes());
-    hasher.update(key.version.to_be_bytes());
-    write_len_prefixed(&mut hasher, key.format.as_bytes());
-    write_len_prefixed(&mut hasher, encoding_label(key.encoding).as_bytes());
-    write_len_prefixed(&mut hasher, key.aggregation_uri.as_bytes());
-    hasher.update(key.token_ttl_secs.to_be_bytes());
-    hasher.update(key.token_exp_secs.to_be_bytes());
-    format!("W/\"{}\"", hex::encode(hasher.finalize()))
-}
-
-/// Update the hasher with `bytes` prefixed by their `u64` length, making a
-/// sequence of variable-length fields unambiguous.
-fn write_len_prefixed(hasher: &mut impl Digest, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn encoding_label(encoding: TokenEncoding) -> &'static str {
-    match encoding {
-        TokenEncoding::Identity => "identity",
-        TokenEncoding::Gzip => "gzip",
-    }
+    hasher.update(representation_bytes);
+    format!("\"{}\"", hex::encode(hasher.finalize()))
 }
 
 /// Content hash over the representation-driving fields of `record`, excluding
@@ -101,6 +71,13 @@ pub(crate) fn generate_historical_etag(
     Ok(format!("W/\"{}\"", hex::encode(hash)))
 }
 
+fn encoding_label(encoding: TokenEncoding) -> &'static str {
+    match encoding {
+        TokenEncoding::Identity => "identity",
+        TokenEncoding::Gzip => "gzip",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,31 +100,15 @@ mod tests {
         }
     }
 
-    fn base_key() -> TokenCacheKey {
-        TokenCacheKey {
-            list_id: "list".to_string(),
-            content_hash: "hash".to_string(),
-            signer_fingerprint: "signer".to_string(),
-            window_start: 1000,
-            iat: 1000,
-            version: 1,
-            format: "jwt".to_string(),
-            encoding: TokenEncoding::Identity,
-            aggregation_uri: String::new(),
-            token_ttl_secs: 300,
-            token_exp_secs: 900,
-        }
-    }
-
     #[test]
-    fn test_generate_token_etag_is_weak() {
-        let etag = generate_token_etag(&base_key());
+    fn test_generate_token_etag_is_strong() {
+        let etag = generate_token_etag(b"some representation bytes");
         assert!(
-            etag.starts_with("W/\""),
-            "live ETag must be weak (W/\"...\"), not strong"
+            etag.starts_with('"') && etag.ends_with('"'),
+            "live ETag must be strong (\"...\"), not weak (W/\"...\")"
         );
-        assert!(etag.ends_with('"'), "ETag should end with \"");
-        let hex_part = &etag[3..etag.len() - 1];
+        assert!(!etag.starts_with("W/"), "live ETag must not be weak");
+        let hex_part = &etag[1..etag.len() - 1];
         assert_eq!(hex_part.len(), 64);
         assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -155,100 +116,37 @@ mod tests {
     #[test]
     fn test_generate_token_etag_determinism() {
         assert_eq!(
-            generate_token_etag(&base_key()),
-            generate_token_etag(&base_key())
+            generate_token_etag(b"same bytes"),
+            generate_token_etag(b"same bytes")
         );
     }
 
     #[test]
-    fn test_generate_token_etag_changes_with_each_identity_dimension() {
-        let base = base_key();
-        let cases = [
-            (
-                "list_id",
-                TokenCacheKey {
-                    list_id: "other".into(),
-                    ..base.clone()
-                },
-            ),
-            (
-                "content_hash",
-                TokenCacheKey {
-                    content_hash: "other".into(),
-                    ..base.clone()
-                },
-            ),
-            (
-                "signer_fingerprint",
-                TokenCacheKey {
-                    signer_fingerprint: "other".into(),
-                    ..base.clone()
-                },
-            ),
-            (
-                "window_start",
-                TokenCacheKey {
-                    window_start: 1001,
-                    ..base.clone()
-                },
-            ),
-            (
-                "iat",
-                TokenCacheKey {
-                    iat: 1002,
-                    ..base.clone()
-                },
-            ),
-            (
-                "version",
-                TokenCacheKey {
-                    version: 2,
-                    ..base.clone()
-                },
-            ),
-            (
-                "format",
-                TokenCacheKey {
-                    format: "cwt".into(),
-                    ..base.clone()
-                },
-            ),
-            (
-                "encoding",
-                TokenCacheKey {
-                    encoding: TokenEncoding::Gzip,
-                    ..base.clone()
-                },
-            ),
-            (
-                "aggregation_uri",
-                TokenCacheKey {
-                    aggregation_uri: "https://agg".into(),
-                    ..base.clone()
-                },
-            ),
-            (
-                "token_ttl_secs",
-                TokenCacheKey {
-                    token_ttl_secs: 600,
-                    ..base.clone()
-                },
-            ),
-            (
-                "token_exp_secs",
-                TokenCacheKey {
-                    token_exp_secs: 1200,
-                    ..base.clone()
-                },
-            ),
-        ];
-        for (dim, key) in cases {
-            assert_ne!(
-                generate_token_etag(&base),
-                generate_token_etag(&key),
-                "ETag must change when {dim} changes"
-            );
-        }
+    fn test_generate_token_etag_changes_with_bytes() {
+        // A strong ETag must change whenever the representation bytes change.
+        assert_ne!(
+            generate_token_etag(b"representation A"),
+            generate_token_etag(b"representation B")
+        );
+        // Even a single differing byte changes the digest.
+        assert_ne!(generate_token_etag(b"aaa"), generate_token_etag(b"aab"));
+    }
+
+    #[test]
+    fn test_generate_token_etag_identity_vs_gzip_bytes_differ() {
+        // gzip and identity representations carry distinct bytes, so their
+        // strong ETags must differ (a client that cached the gzip form must not
+        // revalidate against the identity form).
+        let identity = b"the status list token";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        use std::io::Write as _;
+        encoder.write_all(identity).unwrap();
+        let gzip = encoder.finish().unwrap();
+        assert_ne!(
+            generate_token_etag(identity),
+            generate_token_etag(&gzip),
+            "identity and gzip representations must not share a strong ETag"
+        );
     }
 
     #[test]
@@ -260,34 +158,6 @@ mod tests {
         let mut changed = create_test_record();
         changed.status_list.lst = "changed".to_string();
         assert_ne!(content_hash(&r1), content_hash(&changed));
-    }
-
-    #[test]
-    fn test_generate_token_etag_canonical_encoding_no_field_boundary_collision() {
-        // The ETag must hash a canonical (length-prefixed) encoding of the key,
-        // not a raw concatenation. With raw concatenation these two distinct
-        // keys feed identical bytes into SHA-256:
-        //   aggregation_uri="https://a/1", ttl=2,  exp=34
-        //   aggregation_uri="https://a/",  ttl=12, exp=34
-        // The canonical encoding must keep them distinct so an ETag never
-        // survives a configuration change and certifies a stale token.
-        let a = TokenCacheKey {
-            aggregation_uri: "https://a/1".to_string(),
-            token_ttl_secs: 2,
-            ..base_key()
-        };
-        let b = TokenCacheKey {
-            aggregation_uri: "https://a/".to_string(),
-            token_ttl_secs: 12,
-            ..base_key()
-        };
-        assert_eq!(a.token_exp_secs, b.token_exp_secs, "same exp=34");
-        assert_ne!(
-            generate_token_etag(&a),
-            generate_token_etag(&b),
-            "canonical encoding must not collide across variable-length field \
-             boundaries"
-        );
     }
 
     fn base_snapshot() -> StatusListSnapshot {
