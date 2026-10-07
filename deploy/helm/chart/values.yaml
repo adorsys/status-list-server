@@ -40,6 +40,13 @@ statuslist:
   # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
   # controls the replica count.
   replicaCount: 1
+  # Deployment rollout strategy (apps/v1 Deployment.spec.strategy). Defaults to a plain
+  # RollingUpdate (Kubernetes default) with no maxSurge/maxUnavailable overrides. Set to
+  # `type: Recreate` when a release must never run old and new pods concurrently (for
+  # example, when a schema/concurrency change makes the two versions mutually
+  # incompatible during a rolling deploy). The full strategy object is passed through.
+  strategy:
+    type: RollingUpdate
   # Extra labels merged onto the Pod template metadata. For Azure Workload Identity,
   # specify azure.workload.identity/use: "true" (must be a quoted string, not a boolean).
   podLabels: {}
@@ -167,6 +174,12 @@ statuslist:
     # Maximum status-list records retained by the in-memory backend. Redis uses
     # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
+    # Signed status-list token bytes cache: a *byte* budget (entries are weighed
+    # by their size). Default 64 MiB holds several maximum-permitted lists (each
+    # near 1 MiB once wrapped in JWT/base64) plus many small ones. "0" disables
+    # the cache (every request re-signs). Each entry expires at the end of its own
+    # validity window, so there is no TTL setting.
+    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "67108864"
     APP_CACHE__TLS: "false"
     # Optional Redis settings when APP_CACHE__BACKEND=redis. Prefer secretEnv or
     # secretMounts for passwords. Use a dedicated Redis ACL user scoped to

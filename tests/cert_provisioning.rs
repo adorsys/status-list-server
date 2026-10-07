@@ -5,34 +5,62 @@
 //! These tests require Docker to be running. They spin up:
 //! - **Pebble** (ACME CA test server)
 //! - **challtestsrv** (DNS server for Pebble)
-//! - **LocalStack** (Secrets Manager)
+//! - **Floci** (Secrets Manager)
 //! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use aws_config::BehaviorVersion;
 #[cfg(feature = "vault")]
 use secrecy::SecretString;
 #[cfg(feature = "vault")]
-use status_list_server::{cert_manager::storage::Storage, outbound::vault::VaultClient};
+use status_list_server::outbound::vault::VaultClient;
 use status_list_server::{
     cert_manager::{
         CertManager,
         challenge::{Dns01Handler, PebbleDnsProvider},
         http_client::DefaultHttpClient,
+        storage::Storage,
     },
     outbound::aws::AwsSecretsManager,
 };
 #[cfg(feature = "vault")]
 use testcontainers_modules::hashicorp_vault::HashicorpVault;
-use testcontainers_modules::{
-    localstack::LocalStack,
-    testcontainers::{
-        ContainerAsync, GenericImage, ImageExt,
-        core::{IntoContainerPort, WaitFor},
-        runners::AsyncRunner,
-    },
+use testcontainers_modules::testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
 };
+
+const FLOCI_IMAGE: &str = "floci/floci";
+const FLOCI_TAG: &str = "2.2.0";
+
+async fn start_aws_emulator() -> ContainerAsync<GenericImage> {
+    start_with_retry(|| {
+        let image = GenericImage::new(FLOCI_IMAGE, FLOCI_TAG)
+            .with_exposed_port(4566.tcp())
+            .with_wait_for(WaitFor::http(
+                HttpWaitStrategy::new("/_floci/health").with_expected_status_code(200u16),
+            ))
+            .with_env_var("FLOCI_DEFAULT_REGION", AWS_REGION)
+            .with_env_var("FLOCI_STORAGE_MODE", "memory")
+            .with_env_var("FLOCI_SERVICES_SECRETSMANAGER_ENABLED", "true")
+            .with_env_var("FLOCI_SERVICES_S3_ENABLED", "false");
+        Box::pin(async move { image.start().await })
+    })
+    .await
+}
+
+async fn aws_config(image: &ContainerAsync<GenericImage>) -> aws_config::SdkConfig {
+    let host = image.get_host().await.unwrap();
+    let port = image.get_host_port_ipv4(4566).await.unwrap();
+    aws_config::defaults(BehaviorVersion::latest())
+        .region(aws_config::Region::new(AWS_REGION))
+        .endpoint_url(format!("http://{host}:{port}"))
+        .test_credentials()
+        .load()
+        .await
+}
 
 const PEBBLE_IMAGE: &str = "ghcr.io/letsencrypt/pebble";
 const PEBBLE_TAG: &str = "2.10";
@@ -47,6 +75,35 @@ const OPENBAO_IMAGE: &str = "openbao/openbao";
 #[cfg(feature = "vault")]
 const OPENBAO_TAG: &str = "2.6";
 
+/// Number of attempts when starting a container, tolerating transient Docker
+/// registry/network failures (e.g. truncated image downloads).
+const CONTAINER_START_RETRIES: u32 = 3;
+const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
+
+/// Retry a container start that performs a Docker image pull, tolerating
+/// transient registry/network failures (e.g. truncated image downloads) that
+/// would otherwise make the integration test flaky.
+async fn start_with_retry<F, T, E>(mut attempt: F) -> ContainerAsync<T>
+where
+    T: testcontainers_modules::testcontainers::Image,
+    F: FnMut() -> std::pin::Pin<Box<dyn Future<Output = Result<ContainerAsync<T>, E>> + Send>>,
+    E: std::fmt::Debug + Send,
+{
+    let mut last_err = None;
+    for n in 1..=CONTAINER_START_RETRIES {
+        match attempt().await {
+            Ok(container) => return container,
+            Err(err) => {
+                last_err = Some(err);
+                if n < CONTAINER_START_RETRIES {
+                    tokio::time::sleep(CONTAINER_START_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    panic!("container start failed after {CONTAINER_START_RETRIES} attempts: {last_err:?}");
+}
+
 /// Minica root CA that signs Pebble's own TLS server certificate.
 const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 
@@ -55,11 +112,10 @@ const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 struct TestInfra {
     _challtestsrv: ContainerAsync<GenericImage>,
     _pebble: ContainerAsync<GenericImage>,
-    _localstack: ContainerAsync<LocalStack>,
+    aws_emulator: ContainerAsync<GenericImage>,
 
     pebble_acme_port: u16,
     challtestsrv_port: u16,
-    localstack_port: u16,
 }
 
 impl TestInfra {
@@ -74,65 +130,55 @@ impl TestInfra {
         let challtestsrv_name = format!("challtestsrv-{resource_prefix}");
         let pebble_name = format!("pebble-{resource_prefix}");
 
-        let challtestsrv = GenericImage::new(CHALLTESTSRV_IMAGE, CHALLTESTSRV_TAG)
-            .with_exposed_port(8055.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Starting management server"))
-            .with_network(&network)
-            .with_container_name(&challtestsrv_name)
-            .with_cmd(vec!["-http01=", "-https01=", "-tlsalpn01="])
-            .start()
-            .await
-            .expect("Failed to start challtestsrv");
+        let challtestsrv = start_with_retry(|| {
+            let image = GenericImage::new(CHALLTESTSRV_IMAGE, CHALLTESTSRV_TAG)
+                .with_exposed_port(8055.tcp())
+                .with_wait_for(WaitFor::message_on_stdout("Starting management server"))
+                .with_network(&network)
+                .with_container_name(&challtestsrv_name)
+                .with_cmd(vec!["-http01=", "-https01=", "-tlsalpn01="]);
+            Box::pin(async move { image.start().await })
+        })
+        .await;
 
-        let pebble = GenericImage::new(PEBBLE_IMAGE, PEBBLE_TAG)
-            .with_exposed_port(14000.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("ACME directory available at"))
-            .with_env_var("PEBBLE_VA_NOSLEEP", "1")
-            // Disable Pebble's intentional nonce rejection to prevent flaky tests
-            // See: https://github.com/letsencrypt/pebble#invalid-anti-replay-nonce-errors
-            .with_env_var("PEBBLE_WFE_NONCEREJECT", "0")
-            .with_network(&network)
-            .with_container_name(&pebble_name)
-            .with_cmd(vec![
-                "-config",
-                "/test/config/pebble-config.json",
-                "-strict",
-                "-dnsserver",
-                &format!("{challtestsrv_name}:8053"),
-            ])
-            .start()
-            .await
-            .expect("Failed to start Pebble");
+        let pebble = start_with_retry(|| {
+            let image = GenericImage::new(PEBBLE_IMAGE, PEBBLE_TAG)
+                .with_exposed_port(14000.tcp())
+                .with_wait_for(WaitFor::message_on_stdout("ACME directory available at"))
+                .with_env_var("PEBBLE_VA_NOSLEEP", "1")
+                // Disable Pebble's intentional nonce rejection to prevent flaky tests
+                // See: https://github.com/letsencrypt/pebble#invalid-anti-replay-nonce-errors
+                .with_env_var("PEBBLE_WFE_NONCEREJECT", "0")
+                .with_network(&network)
+                .with_container_name(&pebble_name)
+                .with_cmd(vec![
+                    "-config",
+                    "/test/config/pebble-config.json",
+                    "-strict",
+                    "-dnsserver",
+                    &format!("{challtestsrv_name}:8053"),
+                ]);
+            Box::pin(async move { image.start().await })
+        })
+        .await;
 
-        let localstack = LocalStack::default()
-            .with_tag("4.14")
-            .with_env_var("SERVICES", "secretsmanager")
-            .start()
-            .await
-            .expect("Failed to start LocalStack");
+        let aws_emulator = start_aws_emulator().await;
 
         let pebble_acme_port = pebble.get_host_port_ipv4(14000).await.unwrap();
         let challtestsrv_port = challtestsrv.get_host_port_ipv4(8055).await.unwrap();
-        let localstack_port = localstack.get_host_port_ipv4(4566).await.unwrap();
 
         Self {
             _challtestsrv: challtestsrv,
             _pebble: pebble,
-            _localstack: localstack,
+            aws_emulator,
             pebble_acme_port,
             challtestsrv_port,
-            localstack_port,
         }
     }
 
-    /// Build an AWS SDK config pointing at the LocalStack endpoint.
+    /// Build an AWS SDK config pointing at the Floci endpoint.
     async fn aws_config(&self) -> aws_config::SdkConfig {
-        aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::Region::new(AWS_REGION))
-            .endpoint_url(format!("http://127.0.0.1:{}", self.localstack_port))
-            .test_credentials()
-            .load()
-            .await
+        aws_config(&self.aws_emulator).await
     }
 
     /// Build a `CertManager` with one cryptographic-material backend for both
@@ -373,12 +419,13 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let infra = TestInfra::start("vault-provision").await;
-    let _vault_container = HashicorpVault::default()
-        .with_tag("2.0")
-        .with_env_var("VAULT_DEV_ROOT_TOKEN_ID", "root")
-        .start()
-        .await
-        .expect("Failed to start HashicorpVault container");
+    let _vault_container = start_with_retry(|| {
+        let image = HashicorpVault::default()
+            .with_tag("2.0")
+            .with_env_var("VAULT_DEV_ROOT_TOKEN_ID", "root");
+        Box::pin(async move { image.start().await })
+    })
+    .await;
     let vault_port = _vault_container.get_host_port_ipv4(8200).await.unwrap();
 
     let (role_id, secret_id) = setup_vault_approle(vault_port).await;
@@ -436,16 +483,17 @@ async fn test_cert_provisioning_with_openbao() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let infra = TestInfra::start("openbao-provision").await;
-    let _openbao_container = GenericImage::new(OPENBAO_IMAGE, OPENBAO_TAG)
-        .with_exposed_port(8200.tcp())
-        .with_wait_for(WaitFor::message_on_stdout(
-            "Development mode should NOT be used in production",
-        ))
-        .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
-        .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
-        .start()
-        .await
-        .expect("Failed to start OpenBao container");
+    let _openbao_container = start_with_retry(|| {
+        let image = GenericImage::new(OPENBAO_IMAGE, OPENBAO_TAG)
+            .with_exposed_port(8200.tcp())
+            .with_wait_for(WaitFor::message_on_stdout(
+                "Development mode should NOT be used in production",
+            ))
+            .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
+            .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200");
+        Box::pin(async move { image.start().await })
+    })
+    .await;
     let openbao_port = _openbao_container.get_host_port_ipv4(8200).await.unwrap();
 
     let (role_id, secret_id) = setup_vault_approle(openbao_port).await;

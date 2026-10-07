@@ -292,6 +292,62 @@ podDisruptionBudget:
 
 `replicaCount` lives under `statuslist:` (the Deployment reads `statuslist.replicaCount`); `autoscaling` and `podDisruptionBudget` are top-level values. When `autoscaling.enabled=true` the Deployment omits `replicas` so the HPA controls the count. Keep `podDisruptionBudget.maxUnavailable` below the replica count (the safe default) so node drains do not get blocked.
 
+### Conditional GETs, ETags and the signed-token cache across replicas
+
+The live `GET /status-lists/{id}` endpoint serves a **strong** ETag (`"..."`) derived from a SHA-256 digest of the exact served representation bytes (RFC 9110 §8.8.3.1). Because ES256 signatures are randomized, the bytes differ across replicas, restarts, cold caches, capacity evictions and window roll-overs; the strong ETag therefore differs across replicas — this is a documented, accepted deviation from cross-replica ETag equality (ticket 564 acceptance criterion: "two replicas return matching ETags *or the issue documents why they don't*"). Within a single replica the ETag is stable for the whole token window, so a client revalidating against the same replica gets a `304` with no signing. The token window is exactly the token's full lifetime (`exp_secs`); the ETag changes on content update, key/certificate rotation, window roll-over, token-format/encoding change, aggregation URI or token lifetime change, or mid-window content revert.
+
+That cross-replica stability holds **only when replicas serve the same content with the same signing material and token configuration for the same representation and window**. During a rolling certificate or configuration change — or for different `token_ttl`/`token_exp` or aggregation-URI settings — ETags deliberately differ between replicas, so a revalidation against a replica on the other side of the change returns a freshly signed `200`. Coordinate certificate rotation and configuration rollout so the window during which replicas disagree is brief.
+
+The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
+
+- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. The default (64 MiB) is sized to hold several maximum-permitted lists (each near 1 MiB once wrapped in JWT/base64) plus many small ones. `0` disables the cache (every request re-signs).
+- Each entry expires at the **end of its own validity window** (window width is `exp_secs`), independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
+- The cache avoids re-signing *unchanged* tokens within a window on one replica, even under capacity pressure. A two-tier design (protected tier for latest-generation entries within their window, cold tier for superseded/expired entries) guarantees at most one signature per `(list, window, format)` per replica. A content change, a signer/certificate rotation, or a mid-window content revert to an earlier state always re-signs immediately (all are part of the cache key and the ETag). The monotonic `version` — not `iat` — guarantees a revert to earlier content produces a new key and ETag: a same-second A → B → A revert can leave `iat` unchanged, but `version` advances, so the new representation identity never collides with the pre-revert one.
+- Encoded variants (gzip for JWT, identity for both) and their strong ETags are pre-computed at cache insertion time and stored alongside the uncompressed bytes, so revalidation requests (including `304`) never need to re-compress.
+
+`status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = min(ttl, exp - now)`) vouch for a token that expires sooner.
+
+### Upgrade strategy for this release
+
+This release changes how status-list updates are fenced for concurrency: updates are now
+guarded on a dedicated `version` column (and the `meta:{id}:version` Redis marker) instead of
+the `updated_at` timestamp (and the `meta:{id}:updated` marker). The two guards are **not
+mutually compatible during a rolling deploy**: old pods guard only on `updated_at` and never
+touch `version`, while new pods guard only on `version` and can write a same-second
+`updated_at`. While both versions run they can overwrite each other's update without a
+conflict, and on the Redis path neither side's invalidation fences the other side's delayed
+fills — so a status change can be silently lost.
+
+Deploy this release with a **`Recreate` rollout strategy** so that no old and new pods ever
+run concurrently. The chart exposes the Deployment strategy through
+`statuslist.strategy`; set its type to `Recreate` for this upgrade:
+
+```bash
+helm upgrade --install statuslist ./deploy/helm/chart \
+  --set statuslist.strategy.type=Recreate \
+  ... # your other values
+```
+
+Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
+`maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
+two incompatible versions overlap. Scaling `statuslist.replicaCount`/HPA min/max down to `1`
+alone does **not** avoid that overlap either. If you cannot use `Recreate`, the only safe
+fallback is to scale the workload to **zero** before the upgrade and back up after (a short
+outage):
+
+```bash
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+# kubectl scale returns immediately, but old pods can take up to the 30s default
+# grace period to finish shutting down in-flight requests. Wait for them to be
+# gone before upgrading, otherwise the helm upgrade on the next line scales
+# replicas back up and new pods can start while old ones are still draining.
+kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+```
+
+Only scale back out after all pods are on the new version.
+
 ## Verification
 
 ```bash
