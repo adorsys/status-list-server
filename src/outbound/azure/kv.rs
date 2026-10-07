@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
-use crate::outbound::azure_identity::DefaultAzureCredential;
+use crate::outbound::azure::identity::DefaultAzureCredential;
 
 /// Azure Key Vault secret storage adapter.
 ///
@@ -155,6 +155,14 @@ impl AzureKeyVaultClientBuilder {
             .map_err(|e| {
                 StorageError::Backend(eyre!("failed to create Azure ClientSecretCredential: {e}"))
             })?
+        } else if self.tenant_id.is_some()
+            || self.client_id.is_some()
+            || self.client_secret.is_some()
+        {
+            return Err(StorageError::Backend(eyre!(
+                "incomplete Azure service principal configuration: \
+                 tenant_id, client_id and client_secret must be set together"
+            )));
         } else {
             DefaultAzureCredential::new().map_err(|e| {
                 StorageError::Backend(eyre!("failed to create DefaultAzureCredential: {e}"))
@@ -399,6 +407,26 @@ mod tests {
         let debug_repr = format!("{builder:?}");
         assert!(debug_repr.contains("<redacted>"));
         assert!(!debug_repr.contains("secret-789"));
+    }
+
+    #[test]
+    fn test_build_rejects_partial_service_principal() {
+        let endpoint = Url::parse("https://my-vault.vault.azure.net/").unwrap();
+        let builder = AzureKeyVaultClient::builder(endpoint).service_principal(
+            Some("tenant-123"),
+            None,
+            None,
+        );
+
+        let err = match builder.build() {
+            Ok(_) => panic!("partial SP config must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("incomplete Azure service principal"),
+            "expected an incomplete-service-principal error, got: {err}"
+        );
     }
 
     #[test]
