@@ -2,8 +2,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use color_eyre::eyre::{OptionExt, Result, WrapErr, ensure};
 
 /// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
@@ -176,14 +176,14 @@ fn workspace_root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(Path::to_path_buf)
-        .context("xtask manifest directory has no workspace parent")
+        .ok_or_eyre("xtask manifest directory has no workspace parent")
 }
 
 fn check_profiles(workspace: &Path) -> Result<()> {
     for profile in FeatureProfile::ALL {
         println!("Checking feature profile '{profile}'...");
         run_spec(check_spec(profile), workspace)
-            .with_context(|| format!("feature profile '{profile}' failed"))?;
+            .wrap_err_with(|| format!("feature profile '{profile}' failed"))?;
     }
     Ok(())
 }
@@ -284,7 +284,7 @@ fn run_spec(spec: CommandSpec, workspace: &Path) -> Result<()> {
     let display = format!("{command:?}");
     let status = command
         .status()
-        .with_context(|| format!("failed to start {display}"))?;
+        .wrap_err_with(|| format!("failed to start {display}"))?;
     ensure!(status.success(), "{display} exited with {status}");
     Ok(())
 }
