@@ -26,7 +26,7 @@ use super::utils::{
         token_window,
     },
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
-    etag::{content_hash, generate_historical_etag, generate_token_etag},
+    etag::{content_hash, generate_historical_etag},
     negotiation::{AcceptType, client_accepts_gzip, negotiate_accept},
     token::build_status_list_token,
     token_cache::signer_fingerprint,
@@ -413,31 +413,6 @@ async fn get_or_build_live_token(
             now,
         )
         .await
-}
-
-/// Derive the served representation (and its `Content-Encoding`) from the
-/// cached uncompressed signed bytes for the client's negotiated format and
-/// `Accept-Encoding`. CWT is never gzip-compressed; JWT is gzipped only when
-/// the client accepts gzip.
-fn apply_encoding(
-    bytes: Bytes,
-    accept_type: AcceptType,
-    client_accepts_gzip: bool,
-) -> (Bytes, Option<&'static str>) {
-    if client_accepts_gzip && accept_type == AcceptType::Jwt {
-        use std::io::Write as _;
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        if encoder.write_all(&bytes).is_err() {
-            return (bytes, None);
-        }
-        if let Ok(compressed) = encoder.finish() {
-            return (
-                Bytes::from(compressed),
-                Some(crate::server::handlers::status_list::utils::constants::GZIP_HEADER),
-            );
-        }
-    }
-    (bytes, None)
 }
 
 /// Build a `200 OK` status-list token response from already-signed bytes.

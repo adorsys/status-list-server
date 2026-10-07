@@ -10,7 +10,6 @@ use opentelemetry::{
     metrics::{Counter, ObservableGauge},
     {KeyValue, global},
 };
-use time::OffsetDateTime;
 
 use crate::server::handlers::status_list::utils::etag::generate_token_etag;
 
@@ -430,6 +429,7 @@ impl TokenBytesCache {
     /// If the entry is for the latest generation of its list and its window has
     /// not expired, it goes to the protected tier. Otherwise it goes to the cold
     /// tier.
+    #[cfg(test)]
     async fn insert_tiered(&self, key: TokenCacheKey, value: CachedToken, now: i64) {
         let window_end = window_end(&key);
 
