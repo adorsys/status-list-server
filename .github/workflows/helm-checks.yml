@@ -9,11 +9,12 @@ name: "Helm Checks"
 # check. A path-filtered trigger would leave a pure-Rust PR with `helm-success`
 # stuck in "Expected -- Waiting for status to be reported", blocking the merge.
 # The expensive jobs are gated on the `changes` job instead, so a PR that touches
-# no Helm file skips them (GitHub treats skipped jobs as non-blocking) while
-# `helm-success` still reports a green aggregate. Pushes stay path-gated: they are
-# not a required check, and a push that touches no Helm file has no Helm feedback
-# to give. `workflow_call` (from deploy.yml) must always run Helm checks, which is
-# why the job gates are `helm changed OR event is not pull_request`.
+# none of the inputs they consume skips them (GitHub treats skipped jobs as
+# non-blocking) while `helm-success` still reports a green aggregate. Pushes stay
+# path-gated: they are not a required check, and a push that touches none of these
+# inputs has no Helm/observability feedback to give. `workflow_call` (from
+# deploy.yml) must always run Helm checks, which is why the job gates are
+# `helm changed OR event is not pull_request`.
 on:
   workflow_dispatch:
   workflow_call:
@@ -24,7 +25,16 @@ on:
       - main
     paths:
       - 'deploy/helm/**'
+      - 'deploy/observability/**'
       - '.github/workflows/helm-checks.yml'
+      - '.github/workflows/render-helm-templates/**'
+      - '.kube-linter.yaml'
+      - '.trivyignore.yaml'
+      - 'scripts/verify-image-reference.sh'
+      - 'scripts/check-helm-prometheus.sh'
+      - 'scripts/check-dashboard-drift.sh'
+      - 'scripts/render-helm-templates.sh'
+      - 'scripts/validate-alertmanager-crd.sh'
 
 permissions:
   contents: read
@@ -61,10 +71,25 @@ jobs:
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
+          # Every input consumed by the validation jobs below. A change to the
+          # chart, the observability configs (otel-collector, prometheus rules,
+          # alertmanager, dashboards, slo), the render action, or the helper
+          # scripts must run the jobs that validate that config -- otherwise a
+          # broken config or a broken validator could merge while `helm-success`
+          # reports green. Keep this in sync with the `push.paths` trigger above.
           filters: |
             helm:
               - 'deploy/helm/**'
+              - 'deploy/observability/**'
               - '.github/workflows/helm-checks.yml'
+              - '.github/workflows/render-helm-templates/**'
+              - '.kube-linter.yaml'
+              - '.trivyignore.yaml'
+              - 'scripts/verify-image-reference.sh'
+              - 'scripts/check-helm-prometheus.sh'
+              - 'scripts/check-dashboard-drift.sh'
+              - 'scripts/render-helm-templates.sh'
+              - 'scripts/validate-alertmanager-crd.sh'
 
   trivy-config:
     name: Trivy Config Scan (Helm Chart)

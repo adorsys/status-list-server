@@ -90,19 +90,26 @@ its own `helm-success` job. `helm-checks.yml` runs on every pull request — the
 expensive Helm jobs are gated on a lightweight `changes` gate rather than a
 path-filtered trigger — so `helm-success` always reports a status, which is what
 lets it be a required check without stranding pure-Rust merges in "Expected —
-Waiting for status to be reported". On a PR that touches no file under
-`deploy/helm/**` or the workflow itself, the Helm jobs are skipped and `helm-success`
-reports green; a pure Rust change therefore does not pay for Helm feedback.
+Waiting for status to be reported". On a PR that touches no input the Helm jobs
+consume — the chart under `deploy/helm/**`, the observability configs under
+`deploy/observability/**`, the render action, the `.kube-linter.yaml` /
+`.trivyignore.yaml` configs, or the helper scripts in `scripts/` — the Helm jobs
+are skipped and `helm-success` reports green; a pure Rust change therefore does
+not pay for Helm feedback.
 
-As of this writing the `Rules` ruleset on `develop` requires exactly one status
-check — `Conventional Commits` — and the `main branch guards` ruleset requires none.
-Nothing in `CI.yml` blocks a merge today, so adding `CI Success` closes a real gap
-rather than reshuffling an existing list:
+As of this writing the `Rules` ruleset on `develop` requires **`CI Success`** and
+**`Conventional Commits`**, and the `main branch guards` ruleset requires
+**`CI Success`**. `CI Success` is therefore already enforced on both protected
+branches; only **`Helm Checks Success`** is new. This PR introduces that check
+(alongside `helm-checks.yml`), so the rollout step below adds only the one new
+requirement rather than reshuffling an existing list:
 
-1. Merge the PR that introduces `ci-success` (and, alongside it, `helm-checks.yml`).
-2. Add **`CI Success`** and **`Helm Checks Success`** to the required status checks on both rulesets.
+1. Merge the PR that introduces `helm-checks.yml` and its `helm-success` aggregate.
+2. Add **`Helm Checks Success`** to the required status checks on both rulesets.
+   **`CI Success`** and **`Conventional Commits`** are already active and stay as-is.
 3. If individual workflow job names are ever added to a ruleset, remove them only
-   _after_ `CI Success` and `Helm Checks Success` are required — doing it in the
+   _after_ **`Helm Checks Success`** (and the existing **`CI Success`**) are required —
+   doing it in the
    other order leaves a window
    where a failing job blocks nothing.
 
