@@ -164,7 +164,7 @@ pub(crate) struct TokenCacheKey {
 /// Concurrent misses for the same key coalesce onto one in-flight build. Content
 /// changes, signer/key rotation, and certificate renewal all change the key and
 /// so immediately miss and re-sign; superseded list generations are actively
-/// reclaimed (see [`TokenBytesCache::invalidate_superseded`]).
+/// reclaimed via `TokenBytesCache::invalidate_superseded`.
 ///
 /// Capacity policy (ticket 564 review): the "at most one sign per
 /// `(list, window, format)`" guarantee is scoped to *concurrent misses* (single
