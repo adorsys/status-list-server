@@ -194,15 +194,39 @@ For production deployments:
 
 ## Development and Quality Checks
 
-Run unit and integration tests:
+The repository provides a standard Cargo xtask entry point for common workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build                         # defaults to postgres
+cargo xtask test --profile minimal
+cargo xtask lint
+cargo xtask compose --profile redis
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` accept `--profile <name>`. The supported profiles and their Cargo features are:
+
+| Profile    | Cargo feature selection                   | Compose services                       |
+| ---------- | ----------------------------------------- | -------------------------------------- |
+| `minimal`  | `--no-default-features --features memory` | app only                               |
+| `postgres` | `postgres`                                | app and PostgreSQL                     |
+| `mysql`    | `mysql`                                   | app and MySQL                          |
+| `sqlite`   | `sqlite`                                  | app only                               |
+| `aws`      | `postgres,aws`                            | app, PostgreSQL, and AWS               |
+| `vault`    | `postgres,vault`                          | app, PostgreSQL, and HashiCorp Vault   |
+| `gcp`      | `postgres,gcp`                            | app, PostgreSQL, and Google Cloud      |
+| `azure`    | `postgres,azure`                          | app, PostgreSQL, and Azure Key Vault   |
+| `redis`    | `postgres,redis`                          | app, PostgreSQL, and Redis             |
+
+Vault, GCP, and Azure use externally configured provider endpoints and credentials, so those profiles do not start provider emulators. Configure them in `.env` before starting the profile.
+
+Use `check-profiles` to compile every row in the table. `lint` runs formatting, Clippy for all targets and features, `cargo audit`, and `cargo machete`. `ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
+
+You can still invoke individual Cargo commands directly. For example, run unit and integration tests or verify the zero-infrastructure in-memory build with:
 
 ```bash
 cargo test
-```
-
-Verify zero-infrastructure in-memory compilation:
-
-```bash
 cargo check --no-default-features --features memory
 ```
 

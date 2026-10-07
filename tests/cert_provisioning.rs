@@ -14,12 +14,13 @@ use aws_config::BehaviorVersion;
 #[cfg(feature = "vault")]
 use secrecy::SecretString;
 #[cfg(feature = "vault")]
-use status_list_server::{cert_manager::storage::Storage, outbound::vault::VaultClient};
+use status_list_server::outbound::vault::VaultClient;
 use status_list_server::{
     cert_manager::{
         CertManager,
         challenge::{Dns01Handler, PebbleDnsProvider},
         http_client::DefaultHttpClient,
+        storage::Storage,
     },
     outbound::aws::AwsSecretsManager,
 };

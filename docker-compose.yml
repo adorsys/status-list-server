@@ -130,6 +130,14 @@ services:
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
+      # A null value forwards APP_DATABASE__URL only when the caller or project
+      # .env supplies it; otherwise Compose leaves the variable unset.
+      APP_DATABASE__URL:
+      APP_DATABASE__HOST: ${APP_DATABASE__HOST-db}
+      APP_DATABASE__PORT: ${APP_DATABASE__PORT-5432}
+      APP_DATABASE__USERNAME: ${APP_DATABASE__USERNAME-postgres}
+      APP_DATABASE__PASSWORD: ${APP_DATABASE__PASSWORD-postgres}
+      APP_DATABASE__NAME: ${APP_DATABASE__NAME-status-list}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
       # Enabling telemetry requires the observability profile so the collector exists.
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"

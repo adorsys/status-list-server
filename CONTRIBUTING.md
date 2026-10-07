@@ -225,6 +225,21 @@ Automatic on merge:
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
 
+Use the repository's Cargo xtask commands for repeatable development workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build --profile postgres
+cargo xtask test --profile postgres
+cargo xtask lint
+cargo xtask compose --profile postgres
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` default to the `postgres` profile. They also
+support `minimal`, `mysql`, `sqlite`, `aws`, `vault`, `gcp`, `azure` and `redis`; see the [README feature profile matrix](README.md#development-and-quality-checks)
+for their exact Cargo features and Compose services. The `ci` command runs the complete `local-ci.sh --full` pipeline.
+
 ### Redis cache integration tests
 
 Run the Redis cache integration tests with Docker/testcontainers, or point them at

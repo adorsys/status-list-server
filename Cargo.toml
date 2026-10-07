@@ -3,6 +3,11 @@ name = "status-list-server"
 version = "1.0.1"
 edition = "2024"
 
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+resolver = "3"
+
 [features]
 default = ["memory"]
 memory = []
