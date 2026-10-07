@@ -28,7 +28,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::config::Config;
+use crate::config::{Config, PUBLIC_API_PATH_PREFIX};
+
 use crate::server::AppState;
 use crate::server::auth::auth;
 use crate::server::handlers::{
@@ -75,7 +76,7 @@ impl HttpServer {
             .route("/health/live", get(health::live))
             .route("/health/ready", get(health::ready))
             .nest(
-                "/api/v1",
+                PUBLIC_API_PATH_PREFIX,
                 api_v1_routes(
                     state.clone(),
                     strict_governor.clone(),

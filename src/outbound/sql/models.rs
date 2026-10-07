@@ -108,6 +108,10 @@ pub(crate) mod status_lists {
         pub sub: String,
         /// Unix timestamp (seconds) of last modification
         pub updated_at: i64,
+        /// Monotonic optimistic-concurrency version (see domain
+        /// `StatusListRecord.version`); the concurrency guard, distinct from the
+        /// `updated_at` timestamp.
+        pub version: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -135,6 +139,10 @@ pub(crate) mod status_list_history {
         pub sub: String,
         pub iat: i64,
         pub exp: i64,
+        /// The list's optimistic-concurrency version when this snapshot was
+        /// taken; tie-breaker for `?time=` resolution when two snapshots share
+        /// an `iat` within the same second.
+        pub version: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

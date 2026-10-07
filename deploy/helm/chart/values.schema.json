@@ -70,6 +70,20 @@
           "title": "Replica count",
           "description": "Number of application replicas. Omitted when autoscaling.enabled=true so the HPA controls the replica count."
         },
+        "strategy": {
+          "type": "object",
+          "title": "Deployment rollout strategy",
+          "description": "apps/v1 Deployment.spec.strategy. Defaults to a plain RollingUpdate (Kubernetes default) with no maxSurge/maxUnavailable overrides. Set type to Recreate for a release that must never run old and new pods concurrently.",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["Recreate", "RollingUpdate"],
+              "title": "Strategy type",
+              "description": "Recreate kills existing pods before new ones start; RollingUpdate rolls incrementally."
+            }
+          },
+          "additionalProperties": true
+        },
         "initContainers": {
           "type": "array",
           "title": "Init containers",

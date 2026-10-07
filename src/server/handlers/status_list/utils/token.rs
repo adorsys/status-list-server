@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use crate::domain::models::credential::Issuer;
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
 use crate::domain::models::token::SigningAlgorithm;
-use crate::domain::ports::TokenSigner;
+use crate::domain::ports::{SigningMaterial, TokenSigner};
 
 use super::constants::{
     CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE,
@@ -53,7 +53,7 @@ fn token_metrics() -> TokenMetrics {
             aggregation_uri_omitted: meter
                 .u64_counter(AGGREGATION_URI_OMITTED_METRIC)
                 .with_description(
-                    "Tokens signed without aggregation_uri because the aggregation ID lookup \
+                    "Tokens served without aggregation_uri because the aggregation ID lookup \
                      failed",
                 )
                 .build(),
@@ -125,6 +125,10 @@ struct JwtHeader<'a> {
 /// * `aggregation_uri` – the `aggregation_uri` claim, if any
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
+/// * `signing_material` – an already-fetched signing snapshot; this lets the
+///   caller pin the exact key/certificate used so a rotated key (whose
+///   fingerprint also keys the signed-bytes cache) never produces an entry under
+///   a mismatched fingerprint
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: AcceptType,
@@ -132,6 +136,7 @@ pub(crate) async fn build_status_list_token(
     aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
     let attributes = [KeyValue::new("format", token_format(accept))];
     token_metrics().attempts.add(1, &attributes);
@@ -142,6 +147,7 @@ pub(crate) async fn build_status_list_token(
         aggregation_uri,
         validity_window,
         client_accepts_gzip,
+        signing_material,
     )
     .await
     {
@@ -160,14 +166,8 @@ async fn build_status_list_token_inner(
     aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let signing_material = state
-        .service
-        .cert_provider()
-        .signing_material()
-        .await
-        .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-
     let validity_window = match validity_window {
         Some(window) => window,
         None => {
@@ -420,6 +420,7 @@ mod tests {
                 default_status: None,
             },
             updated_at: 1000,
+            version: 1,
         }
     }
 
@@ -570,12 +571,22 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = i64::MAX as u64;
 
-        let err =
-            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
                 .await
-                .expect_err(
-                    "a positive iat plus i64::MAX token_exp_secs must overflow and be rejected",
-                );
+                .expect("material"),
+        )
+        .await
+        .expect_err("a positive iat plus i64::MAX token_exp_secs must overflow and be rejected");
 
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
@@ -624,10 +635,22 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = u64::MAX;
 
-        let err =
-            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
                 .await
-                .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
 
         assert!(
             matches!(err, StatusListError::TokenExpiryOverflow { .. }),
@@ -645,10 +668,22 @@ mod tests {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_ttl_secs = u64::MAX;
 
-        let err =
-            build_status_list_token(&state, AcceptType::Jwt, sample_record(), None, None, false)
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
                 .await
-                .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
 
         assert!(
             matches!(err, StatusListError::Backend(_)),
@@ -662,11 +697,24 @@ mod tests {
         use crate::test_utils::test_app_state_without_cert_chain;
 
         let state = test_app_state_without_cert_chain().await;
-        let record = sample_record();
+        let signing_material = state
+            .service
+            .cert_provider()
+            .signing_material()
+            .await
+            .expect("material");
 
         for accept in [AcceptType::Cwt, AcceptType::Jwt] {
-            let result =
-                build_status_list_token(&state, accept, record.clone(), None, None, false).await;
+            let result = build_status_list_token(
+                &state,
+                accept,
+                sample_record(),
+                None,
+                None,
+                false,
+                signing_material.clone(),
+            )
+            .await;
             assert!(
                 matches!(result, Err(StatusListError::Backend(_))),
                 "missing chain must surface as a 500 (Backend) for accept `{accept:?}`, got {result:?}"

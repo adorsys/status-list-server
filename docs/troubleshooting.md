@@ -968,7 +968,7 @@ For quick grep, the application emits these verbatim:
 - `list_quota_exceeded` / `issuer already has N status lists; the configured maximum is M`
 - `limits.max_lists_per_issuer must be greater than 0`
 - `limits.max_lists_per_issuer (N) must not exceed AGGREGATION_DEFAULT_LIMIT (1000), the aggregation page size: ...`
-- `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri must be an http or https URL` / `server.aggregation_uri must use https in production` / `server.aggregation_uri must not contain credentials` / `server.aggregation_uri path '...' does not match the aggregation route '/api/v1/aggregation'` / `server.aggregation_uri must not have a query or fragment`
+- `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri must be an http or https URL` / `server.aggregation_uri must use https in production` / `server.aggregation_uri must not contain credentials` / `server.aggregation_uri path '...' does not match the aggregation route '...'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
 - `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
 - `server.aggregation_uri is not advertised in tokens until the list quota is enforced` (WARN)

@@ -26,7 +26,7 @@ pub trait StatusListCache: Send + Sync + 'static {
     async fn invalidate_after_update(
         &self,
         list_id: &str,
-        _updated_at: i64,
+        _version: u64,
     ) -> Result<(), StatusListError> {
         self.invalidate(list_id).await
     }
@@ -56,18 +56,18 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Create a status list and any initial child records atomically.
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
-    /// Concurrently update an existing status list record matching `expected_updated_at`.
+    /// Concurrently update an existing status list record matching `expected_version`.
     async fn update(
         &self,
         status_list: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
     ) -> Result<bool, StatusListError>;
 
     /// Concurrently update an existing record and atomically record a historical snapshot.
     async fn update_with_snapshot(
         &self,
         status_list: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 

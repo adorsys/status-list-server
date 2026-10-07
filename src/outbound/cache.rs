@@ -28,19 +28,19 @@ const CACHE_SCHEMA_VERSION: &str = "v1";
 static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
     redis::Script::new(
         r#"
-        local marker = redis.call('GET', KEYS[2])
-        local updated_at = tonumber(ARGV[2])
-        if marker and updated_at < tonumber(marker) then
+        local marker = tonumber(redis.call('GET', KEYS[2]))
+        local version = tonumber(ARGV[2])
+        if marker and version < marker then
             return 0
         end
 
-        local current_updated_at = redis.call('HGET', KEYS[1], 'u')
-        if current_updated_at and updated_at < tonumber(current_updated_at) then
+        local current_version = tonumber(redis.call('HGET', KEYS[1], 'ver'))
+        if current_version and version < current_version then
             return 0
         end
 
-        redis.call('HSET', KEYS[1], 'v', ARGV[1], 'u', ARGV[2])
-        redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+        redis.call('HSET', KEYS[1], 'v', ARGV[1], 'ver', ARGV[2], 'u', ARGV[3])
+        redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
         return 1
         "#,
     )
@@ -382,7 +382,11 @@ impl RedisStatusListCache {
     }
 
     fn marker_key(&self, list_id: &str) -> String {
-        format!("{}meta:{{{}}}:updated", self.key_prefix, list_id)
+        // The invalidation marker now stores the committed monotonic `version`,
+        // not a timestamp. The key name is deliberately distinct from the old
+        // `meta:{id}:updated` timestamp markers so stale timestamp markers left
+        // in Redis by a previous release never fence out version-stamped fills.
+        format!("{}meta:{{{}}}:version", self.key_prefix, list_id)
     }
 
     fn circuit_error(&self, operation: &'static str) -> Option<StatusListError> {
@@ -507,6 +511,7 @@ impl StatusListCache for RedisStatusListCache {
                     .key(key)
                     .key(marker_key)
                     .arg(value)
+                    .arg(record.version)
                     .arg(record.updated_at)
                     .arg(self.ttl_secs)
                     .invoke_async(&mut connection),
@@ -530,7 +535,7 @@ impl StatusListCache for RedisStatusListCache {
     async fn invalidate_after_update(
         &self,
         list_id: &str,
-        updated_at: i64,
+        version: u64,
     ) -> Result<(), StatusListError> {
         let mut connection = self.connection("invalidate").await?;
         let _: i32 = self
@@ -539,7 +544,7 @@ impl StatusListCache for RedisStatusListCache {
                 REDIS_INVALIDATE_SCRIPT
                     .key(self.key(list_id))
                     .key(self.marker_key(list_id))
-                    .arg(updated_at)
+                    .arg(version)
                     .invoke_async(&mut connection),
             )
             .await?;
@@ -710,6 +715,7 @@ mod tests {
                 },
                 sub: "sub".into(),
                 updated_at: 0,
+                version: 1,
             };
             cache.put(record).await.unwrap();
             assert!(cache.get("k").await.unwrap().is_some());
@@ -746,6 +752,7 @@ mod tests {
             },
             sub: "sub".into(),
             updated_at: 42,
+            version: 3,
         };
 
         let value = serde_json::to_value(&record).expect("serialize record");
@@ -756,7 +763,8 @@ mod tests {
                 "issuer": "issuer",
                 "status_list": { "bits": 1, "lst": "lst" },
                 "sub": "sub",
-                "updated_at": 42
+                "updated_at": 42,
+                "version": 3
             })
         );
     }
@@ -791,6 +799,7 @@ mod redis_tests {
             },
             sub: "sub".into(),
             updated_at,
+            version: 1,
         }
     }
 
@@ -890,8 +899,10 @@ mod redis_tests {
             .put(record_at(&list_id, updated_at))
             .await
             .expect("put stale base");
+        // The base record carries version 1; the invalidation marker is a
+        // strictly higher version so any delayed older fill is fenced out.
         cache
-            .invalidate_after_update(&list_id, updated_at + 1)
+            .invalidate_after_update(&list_id, 2)
             .await
             .expect("write invalidation marker");
         let mut connection = cache.connection("test").await.expect("connect to Redis");
@@ -926,11 +937,11 @@ mod redis_tests {
         let now = crate::domain::service::current_unix_timestamp();
 
         cache
-            .invalidate_after_update(&list_id, now + 2)
+            .invalidate_after_update(&list_id, 2)
             .await
             .expect("write newer invalidation marker");
         cache
-            .invalidate_after_update(&list_id, now + 1)
+            .invalidate_after_update(&list_id, 1)
             .await
             .expect("write delayed older invalidation marker");
         cache
@@ -944,7 +955,10 @@ mod redis_tests {
             .query_async(&mut connection)
             .await
             .expect("read invalidation marker");
-        assert_eq!(marker, (now + 2).to_string());
+        assert_eq!(
+            marker, "2",
+            "the invalidation marker stores the highest committed version"
+        );
         assert_eq!(
             cache.get(&list_id).await.expect("delayed fill rejected"),
             None

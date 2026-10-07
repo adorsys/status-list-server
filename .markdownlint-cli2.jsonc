@@ -4,10 +4,12 @@
     "MD022": false,
     "MD024": false,
     "MD032": false,
-    "MD060": { "style": "aligned" }
+    "MD060": { "style": "consistent" }
   },
   "ignores": [
     "CHANGELOG.md",
-    "**/target"
+    "**/target",
+    "**/node_modules",
+    "**/.venv"
   ]
 }

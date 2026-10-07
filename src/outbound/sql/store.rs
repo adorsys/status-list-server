@@ -269,6 +269,7 @@ impl SeaOrmStore<StatusListRecord> {
                 status_list: Set(entity.status_list),
                 sub: Set(entity.sub),
                 updated_at: Set(entity.updated_at),
+                version: Set(entity.version),
             };
             if let Err(insert_err) = status_lists::Entity::insert(active)
                 .exec_without_returning(&txn)
@@ -368,6 +369,7 @@ impl SeaOrmStore<StatusListRecord> {
                     status_list: Set(entity.status_list),
                     sub: Set(entity.sub),
                     updated_at: Set(entity.updated_at),
+                    version: Set(entity.version),
                 };
                 if let Err(insert_err) = status_lists::Entity::insert(active)
                     .exec_without_returning(&txn)
@@ -455,9 +457,9 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Optimistic-concurrency update guarded on `updated_at`:
-    /// `UPDATE ... WHERE list_id = ? AND updated_at = ?`. `Ok(false)` means the
-    /// guard did not match — a racing writer advanced the stamp, or the row is
+    /// Optimistic-concurrency update guarded on `version`:
+    /// `UPDATE ... WHERE list_id = ? AND version = ?`. `Ok(false)` means the
+    /// guard did not match — a racing writer advanced the version, or the row is
     /// gone — so a lost update was prevented.
     ///
     /// `rows_affected` is used deliberately: its semantics are identical across
@@ -472,23 +474,23 @@ impl SeaOrmStore<StatusListRecord> {
     ///
     /// # Caller contract
     ///
-    /// `entity.updated_at` MUST be strictly greater than `expected_updated_at`.
-    /// With a non-advancing stamp two same-second writers would both match
-    /// `WHERE updated_at = expected` and both succeed, losing a flip. Enforced
+    /// `entity.version` MUST be strictly greater than `expected_version`. With a
+    /// non-advancing version two same-version writers would both match
+    /// `WHERE version = expected` and both succeed, losing a flip. Enforced
     /// below rather than trusted.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
         list_id: &str,
         entity: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: i64,
     ) -> Result<bool, RepositoryError> {
-        if entity.updated_at <= expected_updated_at {
+        if entity.version <= expected_version {
             return Err(RepositoryError::UpdateError(format!(
-                "guarded update requires a strictly newer updated_at \
-                 (new={}, expected-guard={}); a non-advancing stamp would \
-                 silently reintroduce the same-second lost update",
-                entity.updated_at, expected_updated_at
+                "guarded update requires a strictly newer version \
+                 (new={}, expected-guard={}); a non-advancing version would \
+                 silently reintroduce the same-version lost update",
+                entity.version, expected_version
             )));
         }
         time_query("update", "status_list", async {
@@ -505,8 +507,9 @@ impl SeaOrmStore<StatusListRecord> {
                     status_lists::Column::UpdatedAt,
                     Expr::value(entity.updated_at),
                 )
+                .col_expr(status_lists::Column::Version, Expr::value(entity.version))
                 .filter(status_lists::Column::ListId.eq(list_id))
-                .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+                .filter(status_lists::Column::Version.eq(expected_version))
                 .exec(&txn)
                 .await;
 
@@ -538,10 +541,10 @@ impl SeaOrmStore<StatusListRecord> {
     /// where the row changes but a failing snapshot insert leaves nothing
     /// recording it. Transaction semantics are portable across all three
     /// sea-orm backends (#143). Same `false`-on-guard-miss and
-    /// strictly-advancing-stamp contract as `update_one`.
+    /// strictly-advancing-version contract as `update_one`.
     ///
     /// Concurrency cost: the `UPDATE`'s row lock is held until `COMMIT`, across
-    /// the snapshot `INSERT`. A racing writer guarded on the same stamp blocks
+    /// the snapshot `INSERT`. A racing writer guarded on the same version blocks
     /// on that lock instead of reading `rows_affected == 0` immediately. It
     /// still resolves to `false`, but a conflict costs a lock wait.
     ///
@@ -551,7 +554,7 @@ impl SeaOrmStore<StatusListRecord> {
         &self,
         list_id: &str,
         entity: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: i64,
         snapshot: StatusListHistoryRecord,
     ) -> Result<bool, RepositoryError> {
         if snapshot.list_id != list_id || entity.list_id != list_id {
@@ -561,12 +564,12 @@ impl SeaOrmStore<StatusListRecord> {
             )));
         }
 
-        if entity.updated_at <= expected_updated_at {
+        if entity.version <= expected_version {
             return Err(RepositoryError::UpdateError(format!(
-                "guarded update requires a strictly newer updated_at \
-                 (new={}, expected-guard={}); a non-advancing stamp would \
-                 silently reintroduce the same-second lost update",
-                entity.updated_at, expected_updated_at
+                "guarded update requires a strictly newer version \
+                 (new={}, expected-guard={}); a non-advancing version would \
+                 silently reintroduce the same-version lost update",
+                entity.version, expected_version
             )));
         }
 
@@ -584,8 +587,9 @@ impl SeaOrmStore<StatusListRecord> {
                     status_lists::Column::UpdatedAt,
                     Expr::value(entity.updated_at),
                 )
+                .col_expr(status_lists::Column::Version, Expr::value(entity.version))
                 .filter(status_lists::Column::ListId.eq(list_id))
-                .filter(status_lists::Column::UpdatedAt.eq(expected_updated_at))
+                .filter(status_lists::Column::Version.eq(expected_version))
                 .exec(&txn)
                 .await;
 
@@ -902,10 +906,12 @@ impl SeaOrmStore<StatusListHistoryRecord> {
     /// Intervals intentionally overlap: each update writes a fresh snapshot with
     /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
     /// original (later) `exp`, so both can match a `time` in the overlap. That is
-    /// not an inconsistency — `ORDER BY iat DESC LIMIT 1` deterministically
-    /// returns the newest snapshot in effect at `time`, which is the correct
-    /// answer for "what was the status then". The memory adapter mirrors this via
-    /// `max_by_key(iat)`.
+    /// not an inconsistency — `ORDER BY iat DESC, version DESC LIMIT 1`
+    /// deterministically returns the newest snapshot in effect at `time`, which
+    /// is the correct answer for "what was the status then". The `version`
+    /// tie-breaker disambiguates two snapshots written within the same second
+    /// (identical `iat`) so the post-change snapshot wins. The memory adapter
+    /// mirrors this via `max_by_key((iat, version))`.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
@@ -919,6 +925,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 .filter(status_list_history::Column::Iat.lte(time))
                 .filter(status_list_history::Column::Exp.gt(time))
                 .order_by_desc(status_list_history::Column::Iat)
+                .order_by_desc(status_list_history::Column::Version)
                 .one(&*db)
                 .await
                 .map_err(find_err)

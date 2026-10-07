@@ -251,16 +251,16 @@ An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
 finds out instead of caching an empty aggregation. Responses carry a weak `ETag`
 and answer a matching `If-None-Match` with `304`.
 
-Every signed status list token needs its issuer's aggregation ID, so
+Serving a status list token needs its issuer's aggregation ID, so
 `CachingCredentialRepo` keeps found IDs in memory; an ID never changes once
 assigned.
 
 Without an ID, `GET /api/v1/aggregation` still returns every issuer's lists, for
-tokens issued before issuer scoping. It is deprecated. Tokens are signed on each
-request, so once every pod runs this release no newly served token points there.
-It can be removed once `token_exp_secs` has passed since the rollout and
-`aggregation_pages_total{scope="all"}` stays at zero; the metric catches relying
-parties that stored the URI instead of reading it from each token.
+tokens issued before issuer scoping. It is deprecated. No token this release
+serves points there, so it can be removed once `token_exp_secs` has passed since
+the rollout and `aggregation_pages_total{scope="all"}` stays at zero; the metric
+catches relying parties that stored the URI instead of reading it from each
+token.
 
 **Privacy.** Anyone holding one of an issuer's tokens can list all of that
 issuer's status lists, and from them count its lists and the share of its

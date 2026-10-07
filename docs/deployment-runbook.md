@@ -158,6 +158,17 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 
 The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
 
+**Certificate host vs. token `sub` host.** With ACME, the server obtains a
+certificate for `server.domain` (derived from `statuslist.ingress.externalDnsHostname`).
+The status list `sub` URI, however, is built from `server.public_base_url`
+(defaulting to `https://{server.domain}/api/v1`). If you set `APP_SERVER__PUBLIC_BASE_URL`
+to a different host than `server.domain`, the certificate will not cover the
+host in `sub`, and relying parties that pin the token signature to the host in
+`sub` will reject the tokens. Keep the two hosts the same unless you have a
+separate TLS-terminating layer covering the public URL. If the service is
+reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
+(e.g. `https://host:8443/api/v1`), since `server.domain` cannot carry a port.
+
 ### Content negotiation at the edge
 
 The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
@@ -281,12 +292,69 @@ podDisruptionBudget:
 
 `replicaCount` lives under `statuslist:` (the Deployment reads `statuslist.replicaCount`); `autoscaling` and `podDisruptionBudget` are top-level values. When `autoscaling.enabled=true` the Deployment omits `replicas` so the HPA controls the count. Keep `podDisruptionBudget.maxUnavailable` below the replica count (the safe default) so node drains do not get blocked.
 
+### Conditional GETs, ETags and the signed-token cache across replicas
+
+The live `GET /status-lists/{id}` endpoint serves a **strong** ETag (`"..."`) derived from a SHA-256 digest of the exact served representation bytes (RFC 9110 §8.8.3.1). Because ES256 signatures are randomized, the bytes differ across replicas, restarts, cold caches, capacity evictions and window roll-overs; the strong ETag therefore differs across replicas — this is a documented, accepted deviation from cross-replica ETag equality (ticket 564 acceptance criterion: "two replicas return matching ETags *or the issue documents why they don't*"). Within a single replica the ETag is stable for the whole token window, so a client revalidating against the same replica gets a `304` with no signing. The token window is exactly the token's full lifetime (`exp_secs`); the ETag changes on content update, key/certificate rotation, window roll-over, token-format/encoding change, aggregation URI or token lifetime change, or mid-window content revert.
+
+That cross-replica stability holds **only when replicas serve the same content with the same signing material and token configuration for the same representation and window**. During a rolling certificate or configuration change — or for different `token_ttl`/`token_exp` or aggregation-URI settings — ETags deliberately differ between replicas, so a revalidation against a replica on the other side of the change returns a freshly signed `200`. Coordinate certificate rotation and configuration rollout so the window during which replicas disagree is brief.
+
+The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
+
+- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. The default (64 MiB) is sized to hold several maximum-permitted lists (each near 1 MiB once wrapped in JWT/base64) plus many small ones. `0` disables the cache (every request re-signs).
+- Each entry expires at the **end of its own validity window** (window width is `exp_secs`), independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
+- The cache avoids re-signing *unchanged* tokens within a window on one replica, even under capacity pressure. A two-tier design (protected tier for latest-generation entries within their window, cold tier for superseded/expired entries) guarantees at most one signature per `(list, window, format)` per replica. A content change, a signer/certificate rotation, or a mid-window content revert to an earlier state always re-signs immediately (all are part of the cache key and the ETag). The monotonic `version` — not `iat` — guarantees a revert to earlier content produces a new key and ETag: a same-second A → B → A revert can leave `iat` unchanged, but `version` advances, so the new representation identity never collides with the pre-revert one.
+- Encoded variants (gzip for JWT, identity for both) and their strong ETags are pre-computed at cache insertion time and stored alongside the uncompressed bytes, so revalidation requests (including `304`) never need to re-compress.
+
+`status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = min(ttl, exp - now)`) vouch for a token that expires sooner.
+
+### Upgrade strategy for this release
+
+This release changes how status-list updates are fenced for concurrency: updates are now
+guarded on a dedicated `version` column (and the `meta:{id}:version` Redis marker) instead of
+the `updated_at` timestamp (and the `meta:{id}:updated` marker). The two guards are **not
+mutually compatible during a rolling deploy**: old pods guard only on `updated_at` and never
+touch `version`, while new pods guard only on `version` and can write a same-second
+`updated_at`. While both versions run they can overwrite each other's update without a
+conflict, and on the Redis path neither side's invalidation fences the other side's delayed
+fills — so a status change can be silently lost.
+
+Deploy this release with a **`Recreate` rollout strategy** so that no old and new pods ever
+run concurrently. The chart exposes the Deployment strategy through
+`statuslist.strategy`; set its type to `Recreate` for this upgrade:
+
+```bash
+helm upgrade --install statuslist ./deploy/helm/chart \
+  --set statuslist.strategy.type=Recreate \
+  ... # your other values
+```
+
+Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
+`maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
+two incompatible versions overlap. Scaling `statuslist.replicaCount`/HPA min/max down to `1`
+alone does **not** avoid that overlap either. If you cannot use `Recreate`, the only safe
+fallback is to scale the workload to **zero** before the upgrade and back up after (a short
+outage):
+
+```bash
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+# kubectl scale returns immediately, but old pods can take up to the 30s default
+# grace period to finish shutting down in-flight requests. Wait for them to be
+# gone before upgrading, otherwise the helm upgrade on the next line scales
+# replicas back up and new pods can start while old ones are still draining.
+kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+```
+
+Only scale back out after all pods are on the new version.
+
 ## Status List Aggregation
 
 Set `APP_SERVER__AGGREGATION_URI` to the aggregation endpoint's public URL, for
 example `https://statuslist.example.com/api/v1/aggregation`, to advertise it in
 status list tokens. It must be an `https` URL (`http` is accepted outside
-production) with no credentials, its path must be `/api/v1/aggregation`, and it
+production) with no credentials, its path must be `/aggregation` under
+`APP_SERVER__PUBLIC_BASE_URL`'s path (`/api/v1/aggregation` by default), and it
 must have no query or fragment: each token carries its issuer's URI, the
 configured one plus `/<aggregation_id>`. Pods refuse to start otherwise. Unset,
 tokens carry no `aggregation_uri`. The endpoints are served either way.
@@ -348,15 +416,16 @@ During the upgrade:
 - Issuers registered before the upgrade, or by an old pod during it, get an
   aggregation ID the first time one of their tokens is served. They can read it
   from `GET /api/v1/credentials`.
-- Status list tokens are signed on each request, so every token served after
-  the rollout carries the scoped URI. Tokens relying parties cached earlier
-  carry the unscoped one, which keeps working.
+- The signed-token cache is per pod and starts empty, so every token a new pod
+  serves carries the scoped URI. Tokens relying parties cached earlier carry
+  the unscoped one, which keeps working.
 
 ### Rolling back
 
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Remove
-the two records first. The schema changes stay, which the previous release
+this feature's two records first; other migrations shipped in the same release
+are not covered here. The schema changes stay, which the previous release
 ignores, and so do the aggregation IDs:
 
 ```sql
@@ -385,9 +454,8 @@ registering it again does the same to that issuer.
 - `aggregation_pages_total{scope="all"}` counts requests to the deprecated
   unscoped form. Remove that form once `token_exp_secs` has passed since the
   rollout and this stays at zero.
-- `aggregation_uri_omitted_total` counts tokens signed without
-  `aggregation_uri` because looking up the issuer's aggregation ID failed; the
-  tokens are still served.
+- `aggregation_uri_omitted_total` counts tokens served without
+  `aggregation_uri` because looking up the issuer's aggregation ID failed.
 
 ## Verification
 
@@ -432,6 +500,12 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 - `/health/ready` reports a failing backing store.
 - Check database readiness (PostgreSQL pod/connection), the ExternalSecret/SecretStore status (if ESO), and application env values.
+
+### Pod crash-loops at startup in a production profile
+
+- The pod exits before it becomes ready, with a log line like `server.public_base_url (https://localhost/api/v1) resolves to localhost/loopback in a production profile`.
+- This is a deliberate startup guard: a `localhost`/loopback `sub` can never be reached by a relying party, so a production profile (`APP_ENV=production`) refuses to start rather than silently signing tokens every relying party rejects. The Helm chart falls back to `localhost` when no host is configured, which is why an unconfigured upgrade hits this.
+- Set `APP_SERVER__DOMAIN` (or `APP_SERVER__PUBLIC_BASE_URL`) to the public host and redeploy. The guard keys off `APP_ENV`, so it only blocks production profiles; private/local hosts (`.local`, private IPv4, link-local, ULA) warn instead of stopping.
 
 ### Secret not synced (ESO)
 

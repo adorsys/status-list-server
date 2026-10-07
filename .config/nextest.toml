@@ -1,4 +1,4 @@
-# Container-backed tests must not run concurrently with each other.
+# Bound concurrent container-backed tests across nextest processes.
 #
 # Two suites start real Docker containers: the SQL backend proofs, one database
 # per test (`src/outbound/sql/test_containers.rs`), and the ACME provisioning
@@ -10,8 +10,9 @@
 # `WaitContainer(StartupTimeout)`, and the ACME tests time out waiting on
 # pebble. Both are pure scheduling artefacts.
 #
-# Serialising the group trades wall-clock time for determinism, which is the
-# right trade for tests whose entire purpose is proving real-backend behaviour.
+# Limiting the group to four trades wall-clock time for predictable resource use.
+# SQL fixtures also hold a process-wide four-slot semaphore for plain cargo test;
+# nextest needs this group because it runs tests in separate processes.
 [test-groups.containers]
 max-threads = 4
 
