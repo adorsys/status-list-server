@@ -121,8 +121,6 @@ services:
         FEATURES: ${FEATURES:-memory}
     container_name: status-list-server
     env_file:
-      - path: .env.template
-        required: false
       - path: .env
         required: false
     environment:
@@ -137,6 +135,11 @@ services:
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
       APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/dev.crt}
       APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/dev.key}
+      APP_DATABASE__HOST: ${APP_DATABASE__HOST:-db}
+      APP_DATABASE__PORT: ${APP_DATABASE__PORT:-5432}
+      APP_DATABASE__USERNAME: ${APP_DATABASE__USERNAME:-postgres}
+      APP_DATABASE__PASSWORD: ${APP_DATABASE__PASSWORD:-postgres}
+      APP_DATABASE__NAME: ${APP_DATABASE__NAME:-status-list}
       APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
       APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
       APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
