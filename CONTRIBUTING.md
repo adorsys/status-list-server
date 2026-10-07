@@ -79,39 +79,23 @@ unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
 They must also require **`CI Success`** and **`Helm Checks Success`**, and require
-_only_ those checks from `CI.yml` and `helm-checks.yml`. The jobs in `CI.yml` form
-several independent chains — the Rust jobs hang
-off `cargo-build`, the linters and scanners stand alone — deliberately, so that a
-network-dependent scanner is not the root of every Rust job. No single job therefore
-represents the suite; `ci-success` is what aggregates them, and it is the only thing
-that can represent the whole suite to branch protection. Helm chart rendering,
-linting and Kubernetes templating validation live in `helm-checks.yml`, aggregated by
-its own `helm-success` job. `helm-checks.yml` runs on every pull request — the
-expensive Helm jobs are gated on a lightweight `changes` gate rather than a
-path-filtered trigger — so `helm-success` always reports a status, which is what
-lets it be a required check without stranding pure-Rust merges in "Expected —
-Waiting for status to be reported". On a PR that touches no input the Helm jobs
-consume — the chart under `deploy/helm/**`, the observability configs under
-`deploy/observability/**`, the render action, the `.kube-linter.yaml` /
-`.trivyignore.yaml` configs, or the helper scripts in `scripts/` — the Helm jobs
-are skipped and `helm-success` reports green; a pure Rust change therefore does
-not pay for Helm feedback.
+_only_ those checks from `CI.yml` and `helm-checks.yml`. `ci-success` aggregates
+the Rust jobs in `CI.yml`; `helm-success` aggregates the Helm jobs in
+`helm-checks.yml`. `helm-checks.yml` runs on every pull request but skips its
+expensive jobs when a PR touches none of its inputs (the chart under
+`deploy/helm/**`, the observability configs under `deploy/observability/**`, the
+render action, `.kube-linter.yaml` / `.trivyignore.yaml`, or the scripts in
+`scripts/`), so `helm-success` always reports a status and never strands a
+pure-Rust merge.
 
-As of this writing the `Rules` ruleset on `develop` requires **`CI Success`** and
-**`Conventional Commits`**, and the `main branch guards` ruleset requires
-**`CI Success`**. `CI Success` is therefore already enforced on both protected
-branches; only **`Helm Checks Success`** is new. This PR introduces that check
-(alongside `helm-checks.yml`), so the rollout step below adds only the one new
-requirement rather than reshuffling an existing list:
+As of this writing **`CI Success`** and **`Conventional Commits`** are already
+required; only **`Helm Checks Success`** is new:
 
 1. Merge the PR that introduces `helm-checks.yml` and its `helm-success` aggregate.
 2. Add **`Helm Checks Success`** to the required status checks on both rulesets.
-   **`CI Success`** and **`Conventional Commits`** are already active and stay as-is.
 3. If individual workflow job names are ever added to a ruleset, remove them only
-   _after_ **`Helm Checks Success`** (and the existing **`CI Success`**) are required —
-   doing it in the
-   other order leaves a window
-   where a failing job blocks nothing.
+   after **`Helm Checks Success`** (and **`CI Success`**) are required; doing it the
+   other way leaves a window where a failing job blocks nothing.
 
 `ci-success` fails if any job it needs reported `failure` or `cancelled`. It also
 fails if any job reported `skipped`, with one allowed exception — `cargo-test-doc`,
