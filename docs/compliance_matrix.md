@@ -49,7 +49,7 @@ Status legend:
 
 The Tokens, Content-Type, CORS and Aggregation checks run in the normal CI
 Rust test suite; no network service is needed for these tests. Wire tests live in
-`src/server/handlers/status_list/conformance_tests.rs`; vector and multi-algorithm
+`tests/conformance/status_list.rs`; vector and multi-algorithm
 signature tests live in `src/server/handlers/status_list/utils/token.rs`.
 
 | Group        | Checks                                                                                                                                    | Tests                                                                                                              |

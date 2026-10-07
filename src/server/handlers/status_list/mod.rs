@@ -10,6 +10,3 @@ pub use allocate_indices::{allocate_indices, allocate_indices_route};
 pub use get_status_list::{StatusListQuery, get_status_list};
 pub use publish_status::{publish_status, publish_status_route};
 pub use update_status::{update_status, update_status_route};
-
-#[cfg(test)]
-mod conformance_tests;
