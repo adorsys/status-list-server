@@ -5,7 +5,7 @@
 //! These tests require Docker to be running. They spin up:
 //! - **Pebble** (ACME CA test server)
 //! - **challtestsrv** (DNS server for Pebble)
-//! - **LocalStack** (Secrets Manager)
+//! - **Floci** (Secrets Manager)
 //! - **Vault** (if enabled) or **OpenBao** (if enabled)
 
 use std::{future::Future, sync::Arc, time::Duration};
@@ -14,25 +14,53 @@ use aws_config::BehaviorVersion;
 #[cfg(feature = "vault")]
 use secrecy::SecretString;
 #[cfg(feature = "vault")]
-use status_list_server::{cert_manager::storage::Storage, outbound::vault::VaultClient};
+use status_list_server::outbound::vault::VaultClient;
 use status_list_server::{
     cert_manager::{
         CertManager,
         challenge::{Dns01Handler, PebbleDnsProvider},
         http_client::DefaultHttpClient,
+        storage::Storage,
     },
     outbound::aws::AwsSecretsManager,
 };
 #[cfg(feature = "vault")]
 use testcontainers_modules::hashicorp_vault::HashicorpVault;
-use testcontainers_modules::{
-    localstack::LocalStack,
-    testcontainers::{
-        ContainerAsync, GenericImage, ImageExt,
-        core::{IntoContainerPort, WaitFor},
-        runners::AsyncRunner,
-    },
+use testcontainers_modules::testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
 };
+
+const FLOCI_IMAGE: &str = "floci/floci";
+const FLOCI_TAG: &str = "2.2.0";
+
+async fn start_aws_emulator() -> ContainerAsync<GenericImage> {
+    start_with_retry(|| {
+        let image = GenericImage::new(FLOCI_IMAGE, FLOCI_TAG)
+            .with_exposed_port(4566.tcp())
+            .with_wait_for(WaitFor::http(
+                HttpWaitStrategy::new("/_floci/health").with_expected_status_code(200u16),
+            ))
+            .with_env_var("FLOCI_DEFAULT_REGION", AWS_REGION)
+            .with_env_var("FLOCI_STORAGE_MODE", "memory")
+            .with_env_var("FLOCI_SERVICES_SECRETSMANAGER_ENABLED", "true")
+            .with_env_var("FLOCI_SERVICES_S3_ENABLED", "false");
+        Box::pin(async move { image.start().await })
+    })
+    .await
+}
+
+async fn aws_config(image: &ContainerAsync<GenericImage>) -> aws_config::SdkConfig {
+    let host = image.get_host().await.unwrap();
+    let port = image.get_host_port_ipv4(4566).await.unwrap();
+    aws_config::defaults(BehaviorVersion::latest())
+        .region(aws_config::Region::new(AWS_REGION))
+        .endpoint_url(format!("http://{host}:{port}"))
+        .test_credentials()
+        .load()
+        .await
+}
 
 const PEBBLE_IMAGE: &str = "ghcr.io/letsencrypt/pebble";
 const PEBBLE_TAG: &str = "2.10";
@@ -84,11 +112,10 @@ const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 struct TestInfra {
     _challtestsrv: ContainerAsync<GenericImage>,
     _pebble: ContainerAsync<GenericImage>,
-    _localstack: ContainerAsync<LocalStack>,
+    aws_emulator: ContainerAsync<GenericImage>,
 
     pebble_acme_port: u16,
     challtestsrv_port: u16,
-    localstack_port: u16,
 }
 
 impl TestInfra {
@@ -135,36 +162,23 @@ impl TestInfra {
         })
         .await;
 
-        let localstack = start_with_retry(|| {
-            let image = LocalStack::default()
-                .with_tag("4.14")
-                .with_env_var("SERVICES", "secretsmanager");
-            Box::pin(async move { image.start().await })
-        })
-        .await;
+        let aws_emulator = start_aws_emulator().await;
 
         let pebble_acme_port = pebble.get_host_port_ipv4(14000).await.unwrap();
         let challtestsrv_port = challtestsrv.get_host_port_ipv4(8055).await.unwrap();
-        let localstack_port = localstack.get_host_port_ipv4(4566).await.unwrap();
 
         Self {
             _challtestsrv: challtestsrv,
             _pebble: pebble,
-            _localstack: localstack,
+            aws_emulator,
             pebble_acme_port,
             challtestsrv_port,
-            localstack_port,
         }
     }
 
-    /// Build an AWS SDK config pointing at the LocalStack endpoint.
+    /// Build an AWS SDK config pointing at the Floci endpoint.
     async fn aws_config(&self) -> aws_config::SdkConfig {
-        aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::Region::new(AWS_REGION))
-            .endpoint_url(format!("http://127.0.0.1:{}", self.localstack_port))
-            .test_credentials()
-            .load()
-            .await
+        aws_config(&self.aws_emulator).await
     }
 
     /// Build a `CertManager` with one cryptographic-material backend for both
