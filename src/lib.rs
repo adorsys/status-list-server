@@ -1,8 +1,3 @@
-// Keep conformance tests under tests/ while allowing access to crate-private fixtures.
-#[cfg(test)]
-#[path = "../tests/conformance/status_list.rs"]
-mod conformance_tests;
-
 // Ungated on purpose: plain `&str` data with no dependencies, so it is reachable
 // from test modules whatever feature gate they carry.
 #[cfg(test)]

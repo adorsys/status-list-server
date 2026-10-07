@@ -2,40 +2,25 @@
 use std::io::Read;
 
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{Request, StatusCode},
-    response::Response,
-};
 use base64::{
     Engine as _,
     prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD},
 };
 use coset::{CborSerializable, TaggedCborSerializable, cbor::Value};
+use reqwest::{Response, StatusCode};
 use serde_json::json;
-use tower::ServiceExt;
+mod support;
+use support::{TestServer, test_certificate};
 
-use crate::{
-    domain::{
-        models::status_list::{Status, StatusEntry},
-        service::PublishStatusListCommand,
-    },
-    server::AppState,
-    test_utils::{test_app_state, test_certificate},
+use status_list_server::domain::{
+    models::status_list::{Status, StatusEntry},
+    service::PublishStatusListCommand,
 };
 
-fn router(state: AppState) -> Router {
-    Router::new()
-        .nest("/api/v1", crate::startup::public_read_routes())
-        .layer(crate::startup::cors_layer())
-        .with_state(state)
-}
-
-async fn publish(state: &AppState) -> String {
+async fn publish(app: &TestServer) -> String {
     let list_id = uuid::Uuid::new_v4().to_string();
-    let uri = format!("https://example.com/api/v1/status-lists/{list_id}");
-    state
+    let uri = app.url(&format!("/api/v1/status-lists/{list_id}"));
+    app.state
         .service
         .publish_status_list(
             PublishStatusListCommand {
@@ -55,33 +40,26 @@ async fn publish(state: &AppState) -> String {
                 size: None,
                 default_status: None,
             },
-            &state.status_list_policy(),
+            &app.state.status_list_policy(),
         )
         .await
         .unwrap();
     uri
 }
 
-async fn get(app: &Router, uri: &str, accept: &str, encoding: &str) -> Response {
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .header("accept", accept)
-                .header("accept-encoding", encoding)
-                .header("origin", "https://verifier.example")
-                .body(Body::empty())
-                .unwrap(),
-        )
+async fn get(app: &TestServer, uri: &str, accept: &str, encoding: &str) -> Response {
+    app.client
+        .get(app.url(uri))
+        .header("accept", accept)
+        .header("accept-encoding", encoding)
+        .header("origin", "https://verifier.example")
+        .send()
         .await
         .unwrap()
 }
 
 async fn bytes(response: Response) -> Vec<u8> {
-    to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap()
-        .to_vec()
+    response.bytes().await.unwrap().to_vec()
 }
 
 fn certificate_key(der: &[u8]) -> Vec<u8> {
@@ -134,10 +112,8 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
         None,
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
-        let mut state = test_app_state(None).await;
-        state.aggregation_uri = aggregation_uri.clone();
-        let uri = publish(&state).await;
-        let app = router(state);
+        let app = TestServer::start(aggregation_uri.clone()).await;
+        let uri = publish(&app).await;
         let response = get(&app, &uri, "application/statuslist+jwt", "identity").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -171,10 +147,8 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
         None,
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
-        let mut state = test_app_state(None).await;
-        state.aggregation_uri = aggregation_uri.clone();
-        let uri = publish(&state).await;
-        let app = router(state);
+        let app = TestServer::start(aggregation_uri.clone()).await;
+        let uri = publish(&app).await;
         for encoding in ["identity", "gzip"] {
             let response = get(&app, &uri, "application/statuslist+cwt", encoding).await;
             assert_eq!(response.status(), StatusCode::OK);
@@ -243,8 +217,7 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
 
 #[tokio::test]
 async fn aggregation_body_and_list_uris_conform() {
-    let state = test_app_state(None).await;
-    let app = router(state.clone());
+    let app = TestServer::start(None).await;
     let response = get(&app, "/api/v1/aggregation", "application/json", "identity").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "application/json");
@@ -252,7 +225,7 @@ async fn aggregation_body_and_list_uris_conform() {
         serde_json::from_slice::<serde_json::Value>(&bytes(response).await).unwrap(),
         json!({"status_lists": []})
     );
-    let mut uris = vec![publish(&state).await, publish(&state).await];
+    let mut uris = vec![publish(&app).await, publish(&app).await];
     uris.sort();
     let response = get(&app, "/api/v1/aggregation", "application/json", "identity").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -270,20 +243,15 @@ async fn aggregation_body_and_list_uris_conform() {
 
 #[tokio::test]
 async fn cors_preflight_allows_public_get() {
-    let app = router(test_app_state(None).await);
+    let app = TestServer::start(None).await;
     for path in ["/api/v1/aggregation", "/api/v1/status-lists/test"] {
         let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("OPTIONS")
-                    .uri(path)
-                    .header("origin", "https://verifier.example")
-                    .header("access-control-request-method", "GET")
-                    .header("access-control-request-headers", "if-none-match")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .client
+            .request(reqwest::Method::OPTIONS, app.url(path))
+            .header("origin", "https://verifier.example")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "if-none-match")
+            .send()
             .await
             .unwrap();
         assert!(response.status().is_success());
@@ -317,11 +285,10 @@ fn assert_exposed_headers(response: &Response) {
 
 #[tokio::test]
 async fn browser_can_follow_aggregation_link_to_terminal_page() {
-    let state = test_app_state(None).await;
-    let mut expected = vec![publish(&state).await, publish(&state).await];
+    let app = TestServer::start(None).await;
+    let mut expected = vec![publish(&app).await, publish(&app).await];
     expected.sort();
-    let app = router(state);
-    let mut uri = url::Url::parse("https://example.com/api/v1/aggregation?limit=1").unwrap();
+    let mut uri = url::Url::parse(&app.url("/api/v1/aggregation?limit=1")).unwrap();
     let mut seen = Vec::new();
     for page_index in 0..2 {
         let response = get(&app, uri.as_str(), "application/json", "identity").await;

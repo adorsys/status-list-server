@@ -48,7 +48,9 @@ Status legend:
 ## Conformance test evidence (#577)
 
 The Tokens, Content-Type, CORS and Aggregation checks run in the normal CI
-Rust test suite; no network service is needed for these tests. Wire tests live in
+Rust test suite. The `conformance` integration target starts the production
+`HttpServer` on an ephemeral loopback port and uses an HTTP client; no external
+service is required. Wire tests live in
 `tests/conformance/status_list.rs`; vector and multi-algorithm
 signature tests live in `src/server/handlers/status_list/utils/token.rs`.
 
@@ -76,15 +78,3 @@ change token bytes and ETags, while existing compressed lists remain readable.
 Documentation follow-up for #8: Appendix C.3 and C.4 use reserved status values
 rejected since #557. These vectors cannot be reproduced through the supported
 status model; they are intentionally excluded, without bypassing validation.
-
-Review follow-up for #605: exact-vector tests also decompress both the generated
-and reference lists and check all 2^20 status entries, including zero-filled gaps.
-`libz-sys = 1.1.29` enables `static` and `stock-zlib` to build bundled zlib 1.3.2
-on the supported Linux/macOS targets rather than selecting a host pkg-config
-library. Do not override `LIBZ_SYS_STATIC=0`; dependency upgrades must rerun the
-exact vectors. The production byte change is intentional to meet #577; cache
-rollout effects and the breaking terminal cursor change are in the changelog.
-`browser_can_follow_aggregation_link_to_terminal_page` verifies that CORS exposes
-`Link` and that a browser can follow it to a terminal response. Repository searches
-found no client requiring the terminal `null` key; external compatibility remains
-an operator release check, not something these tests establish.

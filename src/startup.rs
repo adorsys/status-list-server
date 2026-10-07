@@ -110,6 +110,11 @@ impl HttpServer {
         Ok(Self { router, listener })
     }
 
+    /// The bound address, including the assigned port when binding to port zero.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
     pub async fn run(self) -> color_eyre::Result<()> {
         tracing::info!("listening on {}", self.listener.local_addr()?);
         axum::serve(
