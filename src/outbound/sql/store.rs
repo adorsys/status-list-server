@@ -1,7 +1,4 @@
-#[cfg(all(
-    test,
-    any(feature = "sqlite", feature = "mysql", feature = "postgres-tests")
-))]
+#[cfg(test)]
 mod tests;
 
 use arc_swap::ArcSwap;
