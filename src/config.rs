@@ -130,6 +130,7 @@ pub struct Config {
     pub gcp_secret_manager: GcpSecretManagerConfig,
     pub azure_keyvault: AzureKeyVaultConfig,
     pub cache: CacheConfig,
+    pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
     pub rate_limit: RateLimitConfig,
@@ -1356,6 +1357,16 @@ impl CacheConfig {
     }
 }
 
+/// Configuration for the per-replica, byte-bounded cache of fully signed
+/// status-list token bytes. Entries expire at their window boundary, and a
+/// zero capacity disables reuse; capacity pressure may evict an entry and
+/// cause a re-sign within the same window.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenBytesCacheConfig {
+    /// Byte budget bounding resident signed-token entries; `0` disables the cache.
+    pub max_capacity: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
@@ -1581,6 +1592,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
             "cache.reconnect_cooldown_ms",
             default_cache_reconnect_cooldown_ms(),
         )?
+        .set_default("token_bytes_cache.max_capacity", 67108864)?
         .set_default("status_list.token_exp_secs", 900)?
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
@@ -1654,6 +1666,7 @@ mod tests {
         assert_eq!(config.gcp_secret_manager.secrets_cache_ttl, 300);
         assert_eq!(config.azure_keyvault.vault_url, None);
         assert_eq!(config.azure_keyvault.secrets_cache_ttl, 300);
+        assert_eq!(config.token_bytes_cache.max_capacity, 67108864);
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.management_auth.leeway_secs, 60);
@@ -1751,6 +1764,7 @@ mod tests {
             ("cache.backend", "redis"),
             ("cache.ttl", "600"),
             ("cache.max_capacity", "2000"),
+            ("token_bytes_cache.max_capacity", "500"),
             ("cache.host", "redis"),
             ("cache.port", "6380"),
             ("cache.username", "default"),
@@ -1813,6 +1827,7 @@ mod tests {
         assert_eq!(overridden.cache.backend, CacheBackend::Redis);
         assert_eq!(overridden.cache.ttl, 600);
         assert_eq!(overridden.cache.max_capacity, 2000);
+        assert_eq!(overridden.token_bytes_cache.max_capacity, 500);
         assert_eq!(overridden.cache.host.as_deref(), Some("redis"));
         assert_eq!(overridden.cache.port, Some(6380));
         assert_eq!(overridden.cache.username.as_deref(), Some("default"));
@@ -2088,6 +2103,43 @@ mod tests {
         assert!(missing_db_password.contains("database.password"));
         assert!(!missing_db_password.contains("postgres://"));
         assert!(!missing_db_password.contains("status-list"));
+
+        // 3a. status_list.token_ttl_secs must be strictly < token_exp_secs
+        let valid_ttl = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "300"),
+            ("status_list.token_exp_secs", "900"),
+        ])
+        .expect("ttl < exp is valid");
+        assert_eq!(valid_ttl.status_list.token_ttl_secs, 300);
+
+        let ttl_ge_exp = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "900"),
+            ("status_list.token_exp_secs", "900"),
+        ])
+        .expect_err("ttl == exp must be rejected");
+        let ttl_ge_exp_msg = ttl_ge_exp.to_string();
+        assert!(
+            ttl_ge_exp_msg.contains("APP_STATUS_LIST__TOKEN_TTL_SECS"),
+            "the refusal must name the APP_STATUS_LIST__TOKEN_TTL_SECS env var: {ttl_ge_exp_msg}"
+        );
+        assert!(
+            ttl_ge_exp_msg.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
+            "the refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {ttl_ge_exp_msg}"
+        );
+
+        // ttl > exp must also be rejected.
+        let _ttl_gt_exp = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "600"),
+            ("status_list.token_exp_secs", "300"),
+        ])
+        .expect_err("ttl > exp must be rejected");
+
+        // exp == 0 is unusable (born-expired tokens) and is rejected by the same rule.
+        let _exp_zero = Config::load_from_overrides(&[
+            ("status_list.token_ttl_secs", "0"),
+            ("status_list.token_exp_secs", "0"),
+        ])
+        .expect_err("exp == 0 must be rejected (ttl >= 0 can never be < 0)");
 
         // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[
@@ -2414,6 +2466,55 @@ mod tests {
         assert!(
             zero_quota.is_err(),
             "a zero list quota would refuse every publish and must fail config loading"
+        );
+    }
+
+    #[test]
+    fn test_status_list_ttl_exp_validation_boundaries() {
+        // The valid boundary and the rejected cases each exercise
+        // `StatusListConfig::validate` directly, so removing or loosening the
+        // check fails these tests instead of silently passing through the
+        // positive `Config::load_from_overrides` path.
+        let valid = StatusListConfig {
+            token_exp_secs: 900,
+            token_ttl_secs: 300,
+            snapshot_retention_secs: 7776000,
+        };
+        assert!(valid.validate().is_ok(), "ttl < exp must be accepted");
+
+        let equal = StatusListConfig {
+            token_exp_secs: 600,
+            token_ttl_secs: 600,
+            snapshot_retention_secs: 7776000,
+        };
+        let err = equal
+            .validate()
+            .expect_err("ttl == exp must be rejected")
+            .to_string();
+        assert!(
+            err.contains("APP_STATUS_LIST__TOKEN_TTL_SECS"),
+            "refusal must name the APP_STATUS_LIST__TOKEN_TTL_SECS env var: {err}"
+        );
+        assert!(
+            err.contains("APP_STATUS_LIST__TOKEN_EXP_SECS"),
+            "refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {err}"
+        );
+
+        let gt = StatusListConfig {
+            token_exp_secs: 300,
+            token_ttl_secs: 600,
+            snapshot_retention_secs: 7776000,
+        };
+        assert!(gt.validate().is_err(), "ttl > exp must be rejected");
+
+        let exp_zero = StatusListConfig {
+            token_exp_secs: 0,
+            token_ttl_secs: 0,
+            snapshot_retention_secs: 7776000,
+        };
+        assert!(
+            exp_zero.validate().is_err(),
+            "exp == 0 must be rejected (ttl >= 0 can never be < 0)"
         );
     }
 

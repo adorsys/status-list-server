@@ -5622,6 +5622,7 @@ dependencies = [
  "color-eyre",
  "config",
  "coset",
+ "dashmap",
  "der 0.8.2",
  "dotenvy",
  "flate2",
