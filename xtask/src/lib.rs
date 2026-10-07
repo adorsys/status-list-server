@@ -396,7 +396,7 @@ mod tests {
     fn ci_delegates_to_the_authoritative_full_local_pipeline() {
         assert_eq!(
             ci_spec(),
-            CommandSpec::new("bash", ["local-ci.sh", "--full"])
+            CommandSpec::new("sh", ["local-ci.sh", "--full"])
         );
     }
 }
