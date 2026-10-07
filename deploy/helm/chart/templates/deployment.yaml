@@ -42,6 +42,8 @@ spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.statuslist.replicaCount }}
   {{- end }}
+  strategy:
+    {{- toYaml .Values.statuslist.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}

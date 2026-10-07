@@ -3,7 +3,7 @@ mod allocate_indices;
 mod get_status_list;
 mod publish_status;
 mod update_status;
-pub(super) mod utils;
+pub(crate) mod utils;
 
 pub use aggregation::{AggregationQuery, get_aggregation};
 pub use allocate_indices::{allocate_indices, allocate_indices_route};
