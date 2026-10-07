@@ -622,7 +622,7 @@ jobs:
               "observability": {"app", "otel-collector", "jaeger", "prometheus", "alertmanager", "grafana", "pushgateway"},
               "acme": {"app", "pebble", "challtestsrv"},
               "fscert": {"app", "filesystem-cert"},
-              "aws": {"app", "localstack"},
+              "aws": {"app", "floci"},
               "redis": {"app", "redis"},
           }
           for profile, services in expected.items():
