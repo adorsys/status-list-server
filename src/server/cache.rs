@@ -182,10 +182,10 @@ fn compress_gzip(bytes: &[u8]) -> Bytes {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     // Compression should never fail for valid input; if it does, fall back to
     // uncompressed (the caller will handle the error by not using gzip).
-    if encoder.write_all(bytes).is_ok() {
-        if let Ok(compressed) = encoder.finish() {
-            return Bytes::from(compressed);
-        }
+    if encoder.write_all(bytes).is_ok()
+        && let Ok(compressed) = encoder.finish()
+    {
+        return Bytes::from(compressed);
     }
     // Fallback: return uncompressed (should not happen in practice).
     Bytes::from(bytes.to_vec())

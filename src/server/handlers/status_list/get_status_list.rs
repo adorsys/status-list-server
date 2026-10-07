@@ -207,8 +207,10 @@ async fn get_status_list_at(
 
     // Recheck the clock after async work. If the request crossed the token's
     // expiry boundary, we must recompute the window and validator for the
-    // current window to avoid certifying a 304 for an expired token.
-    let now_after = OffsetDateTime::now_utc().unix_timestamp();
+    // current window to avoid certifying a 304 for an expired token. The
+    // request-time `now` is used so tests can advance the clock deterministically
+    // (see `get_status_list`); in production it is the request's entry time.
+    let now_after = now;
     let exp_after = if now_after >= exp {
         let window_start_after = token_window(now_after, validity).0;
         let iat_after = window_start_after;
