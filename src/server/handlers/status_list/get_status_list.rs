@@ -1200,55 +1200,63 @@ mod tests {
         );
     }
 
-    /// A token signed without the claim, for example while the aggregation ID
-    /// lookup was failing, must not be reused once the claim is available: a
-    /// client revalidating with its ETag gets the new token, not a 304.
+    /// Gaining or losing the claim, as when a failed aggregation ID lookup
+    /// recovers or aggregation is withheld, makes a new token, so a client
+    /// revalidating the old one gets it instead of a 304.
     #[tokio::test]
-    async fn test_revalidation_serves_a_new_token_once_it_carries_aggregation_uri() {
-        let mut app_state = test_app_state(None).await;
-        register_issuer(&app_state.service, "issuer1").await;
-        let token_id = uuid::Uuid::new_v4().to_string();
-        publish_status(
-            State(app_state.clone()),
-            authenticated_issuer("issuer1"),
-            Path(token_id.clone()),
-            Json(StatusesRequest { statuses: vec![] }),
-        )
-        .await
-        .unwrap();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let fetch = |app_state: AppState, headers: HeaderMap| {
-            get_status_list_at(
-                State(app_state),
-                token_id.clone(),
-                Ok(Query(StatusListQuery { time: None })),
-                headers,
-                now,
-            )
-        };
+    async fn test_revalidation_serves_a_new_token_when_aggregation_uri_changes() {
+        let scoped: Option<url::Url> = Some(AGGREGATION_BASE.parse().unwrap());
+        for (before, after) in [(None, scoped.clone()), (scoped, None)] {
+            for (condition, validator) in [
+                (header::IF_NONE_MATCH, header::ETAG),
+                (header::IF_MODIFIED_SINCE, header::LAST_MODIFIED),
+            ] {
+                let mut app_state = test_app_state(None).await;
+                app_state.aggregation_uri = before.clone();
+                register_issuer(&app_state.service, "issuer1").await;
+                let token_id = uuid::Uuid::new_v4().to_string();
+                publish_status(
+                    State(app_state.clone()),
+                    authenticated_issuer("issuer1"),
+                    Path(token_id.clone()),
+                    Json(StatusesRequest { statuses: vec![] }),
+                )
+                .await
+                .unwrap();
+                let now = OffsetDateTime::now_utc().unix_timestamp();
+                let fetch = |app_state: AppState, headers: HeaderMap| {
+                    get_status_list_at(
+                        State(app_state),
+                        token_id.clone(),
+                        Ok(Query(StatusListQuery { time: None })),
+                        headers,
+                        now,
+                    )
+                };
 
-        let first = fetch(app_state.clone(), HeaderMap::new())
-            .await
-            .unwrap()
-            .into_response();
-        let mut revalidation = HeaderMap::new();
-        revalidation.insert(header::IF_NONE_MATCH, first.headers()[header::ETAG].clone());
-        let unchanged = fetch(app_state.clone(), revalidation.clone())
-            .await
-            .unwrap()
-            .into_response();
-        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+                let first = fetch(app_state.clone(), HeaderMap::new())
+                    .await
+                    .unwrap()
+                    .into_response();
+                let mut revalidation = HeaderMap::new();
+                revalidation.insert(condition.clone(), first.headers()[&validator].clone());
+                app_state.aggregation_uri = after.clone();
+                let response = fetch(app_state, revalidation)
+                    .await
+                    .unwrap()
+                    .into_response();
 
-        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
-        let with_claim = fetch(app_state, revalidation)
-            .await
-            .unwrap()
-            .into_response();
-        assert_eq!(with_claim.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(with_claim.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(decode_jwt_claims(&body)["status_list"]["aggregation_uri"].is_string());
+                assert_eq!(response.status(), StatusCode::OK, "{condition}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    decode_jwt_claims(&body)["status_list"]["aggregation_uri"].is_string(),
+                    after.is_some(),
+                    "{condition}"
+                );
+            }
+        }
     }
 
     struct UnavailableCredentials;

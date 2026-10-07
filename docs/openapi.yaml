@@ -877,8 +877,8 @@ components:
           type: string
           format: uri
           description: |
-            The issuer's Status List Aggregation URI. Absent when the server
-            has no `server.aggregation_uri` configured.
+            The issuer's Status List Aggregation URI. Absent when status list
+            tokens do not carry one (see `StatusList.aggregation_uri`).
           example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
 
     RegistrationResponse:
@@ -898,7 +898,8 @@ components:
           type: string
           format: uri
           description: |
-            Absent when the server has no `server.aggregation_uri` configured.
+            Absent when status list tokens do not carry one (see
+            `StatusList.aggregation_uri`).
           example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
 
     JWK:
@@ -1112,7 +1113,8 @@ components:
           description: |
             The issuing issuer's Status List Aggregation URI (draft-21 §4.2,
             §4.3). Present when the server has `server.aggregation_uri`
-            configured and the list quota is enforced, unless looking up the
+            configured, the list quota is enforced and no issuer has more
+            status lists than one aggregation page, unless looking up the
             issuer's aggregation ID failed.
             Tokens served before issuer scoping carried the unscoped URI, which
             still resolves.
@@ -1225,6 +1227,7 @@ components:
             - invalid_count
             - duplicate_index
             - list_quota_exceeded
+            - invalid_aggregation_id
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
             - invalid_token
@@ -1236,6 +1239,7 @@ components:
             # 404
             - status_list_not_found
             - historical_status_list_not_found
+            - aggregation_not_found
             # 406
             - invalid_accept_header
             # 409

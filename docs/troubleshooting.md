@@ -916,7 +916,13 @@ it cannot be larger than the page.
 
 **Fix:** Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` to `1000` or less and roll the Deployment. Issuers
 that already hold more lists keep them, and their aggregation spans several pages, but every
-further publish is refused until they are back under the cap.
+further publish is refused until they are back under the cap. While any holds more than 1000,
+tokens carry no `aggregation_uri`, and pods say so at startup:
+
+```text
+server.aggregation_uri is not advertised in tokens: 1 issuer(s) have more status lists than one aggregation page (1000); delete lists until none does, then restart:
+    https://issuer.example (1003 lists)
+```
 
 ---
 
@@ -929,6 +935,10 @@ Because a recount racing enforced publishes could miss one, it only runs with th
 1. `status-list-server list-quota disable`
 2. `status-list-server list-quota recount`
 3. `status-list-server list-quota enable`
+
+While the quota is off, an issuer at the cap can publish past it, and pods that started with it
+enforced keep advertising `aggregation_uri` until they restart. If `enable` then refuses, roll the
+Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 
 `recount` runs this statement, which is also the migration's backfill (a unit test keeps the
 two identical). It is portable across PostgreSQL, MySQL and SQLite:
@@ -971,7 +981,7 @@ For quick grep, the application emits these verbatim:
 - `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri must be an http or https URL` / `server.aggregation_uri must use https in production` / `server.aggregation_uri must not contain credentials` / `server.aggregation_uri path '...' does not match the aggregation route '...'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
 - `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
-- `server.aggregation_uri is not advertised in tokens until the list quota is enforced` (WARN)
+- `server.aggregation_uri is not advertised in tokens: the list quota is not enforced` / `server.aggregation_uri is not advertised in tokens: N issuer(s) have more status lists than one aggregation page (1000); ...` (WARN)
 - `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,

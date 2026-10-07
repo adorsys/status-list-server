@@ -152,15 +152,7 @@ pub async fn enable(
 
     let max = i64::try_from(max_lists_per_issuer).unwrap_or(i64::MAX);
     // `max` is an integer, so interpolating it is safe.
-    let sql = format!(
-        "SELECT issuer, list_count, actual FROM (\
-           SELECT c.issuer AS issuer, c.list_count AS list_count, \
-             (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual \
-           FROM credentials c\
-         ) counts \
-         WHERE actual > {max} OR list_count <> actual \
-         ORDER BY issuer"
-    );
+    let sql = issuer_counts(&format!("actual > {max} OR list_count <> actual"));
     let offenders =
         IssuerCount::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
             .all(&txn)
@@ -185,6 +177,38 @@ pub async fn enable(
         over_quota,
         miscounted,
     })
+}
+
+/// Issuers with more than `limit` status lists. The quota bounds new lists
+/// only, so an issuer can still hold more from under an earlier, higher cap.
+pub async fn issuers_over(db: &DatabaseConnection, limit: u64) -> Result<Vec<IssuerCount>, DbErr> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    // `limit` is an integer, so interpolating it is safe.
+    let sql = issuer_counts(&format!("actual > {limit}"));
+    IssuerCount::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
+}
+
+/// Names `issuers` the way a refusal does.
+pub fn name_issuers(issuers: &[IssuerCount]) -> String {
+    let mut out = String::new();
+    list_issuers(&mut out, issuers, |c| format!("{} lists", c.actual));
+    out
+}
+
+/// Each issuer's `list_count` beside the lists it has (`actual`), where
+/// `condition` holds.
+fn issuer_counts(condition: &str) -> String {
+    format!(
+        "SELECT issuer, list_count, actual FROM (\
+           SELECT c.issuer AS issuer, c.list_count AS list_count, \
+             (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual \
+           FROM credentials c\
+         ) counts \
+         WHERE {condition} \
+         ORDER BY issuer"
+    )
 }
 
 pub async fn disable(db: &DatabaseConnection) -> Result<(), ListQuotaError> {

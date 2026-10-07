@@ -371,7 +371,8 @@ relying parties that do not page; pods refuse to start above it (see
 It only holds while the list quota is enforced. With
 `APP_LIMITS__LIST_QUOTA_TRANSITION` set, publishes past the cap are accepted and
 an issuer can outgrow one page, so tokens carry no `aggregation_uri` until the
-quota is enforced.
+quota is enforced. Nor do they while an issuer still holds more than 1000 lists
+from under an earlier, higher cap; pods name such issuers at startup.
 
 ### Upgrading to issuer-scoped aggregation
 

@@ -243,9 +243,10 @@ list quota holds each issuer to it. So a relying party that reads only
 `status_lists`, as draft-21 §9.3 defines it, gets every list. That holds only
 while the quota is enforced. While an operator runs with
 `limits.list_quota_transition`, publishes past the cap are accepted, so tokens
-carry no `aggregation_uri` until the quota is enforced. An issuer that had more
-lists before the quota was enforced keeps paging. Pages are read by a keyset
-scan on `(issuer, list_id)` and there is no total count.
+carry no `aggregation_uri` until the quota is enforced. An issuer can also hold
+more lists than one page from under an earlier, higher cap. It keeps paging, and
+while one does, tokens carry no `aggregation_uri` either. Pages are read by a
+keyset scan on `(issuer, list_id)` and there is no total count.
 
 An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
 finds out instead of caching an empty aggregation. Responses carry a weak `ETag`

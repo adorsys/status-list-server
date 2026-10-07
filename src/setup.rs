@@ -52,6 +52,8 @@ use crate::config::CacheBackend;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
 use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -400,8 +402,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
-    // False only while an upgrade runs with `limits.list_quota_transition`.
-    let list_quota_enforced: bool;
+    // Why tokens must leave out `aggregation_uri`, when they must.
+    let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -414,7 +416,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             {
                 db_arc = None;
             }
-            list_quota_enforced = true;
+            aggregation_withheld = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -449,7 +451,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      above for the fix.",
             )?;
 
-            list_quota_enforced = match list_quota::on_startup(
+            let list_quota_enforced = match list_quota::on_startup(
                 &db,
                 fresh,
                 config.limits.list_quota_transition,
@@ -476,6 +478,22 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     );
                     false
                 }
+            };
+            aggregation_withheld = if list_quota_enforced {
+                let over = list_quota::issuers_over(&db, AGGREGATION_DEFAULT_LIMIT as u64)
+                    .await
+                    .wrap_err("Failed to count each issuer's status lists")?;
+                (!over.is_empty()).then(|| {
+                    format!(
+                        "{} issuer(s) have more status lists than one aggregation page \
+                         ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
+                         restart:{}",
+                        over.len(),
+                        list_quota::name_issuers(&over)
+                    )
+                })
+            } else {
+                Some("the list quota is not enforced".to_string())
             };
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
@@ -803,7 +821,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
-        aggregation_uri: advertised_aggregation_uri(config, list_quota_enforced)?,
+        aggregation_uri: advertised_aggregation_uri(config, aggregation_withheld.as_deref())?,
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -828,20 +846,18 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
-/// The aggregation URI tokens advertise. Without the list quota an issuer's
-/// aggregation can outgrow one page, which a draft-21 §9.3 client takes as
-/// complete, so tokens leave the claim out until the quota is enforced.
+/// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
+/// page of an issuer's aggregation as complete, so tokens leave the claim out,
+/// for the reason in `withheld`, while one might not fit in it.
 fn advertised_aggregation_uri(
     config: &AppConfig,
-    list_quota_enforced: bool,
+    withheld: Option<&str>,
 ) -> EyeResult<Option<url::Url>> {
     let uri = config
         .server
         .aggregation_uri(config.telemetry.environment)?;
-    if uri.is_some() && !list_quota_enforced {
-        tracing::warn!(
-            "server.aggregation_uri is not advertised in tokens until the list quota is enforced"
-        );
+    if let (Some(_), Some(reason)) = (&uri, withheld) {
+        tracing::warn!("server.aggregation_uri is not advertised in tokens: {reason}");
         return Ok(None);
     }
     Ok(uri)
@@ -1254,17 +1270,95 @@ mod tests {
 mod general_tests {
     use super::*;
 
-    /// In quota transition publishes past the cap are accepted, so an issuer can
-    /// outgrow one aggregation page while tokens would still point at it.
     #[test]
-    fn aggregation_uri_is_withheld_until_the_list_quota_is_enforced() {
+    fn aggregation_uri_is_withheld_for_a_reason() {
         let config = AppConfig::load_from_overrides(&[(
             "server.aggregation_uri",
             "https://statuslist.example.com/api/v1/aggregation",
         )])
         .unwrap();
-        assert!(advertised_aggregation_uri(&config, true).unwrap().is_some());
-        assert_eq!(advertised_aggregation_uri(&config, false).unwrap(), None);
+        assert!(advertised_aggregation_uri(&config, None).unwrap().is_some());
+        assert_eq!(
+            advertised_aggregation_uri(&config, Some("the list quota is not enforced")).unwrap(),
+            None
+        );
+    }
+
+    /// Overrides that let `build_state` start whichever features are built.
+    /// Keep it while the state is in use: it serves the mocked Vault.
+    struct Startable {
+        overrides: Vec<(&'static str, String)>,
+        #[cfg(feature = "vault")]
+        _vault: wiremock::MockServer,
+    }
+
+    impl Startable {
+        async fn new() -> Self {
+            #[cfg(feature = "vault")]
+            let vault = {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::path("/v1/auth/approle/login"))
+                    .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({
+                            "auth": {
+                                "client_token": "s.mock-token",
+                                "lease_duration": 3600,
+                                "renewable": true
+                            }
+                        }),
+                    ))
+                    .mount(&server)
+                    .await;
+                server
+            };
+            #[cfg(not(feature = "acme"))]
+            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate test cert and key");
+
+            Self {
+                overrides: Vec::from([
+                    #[cfg(not(feature = "acme"))]
+                    (
+                        "APP_SERVER__CERT__STORE__CERTIFICATE",
+                        certified_key.cert.pem(),
+                    ),
+                    #[cfg(not(feature = "acme"))]
+                    (
+                        "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                        certified_key.signing_key.serialize_pem(),
+                    ),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__ADDR", vault.uri()),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__ROLE_ID", "test-role".to_string()),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__SECRET_ID", "test-secret".to_string()),
+                    #[cfg(feature = "gcp")]
+                    (
+                        "APP_GCP_SECRET_MANAGER__PROJECT_ID",
+                        "test-project".to_string(),
+                    ),
+                    #[cfg(feature = "azure")]
+                    (
+                        "APP_AZURE_KEYVAULT__VAULT_URL",
+                        "https://test.vault.azure.net/".to_string(),
+                    ),
+                ]),
+                #[cfg(feature = "vault")]
+                _vault: vault,
+            }
+        }
+
+        fn config(&self, overrides: &[(&str, &str)]) -> AppConfig {
+            let overrides: Vec<_> = self
+                .overrides
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .chain(overrides.iter().copied())
+                .collect();
+            AppConfig::load_from_overrides(&overrides).expect("Failed to load config")
+        }
     }
 
     /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
@@ -1273,60 +1367,103 @@ mod general_tests {
     #[tokio::test]
     async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        #[cfg(feature = "vault")]
-        let mock_vault = {
-            let server = wiremock::MockServer::start().await;
-            wiremock::Mock::given(wiremock::matchers::method("POST"))
-                .and(wiremock::matchers::path("/v1/auth/approle/login"))
-                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({
-                        "auth": {
-                            "client_token": "s.mock-token",
-                            "lease_duration": 3600,
-                            "renewable": true
-                        }
-                    }),
-                ))
-                .mount(&server)
-                .await;
-            server
-        };
-
-        #[cfg(not(feature = "acme"))]
-        let (cert_pem, key_pem) = {
-            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-                .expect("generate test cert and key");
-            (
-                certified_key.cert.pem(),
-                certified_key.signing_key.serialize_pem(),
-            )
-        };
-
-        let config = AppConfig::load_from_overrides(&[
+        let startable = Startable::new().await;
+        let config = startable.config(&[
             ("APP_DATABASE__BACKEND", "memory"),
             ("APP_DATABASE__URL", "memory:"),
-            #[cfg(not(feature = "acme"))]
-            ("APP_SERVER__CERT__STORE__CERTIFICATE", &cert_pem),
-            #[cfg(not(feature = "acme"))]
-            ("APP_SERVER__CERT__STORE__SIGNING_KEY", &key_pem),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__ADDR", &mock_vault.uri()),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__ROLE_ID", "test-role"),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__SECRET_ID", "test-secret"),
-            #[cfg(feature = "gcp")]
-            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
-            #[cfg(feature = "azure")]
-            (
-                "APP_AZURE_KEYVAULT__VAULT_URL",
-                "https://test.vault.azure.net/",
-            ),
-        ])
-        .expect("Failed to load config");
+        ]);
 
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
+        }
+    }
+
+    /// Pods of a deployment, restarted on one SQLite database.
+    #[cfg(feature = "sqlite")]
+    mod aggregation_withheld {
+        use super::*;
+        use crate::test_utils::{publish_list, publish_list_under_quota, register_issuer};
+
+        const AGGREGATION_URI: &str = "https://statuslist.example.com/api/v1/aggregation";
+
+        /// A database file, which outlives a restart as a deployment's does.
+        /// Returns its directory, to remove afterwards, and its URL.
+        fn database_file() -> (std::path::PathBuf, String) {
+            let dir = std::env::temp_dir().join(format!("status-list-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            let url = format!("sqlite://{}?mode=rwc", dir.join("status-list.db").display());
+            (dir, url)
+        }
+
+        /// In transition publishes past the cap are accepted, so an issuer's
+        /// aggregation can outgrow one page.
+        #[tokio::test]
+        async fn in_quota_transition_with_an_issuer_over_the_cap() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let deployment = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                ("APP_SERVER__AGGREGATION_URI", AGGREGATION_URI),
+                ("APP_LIMITS__MAX_LISTS_PER_ISSUER", "2"),
+            ];
+            let config = startable.config(&deployment);
+            let fresh = build_state(&config).await.expect("first start");
+            assert!(fresh.aggregation_uri.is_some());
+
+            // As on a database a release without the quota has served.
+            run_list_quota_command(&config, "disable")
+                .await
+                .expect("disable the quota");
+            let mut transition = deployment.to_vec();
+            transition.push(("APP_LIMITS__LIST_QUOTA_TRANSITION", "true"));
+            let state = build_state(&startable.config(&transition))
+                .await
+                .expect("start in transition");
+            register_issuer(&state.service, "issuer1").await;
+            for _ in 0..3 {
+                let list_id = uuid::Uuid::new_v4().to_string();
+                publish_list_under_quota(&state.service, "issuer1", &list_id, 2)
+                    .await
+                    .expect("the cap is lifted in transition");
+            }
+
+            assert_eq!(state.aggregation_uri, None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The quota bounds new lists only, so an issuer keeps any it published
+        /// under an earlier, higher cap.
+        #[tokio::test]
+        async fn while_an_issuer_has_more_lists_than_one_page() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let config = startable.config(&[
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", &database),
+                ("APP_SERVER__AGGREGATION_URI", AGGREGATION_URI),
+            ]);
+            let state = build_state(&config).await.expect("first start");
+            assert!(state.aggregation_uri.is_some());
+
+            // An earlier build enforced a cap above one page.
+            run_list_quota_command(&config, "disable")
+                .await
+                .expect("disable the quota");
+            register_issuer(&state.service, "issuer1").await;
+            for _ in 0..=AGGREGATION_DEFAULT_LIMIT {
+                publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
+            }
+            let db = connect_database_pool(&config).await.expect("connect");
+            list_quota::enable(&db, 2 * AGGREGATION_DEFAULT_LIMIT as u64)
+                .await
+                .expect("enable under the earlier cap");
+
+            let restarted = build_state(&config).await.expect("restart");
+            assert_eq!(restarted.aggregation_uri, None);
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
