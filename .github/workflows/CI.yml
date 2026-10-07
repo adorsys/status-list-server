@@ -304,11 +304,14 @@ jobs:
         # either no longer exists upstream.
         run: |
           set -eu
+          n=0
           while IFS= read -r line; do
             ref=$(printf '%s' "$line" | sed -n 's/^FROM --platform=\$BUILDPLATFORM \([^ ]*\) AS .*/\1/p')
             echo "inspecting $ref"
             docker buildx imagetools inspect "$ref" >/dev/null
+            n=$((n+1))
           done < <(grep -E '^FROM --platform=\$BUILDPLATFORM blackdex/rust-musl:' Dockerfile)
+          [ "$n" -eq 2 ] || { echo "expected 2 builder FROM lines, found $n"; exit 1; }
 
       - name: Docker build (production features)
         # No FEATURES build-arg: the Dockerfile default is already the release set, and
