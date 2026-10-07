@@ -46,7 +46,7 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // Seed a status list at a known timestamp
+        // Seed a status list at a known version and timestamp
         let base_timestamp = 1000i64;
         let list_id = "list-contention-mysql";
         let base_record = StatusListRecord {
@@ -60,6 +60,7 @@ mod database_implementation {
             },
             sub: "sub-contention".to_string(),
             updated_at: base_timestamp,
+            version: 1,
         };
         store_a
             .insert_one(base_record.clone(), fixtures::NO_LIST_QUOTA)
@@ -93,7 +94,7 @@ mod database_implementation {
                     size: None,
                     default_status: None,
                 },
-                updated_at: updated_at_a,
+                version: base_record_a.version + 1,
                 ..base_record_a.clone()
             };
             let snapshot_a = StatusListHistoryRecord {
@@ -104,10 +105,11 @@ mod database_implementation {
                 sub: record_a.sub.clone(),
                 iat: updated_at_a,
                 exp: updated_at_a + 900,
+                version: record_a.version,
             };
 
             store_a_clone
-                .update_one_with_snapshot(list_id, record_a, base_timestamp, snapshot_a)
+                .update_one_with_snapshot(list_id, record_a, base_record_a.version, snapshot_a)
                 .await
                 .expect("Update A should complete")
         });
@@ -134,7 +136,7 @@ mod database_implementation {
                     size: None,
                     default_status: None,
                 },
-                updated_at: updated_at_b,
+                version: base_record_b.version + 1,
                 ..base_record_b.clone()
             };
             let snapshot_b = StatusListHistoryRecord {
@@ -145,13 +147,14 @@ mod database_implementation {
                 sub: record_b.sub.clone(),
                 iat: updated_at_b,
                 exp: updated_at_b + 900,
+                version: record_b.version,
             };
 
-            // This update uses the ORIGINAL base_timestamp as guard
-            // After A commits, the row has updated_at = base_timestamp + 1
-            // So this guard (base_timestamp) should miss → returns false
+            // This update uses the ORIGINAL base version as guard. After A
+            // commits, the row has version = base + 1, so this stale guard
+            // (base) should miss → returns false.
             let result = store_b_clone
-                .update_one_with_snapshot(list_id, record_b, base_timestamp, snapshot_b)
+                .update_one_with_snapshot(list_id, record_b, base_record_b.version, snapshot_b)
                 .await
                 .expect("Update B should complete");
 
@@ -223,9 +226,9 @@ mod database_implementation {
             "A's write should be persisted"
         );
         assert_eq!(
-            final_record.updated_at,
-            base_timestamp + 1,
-            "updated_at should be A's timestamp"
+            final_record.version,
+            base_record.version + 1,
+            "version should reflect A's committed write"
         );
 
         // Verify A's winning snapshot was created.
@@ -297,6 +300,7 @@ mod database_implementation {
             },
             sub: format!("sub-{list_id}"),
             updated_at,
+            version: 1,
         };
         let snapshot = move |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
             snapshot_id: snapshot_id.to_string(),
@@ -311,6 +315,7 @@ mod database_implementation {
             sub: format!("sub-{list_id}"),
             iat,
             exp: iat + 900,
+            version: 1,
         };
 
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
@@ -838,9 +843,9 @@ mod database_implementation {
             .await
             .expect("A failed to take the row lock");
 
-        // B's guard is valid — the row really is still at `v`. B fails purely
-        // because it cannot acquire the lock within its 1s budget, which is what
-        // makes this contention rather than a lost race.
+        // B's guard is valid — the row really is still at `base.version`. B fails
+        // purely because it cannot acquire the lock within its 1s budget, which is
+        // what makes this contention rather than a lost race.
         let result = store_b
             .update_one(
                 list_id,
@@ -852,9 +857,10 @@ mod database_implementation {
                         default_status: None,
                     },
                     updated_at: v + 1,
+                    version: base.version + 1,
                     ..base.clone()
                 },
-                v,
+                base.version,
             )
             .await;
 
@@ -991,9 +997,10 @@ mod database_implementation {
                             default_status: None,
                         },
                         updated_at: v + 1,
+                        version: base.version + 1,
                         ..base
                     },
-                    v,
+                    base.version,
                     StatusListHistoryRecord {
                         snapshot_id: snapshot_id.to_string(),
                         list_id: list_id.to_string(),
@@ -1007,6 +1014,7 @@ mod database_implementation {
                         sub: "sub-deadlock".to_string(),
                         iat: v + 1,
                         exp: v + 901,
+                        version: base.version + 1,
                     },
                 )
                 .await
@@ -1082,8 +1090,13 @@ mod database_implementation {
             txn_a
                 .execute(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE status_lists SET sub = 'a', updated_at = $1 WHERE list_id = $2",
-                    vec![Value::from(v + 5), Value::from(list_id)],
+                    "UPDATE status_lists SET sub = 'a', updated_at = $1, version = $2 \
+                     WHERE list_id = $3",
+                    vec![
+                        Value::from(v + 5),
+                        Value::from(base.version + 1),
+                        Value::from(list_id),
+                    ],
                 ))
                 .await
                 .expect("A failed to take the row lock");
@@ -1096,6 +1109,7 @@ mod database_implementation {
                     default_status: None,
                 },
                 updated_at: v + 1,
+                version: base.version + 1,
                 ..base
             };
             let b_call = tokio::spawn(async move {
@@ -1104,7 +1118,7 @@ mod database_implementation {
                         .update_one_with_snapshot(
                             list_id,
                             updated,
-                            v,
+                            base.version,
                             StatusListHistoryRecord {
                                 snapshot_id: "snap-pinned".to_string(),
                                 list_id: list_id.to_string(),
@@ -1118,11 +1132,12 @@ mod database_implementation {
                                 sub: "sub-pinned".to_string(),
                                 iat: v + 1,
                                 exp: v + 901,
+                                version: base.version + 1,
                             },
                         )
                         .await
                 } else {
-                    store_b.update_one(list_id, updated, v).await
+                    store_b.update_one(list_id, updated, base.version).await
                 }
             });
 
