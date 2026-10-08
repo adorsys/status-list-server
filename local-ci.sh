@@ -53,7 +53,7 @@ usage() {
 Usage: ./local-ci.sh [--full] [--no-bootstrap] [--gate NAME] [--help]
 
 Modes:
-  default       Fast day-to-day gates: fmt, build, memory/release feature checks,
+  default       Fast day-to-day gates: fmt, build, profile/release feature checks,
                 domain purity, clippy, nextest, docs, doctests, machete, and
                 fast local workflow/script wiring checks.
   --full        Practical local parity with GitHub CI: default gates plus zizmor,
@@ -408,6 +408,8 @@ rust_default_gates() {
     run cargo build --workspace --all-targets --all-features
     log "Memory-only build"
     run cargo check --no-default-features --features memory
+    log "Cargo feature profiles"
+    run cargo xtask check-profiles
     release_image_features_check
     domain_purity_check
     log "Cargo clippy"

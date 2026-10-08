@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,8 +14,14 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Task::CheckProfiles => check_profiles(&workspace),
-        Task::Build { profile } => run_spec(build_spec(profile), &workspace),
-        Task::Test { profile } => run_spec(test_spec(profile), &workspace),
+        Task::Build { profile, release } => run_spec(build_spec(profile, release), &workspace),
+        Task::Test { profile, args } => {
+            let runner = detect_test_runner()?;
+            for spec in test_specs(profile, runner, &args) {
+                run_spec(spec, &workspace)?;
+            }
+            Ok(())
+        }
         Task::Lint => run_checks(
             lint_specs().map(|(name, spec)| (name.to_owned(), spec)),
             |spec| run_spec(spec, &workspace),
@@ -34,7 +42,7 @@ struct Cli {
     command: Task,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Debug, Eq, PartialEq, Subcommand)]
 enum Task {
     /// Check every supported feature profile.
     CheckProfiles,
@@ -43,12 +51,18 @@ enum Task {
         /// Cargo feature profile to build.
         #[arg(long, value_enum, default_value_t = FeatureProfile::Postgres)]
         profile: FeatureProfile,
+        /// Build with Cargo's release configuration.
+        #[arg(long)]
+        release: bool,
     },
     /// Test the workspace.
     Test {
         /// Cargo feature profile to test.
         #[arg(long, value_enum, default_value_t = FeatureProfile::Postgres)]
         profile: FeatureProfile,
+        /// Test name filters and runner options following `--`.
+        #[arg(last = true)]
+        args: Vec<OsString>,
     },
     /// Run formatting, Clippy, cargo-audit, and cargo-machete.
     Lint,
@@ -184,15 +198,15 @@ impl fmt::Display for FeatureProfile {
 #[derive(Debug, Eq, PartialEq)]
 struct CommandSpec {
     program: &'static str,
-    args: Vec<&'static str>,
+    args: Vec<OsString>,
     env: Vec<(&'static str, &'static str)>,
 }
 
 impl CommandSpec {
-    fn new(program: &'static str, args: impl IntoIterator<Item = &'static str>) -> Self {
+    fn new(program: &'static str, args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
         Self {
             program,
-            args: args.into_iter().collect(),
+            args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
         }
     }
@@ -254,8 +268,8 @@ fn check_spec(profile: FeatureProfile) -> CommandSpec {
     CommandSpec::new("cargo", args)
 }
 
-fn build_spec(profile: FeatureProfile) -> CommandSpec {
-    let args = [
+fn build_spec(profile: FeatureProfile, release: bool) -> CommandSpec {
+    let mut args: Vec<_> = [
         "build",
         "--package",
         "status-list-server",
@@ -263,20 +277,70 @@ fn build_spec(profile: FeatureProfile) -> CommandSpec {
         "status-list-server",
     ]
     .into_iter()
-    .chain(profile.cargo_args());
+    .chain(profile.cargo_args())
+    .collect();
+    if release {
+        args.push("--release");
+    }
     CommandSpec::new("cargo", args)
 }
 
-fn test_spec(profile: FeatureProfile) -> CommandSpec {
-    let mut args: Vec<_> = ["test", "--workspace"]
-        .into_iter()
-        .chain(profile.cargo_args())
-        .collect();
-    let test_features = profile.definition().test_features;
-    if !test_features.is_empty() {
-        args.extend(["--features", test_features]);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestRunner {
+    Cargo,
+    Nextest,
+}
+
+fn detect_test_runner() -> Result<TestRunner> {
+    match Command::new("cargo-nextest")
+        .args(["nextest", "--version"])
+        .output()
+    {
+        Ok(output) => {
+            ensure!(
+                output.status.success(),
+                "cargo-nextest version probe failed: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(TestRunner::Nextest)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            println!(
+                "cargo-nextest is not installed; using cargo test without nextest's timeouts and test groups."
+            );
+            Ok(TestRunner::Cargo)
+        }
+        Err(error) => Err(error).wrap_err("failed to probe cargo-nextest"),
     }
-    CommandSpec::new("cargo", args)
+}
+
+fn test_specs(
+    profile: FeatureProfile,
+    runner: TestRunner,
+    test_args: &[OsString],
+) -> Vec<CommandSpec> {
+    let mut specs = match runner {
+        TestRunner::Cargo => vec![CommandSpec::new("cargo", ["test", "--workspace"])],
+        TestRunner::Nextest => vec![
+            CommandSpec::new("cargo", ["nextest", "run", "--workspace", "--all-targets"]),
+            CommandSpec::new("cargo", ["test", "--doc", "--workspace"]),
+        ],
+    };
+    let test_features = profile.definition().test_features;
+    for spec in &mut specs {
+        spec.args
+            .extend(profile.cargo_args().into_iter().map(OsString::from));
+        if !test_features.is_empty() {
+            spec.args
+                .extend(["--features", test_features].map(OsString::from));
+        }
+        if !test_args.is_empty() {
+            spec.args.push("--".into());
+            spec.args.extend_from_slice(test_args);
+        }
+    }
+    specs
 }
 
 fn lint_specs() -> [(&'static str, CommandSpec); 4] {
@@ -380,7 +444,8 @@ mod tests {
         assert_eq!(
             parse(&["build"]).expect("build parses").command,
             Task::Build {
-                profile: FeatureProfile::Postgres
+                profile: FeatureProfile::Postgres,
+                release: false,
             }
         );
     }
@@ -392,7 +457,8 @@ mod tests {
                 .expect("separate profile parses")
                 .command,
             Task::Test {
-                profile: FeatureProfile::Redis
+                profile: FeatureProfile::Redis,
+                args: vec![],
             }
         );
         assert_eq!(
@@ -416,6 +482,81 @@ mod tests {
             .expect_err("extra lint argument must be rejected")
             .to_string();
         assert!(extra.contains("unexpected argument 'extra'"));
+    }
+
+    #[test]
+    fn build_release_and_test_arguments_preserve_the_selected_profile() {
+        assert_eq!(
+            parse(&["build", "--profile", "sqlite", "--release"])
+                .unwrap()
+                .command,
+            Task::Build {
+                profile: FeatureProfile::Sqlite,
+                release: true
+            }
+        );
+        assert!(
+            build_spec(FeatureProfile::Sqlite, true)
+                .args
+                .contains(&OsString::from("--release"))
+        );
+        assert!(
+            !build_spec(FeatureProfile::Sqlite, false)
+                .args
+                .contains(&OsString::from("--release"))
+        );
+        let args = vec![OsString::from("my test"), OsString::from("--exact")];
+        assert_eq!(
+            parse(&["test", "--profile", "sqlite", "--", "my test", "--exact"])
+                .unwrap()
+                .command,
+            Task::Test {
+                profile: FeatureProfile::Sqlite,
+                args: args.clone()
+            }
+        );
+        for runner in [TestRunner::Cargo, TestRunner::Nextest] {
+            for spec in test_specs(FeatureProfile::Sqlite, runner, &args) {
+                assert_eq!(
+                    &spec.args[spec.args.len() - 3..],
+                    &[OsString::from("--"), args[0].clone(), args[1].clone()]
+                );
+            }
+        }
+        assert!(parse(&["build", "--", "--features", "mysql"]).is_err());
+    }
+
+    #[test]
+    fn nextest_runs_all_targets_and_preserves_doctests() {
+        let specs = test_specs(FeatureProfile::Minimal, TestRunner::Nextest, &[]);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[0].args,
+            [
+                "nextest",
+                "run",
+                "--workspace",
+                "--all-targets",
+                "--no-default-features",
+                "--features",
+                "memory"
+            ]
+        );
+        assert_eq!(
+            specs[1].args,
+            [
+                "test",
+                "--doc",
+                "--workspace",
+                "--no-default-features",
+                "--features",
+                "memory"
+            ]
+        );
+        assert_eq!(
+            test_specs(FeatureProfile::Minimal, TestRunner::Cargo, &[]).len(),
+            1
+        );
     }
 
     #[test]
@@ -537,12 +678,24 @@ mod tests {
             if !test_features.is_empty() {
                 args.extend(["--features", test_features]);
             }
-            assert_eq!(test_spec(profile).args, args, "profile {profile}");
+            assert_eq!(
+                test_specs(profile, TestRunner::Cargo, &[])[0].args,
+                args,
+                "profile {profile}"
+            );
+            for spec in test_specs(profile, TestRunner::Nextest, &[]) {
+                if !test_features.is_empty() {
+                    assert!(
+                        spec.args.contains(&OsString::from(test_features)),
+                        "profile {profile}"
+                    );
+                }
+            }
             assert!(
-                !build_spec(profile)
+                !build_spec(profile, false)
                     .args
                     .iter()
-                    .any(|arg| arg.contains("-tests"))
+                    .any(|arg| arg.to_string_lossy().contains("-tests"))
             );
         }
     }
@@ -551,13 +704,26 @@ mod tests {
     fn isolated_checks_disable_defaults_and_leave_test_helpers_to_supported_checks() {
         for profile in FeatureProfile::ALL {
             let isolated = isolated_check_spec(profile);
-            assert!(isolated.args.contains(&"--no-default-features"));
-            assert!(isolated.args.contains(&"--lib"));
-            assert!(!isolated.args.contains(&"--all-targets"));
-            assert_eq!(isolated.args.last(), Some(&profile.definition().features));
-            assert!(check_spec(profile).args.contains(&"--all-targets"));
+            assert!(
+                isolated
+                    .args
+                    .contains(&OsString::from("--no-default-features"))
+            );
+            assert!(isolated.args.contains(&OsString::from("--lib")));
+            assert!(!isolated.args.contains(&OsString::from("--all-targets")));
             assert_eq!(
-                check_spec(profile).args.contains(&"--no-default-features"),
+                isolated.args.last(),
+                Some(&OsString::from(profile.definition().features))
+            );
+            assert!(
+                check_spec(profile)
+                    .args
+                    .contains(&OsString::from("--all-targets"))
+            );
+            assert_eq!(
+                check_spec(profile)
+                    .args
+                    .contains(&OsString::from("--no-default-features")),
                 profile == FeatureProfile::Minimal
             );
         }
@@ -565,8 +731,12 @@ mod tests {
 
     #[test]
     fn checks_continue_after_failures_and_report_every_failed_step() {
-        let checks = ["first", "second", "third", "fourth"]
-            .map(|name| (name.to_owned(), CommandSpec::new(name, [])));
+        let checks = ["first", "second", "third", "fourth"].map(|name| {
+            (
+                name.to_owned(),
+                CommandSpec::new(name, std::iter::empty::<&str>()),
+            )
+        });
         let mut executed = Vec::new();
         let error = run_checks(checks, |spec| {
             executed.push(spec.program);

@@ -48,6 +48,17 @@ class LocalCiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("unexpected-install", result.stderr)
 
+    def test_rust_gates_run_profiles_and_stop_on_failure(self):
+        result = self.shell('''
+run() { printf '%s\\n' "$*"; [[ "$*" != 'cargo xtask check-profiles' ]] || return 17; }
+rust_default_gates
+echo unexpected-success
+''')
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertIn("cargo xtask check-profiles", result.stdout)
+        self.assertNotIn("cargo clippy", result.stdout)
+        self.assertNotIn("unexpected-success", result.stdout)
+
     def test_llvm_cov_version_uses_cargo_subcommand_protocol(self):
         self.stub("cargo-llvm-cov", "[[ \"$*\" == 'llvm-cov --version' ]] || exit 2; echo 'cargo-llvm-cov 0.6.16'")
         result = self.shell('BOOTSTRAP=0; install_cargo_bin cargo-llvm-cov cargo-llvm-cov "$LLVM_COV_VERSION"')
