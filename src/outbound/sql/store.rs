@@ -1148,10 +1148,12 @@ where
 /// or index entry while another arrives — is never entered.
 #[cfg(test)]
 mod snapshot_txn_test_hook {
+    use std::collections::HashMap;
     use std::sync::OnceLock;
     use tokio::sync::{Mutex, oneshot};
 
     pub(super) struct Probe {
+        #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) list_id: String,
         /// Fires once the paused writer is inside the transaction, holding its
         /// locks. The test waits on this before starting the second writer.
@@ -1160,10 +1162,10 @@ mod snapshot_txn_test_hook {
         pub(super) release: oneshot::Receiver<()>,
     }
 
-    /// One installable pause point. Each site owns its own slot so the insert
-    /// and update contention tests cannot capture each other's probe.
+    /// Each site and list owns its pause point so concurrent contention tests
+    /// cannot replace or capture each other's probes.
     pub(super) struct PauseSite {
-        slot: OnceLock<Mutex<Option<Probe>>>,
+        slot: OnceLock<Mutex<HashMap<String, Probe>>>,
     }
 
     impl PauseSite {
@@ -1173,35 +1175,25 @@ mod snapshot_txn_test_hook {
             }
         }
 
-        fn slot(&self) -> &Mutex<Option<Probe>> {
-            self.slot.get_or_init(|| Mutex::new(None))
+        fn slot(&self) -> &Mutex<HashMap<String, Probe>> {
+            self.slot.get_or_init(|| Mutex::new(HashMap::new()))
         }
 
         #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) async fn install(&self, probe_to_install: Probe) {
             let mut guard = self.slot().lock().await;
             assert!(
-                guard.is_none(),
-                "only one contention probe can be installed at a time"
+                !guard.contains_key(&probe_to_install.list_id),
+                "only one contention probe can be installed per list at a time"
             );
-            *guard = Some(probe_to_install);
+            guard.insert(probe_to_install.list_id.clone(), probe_to_install);
         }
 
         /// Pauses only the writer working on the probed `list_id`, and only
         /// once — the probe is taken, so every other call is a no-op and the
         /// production path is untouched for all other rows.
         pub(super) async fn pause(&self, list_id: &str) {
-            let installed_probe = {
-                let mut guard = self.slot().lock().await;
-                if guard
-                    .as_ref()
-                    .is_some_and(|installed| installed.list_id == list_id)
-                {
-                    guard.take()
-                } else {
-                    None
-                }
-            };
+            let installed_probe = { self.slot().lock().await.remove(list_id) };
 
             if let Some(installed_probe) = installed_probe {
                 let _ = installed_probe.ready.send(());
@@ -1217,4 +1209,40 @@ mod snapshot_txn_test_hook {
     /// Inside `insert_one_with_snapshot`, after the snapshot INSERT, while the
     /// row INSERT still holds its uncommitted primary-key entry.
     pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new();
+
+    #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
+    #[tokio::test]
+    async fn probes_for_different_lists_can_coexist_without_consuming_each_other() {
+        let site = PauseSite::new();
+        let (ready_a, received_a) = oneshot::channel();
+        let (release_a, wait_a) = oneshot::channel();
+        let (ready_b, mut received_b) = oneshot::channel();
+        let (release_b, wait_b) = oneshot::channel();
+        site.install(Probe {
+            list_id: "list-a".into(),
+            ready: ready_a,
+            release: wait_a,
+        })
+        .await;
+        site.install(Probe {
+            list_id: "list-b".into(),
+            ready: ready_b,
+            release: wait_b,
+        })
+        .await;
+
+        site.pause("unrelated-list").await;
+        release_a.send(()).unwrap();
+        site.pause("list-a").await;
+        received_a.await.unwrap();
+        assert!(matches!(
+            received_b.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        release_b.send(()).unwrap();
+        site.pause("list-b").await;
+        received_b.await.unwrap();
+        site.pause("list-a").await;
+    }
 }
