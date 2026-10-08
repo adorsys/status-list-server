@@ -245,8 +245,14 @@ while the quota is enforced. While an operator runs with
 `limits.list_quota_transition`, publishes past the cap are accepted, so tokens
 carry no `aggregation_uri` until the quota is enforced. An issuer can also hold
 more lists than one page from under an earlier, higher cap. It keeps paging, and
-while one does, tokens carry no `aggregation_uri` either. Pages are read by a
-keyset scan on `(issuer, list_id)` and there is no total count.
+while one does, tokens carry no `aggregation_uri` either. Tokens already served,
+or pods that started while the quota was on, can still point at an issuer that
+outgrew a page, for example after `list-quota disable`. So the endpoint itself
+never answers in part: a request without `limit` for an aggregation that does
+not fit gets `409 paging_required`, and sending `limit` opts in to paging.
+Cursors name the aggregation they came from, so one replayed elsewhere is
+refused rather than skipping lists. Pages are read by a keyset scan on
+`(issuer, list_id)` and there is no total count.
 
 An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
 finds out instead of caching an empty aggregation. Responses carry a weak `ETag`

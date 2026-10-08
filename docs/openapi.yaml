@@ -269,11 +269,11 @@ paths:
 
         The response is complete in one page and `next_cursor` is `null`: the
         server refuses to start when `limits.max_lists_per_issuer` exceeds the
-        default page size, and the list quota holds each issuer to it. The
-        exceptions are an issuer that had more lists before the quota was
-        enforced, and any issuer while an operator runs the quota unenforced
-        during an upgrade, when tokens don't advertise this URI. Those page as
-        described under `getAggregation`.
+        default page size, and the list quota holds each issuer to it. When an
+        issuer has more lists anyway, for example while the quota is off, a
+        request without `limit` gets `409 paging_required` rather than part of
+        the aggregation. Send `limit` to page as described under
+        `getAggregation`.
       security: []
       parameters:
         - name: aggregation_id
@@ -314,6 +314,17 @@ paths:
               example:
                 error: "aggregation_not_found"
                 error_description: "No issuer has this aggregation ID"
+        "409":
+          description: |
+            The issuer has more status lists than one page and the request
+            sent neither `limit` nor `cursor` (`paging_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "paging_required"
+                error_description: "this aggregation has more than 1000 status lists; send limit to page through it"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1250,6 +1261,7 @@ components:
             - list_not_fixed_size
             - allocation_exhausted
             - write_contention
+            - paging_required
             # 413
             - payload_too_large
             # 422
@@ -1284,7 +1296,8 @@ components:
       required: false
       description: |
         Opaque `next_cursor` value from the previous page. Omit for the first
-        page. Clients must not construct or modify cursors.
+        page. Clients must not construct or modify cursors, and a cursor only
+        works on the aggregation that returned it.
       schema:
         type: string
     AggregationIfNoneMatch:

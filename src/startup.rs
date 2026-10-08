@@ -334,6 +334,100 @@ mod tests {
         assert_eq!(aggregation.status(), StatusCode::OK);
     }
 
+    /// A pod that started with the quota enforced keeps advertising the
+    /// aggregation after `list-quota disable`, and its cached tokens keep the
+    /// claim, so an issuer can outgrow one page on a running server. A client
+    /// that does not page must then get an error, not part of the aggregation.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_aggregation_never_answers_in_part_when_the_quota_is_disabled_live() {
+        use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
+        use crate::outbound::sql::list_quota;
+        use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let db = sqlite_test_db(None).await;
+        list_quota::enable(&db, AGGREGATION_DEFAULT_LIMIT as u64)
+            .await
+            .unwrap();
+        let mut state = test_app_state(Some(db.clone())).await;
+        state.aggregation_uri = Some(
+            "https://statuslist.example.com/api/v1/aggregation"
+                .parse()
+                .unwrap(),
+        );
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let router =
+            api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state.clone());
+        let get = |uri: String| {
+            let request = Request::get(uri)
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )))
+                .body(Body::empty())
+                .unwrap();
+            router.clone().oneshot(request)
+        };
+        let advertised = |token: Vec<u8>| {
+            let token = String::from_utf8(token).unwrap();
+            let payload = URL_SAFE_NO_PAD
+                .decode(token.split('.').nth(1).unwrap())
+                .unwrap();
+            let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            claims["status_list"]["aggregation_uri"].is_string()
+        };
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        let list_id = uuid::Uuid::new_v4().to_string();
+        publish_list(&state.service, "issuer1", &list_id).await;
+        let token = get(format!("/status-lists/{list_id}")).await.unwrap();
+        let token = to_bytes(token.into_body(), usize::MAX).await.unwrap();
+        assert!(advertised(token.to_vec()));
+
+        list_quota::disable(&db).await.unwrap();
+        for _ in 0..AGGREGATION_DEFAULT_LIMIT {
+            publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
+        }
+        let cached = get(format!("/status-lists/{list_id}")).await.unwrap();
+        let cached = to_bytes(cached.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            advertised(cached.to_vec()),
+            "the warm token still points there"
+        );
+
+        let unpaged = get(format!("/aggregation/{aggregation_id}")).await.unwrap();
+        assert_eq!(unpaged.status(), StatusCode::CONFLICT);
+
+        let mut lists = 0;
+        let mut next = Some(
+            url::Url::parse(&format!(
+                "http://localhost/aggregation/{aggregation_id}?limit={AGGREGATION_DEFAULT_LIMIT}"
+            ))
+            .unwrap(),
+        );
+        while let Some(url) = next {
+            let page = get(url[url::Position::BeforePath..].to_string())
+                .await
+                .unwrap();
+            assert_eq!(page.status(), StatusCode::OK, "{url}");
+            next = page.headers().get(axum::http::header::LINK).map(|link| {
+                let link = link.to_str().unwrap();
+                let (target, _) = link.strip_prefix('<').unwrap().split_once('>').unwrap();
+                url.join(target).unwrap()
+            });
+            let page: serde_json::Value =
+                serde_json::from_slice(&to_bytes(page.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            lists += page["status_lists"].as_array().unwrap().len();
+        }
+        assert_eq!(
+            lists,
+            AGGREGATION_DEFAULT_LIMIT + 1,
+            "paging still reaches every list"
+        );
+    }
+
     #[tokio::test]
     async fn test_strict_governor_returns_429_when_burst_exceeded() {
         async fn handler() -> impl IntoResponse {

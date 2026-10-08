@@ -198,13 +198,14 @@ pub fn name_issuers(issuers: &[IssuerCount]) -> String {
 }
 
 /// Each issuer's `list_count` beside the lists it has (`actual`), where
-/// `condition` holds.
+/// `condition` holds, counted in one pass. The outer query lets `condition`
+/// name `actual`, which Postgres does not allow in `HAVING`.
 fn issuer_counts(condition: &str) -> String {
     format!(
         "SELECT issuer, list_count, actual FROM (\
-           SELECT c.issuer AS issuer, c.list_count AS list_count, \
-             (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual \
-           FROM credentials c\
+           SELECT c.issuer AS issuer, c.list_count AS list_count, COUNT(s.list_id) AS actual \
+           FROM credentials c LEFT JOIN status_lists s ON s.issuer = c.issuer \
+           GROUP BY c.issuer, c.list_count\
          ) counts \
          WHERE {condition} \
          ORDER BY issuer"

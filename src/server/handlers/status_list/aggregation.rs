@@ -102,7 +102,12 @@ async fn aggregation_page(
             format!("limit must be between 1 and {AGGREGATION_MAX_LIMIT}, got {limit}"),
         ));
     }
-    let after = query.cursor.as_deref().map(decode_cursor).transpose()?;
+    let cursor_scope = scope.map_or_else(|| "all".to_string(), |id| id.to_string());
+    let after = query
+        .cursor
+        .as_deref()
+        .map(|cursor| decode_cursor(&cursor_scope, cursor))
+        .transpose()?;
 
     let page = match scope {
         None => state.service.list_uris(after.as_deref(), limit).await?,
@@ -114,7 +119,10 @@ async fn aggregation_page(
                 ApiError::not_found("aggregation_not_found", "No issuer has this aggregation ID")
             })?,
     };
-    let next_cursor = page.next_after.as_deref().map(encode_cursor);
+    let next_cursor = page
+        .next_after
+        .as_deref()
+        .map(|list_id| encode_cursor(&cursor_scope, list_id));
 
     aggregation_pages().add(
         1,
@@ -134,6 +142,19 @@ async fn aggregation_page(
         "Serving status list aggregation page with {} list(s)",
         page.status_lists.len()
     );
+    // A draft-21 §9.3 client takes one response as the whole aggregation. The
+    // quota normally keeps an issuer's in one page, but not while it is off on
+    // running pods, so a request that does not page is refused rather than
+    // answered in part. Sending `limit` opts in to paging.
+    if scope.is_some() && query.limit.is_none() && query.cursor.is_none() && next_cursor.is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "paging_required",
+            Some(format!(
+                "this aggregation has more than {limit} status lists; send limit to page through it"
+            )),
+        ));
+    }
 
     let mut response_headers = HeaderMap::new();
     if let Some(cursor) = &next_cursor {
@@ -169,9 +190,8 @@ async fn aggregation_page(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
-/// `truncated` is the page a client that knows only draft-21 §9.3 sees when
-/// more lists follow: the first one, at the default size. It should stay at
-/// zero for scoped requests while the list quota fits in one page.
+/// `truncated` is a first page with more lists following, for a client that
+/// did not page: served by the unscoped endpoint, refused for one issuer's.
 fn page_outcome(has_cursor: bool, has_limit: bool, has_next: bool) -> &'static str {
     match (has_cursor, has_limit, has_next) {
         (false, _, false) => "complete",
@@ -180,10 +200,12 @@ fn page_outcome(has_cursor: bool, has_limit: bool, has_next: bool) -> &'static s
     }
 }
 
-/// Encodes the last `list_id` of a page as an opaque cursor. The `list_id` is
-/// kept exactly as stored; normalising it would shift the page boundary.
-fn encode_cursor(list_id: &str) -> String {
-    URL_SAFE_NO_PAD.encode(format!("{CURSOR_VERSION}{list_id}"))
+/// Encodes the last `list_id` of a page as an opaque cursor, bound to `scope`
+/// (an aggregation ID, or `all`): replayed on another aggregation, it would
+/// skip that one's lists that sort before it. The `list_id` is kept exactly as
+/// stored; normalising it would shift the page boundary.
+fn encode_cursor(scope: &str, list_id: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{CURSOR_VERSION}{scope}:{list_id}"))
 }
 
 /// Deliberately not restricted to UUIDs: rows stored before `list_id` was
@@ -192,7 +214,7 @@ fn encode_cursor(list_id: &str) -> String {
 /// NUL is the one exception: Postgres rejects it in text, so letting it through
 /// is a 500. The trade-off is that a pre-validation `list_id` containing NUL,
 /// storable only on MySQL or SQLite, ends a walk at its page.
-fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
+fn decode_cursor(scope: &str, cursor: &str) -> Result<String, ApiError> {
     (cursor.len() <= MAX_CURSOR_LEN)
         .then_some(cursor)
         .and_then(|cursor| URL_SAFE_NO_PAD.decode(cursor).ok())
@@ -200,6 +222,8 @@ fn decode_cursor(cursor: &str) -> Result<String, ApiError> {
         .and_then(|decoded| {
             decoded
                 .strip_prefix(CURSOR_VERSION)
+                .and_then(|rest| rest.strip_prefix(scope))
+                .and_then(|rest| rest.strip_prefix(':'))
                 .filter(|list_id| !list_id.is_empty() && !list_id.contains('\0'))
                 .map(str::to_string)
         })
@@ -414,9 +438,14 @@ mod tests {
                 .as_str(),
             URL_SAFE_NO_PAD.encode(CURSOR_VERSION).as_str(),
             URL_SAFE_NO_PAD.encode([0xff, 0xfe]).as_str(),
-            encode_cursor(&"a".repeat(MAX_CURSOR_LEN)).as_str(),
-            encode_cursor("\0").as_str(),
-            encode_cursor("477121aa-b598\0-419e-916f-1e74654ff38b").as_str(),
+            // The format before cursors named their aggregation.
+            URL_SAFE_NO_PAD
+                .encode("v1:477121aa-b598-419e-916f-1e74654ff38b")
+                .as_str(),
+            URL_SAFE_NO_PAD.encode("v1:all:").as_str(),
+            encode_cursor("all", &"a".repeat(MAX_CURSOR_LEN)).as_str(),
+            encode_cursor("all", "\0").as_str(),
+            encode_cursor("all", "477121aa-b598\0-419e-916f-1e74654ff38b").as_str(),
         ] {
             let err = get(&state, None, Some(cursor)).await.unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST, "cursor={cursor}");
@@ -450,8 +479,8 @@ mod tests {
             "list with spaces/and?query",
             "legacy\tlist\n",
         ] {
-            let cursor = encode_cursor(list_id);
-            assert_eq!(decode_cursor(&cursor).unwrap(), list_id);
+            let cursor = encode_cursor("all", list_id);
+            assert_eq!(decode_cursor("all", &cursor).unwrap(), list_id);
         }
     }
 
@@ -558,6 +587,69 @@ mod tests {
             seen.extend(body(response).await.status_lists);
         }
         assert_eq!(seen, expected);
+    }
+
+    /// A cursor from one aggregation, replayed on another, would skip that
+    /// one's lists that sort before it.
+    #[tokio::test]
+    async fn test_cursor_is_bound_to_its_aggregation() {
+        let state = test_app_state(None).await;
+        let first = register_issuer(&state.service, "issuer1").await;
+        let second = register_issuer(&state.service, "issuer2").await;
+        for issuer in ["issuer1", "issuer1", "issuer2", "issuer2"] {
+            publish(&state, issuer).await;
+        }
+        for (minted, replayed) in [
+            (Some(first), Some(second)),
+            (Some(first), None),
+            (None, Some(first)),
+        ] {
+            let cursor = body(get_page(&state, minted, Some(1), None).await.unwrap())
+                .await
+                .next_cursor
+                .unwrap();
+            let err = get_page(&state, replayed, Some(1), Some(&cursor))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.status,
+                StatusCode::BAD_REQUEST,
+                "{minted:?} on {replayed:?}"
+            );
+            assert_eq!(err.error, "invalid_query", "{minted:?} on {replayed:?}");
+        }
+    }
+
+    /// A draft-21 client that does not page must not get part of an issuer's
+    /// aggregation as if it were all of it; a client that pages still can.
+    #[tokio::test]
+    async fn test_unpaged_aggregation_over_one_page_is_refused() {
+        let state = test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        for _ in 0..=AGGREGATION_DEFAULT_LIMIT {
+            publish(&state, "issuer1").await;
+        }
+
+        let err = get_scoped(&state, aggregation_id, None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.error, "paging_required");
+
+        let paged = get_scoped(
+            &state,
+            aggregation_id,
+            Some(AGGREGATION_DEFAULT_LIMIT),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(body(paged).await.next_cursor.is_some());
+        let unscoped = body(get(&state, None, None).await.unwrap()).await;
+        assert!(
+            unscoped.next_cursor.is_some(),
+            "the unscoped endpoint still pages"
+        );
     }
 
     #[tokio::test]

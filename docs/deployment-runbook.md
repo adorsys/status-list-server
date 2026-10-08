@@ -449,9 +449,9 @@ registering it again does the same to that issuer.
 ### Metrics
 
 - `aggregation_pages_total{scope="issuer",outcome="truncated"}` should stay at
-  `0`. Anything else means an issuer's aggregation did not fit in one page: an
-  issuer from the pre-upgrade query above, or any issuer while the list quota
-  is in transition.
+  `0`. Anything else counts requests refused with `409 paging_required` because
+  an issuer's aggregation did not fit in one page: an issuer from the
+  pre-upgrade query above, or any issuer while the list quota is off.
 - `aggregation_pages_total{scope="all"}` counts requests to the deprecated
   unscoped form. Remove that form once `token_exp_secs` has passed since the
   rollout and this stays at zero.

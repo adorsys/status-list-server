@@ -937,8 +937,9 @@ Because a recount racing enforced publishes could miss one, it only runs with th
 3. `status-list-server list-quota enable`
 
 While the quota is off, an issuer at the cap can publish past it, and pods that started with it
-enforced keep advertising `aggregation_uri` until they restart. If `enable` then refuses, roll the
-Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
+enforced keep advertising `aggregation_uri` until they restart. A request for that issuer's
+aggregation without `limit` then gets `409 paging_required` instead of part of it. If `enable`
+refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 
 `recount` runs this statement, which is also the migration's backfill (a unit test keeps the
 two identical). It is portable across PostgreSQL, MySQL and SQLite:
