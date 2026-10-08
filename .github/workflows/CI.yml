@@ -362,6 +362,11 @@ jobs:
       - name: Run Cargo Tests
         run: cargo nextest run --workspace --all-targets --all-features
 
+      # This suite exercises build_state's static-certificate path; the all-features
+      # build selects ACME provisioning, which is covered by cert_provisioning.
+      - name: Run HTTP conformance with static certificates
+        run: cargo test --no-default-features --features memory --test conformance
+
   cargo-doc:
     name: Cargo Documentation
     runs-on: ubuntu-latest

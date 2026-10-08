@@ -48,8 +48,8 @@ pub struct HttpServer {
     router: Router,
 }
 
-/// Shared browser policy for public token retrieval and cache revalidation.
-pub(crate) fn cors_layer() -> CorsLayer {
+/// Browser policy for the whole router, including management and public reads.
+fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([
             Method::GET,
@@ -68,6 +68,20 @@ impl HttpServer {
         config: &Config,
         state: AppState,
         prometheus_registry: Registry,
+    ) -> color_eyre::Result<Self> {
+        let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
+            .await
+            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
+        Self::from_listener(config, state, prometheus_registry, listener)
+    }
+
+    /// Build the production router on an already-bound listener.
+    /// Useful when the assigned port must be known before constructing public URLs.
+    pub fn from_listener(
+        config: &Config,
+        state: AppState,
+        prometheus_registry: Registry,
+        listener: TcpListener,
     ) -> color_eyre::Result<Self> {
         let max_body_size = config.limits.max_body_size_bytes;
 
@@ -103,16 +117,7 @@ impl HttpServer {
 
         validate_aggregation_uri(config)?;
 
-        let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
-            .await
-            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
-
         Ok(Self { router, listener })
-    }
-
-    /// The bound address, including the assigned port when binding to port zero.
-    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.listener.local_addr()
     }
 
     pub async fn run(self) -> color_eyre::Result<()> {
@@ -187,7 +192,7 @@ fn build_governor_configs(
     Ok((strict, issuer, permissive))
 }
 
-pub(crate) fn public_read_routes() -> Router<AppState> {
+fn public_read_routes() -> Router<AppState> {
     Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/status-lists/{list_id}", get(get_status_list))

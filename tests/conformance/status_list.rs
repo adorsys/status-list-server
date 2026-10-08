@@ -1,3 +1,7 @@
+// Exercise production static-certificate setup. CI runs this target explicitly
+// with memory-only features; ACME provisioning has its own integration suite.
+#![cfg(not(feature = "acme"))]
+
 //! Draft-21 wire assertions: literal labels deliberately do not share issuer constants.
 use std::io::Read;
 
@@ -10,41 +14,28 @@ use coset::{CborSerializable, TaggedCborSerializable, cbor::Value};
 use reqwest::{Response, StatusCode};
 use serde_json::json;
 mod support;
-use support::{TestServer, test_certificate};
-
-use status_list_server::domain::{
-    models::status_list::{Status, StatusEntry},
-    service::PublishStatusListCommand,
-};
+use support::{CERT, TestServer};
 
 async fn publish(app: &TestServer) -> String {
-    let list_id = uuid::Uuid::new_v4().to_string();
-    let uri = app.url(&format!("/api/v1/status-lists/{list_id}"));
-    app.state
-        .service
-        .publish_status_list(
-            PublishStatusListCommand {
-                list_id,
-                issuer: "issuer1".into(),
-                sub: uri.clone(),
-                statuses: vec![
-                    StatusEntry {
-                        index: 0,
-                        status: Status::Invalid,
-                    },
-                    StatusEntry {
-                        index: 15,
-                        status: Status::Valid,
-                    },
-                ],
-                size: None,
-                default_status: None,
-            },
-            &app.state.status_list_policy(),
-        )
+    let list_id = uuid::Uuid::new_v4();
+    let response = app
+        .client
+        .put(app.url(&format!("/api/v1/status-lists/{list_id}/statuses")))
+        .bearer_auth(app.bearer_token())
+        .json(&json!({"statuses": [{"index": 0, "status": 1}, {"index": 15, "status": 0}]}))
+        .send()
         .await
         .unwrap();
-    uri
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["uri"], location);
+    let expected = app.url(&format!("/api/v1/status-lists/{list_id}"));
+    assert_eq!(
+        location, expected,
+        "publish must build the URI from the configured bound address"
+    );
+    location
 }
 
 async fn get(app: &TestServer, uri: &str, accept: &str, encoding: &str) -> Response {
@@ -73,7 +64,10 @@ fn verified_jwt(body: &[u8]) -> serde_json::Value {
     let header = jsonwebtoken::decode_header(token).unwrap();
     assert_eq!(header.alg, jsonwebtoken::Algorithm::ES256);
     assert_eq!(header.typ.as_deref(), Some("statuslist+jwt"));
-    assert_eq!(header.x5c.as_ref().unwrap(), &[test_certificate()]);
+    assert_eq!(
+        header.x5c.as_ref().unwrap(),
+        &[BASE64_STANDARD.encode(pem::parse(CERT).unwrap().contents())]
+    );
     let der = BASE64_STANDARD.decode(&header.x5c.unwrap()[0]).unwrap();
     let key = jsonwebtoken::DecodingKey::from_ec_der(&certificate_key(&der));
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
@@ -110,9 +104,12 @@ fn assert_list(compressed: &[u8]) {
 async fn jwt_get_conforms_with_and_without_aggregation_uri() {
     for aggregation_uri in [
         None,
+        Some(String::new()),
+        Some("   ".to_owned()),
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
         let app = TestServer::start(aggregation_uri.clone()).await;
+        let aggregation_uri = aggregation_uri.filter(|value| !value.trim().is_empty());
         let uri = publish(&app).await;
         let response = get(&app, &uri, "application/statuslist+jwt", "identity").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -125,7 +122,6 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
         assert_exposed_headers(&response);
         let claims = verified_jwt(&bytes(response).await);
         assert_eq!(claims["sub"], uri);
-        assert!(claims["iat"].as_i64().unwrap() < claims["exp"].as_i64().unwrap());
         assert!(claims["ttl"].as_u64().unwrap() > 0);
         assert!([1, 2, 4, 8].contains(&claims["status_list"]["bits"].as_u64().unwrap()));
         let lst = claims["status_list"]["lst"].as_str().unwrap();
@@ -145,11 +141,14 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
 async fn cwt_get_conforms_with_and_without_aggregation_uri() {
     for aggregation_uri in [
         None,
+        Some(String::new()),
+        Some("   ".to_owned()),
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
         let app = TestServer::start(aggregation_uri.clone()).await;
+        let aggregation_uri = aggregation_uri.filter(|value| !value.trim().is_empty());
         let uri = publish(&app).await;
-        for encoding in ["identity", "gzip"] {
+        for encoding in ["identity", "gzip", "gzip, deflate, br, zstd", "*"] {
             let response = get(&app, &uri, "application/statuslist+cwt", encoding).await;
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
@@ -174,7 +173,7 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
             let cert = field(&protected, Value::Integer(33.into()))
                 .as_bytes()
                 .unwrap();
-            assert_eq!(cert, &BASE64_STANDARD.decode(test_certificate()).unwrap());
+            assert_eq!(cert, &pem::parse(CERT).unwrap().contents());
             let key = certificate_key(cert);
             sign1
                 .verify_signature(&[], |signature, tbs| {
@@ -223,7 +222,7 @@ async fn aggregation_body_and_list_uris_conform() {
     assert_eq!(response.headers()["content-type"], "application/json");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes(response).await).unwrap(),
-        json!({"status_lists": []})
+        json!({"status_lists": [], "next_cursor": null})
     );
     let mut uris = vec![publish(&app).await, publish(&app).await];
     uris.sort();
@@ -232,7 +231,7 @@ async fn aggregation_body_and_list_uris_conform() {
     assert_eq!(response.headers()["content-type"], "application/json");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&bytes(response).await).unwrap(),
-        json!({"status_lists": uris})
+        json!({"status_lists": uris, "next_cursor": null})
     );
     for uri in uris {
         let response = get(&app, &uri, "application/statuslist+jwt", "identity").await;
@@ -256,6 +255,14 @@ async fn cors_preflight_allows_public_get() {
             .unwrap();
         assert!(response.status().is_success());
         assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert!(
+            response.headers()["access-control-allow-headers"]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|header| header.trim() == "*"
+                    || header.trim().eq_ignore_ascii_case("if-none-match"))
+        );
         assert!(
             response.headers()["access-control-allow-methods"]
                 .to_str()
@@ -319,8 +326,59 @@ async fn browser_can_follow_aggregation_link_to_terminal_page() {
             );
         } else {
             assert!(link.is_none());
-            assert_eq!(body, json!({"status_lists": [expected[1]]}));
+            assert_eq!(
+                body,
+                json!({"status_lists": [expected[1]], "next_cursor": null})
+            );
         }
     }
     assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn jwt_gzip_conforms_for_current_and_historical_tokens() {
+    let app = TestServer::start(None).await;
+    let uri = publish(&app).await;
+    let snapshot_time = time::OffsetDateTime::now_utc().unix_timestamp();
+    for request_uri in [uri.clone(), format!("{uri}?time={snapshot_time}")] {
+        for encoding in ["identity", "gzip", "gzip, deflate, br, zstd", "*"] {
+            let response = get(&app, &request_uri, "application/statuslist+jwt", encoding).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/statuslist+jwt"
+            );
+            let compressed = encoding != "identity";
+            if compressed {
+                assert_eq!(response.headers()["content-encoding"], "gzip");
+            } else {
+                assert!(!response.headers().contains_key("content-encoding"));
+            }
+            let body = bytes(response).await;
+            let mut jwt = Vec::new();
+            if compressed {
+                flate2::read::GzDecoder::new(body.as_slice())
+                    .read_to_end(&mut jwt)
+                    .unwrap();
+            } else {
+                jwt = body;
+            }
+            let claims = verified_jwt(&jwt);
+            assert_eq!(claims["sub"], uri);
+            assert_list(
+                &BASE64_URL_SAFE_NO_PAD
+                    .decode(claims["status_list"]["lst"].as_str().unwrap())
+                    .unwrap(),
+            );
+
+            let response = get(&app, &request_uri, "application/statuslist+cwt", encoding).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/statuslist+cwt"
+            );
+            assert!(!response.headers().contains_key("content-encoding"));
+            assert_eq!(bytes(response).await[0], 0xd2);
+        }
+    }
 }

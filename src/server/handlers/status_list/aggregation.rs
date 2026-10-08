@@ -20,8 +20,7 @@ pub struct AggregationQuery {
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AggregationResponse {
     pub(super) status_lists: Vec<String>,
-    /// Opaque cursor for the next page; omitted on the last page.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Opaque cursor for the next page; `null` on the last page.
     pub(super) next_cursor: Option<String>,
 }
 
@@ -185,12 +184,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_aggregation_last_page_omits_cursor() {
+    async fn test_aggregation_last_page_serializes_null_cursor() {
         let state = test_app_state(None).await;
         let response = get(&state, None, None).await.unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json, serde_json::json!({"status_lists": []}));
+        assert_eq!(
+            json,
+            serde_json::json!({"status_lists": [], "next_cursor": null})
+        );
     }
 
     #[tokio::test]

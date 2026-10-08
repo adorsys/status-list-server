@@ -26,17 +26,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Real self-signed certificate for the shared ES256 fixture key.
+/// Checked-in rcgen certificate shared with the HTTP conformance suite.
 pub(crate) fn test_certificate() -> &'static str {
     use base64::{Engine as _, prelude::BASE64_STANDARD};
     static CERT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CERT.get_or_init(|| {
-        let key = rcgen::KeyPair::from_pem(include_str!("../test_data/ec-private.pem")).unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["example.com".into()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        BASE64_STANDARD.encode(cert.der())
+        BASE64_STANDARD.encode(
+            pem::parse(include_str!("../test_data/ec-cert.pem"))
+                .unwrap()
+                .contents(),
+        )
     })
 }
 

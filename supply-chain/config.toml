@@ -962,11 +962,6 @@ criteria = "safe-to-deploy"
 version = "0.30.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.libz-sys]]
-version = "1.1.29"
-criteria = "safe-to-deploy"
-notes = "Added for #577 exact zlib reference output; pending independent audit."
-
 [[exemptions.linux-raw-sys]]
 version = "0.12.1"
 criteria = "safe-to-deploy"

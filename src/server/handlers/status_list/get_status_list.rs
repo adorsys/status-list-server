@@ -651,7 +651,7 @@ mod tests {
         > {
             Ok(Arc::new(
                 crate::domain::ports::SigningMaterial::new(
-                    Some(vec!["ZHVtbXlfY2VydA==".to_string()]),
+                    Some(vec![crate::test_utils::test_certificate().to_owned()]),
                     self.signer.clone(),
                 )
                 .expect("signing material"),
@@ -706,7 +706,7 @@ mod tests {
             };
             Ok(Arc::new(
                 crate::domain::ports::SigningMaterial::new(
-                    Some(vec!["ZHVtbXlfY2VydA==".to_string()]),
+                    Some(vec![crate::test_utils::test_certificate().to_owned()]),
                     Arc::clone(signer),
                 )
                 .expect("signing material"),
@@ -2374,7 +2374,7 @@ mod tests {
         // serves different bytes/ETag, never the stale key's token.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
-            vec!["ZHVtbXlfY2VydA==".to_string()],
+            vec![crate::test_utils::test_certificate().to_owned()],
         ));
         let app_state = test_app_state_with_cert_provider(provider.clone()).await;
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -2447,7 +2447,7 @@ mod tests {
         // window must also invalidate cached bytes, mirroring key rotation.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
-            vec!["ZHVtbXlfY2VydA==".to_string()],
+            vec![crate::test_utils::test_certificate().to_owned()],
         ));
         let app_state = test_app_state_with_cert_provider(provider.clone()).await;
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -2549,7 +2549,7 @@ mod tests {
         ] {
             let provider = Arc::new(RotatingCertProvider::new(
                 include_str!("../../../../test_data/ec-private.pem").to_string(),
-                vec!["ZHVtbXlfY2VydA==".to_string()],
+                vec![crate::test_utils::test_certificate().to_owned()],
             ));
             let mut app_state = test_app_state_with_cert_provider(provider).await;
             app_state.token_exp_secs = exp;
@@ -2701,7 +2701,7 @@ mod tests {
         // strong ETag is stable for the window, so revalidation still gets a 304.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
-            vec!["ZHVtbXlfY2VydA==".to_string()],
+            vec![crate::test_utils::test_certificate().to_owned()],
         ));
         let replica_a = test_app_state_with_cert_provider(provider.clone()).await;
         let replica_b = test_app_state_with_cert_provider(provider.clone()).await;
