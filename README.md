@@ -153,15 +153,8 @@ Then run the collection in another terminal:
 ./scripts/test-postman-collection.sh
 ```
 
-To verify that the live implementation still conforms to the OpenAPI contract
-with Microcks, keep the server running and run:
-
-```bash
-./scripts/test-microcks-conformance.sh
-```
-
 See [API Testing](docs/api-testing.md) for Postman import steps, issuer token
-setup, Newman usage, host prerequisites, and Microcks runner configuration.
+setup, Newman usage, and host prerequisites.
 
 ## Cargo Feature Matrix
 
