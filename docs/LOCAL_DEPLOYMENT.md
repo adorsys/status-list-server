@@ -20,7 +20,7 @@ The `.env.template` file serves as a reference blueprint documenting all availab
   Grafana, and Pushgateway.
 - `acme`: Pebble and its challenge test server.
 - `fscert`: One-shot `filesystem-cert` preparation of the checked-in local test certificate.
-- `aws`: LocalStack.
+- `aws`: Floci (Secrets Manager, Route53).
 - `redis`: Redis.
 
 > **NOTE**: The `postgres` and `mysql` profiles are alternatives. Do not activate both for the same application instance.
