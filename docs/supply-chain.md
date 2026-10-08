@@ -432,9 +432,29 @@ This file is read by two consumers on different cadences — CI.yml's `config-gu
 
 `cargo-auditable` and `rust-audit-info` are pinned in the `Dockerfile` as build arguments, and nothing bumps them. Dependabot's `cargo` ecosystem reads `Cargo.toml` and `Cargo.lock`, its `docker` ecosystem reads `FROM` tags, and neither parses `RUN` arguments.
 
-That matters because `rust-toolchain.toml` is `channel = "stable"`, so the toolchain moves on its own and `cargo-auditable` wraps rustc — the coupling breaks without any commit touching it. The symptom is a builder-stage failure in the deploy path, at the `cargo install` layer or the `rust-audit-info` assertion, on a commit that changed nothing relevant. Bump both pins against crates.io when it happens.
+That matters because the compiler comes from the builder image, not from `rust-toolchain.toml` (Docker never mounts that file): `rust-toolchain.toml` is `channel = "stable"`, but it only affects the source-level cargo jobs, so the toolchain in the image moves only when the builder digest is bumped. `cargo-auditable` wraps that rustc — the coupling only breaks when the builder digest is bumped, so check the `cargo-auditable` and `rust-audit-info` pins in that same PR. The symptom is a builder-stage failure in the deploy path, at the `cargo install` layer or the `rust-audit-info` assertion, when the digest is bumped. Bump both pins against crates.io at the same time. Note the drift this sets up: CI's cargo jobs run on the latest stable toolchain, while Docker is on a fixed compiler from the pinned builder. If a dependency starts needing a newer rustc, cargo CI will pass and the Docker build will fail; the fix is bumping the builder digest.
 
 This is an accepted gap: a loud build failure is worse than a bump PR but better than a silently empty SBOM, and a scheduled crates.io poller would itself be unmonitored automation. Renovate's regex manager would close it properly.
+
+## Builder Image Digests
+
+The `builder-amd64` and `builder-arm64` stages of the `Dockerfile` pin their upstream bases — `blackdex/rust-musl:x86_64-musl` and `blackdex/rust-musl:aarch64-musl` — to immutable `@sha256:...` index digests. A mutable tag can change upstream without notice, which would produce non-reproducible builds, unexpected compiler differences, or supply-chain risk. Pinning by digest means every rebuild uses the same base image.
+
+Both tags are **multi-architecture index manifests** (each contains `linux/amd64` and `linux/arm64` children), and the `Dockerfile` selects the correct architecture with `--platform=$BUILDPLATFORM`. The pinned digest is therefore the **index** digest, not a per-platform child manifest digest: pinning the index keeps both architectures reproducible in a single immutable reference, and `--platform` still resolves the right child inside it. Do not pin a single child digest — that would not change the output architecture (the tag decides that), it would lock the builder to one machine type, so anyone building on the other kind would run it under emulation.
+
+Dependabot keeps both pins current. Its `docker` ecosystem reads the `tag@sha256:<digest>` on each `FROM` line and opens a digest-update PR whenever the tag moves to a different digest; because the tag (`x86_64-musl`, `aarch64-musl`) is not a version number, it watches the digest the tag resolves to rather than the tag text. The manual bump path below remains as a fallback:
+
+1. **Resolve the current index digest** of each tag. `{{ .Manifest.Digest }}` prints the index digest directly (the same format `deploy.yml` uses), so there is no need to pick a `Digest:` line out of the verbose output:
+
+    ```bash
+    docker buildx imagetools inspect blackdex/rust-musl:x86_64-musl --format '{{ .Manifest.Digest }}'     # builder-amd64
+    docker buildx imagetools inspect blackdex/rust-musl:aarch64-musl --format '{{ .Manifest.Digest }}'    # builder-arm64
+    ```
+
+2. **Update the two `FROM` lines** in the `Dockerfile`, replacing the `@sha256:<digest>` suffix. The tag stays, so the `--platform=$BUILDPLATFORM` child resolution is unchanged.
+3. **Build both architectures** to confirm the new builder still produces a working image on `linux/amd64` and `linux/arm64`, and that the auditable-binary assertion still holds.
+
+Bump both pins together: the two tags are released by the same upstream project and a compiler change that matters usually lands for both targets at once.
 
 ## Relationship to Source-Level Checks
 
