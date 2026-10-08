@@ -40,6 +40,13 @@ statuslist:
   # Number of application replicas. Omitted when autoscaling.enabled=true so the HPA
   # controls the replica count.
   replicaCount: 1
+  # Deployment rollout strategy (apps/v1 Deployment.spec.strategy). Defaults to a plain
+  # RollingUpdate (Kubernetes default) with no maxSurge/maxUnavailable overrides. Set to
+  # `type: Recreate` when a release must never run old and new pods concurrently (for
+  # example, when a schema/concurrency change makes the two versions mutually
+  # incompatible during a rolling deploy). The full strategy object is passed through.
+  strategy:
+    type: RollingUpdate
   # Extra labels merged onto the Pod template metadata. For Azure Workload Identity,
   # specify azure.workload.identity/use: "true" (must be a quoted string, not a boolean).
   podLabels: {}
@@ -130,6 +137,9 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).
+    # APP_SERVER__PUBLIC_BASE_URL defaults to https://{DOMAIN}/api/v1; set it only when it differs.
+    # APP_SERVER__PUBLIC_BASE_URL: "https://statuslist.example.com/api/v1"
     APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     APP_SERVER__CERT__EKU: "1,3,6,1,5,5,7,3,30"
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: "0 0 0 * * *"
@@ -164,6 +174,12 @@ statuslist:
     # Maximum status-list records retained by the in-memory backend. Redis uses
     # native key expiration based on APP_CACHE__TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
+    # Signed status-list token bytes cache: a *byte* budget (entries are weighed
+    # by their size). Default 64 MiB holds several maximum-permitted lists (each
+    # near 1 MiB once wrapped in JWT/base64) plus many small ones. "0" disables
+    # the cache (every request re-signs). Each entry expires at the end of its own
+    # validity window, so there is no TTL setting.
+    APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "67108864"
     APP_CACHE__TLS: "false"
     # Optional Redis settings when APP_CACHE__BACKEND=redis. Prefer secretEnv or
     # secretMounts for passwords. Use a dedicated Redis ACL user scoped to

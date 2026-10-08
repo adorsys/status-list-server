@@ -56,10 +56,10 @@ async fn test_sqlite_status_list_round_trip() {
             "list-sqlite-test",
             StatusListRecord {
                 sub: "sub-2-sqlite-test".to_string(),
-                updated_at: record.updated_at + 1, // guarded write must advance the stamp
+                version: record.version + 1, // guarded write must advance the version
                 ..record.clone()
             },
-            record.updated_at,
+            record.version,
         )
         .await
         .unwrap();
@@ -71,7 +71,7 @@ async fn test_sqlite_status_list_round_trip() {
         .unwrap()
         .unwrap();
     assert_eq!(updated_found.sub, "sub-2-sqlite-test");
-    assert_eq!(updated_found.updated_at, record.updated_at + 1);
+    assert_eq!(updated_found.version, record.version + 1);
 
     let by_issuer = store.find_by_issuer("sub-2-sqlite-test").await.unwrap();
     assert!(!by_issuer.is_empty());
@@ -94,6 +94,7 @@ async fn test_status_list_find_all() {
             },
             sub: "https://example.com/statuslists/list1".to_string(),
             updated_at: 0,
+            version: 0,
         },
         status_lists::Model {
             list_id: "list2".to_string(),
@@ -106,6 +107,7 @@ async fn test_status_list_find_all() {
             },
             sub: "https://example.com/statuslists/list2".to_string(),
             updated_at: 0,
+            version: 0,
         },
     ];
 
@@ -226,18 +228,19 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_lists" ("list_id", "issuer", "status_list", "sub", "updated_at") VALUES ($1, $2, $3, $4, $5)"#,
+                r#"INSERT INTO "status_lists" ("list_id", "issuer", "status_list", "sub", "updated_at", "version") VALUES ($1, $2, $3, $4, $5, $6)"#,
                 [
                     entity.list_id.into(),
                     entity.issuer.into(),
                     serde_json::to_value(entity.status_list).unwrap().into(),
                     entity.sub.into(),
                     entity.updated_at.into(),
+                    entity.version.into(),
                 ],
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp", "version") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
                 [
                     snapshot.snapshot_id.into(),
                     snapshot.list_id.into(),
@@ -246,6 +249,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
                     snapshot.sub.into(),
                     snapshot.iat.into(),
                     snapshot.exp.into(),
+                    snapshot.version.into(),
                 ],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
@@ -382,7 +386,7 @@ async fn assert_guarded_update_rejects_stale_write(
         .await
         .unwrap();
 
-    // Both writers read the same state, so both guard on V.
+    // Both writers read the same state, so both guard on the same version.
     let writer_a = StatusListRecord {
         status_list: StatusList {
             bits: 1,
@@ -390,7 +394,7 @@ async fn assert_guarded_update_rejects_stale_write(
             size: None,
             default_status: None,
         },
-        updated_at: v + 1,
+        version: base.version + 1,
         ..base.clone()
     };
     let writer_b = StatusListRecord {
@@ -400,22 +404,29 @@ async fn assert_guarded_update_rejects_stale_write(
             size: None,
             default_status: None,
         },
-        updated_at: v + 1,
+        version: base.version + 1,
         ..base.clone()
     };
 
     // First writer wins.
-    let a_won = store.update_one(&base.list_id, writer_a, v).await.unwrap();
+    let a_won = store
+        .update_one(&base.list_id, writer_a, base.version)
+        .await
+        .unwrap();
     assert!(a_won, "first guarded write should land");
 
-    // Second writer guarded on the now-stale V: rejected, not silently applied.
-    let b_won = store.update_one(&base.list_id, writer_b, v).await.unwrap();
+    // Second writer guarded on the now-stale version: rejected, not silently
+    // applied.
+    let b_won = store
+        .update_one(&base.list_id, writer_b, base.version)
+        .await
+        .unwrap();
     assert!(!b_won, "stale guarded write must be rejected");
 
     // A's flip survived; B's did not overwrite it.
     let stored = store.find_one_by(&base.list_id).await.unwrap().unwrap();
     assert_eq!(stored.status_list.lst, "flip-A");
-    assert_eq!(stored.updated_at, v + 1);
+    assert_eq!(stored.version, base.version + 1);
 }
 
 #[cfg(feature = "sqlite")]
@@ -473,7 +484,7 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
             size: None,
             default_status: None,
         },
-        updated_at: v + 1,
+        version: base.version + 1,
         ..base.clone()
     };
     let stale_writer_b = StatusListRecord {
@@ -483,21 +494,26 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
             size: None,
             default_status: None,
         },
-        updated_at: v + 1,
+        version: base.version + 1,
         ..base.clone()
     };
 
-    assert!(store.update_one(&base.list_id, writer_a, v).await.unwrap());
+    assert!(
+        store
+            .update_one(&base.list_id, writer_a, base.version)
+            .await
+            .unwrap()
+    );
     assert!(
         !store
-            .update_one(&base.list_id, stale_writer_b, v)
+            .update_one(&base.list_id, stale_writer_b, base.version)
             .await
             .unwrap(),
         "B should lose the stale guard first"
     );
 
     let reread = store.find_one_by(&base.list_id).await.unwrap().unwrap();
-    assert_eq!(reread.updated_at, v + 1);
+    assert_eq!(reread.version, base.version + 1);
 
     let retry_writer_b = StatusListRecord {
         status_list: StatusList {
@@ -506,12 +522,12 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
             size: None,
             default_status: None,
         },
-        updated_at: reread.updated_at + 1,
+        version: reread.version + 1,
         ..reread.clone()
     };
     assert!(
         store
-            .update_one(&base.list_id, retry_writer_b, reread.updated_at)
+            .update_one(&base.list_id, retry_writer_b, reread.version)
             .await
             .unwrap(),
         "B's retry with the fresh guard should succeed"
@@ -519,12 +535,12 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
 
     let final_row = store.find_one_by(&base.list_id).await.unwrap().unwrap();
     assert_eq!(final_row.status_list.lst, "flip-B-retry");
-    assert_eq!(final_row.updated_at, v + 2);
+    assert_eq!(final_row.version, base.version + 2);
 }
 
-/// A guarded write whose `updated_at` does not strictly advance past the
+/// A guarded write whose `version` does not strictly advance past the
 /// guard is rejected before touching the DB, so a caller that forgets to
-/// advance the stamp fails loudly. The check precedes the query, so this
+/// advance the version fails loudly. The check precedes the query, so this
 /// runs on the mock backend.
 #[tokio::test]
 async fn test_update_one_rejects_non_advancing_stamp() {
@@ -534,11 +550,11 @@ async fn test_update_one_rejects_non_advancing_stamp() {
     let entity = fixtures::record("list-x", "issuer", "x", "sub", 1000);
 
     // new == expected: not advancing.
-    let equal = store.update_one("list-x", entity.clone(), 1000).await;
+    let equal = store.update_one("list-x", entity.clone(), 1).await;
     assert!(matches!(equal, Err(RepositoryError::UpdateError(_))));
 
     // new < expected: going backwards.
-    let backwards = store.update_one("list-x", entity, 1001).await;
+    let backwards = store.update_one("list-x", entity, 2).await;
     assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
 }
 
@@ -559,12 +575,12 @@ async fn test_update_one_with_snapshot_rejects_non_advancing_stamp() {
     );
 
     let equal = store
-        .update_one_with_snapshot("list-x", entity.clone(), 1000, snapshot.clone())
+        .update_one_with_snapshot("list-x", entity.clone(), 1, snapshot.clone())
         .await;
     assert!(matches!(equal, Err(RepositoryError::UpdateError(_))));
 
     let backwards = store
-        .update_one_with_snapshot("list-x", entity, 1001, snapshot)
+        .update_one_with_snapshot("list-x", entity, 2, snapshot)
         .await;
     assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
 }
@@ -597,10 +613,14 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             .into_connection(),
     );
     let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
+    let writer = StatusListRecord {
+        version: entity.version + 1,
+        ..entity.clone()
+    };
 
     assert!(
         store
-            .update_one_with_snapshot("list-txn", entity.clone(), 1000, snapshot.clone())
+            .update_one_with_snapshot("list-txn", writer.clone(), entity.version, snapshot.clone())
             .await
             .unwrap()
     );
@@ -613,21 +633,22 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4 WHERE "status_lists"."list_id" = $5 AND "status_lists"."updated_at" = $6"#,
+                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7"#,
                 [
-                    entity.issuer.clone().into(),
-                    serde_json::to_value(entity.status_list.clone())
+                    writer.issuer.clone().into(),
+                    serde_json::to_value(writer.status_list.clone())
                         .unwrap()
                         .into(),
-                    entity.sub.clone().into(),
-                    entity.updated_at.into(),
+                    writer.sub.clone().into(),
+                    writer.updated_at.into(),
+                    writer.version.into(),
                     "list-txn".into(),
-                    1000i64.into(),
+                    entity.version.into(),
                 ],
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                r#"INSERT INTO "status_list_history" ("snapshot_id", "list_id", "issuer", "status_list", "sub", "iat", "exp", "version") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
                 [
                     snapshot.snapshot_id.clone().into(),
                     snapshot.list_id.clone().into(),
@@ -638,6 +659,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
                     snapshot.sub.clone().into(),
                     snapshot.iat.into(),
                     snapshot.exp.into(),
+                    snapshot.version.into(),
                 ],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "COMMIT"),
@@ -656,7 +678,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
 
     assert!(
         !store
-            .update_one_with_snapshot("list-txn", entity.clone(), 1000, snapshot)
+            .update_one_with_snapshot("list-txn", writer.clone(), entity.version, snapshot)
             .await
             .unwrap()
     );
@@ -669,14 +691,15 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4 WHERE "status_lists"."list_id" = $5 AND "status_lists"."updated_at" = $6"#,
+                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7"#,
                 [
-                    entity.issuer.into(),
-                    serde_json::to_value(entity.status_list).unwrap().into(),
-                    entity.sub.into(),
-                    entity.updated_at.into(),
+                    writer.issuer.into(),
+                    serde_json::to_value(writer.status_list).unwrap().into(),
+                    writer.sub.into(),
+                    writer.updated_at.into(),
+                    writer.version.into(),
                     "list-txn".into(),
-                    1000i64.into(),
+                    entity.version.into(),
                 ],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "ROLLBACK"),
@@ -731,9 +754,10 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                     default_status: None,
                 },
                 updated_at: v + 1,
+                version: base.version + 1,
                 ..base.clone()
             },
-            v,
+            base.version,
             good_snapshot,
         )
         .await
@@ -776,9 +800,10 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                     default_status: None,
                 },
                 updated_at: v + 2,
+                version: base.version + 2,
                 ..base.clone()
             },
-            v + 1,
+            base.version + 1,
             colliding_snapshot,
         )
         .await;
@@ -822,9 +847,10 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                     default_status: None,
                 },
                 updated_at: v + 5,
+                version: base.version + 4,
                 ..base.clone()
             },
-            v, // stale: the row is at v+1 now
+            base.version, // stale: the row is at version base.version + 1 now
             fixtures::snapshot(
                 "snap-conflict",
                 &base.list_id,
@@ -1226,6 +1252,7 @@ async fn assert_duplicate_list_id_is_conflict(
         },
         sub: format!("sub-{list_id}"),
         updated_at,
+        version: 1,
     };
     let snapshot = |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
         snapshot_id: snapshot_id.to_string(),
@@ -1240,6 +1267,7 @@ async fn assert_duplicate_list_id_is_conflict(
         sub: format!("sub-{list_id}"),
         iat,
         exp: iat + 900,
+        version: 1,
     };
 
     store
@@ -1350,9 +1378,10 @@ async fn assert_update_snapshot_rolls_back(
                     default_status: None,
                 },
                 updated_at: v + 1,
+                version: base.version + 1,
                 ..base.clone()
             },
-            v,
+            base.version,
             fixtures::snapshot(
                 snapshot_id,
                 list_id,
@@ -1388,9 +1417,10 @@ async fn assert_update_snapshot_rolls_back(
                     default_status: None,
                 },
                 updated_at: v + 2,
+                version: base.version + 2,
                 ..base.clone()
             },
-            v + 1,
+            base.version + 1,
             fixtures::snapshot(
                 snapshot_id,
                 list_id,

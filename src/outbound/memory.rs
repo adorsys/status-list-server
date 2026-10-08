@@ -179,11 +179,11 @@ impl StatusListRepo for MemoryStatusLists {
     async fn update(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
     ) -> Result<bool, StatusListError> {
         let mut values = self.values.write().await;
         match values.by_id.get_mut(&record.list_id) {
-            Some(current) if current.updated_at == expected_updated_at => *current = record,
+            Some(current) if current.version == expected_version => *current = record,
             _ => return Ok(false),
         }
         Ok(true)
@@ -192,13 +192,13 @@ impl StatusListRepo for MemoryStatusLists {
     async fn update_with_snapshot(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError> {
         let snapshot_store = self.require_snapshot()?;
         let mut values = self.values.write().await;
         match values.by_id.get_mut(&record.list_id) {
-            Some(current) if current.updated_at == expected_updated_at => *current = record,
+            Some(current) if current.version == expected_version => *current = record,
             _ => return Ok(false),
         }
         snapshot_store
@@ -338,7 +338,10 @@ impl StatusListSnapshotRepo for MemoryStatusListSnapshotRepo {
             let result = values
                 .values()
                 .filter(|r| r.list_id == list_id && r.iat <= time && r.exp > time)
-                .max_by_key(|r| r.iat)
+                // Mirrors the SQL adapter's `ORDER BY iat DESC, version DESC`:
+                // two snapshots written in the same second share an `iat`, so
+                // `version` breaks the tie and the post-change snapshot wins.
+                .max_by_key(|r| (r.iat, r.version as i64))
                 .cloned();
             Ok(result)
         })
@@ -607,9 +610,9 @@ mod tests {
     }
 
     /// An empty PATCH is a successful no-op: it must not advance the status
-    /// list version (`updated_at`) and must not insert a duplicate history
-    /// snapshot. Re-submitting the current value at an existing index behaves
-    /// the same way (see `noop_update_with_identical_values`).
+    /// list version and must not insert a duplicate history snapshot.
+    /// Re-submitting the current value at an existing index behaves the same
+    /// way (see `noop_update_with_identical_values`).
     #[tokio::test]
     async fn empty_update_is_noop_without_version_advance_or_snapshot() {
         let repo = MemoryStatusLists::default();
@@ -722,7 +725,7 @@ mod tests {
 
     /// The redundant-write guard must only swallow updates that leave the list
     /// byte-for-byte identical. A mixed payload — one entry unchanged, one
-    /// changed — must still land: `updated_at` advances and a second snapshot is
+    /// changed — must still land: the version advances and a second snapshot is
     /// written. This pins the behaviour so a later "optimisation" that skips the
     /// write when *any* entry is unchanged would fail.
     #[tokio::test]
@@ -786,7 +789,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            after.updated_at > before.updated_at,
+            after.version > before.version,
             "a mixed update that changes the list must advance the version"
         );
         assert_ne!(after.status_list, before.status_list);
@@ -849,7 +852,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            after.updated_at > before.updated_at,
+            after.version > before.version,
             "growing the list must advance the version, not become a no-op"
         );
         assert_ne!(after.status_list, before.status_list, "the list must grow");
@@ -948,6 +951,7 @@ mod tests {
             },
             sub: format!("https://example/{list_id}"),
             updated_at: 0,
+            version: 1,
         }
     }
 
@@ -993,6 +997,7 @@ mod tests {
             sub: format!("https://example/{id}"),
             iat: 0,
             exp: 900,
+            version: 1,
         };
 
         repo.create_with_snapshot(list_record("l1", "issuer"), snapshot("l1"), 1)
@@ -1080,8 +1085,8 @@ mod tests {
         repo.insert(list_record("l1", "issuer"), 2).await.unwrap();
 
         let mut updated = list_record("l1", "issuer");
-        updated.updated_at = 1;
-        assert!(repo.update(updated, 0).await.unwrap());
+        updated.version = 2;
+        assert!(repo.update(updated, 1).await.unwrap());
 
         repo.insert(list_record("l2", "issuer"), 2).await.unwrap();
         assert!(matches!(

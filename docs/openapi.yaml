@@ -323,7 +323,15 @@ paths:
       - name: list_id
         in: path
         required: true
-        description: UUID of the status list.
+        description: |
+          UUID of the status list. For publish (`PUT`), only the lowercase,
+          hyphenated form is accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`);
+          the braced, `urn:uuid:`, no-hyphen and uppercase forms are rejected
+          with `400`. For update (`PATCH`), any well-formed UUID is accepted
+          for the lookup, but a list is only found by the exact spelling it was
+          published with: an uppercase (or otherwise differently-spelled) ID
+          for a list stored in the canonical lowercase form is not matched and
+          yields `404`.
         schema:
           type: string
           format: uuid
@@ -332,10 +340,28 @@ paths:
     put:
       operationId: publishStatusList
       summary: Publish a new status list
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          description: |
+            UUID of the status list. Only the lowercase, hyphenated UUID form is
+            accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
+            `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
+          schema:
+            type: string
+            format: uuid
+            example: "477121aa-b598-419e-916f-1e74654ff38b"
       description: |
         Creates a new status list for the given `list_id`. The issuer is
         derived from the validated JWT Bearer token. The request body defines
         the initial status entries for the list.
+
+        On success the response `Location` header and the `uri` member of the
+        body carry the absolute URI of the created status list. For full spec
+        compliance (§5.1/§5.2/§8.3) the issuer MUST embed that exact URI in the
+        Referenced Token's `status.status_list.uri`; the status list token's own
+        `sub` carries the same URI so relying parties can resolve it.
 
         Each issuer may hold at most `limits.max_lists_per_issuer` status lists
         (default 1000). A publish past that is refused with `400`
@@ -361,10 +387,26 @@ paths:
       responses:
         "201":
           description: Status list created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                Absolute URI of the newly created status list, e.g.
+                `https://statuslist.example.com/api/v1/status-lists/{list_id}`.
+                This is the value the issuer MUST embed in the Referenced
+                Token's `status.status_list.uri`; the status list token's own
+                `sub` carries the same URI.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusPublishResponse"
+              example:
+                uri: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+                list_id: "477121aa-b598-419e-916f-1e74654ff38b"
+                size: 100000
+                bits: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -562,28 +604,37 @@ paths:
           in: header
           required: false
           description: |
-            Weak conditional validator (an `ETag` previously returned by this
-            endpoint). The validator is keyed to the current token window of
-            length `exp - ttl` (where `exp - iat` and `ttl` are the live token's
-            claims), which rotates every `exp - ttl` seconds. A match therefore
-            proves the client's cached token still has more than `ttl` seconds of
-            validity left, so the server responds `304 Not Modified`. Once the
-            window rolls over — covering the last `ttl` seconds before `exp`, the
-            "dead zone" in which a `304` would hand back a token that is about to
-            expire — the validator changes and the server returns a freshly
-            signed `200 OK` token instead of a body-less `304`.
+            Conditional validator: the strong `"..."` `ETag` previously returned by
+            this endpoint. The ETag is opaque to clients — it is a SHA-256 digest
+            of the exact served representation bytes (RFC 9110 §8.8.3.1). Because
+            ES256 signatures are randomized, the bytes differ across replicas,
+            restarts, cold caches and window roll-overs; the strong ETag therefore
+            differs across replicas — this is a documented, accepted deviation from
+            cross-replica ETag equality (ticket 564 acceptance criterion: "two
+            replicas return matching ETags *or the issue documents why they don't*").
+            Within a single replica the ETag is stable for the whole token window,
+            so a client revalidating against the same replica gets a `304` with no
+            signing. The token window is exactly the token's full lifetime
+            (`exp_secs`); the ETag changes on content update, key/certificate
+            rotation, window roll-over, token-format/encoding change, aggregation
+            URI or token lifetime change, or mid-window content revert. A matching
+            `If-None-Match` proves the client holds the current window's token; the
+            server certifies `304` only while that token remains valid beyond the
+            advertised `max-age = min(ttl, exp - now)`, so the `304` never extends
+            a cached token past its `exp`. Otherwise a freshly signed `200 OK`
+            token is returned.
           schema:
             type: string
-            example: 'W/"9f2d..."'
+            example: '"a1b2c3d4..."'
         - name: If-Modified-Since
           in: header
           required: false
           description: |
             Date-time validator matching the `Last-Modified` header of a previous
-            response. `304 Not Modified` is returned only while the client's
-            cached token still has more than `ttl` seconds of validity remaining
-            (i.e. within `exp - ttl` of the list's last modification); otherwise
-            the server returns a freshly signed `200 OK` token.
+            response. Unlike `If-None-Match`, an `If-Modified-Since`-only request
+            never returns `304 Not Modified`; the server always returns a freshly
+            signed `200 OK` token. `304` is returned only for a matching
+            `If-None-Match`.
           schema:
             type: string
             example: "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -641,26 +692,32 @@ paths:
               example: Accept, Accept-Encoding
         "304":
           description: |
-            Not Modified. Returned for a conditional revalidation (`If-None-Match`
-            or `If-Modified-Since`) when the list has not changed and the client's
-            previously cached Status List Token still has more than `ttl` seconds
-            of validity remaining (`iat <= now < exp - ttl`). The client can
-            continue to use its cached token, so no body is sent.
+            Not Modified. Returned only for a matching `If-None-Match`
+            conditional revalidation when the list has not changed and the
+            client's previously cached Status List Token is still more than `ttl`
+            seconds from `exp`. The client can continue to use its cached token,
+            so no body is sent.
 
-            The server never answers `304` inside the dead zone — the last `ttl`
-            seconds before `exp` — or once `exp` has passed: a `304` there would
-            hand the relying party a token that is about to expire or already
-            expired, so it returns `200 OK` with a freshly signed token instead
-            (RFC 9110 §8.8.1).
+            A matching `If-None-Match` proves the client holds the current-window
+            token; the server certifies the `304` only while that token is still
+            valid beyond the advertised `max-age = min(ttl, exp - now)`, so the
+            `304` never strands the relying party with a token that is about to
+            expire or already expired (RFC 9110 §8.8.1).
+
+            An `If-Modified-Since`-only request never gets a `304`; it always
+            receives a freshly signed `200 OK` token.
           headers:
             ETag:
               schema:
                 type: string
               description: |
-                The current weak validator for the live representation, keyed to
-                the current `exp - ttl` token window. It changes when the window
-                rolls over so a stale cached token is no longer validated as
-                current.
+                The current strong validator for the live representation. It is a
+                SHA-256 digest of the served representation bytes, stable for the
+                whole token window on a single replica. It differs across replicas
+                (due to randomized ES256 signatures) and changes whenever the live
+                representation or its validity window changes (content,
+                key/certificate, window roll-over, format or encoding, aggregation
+                URI, token lifetime settings).
             Last-Modified:
               schema:
                 type: string
@@ -670,8 +727,8 @@ paths:
               schema:
                 type: string
               description: |
-                Caching directive for intermediaries (e.g. `max-age=<ttl>`). The
-                live token is not marked `immutable`: it expires and its validator
+                Caching directive for intermediaries (e.g. `max-age=<min(ttl, exp - now)>`).
+                The live token is not marked `immutable`: it expires and its validator
                 rotates, so freshness-honouring caches/browsers must revalidate to
                 obtain an unexpired token.
             Vary:
@@ -801,10 +858,27 @@ components:
 
     StatusPublishResponse:
       type: object
+      description: |
+        Response body of a successful `PUT /api/v1/status-lists/{list_id}/statuses`.
+        `uri` is the absolute URI of the newly created status list — the value
+        the issuer MUST embed in the Referenced Token's `status.status_list.uri`
+        (spec §5.1/§5.2/§8.3). It is identical to the `Location` header.
       required:
+        - uri
+        - list_id
         - size
         - bits
       properties:
+        uri:
+          type: string
+          format: uri
+          description: Absolute URI of the created status list.
+          example: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+        list_id:
+          type: string
+          format: uuid
+          description: The `list_id` the status list was published under.
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
         size:
           type:
             - integer
@@ -944,11 +1018,19 @@ components:
           example: "https://statuslist.example.com/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
         iat:
           type: integer
-          description: Issued-at timestamp (seconds since Unix epoch).
+          description: |
+            Issued-at timestamp (seconds since Unix epoch). For live tokens it is
+            `max(window_start, updated_at)`: the start of the current token window
+            (matching the window by which the ETag and signed-bytes cache rotate),
+            or the last content change if that is later — so it never predates the
+            list's most recent modification, and is part of the cache key and ETag
+            so a mid-window content revert to an earlier state is a distinct
+            identity. Lifetime is governed by `exp` and `ttl`, not by `iat` skew.
           example: 1752515200
         exp:
           type: integer
-          description: Expiration timestamp (seconds since Unix epoch).
+          description: |
+            Expiration timestamp (seconds since Unix epoch); always `iat + exp_secs`.
           example: 1752516100
         ttl:
           type: integer
@@ -1150,7 +1232,9 @@ components:
 
         `status_list_already_exists` — a list with this `list_id` is already
         published. **Retrying will never succeed**; choose a different `list_id`
-        or update the existing list instead.
+        or update the existing list instead. When the stored list can be read, a
+        `Location` header carries its canonical URI (the same `sub` the list
+        already uses), so a racing publisher can adopt it instead of guessing.
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -1158,6 +1242,15 @@ components:
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
       headers:
+        Location:
+          description: |
+            Present only for `status_list_already_exists`, when the stored list
+            is readable: the canonical URI of the existing list — the `sub` the
+            list already uses.
+          required: false
+          schema:
+            type: string
+            format: uri
         Retry-After:
           description: |
             Present only for `write_contention`. Seconds to wait before

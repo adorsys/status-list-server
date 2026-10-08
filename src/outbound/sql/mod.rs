@@ -115,11 +115,12 @@ impl StatusListRepo for SqlStatusListRepo {
     async fn update(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
     ) -> Result<bool, StatusListError> {
         let id = record.list_id.clone();
+        let expected = i64::try_from(expected_version).unwrap_or(i64::MAX);
         self.store
-            .update_one(&id, record.into(), expected_updated_at)
+            .update_one(&id, record.into(), expected)
             .await
             .map_err(Into::into)
     }
@@ -127,12 +128,13 @@ impl StatusListRepo for SqlStatusListRepo {
     async fn update_with_snapshot(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError> {
         let id = record.list_id.clone();
+        let expected = i64::try_from(expected_version).unwrap_or(i64::MAX);
         self.store
-            .update_one_with_snapshot(&id, record.into(), expected_updated_at, snapshot.into())
+            .update_one_with_snapshot(&id, record.into(), expected, snapshot.into())
             .await
             .map_err(Into::into)
     }
@@ -213,6 +215,7 @@ impl From<models::StatusListRecord> for StatusListRecord {
                 default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
+            version: u64::try_from(record.version).unwrap_or(0),
         }
     }
 }
@@ -230,6 +233,7 @@ impl From<StatusListRecord> for models::StatusListRecord {
                 default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
+            version: i64::try_from(record.version).unwrap_or(i64::MAX),
         }
     }
 }
@@ -249,6 +253,7 @@ impl From<models::StatusListHistoryRecord> for StatusListSnapshot {
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: u64::try_from(record.version).unwrap_or(0),
         }
     }
 }
@@ -268,6 +273,7 @@ impl From<StatusListSnapshot> for models::StatusListHistoryRecord {
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: i64::try_from(record.version).unwrap_or(i64::MAX),
         }
     }
 }

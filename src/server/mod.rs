@@ -1,6 +1,7 @@
 //! Inbound HTTP web server module containing handlers, auth middleware, and shared application state.
 
 pub mod auth;
+pub mod cache;
 pub mod error;
 pub mod handlers;
 pub mod health;
@@ -42,7 +43,10 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
 pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
-    pub server_domain: String,
+    /// Resolved public base URL (e.g. `https://statuslist.example.com/api/v1`).
+    /// Used to build the `sub` URI signed into issued tokens and returned to
+    /// issuers as the publish `Location`.
+    pub public_base_url: String,
     pub aggregation_uri: Option<String>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
@@ -52,6 +56,8 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Per-replica cache of signed status-list token bytes.
+    pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
 }
