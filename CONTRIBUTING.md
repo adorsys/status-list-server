@@ -240,6 +240,17 @@ cargo xtask ci
 support `minimal`, `mysql`, `sqlite`, `aws`, `vault`, `gcp`, `azure` and `redis`; see the [README feature profile matrix](README.md#development-and-quality-checks)
 for their exact Cargo features and Compose services. The `ci` command runs the complete `local-ci.sh --full` pipeline.
 
+Before using `lint`, install rustfmt and Clippy with
+`rustup component add rustfmt clippy`, and the security/dependency tools with
+`cargo install --locked cargo-audit cargo-machete`. Unlike `ci`, `lint` does not
+bootstrap missing tools. It runs every step and reports all failures.
+
+`check-profiles` checks isolated libraries without default features as well as
+all supported targets. `test` enables `postgres-tests` for PostgreSQL-backed
+profiles and `redis-tests` for Redis; these profiles and MySQL need a running
+Docker daemon. Use `cargo xtask test --profile minimal` for tests without
+database containers.
+
 ### Redis cache integration tests
 
 Run the Redis cache integration tests with Docker/testcontainers, or point them at

@@ -184,16 +184,52 @@ cargo xtask ci
 | `minimal`  | `--no-default-features --features memory` | app only                               |
 | `postgres` | `postgres`                                | app and PostgreSQL                     |
 | `mysql`    | `mysql`                                   | app and MySQL                          |
-| `sqlite`   | `sqlite`                                  | app only                               |
+| `sqlite`   | `sqlite`                                  | app and SQLite volume initialization   |
 | `aws`      | `postgres,aws`                            | app, PostgreSQL, and AWS               |
-| `vault`    | `postgres,vault`                          | app, PostgreSQL, and HashiCorp Vault   |
-| `gcp`      | `postgres,gcp`                            | app, PostgreSQL, and Google Cloud      |
-| `azure`    | `postgres,azure`                          | app, PostgreSQL, and Azure Key Vault   |
+| `vault`    | `postgres,vault`                          | app and PostgreSQL                     |
+| `gcp`      | `postgres,gcp`                            | app and PostgreSQL                     |
+| `azure`    | `postgres,azure`                          | app and PostgreSQL                     |
 | `redis`    | `postgres,redis`                          | app, PostgreSQL, and Redis             |
 
 Vault, GCP, and Azure use externally configured provider endpoints and credentials, so those profiles do not start provider emulators. Configure them in `.env` before starting the profile.
 
-Use `check-profiles` to compile every row in the table. `lint` runs formatting, Clippy for all targets and features, `cargo audit`, and `cargo machete`. `ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
+`check-profiles` checks each library with `--no-default-features` and the listed
+features to detect dependence on other default features. It also checks all
+supported targets with the normal profile selection. Non-minimal builds and
+tests retain the default `memory` feature, which the binary and existing test
+helpers require. Every check runs, and failures are summarized at the end.
+
+`test` adds `postgres-tests` to every PostgreSQL-backed profile and also adds
+`redis-tests` to the Redis profile. These profiles and MySQL require a running
+Docker daemon for their container tests. `minimal` and SQLite tests need no
+database containers. Cloud integration tests may require additional provider
+configuration; see the contributing guide.
+
+`lint` runs formatting, Clippy for all targets and features, `cargo audit`, and
+`cargo machete`, then summarizes all failures. Install its tools first:
+
+```bash
+rustup component add rustfmt clippy
+cargo install --locked cargo-audit cargo-machete
+```
+
+`compose` selects the MySQL, SQLite, or Redis override file when needed. MySQL
+uses `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from the shell or
+`.env` for both the database service and application. SQLite stores its database
+in the `sqlitedata` named volume, preserving lists across container restarts;
+`down --volumes` deletes that data. Plain Compose continues to read database
+configuration from its environment files. The overrides can also be used directly:
+
+```bash
+docker compose -f docker-compose.yml -f compose/mysql.yml --profile mysql up -d --build
+docker compose -f docker-compose.yml -f compose/sqlite.yml up -d --build
+```
+
+These local overrides select their connection mode. Remove incompatible
+`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before
+using the MySQL override, and password-file entries before using SQLite.
+
+`ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
 
 You can still invoke individual Cargo commands directly. For example, run unit and integration tests or verify the zero-infrastructure in-memory build with:
 

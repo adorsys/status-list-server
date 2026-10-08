@@ -14,7 +14,10 @@ pub fn run() -> Result<()> {
         Task::CheckProfiles => check_profiles(&workspace),
         Task::Build { profile } => run_spec(build_spec(profile), &workspace),
         Task::Test { profile } => run_spec(test_spec(profile), &workspace),
-        Task::Lint => run_specs(lint_specs(), &workspace),
+        Task::Lint => run_checks(
+            lint_specs().map(|(name, spec)| (name.to_owned(), spec)),
+            |spec| run_spec(spec, &workspace),
+        ),
         Task::Compose { profile } => run_spec(compose_spec(profile), &workspace),
         Task::Ci => run_spec(ci_spec(), &workspace),
     }
@@ -73,6 +76,13 @@ enum FeatureProfile {
     Redis,
 }
 
+struct ProfileDefinition {
+    features: &'static str,
+    test_features: &'static str,
+    compose_profiles: &'static [&'static str],
+    compose_file: Option<&'static str>,
+}
+
 impl FeatureProfile {
     const ALL: [Self; 9] = [
         Self::Minimal,
@@ -86,42 +96,72 @@ impl FeatureProfile {
         Self::Redis,
     ];
 
-    fn cargo_args(self) -> &'static [&'static str] {
+    const fn definition(self) -> ProfileDefinition {
         match self {
-            Self::Minimal => &["--no-default-features", "--features", "memory"],
-            Self::Postgres => &["--features", "postgres"],
-            Self::MySql => &["--features", "mysql"],
-            Self::Sqlite => &["--features", "sqlite"],
-            Self::Aws => &["--features", "postgres,aws"],
-            Self::Vault => &["--features", "postgres,vault"],
-            Self::Gcp => &["--features", "postgres,gcp"],
-            Self::Azure => &["--features", "postgres,azure"],
-            Self::Redis => &["--features", "postgres,redis"],
+            Self::Minimal => ProfileDefinition {
+                features: "memory",
+                test_features: "",
+                compose_profiles: &[],
+                compose_file: None,
+            },
+            Self::Postgres => ProfileDefinition {
+                features: "postgres",
+                test_features: "postgres-tests",
+                compose_profiles: &["postgres"],
+                compose_file: None,
+            },
+            Self::MySql => ProfileDefinition {
+                features: "mysql",
+                test_features: "",
+                compose_profiles: &["mysql"],
+                compose_file: Some("compose/mysql.yml"),
+            },
+            Self::Sqlite => ProfileDefinition {
+                features: "sqlite",
+                test_features: "",
+                compose_profiles: &[],
+                compose_file: Some("compose/sqlite.yml"),
+            },
+            Self::Aws => ProfileDefinition {
+                features: "postgres,aws",
+                test_features: "postgres-tests",
+                compose_profiles: &["postgres", "aws"],
+                compose_file: None,
+            },
+            Self::Vault => ProfileDefinition {
+                features: "postgres,vault",
+                test_features: "postgres-tests",
+                compose_profiles: &["postgres"],
+                compose_file: None,
+            },
+            Self::Gcp => ProfileDefinition {
+                features: "postgres,gcp",
+                test_features: "postgres-tests",
+                compose_profiles: &["postgres"],
+                compose_file: None,
+            },
+            Self::Azure => ProfileDefinition {
+                features: "postgres,azure",
+                test_features: "postgres-tests",
+                compose_profiles: &["postgres"],
+                compose_file: None,
+            },
+            Self::Redis => ProfileDefinition {
+                features: "postgres,redis",
+                test_features: "postgres-tests,redis-tests",
+                compose_profiles: &["postgres", "redis"],
+                compose_file: Some("compose/redis.yml"),
+            },
         }
     }
 
-    fn docker_features(self) -> &'static str {
-        match self {
-            Self::Minimal => "memory",
-            Self::Postgres => "postgres",
-            Self::MySql => "mysql",
-            Self::Sqlite => "sqlite",
-            Self::Aws => "postgres,aws",
-            Self::Vault => "postgres,vault",
-            Self::Gcp => "postgres,gcp",
-            Self::Azure => "postgres,azure",
-            Self::Redis => "postgres,redis",
+    fn cargo_args(self) -> Vec<&'static str> {
+        let mut args = Vec::new();
+        if self == Self::Minimal {
+            args.push("--no-default-features");
         }
-    }
-
-    fn compose_profiles(self) -> &'static [&'static str] {
-        match self {
-            Self::Minimal | Self::Sqlite => &[],
-            Self::Postgres | Self::Vault | Self::Gcp | Self::Azure => &["postgres"],
-            Self::MySql => &["mysql"],
-            Self::Aws => &["postgres", "aws"],
-            Self::Redis => &["postgres", "redis"],
-        }
+        args.extend(["--features", self.definition().features]);
+        args
     }
 }
 
@@ -180,18 +220,37 @@ fn workspace_root() -> Result<PathBuf> {
 }
 
 fn check_profiles(workspace: &Path) -> Result<()> {
-    for profile in FeatureProfile::ALL {
-        println!("Checking feature profile '{profile}'...");
-        run_spec(check_spec(profile), workspace)
-            .wrap_err_with(|| format!("feature profile '{profile}' failed"))?;
-    }
-    Ok(())
+    let checks = FeatureProfile::ALL.into_iter().flat_map(|profile| {
+        [
+            (
+                format!("{profile}: isolated library"),
+                isolated_check_spec(profile),
+            ),
+            (format!("{profile}: supported targets"), check_spec(profile)),
+        ]
+    });
+    run_checks(checks, |spec| run_spec(spec, workspace))
+}
+
+fn isolated_check_spec(profile: FeatureProfile) -> CommandSpec {
+    CommandSpec::new(
+        "cargo",
+        [
+            "check",
+            "--package",
+            "status-list-server",
+            "--lib",
+            "--no-default-features",
+            "--features",
+            profile.definition().features,
+        ],
+    )
 }
 
 fn check_spec(profile: FeatureProfile) -> CommandSpec {
     let args = ["check", "--package", "status-list-server", "--all-targets"]
         .into_iter()
-        .chain(profile.cargo_args().iter().copied());
+        .chain(profile.cargo_args());
     CommandSpec::new("cargo", args)
 }
 
@@ -204,77 +263,96 @@ fn build_spec(profile: FeatureProfile) -> CommandSpec {
         "status-list-server",
     ]
     .into_iter()
-    .chain(profile.cargo_args().iter().copied());
+    .chain(profile.cargo_args());
     CommandSpec::new("cargo", args)
 }
 
 fn test_spec(profile: FeatureProfile) -> CommandSpec {
-    let args = ["test", "--workspace"]
+    let mut args: Vec<_> = ["test", "--workspace"]
         .into_iter()
-        .chain(profile.cargo_args().iter().copied());
+        .chain(profile.cargo_args())
+        .collect();
+    let test_features = profile.definition().test_features;
+    if !test_features.is_empty() {
+        args.extend(["--features", test_features]);
+    }
     CommandSpec::new("cargo", args)
 }
 
-fn lint_specs() -> [CommandSpec; 4] {
+fn lint_specs() -> [(&'static str, CommandSpec); 4] {
     [
-        CommandSpec::new("cargo", ["fmt", "--all", "--check"]),
-        CommandSpec::new(
-            "cargo",
-            [
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ],
+        (
+            "formatting",
+            CommandSpec::new("cargo", ["fmt", "--all", "--check"]),
         ),
-        CommandSpec::new("cargo", ["audit"]),
+        (
+            "Clippy",
+            CommandSpec::new(
+                "cargo",
+                [
+                    "clippy",
+                    "--workspace",
+                    "--all-targets",
+                    "--all-features",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+        ),
+        ("audit", CommandSpec::new("cargo", ["audit"])),
         // Invoke the plugin binary directly. Older cargo-machete releases parse
         // nested `cargo machete` arguments as paths when xtask itself is run by Cargo.
-        CommandSpec::new("cargo-machete", ["--with-metadata"]),
+        (
+            "machete",
+            CommandSpec::new("cargo-machete", ["--with-metadata"]),
+        ),
     ]
 }
 
 fn compose_spec(profile: FeatureProfile) -> CommandSpec {
-    let mut args = vec!["compose"];
-    for compose_profile in profile.compose_profiles() {
+    let definition = profile.definition();
+    let mut args = vec!["compose", "-f", "docker-compose.yml"];
+    if let Some(file) = definition.compose_file {
+        args.extend(["-f", file]);
+    }
+    for compose_profile in definition.compose_profiles {
         args.extend(["--profile", compose_profile]);
     }
     args.extend(["up", "--detach", "--build"]);
 
-    let mut spec = CommandSpec::new("docker", args).with_env("FEATURES", profile.docker_features());
-    if profile == FeatureProfile::MySql {
-        spec = spec
-            .with_env("APP_DATABASE__HOST", "mysql")
-            .with_env("APP_DATABASE__PORT", "3306")
-            .with_env("APP_DATABASE__USERNAME", "mysql")
-            .with_env("APP_DATABASE__PASSWORD", "mysql")
-            .with_env("APP_DATABASE__NAME", "status-list");
-    }
-    if profile == FeatureProfile::Sqlite {
-        spec = spec
-            .with_env("APP_DATABASE__URL", "sqlite::memory:?cache=shared")
-            .with_env("APP_DATABASE__HOST", "")
-            .with_env("APP_DATABASE__USERNAME", "")
-            .with_env("APP_DATABASE__PASSWORD", "")
-            .with_env("APP_DATABASE__NAME", "");
-    }
-    if profile == FeatureProfile::Redis {
-        spec = spec.with_env("APP_CACHE__BACKEND", "redis");
-    }
-    spec
+    CommandSpec::new("docker", args).with_env("FEATURES", definition.features)
 }
 
 fn ci_spec() -> CommandSpec {
     CommandSpec::new("sh", ["local-ci.sh", "--full"])
 }
 
-fn run_specs<const N: usize>(specs: [CommandSpec; N], workspace: &Path) -> Result<()> {
-    for spec in specs {
-        run_spec(spec, workspace)?;
+fn run_checks(
+    checks: impl IntoIterator<Item = (String, CommandSpec)>,
+    mut execute: impl FnMut(CommandSpec) -> Result<()>,
+) -> Result<()> {
+    let mut results = Vec::new();
+    for (name, spec) in checks {
+        println!("Checking {name}...");
+        results.push((name, execute(spec)));
     }
+    println!("\nCheck results:");
+    let mut failures = Vec::new();
+    for (name, result) in results {
+        match result {
+            Ok(()) => println!("PASS {name}"),
+            Err(error) => {
+                eprintln!("FAIL {name}: {error:#}");
+                failures.push(name);
+            }
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "failed checks: {}",
+        failures.join(", ")
+    );
     Ok(())
 }
 
@@ -365,31 +443,141 @@ mod tests {
     #[test]
     fn compose_profiles_never_start_postgres_and_mysql_together() {
         for profile in FeatureProfile::ALL {
-            let services = profile.compose_profiles();
+            let services = profile.definition().compose_profiles;
             assert!(
                 !(services.contains(&"postgres") && services.contains(&"mysql")),
                 "profile {profile} starts two database services"
             );
         }
-        assert_eq!(FeatureProfile::MySql.compose_profiles(), &["mysql"]);
+        assert_eq!(
+            FeatureProfile::MySql.definition().compose_profiles,
+            &["mysql"]
+        );
     }
 
     #[test]
-    fn compose_sets_backend_specific_runtime_environment() {
-        let mysql = compose_spec(FeatureProfile::MySql);
-        assert!(mysql.env.contains(&("APP_DATABASE__HOST", "mysql")));
-        assert!(mysql.env.contains(&("APP_DATABASE__PORT", "3306")));
+    fn compose_uses_the_profile_matrix_and_never_passes_credentials() {
+        let expected = [
+            (FeatureProfile::Minimal, "memory", &[][..], None),
+            (
+                FeatureProfile::Postgres,
+                "postgres",
+                &["postgres"][..],
+                None,
+            ),
+            (
+                FeatureProfile::MySql,
+                "mysql",
+                &["mysql"][..],
+                Some("compose/mysql.yml"),
+            ),
+            (
+                FeatureProfile::Sqlite,
+                "sqlite",
+                &[][..],
+                Some("compose/sqlite.yml"),
+            ),
+            (
+                FeatureProfile::Aws,
+                "postgres,aws",
+                &["postgres", "aws"][..],
+                None,
+            ),
+            (
+                FeatureProfile::Vault,
+                "postgres,vault",
+                &["postgres"][..],
+                None,
+            ),
+            (FeatureProfile::Gcp, "postgres,gcp", &["postgres"][..], None),
+            (
+                FeatureProfile::Azure,
+                "postgres,azure",
+                &["postgres"][..],
+                None,
+            ),
+            (
+                FeatureProfile::Redis,
+                "postgres,redis",
+                &["postgres", "redis"][..],
+                Some("compose/redis.yml"),
+            ),
+        ];
+        for (profile, features, services, file) in expected {
+            let spec = compose_spec(profile);
+            let mut args = vec!["compose", "-f", "docker-compose.yml"];
+            if let Some(file) = file {
+                args.extend(["-f", file]);
+            }
+            for service in services {
+                args.extend(["--profile", service]);
+            }
+            args.extend(["up", "--detach", "--build"]);
+            assert_eq!(spec.args, args, "profile {profile}");
+            assert_eq!(spec.env, [("FEATURES", features)], "profile {profile}");
+        }
+    }
 
-        let sqlite = compose_spec(FeatureProfile::Sqlite);
-        assert!(
-            sqlite
-                .env
-                .contains(&("APP_DATABASE__URL", "sqlite::memory:?cache=shared"))
-        );
-        assert!(sqlite.env.contains(&("APP_DATABASE__HOST", "")));
+    #[test]
+    fn test_profiles_enable_integration_tests_without_changing_build_features() {
+        let expected = [
+            (FeatureProfile::Minimal, ""),
+            (FeatureProfile::Postgres, "postgres-tests"),
+            (FeatureProfile::MySql, ""),
+            (FeatureProfile::Sqlite, ""),
+            (FeatureProfile::Aws, "postgres-tests"),
+            (FeatureProfile::Vault, "postgres-tests"),
+            (FeatureProfile::Gcp, "postgres-tests"),
+            (FeatureProfile::Azure, "postgres-tests"),
+            (FeatureProfile::Redis, "postgres-tests,redis-tests"),
+        ];
+        for (profile, test_features) in expected {
+            let mut args = vec!["test", "--workspace"];
+            args.extend(profile.cargo_args());
+            if !test_features.is_empty() {
+                args.extend(["--features", test_features]);
+            }
+            assert_eq!(test_spec(profile).args, args, "profile {profile}");
+            assert!(
+                !build_spec(profile)
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("-tests"))
+            );
+        }
+    }
 
-        let redis = compose_spec(FeatureProfile::Redis);
-        assert!(redis.env.contains(&("APP_CACHE__BACKEND", "redis")));
+    #[test]
+    fn isolated_checks_disable_defaults_and_leave_test_helpers_to_supported_checks() {
+        for profile in FeatureProfile::ALL {
+            let isolated = isolated_check_spec(profile);
+            assert!(isolated.args.contains(&"--no-default-features"));
+            assert!(isolated.args.contains(&"--lib"));
+            assert!(!isolated.args.contains(&"--all-targets"));
+            assert_eq!(isolated.args.last(), Some(&profile.definition().features));
+            assert!(check_spec(profile).args.contains(&"--all-targets"));
+            assert_eq!(
+                check_spec(profile).args.contains(&"--no-default-features"),
+                profile == FeatureProfile::Minimal
+            );
+        }
+    }
+
+    #[test]
+    fn checks_continue_after_failures_and_report_every_failed_step() {
+        let checks = ["first", "second", "third", "fourth"]
+            .map(|name| (name.to_owned(), CommandSpec::new(name, [])));
+        let mut executed = Vec::new();
+        let error = run_checks(checks, |spec| {
+            executed.push(spec.program);
+            if matches!(spec.program, "first" | "third") {
+                color_eyre::eyre::bail!("simulated failure");
+            }
+            Ok(())
+        })
+        .expect_err("any failed step must fail the task");
+        assert_eq!(executed, ["first", "second", "third", "fourth"]);
+        assert_eq!(error.to_string(), "failed checks: first, third");
     }
 
     #[test]

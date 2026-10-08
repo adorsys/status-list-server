@@ -758,6 +758,9 @@ jobs:
       - name: Validate Docker Compose model
         run: docker compose --profile "*" config --quiet
 
+      - name: Validate backend override configuration
+        run: python3 -m unittest discover -s scripts/tests -p test_compose_backends.py -v
+
       - name: Validate profiles and application defaults
         run: |
           python3 - <<'PY'
