@@ -1,16 +1,21 @@
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 use sea_orm::DatabaseConnection;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 use jsonwebtoken::jwk::Jwk;
 
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 use crate::outbound::sql::SeaOrmStore;
-use crate::outbound::sql::models::{
-    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord,
-};
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+use crate::outbound::sql::models::Credentials;
+use crate::outbound::sql::models::{StatusList, StatusListHistoryRecord, StatusListRecord};
 
 pub(super) const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
 /// Quota argument for tests that exercise something other than the quota.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 pub(super) const NO_LIST_QUOTA: u64 = u64::MAX;
 
 #[cfg(feature = "sqlite")]
@@ -26,6 +31,7 @@ pub(super) async fn sqlite_connection_migrated(steps: Option<u32>) -> Arc<Databa
 
 /// Seeds a credential whose `issuer` backs the `status_lists.issuer` foreign
 /// key and returns the JWK it was seeded with.
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 pub(super) async fn seed_credential(db: &Arc<DatabaseConnection>, issuer: &str) -> Jwk {
     let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
     let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();

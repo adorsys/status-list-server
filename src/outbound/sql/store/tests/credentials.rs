@@ -1,15 +1,22 @@
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase, MockExecResult};
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
 use super::fixtures;
-use crate::outbound::sql::models::{Credentials, StatusListRecord, credentials};
-use crate::outbound::sql::{RepositoryError, SeaOrmStore};
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use crate::outbound::sql::RepositoryError;
+use crate::outbound::sql::SeaOrmStore;
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use crate::outbound::sql::models::StatusListRecord;
+use crate::outbound::sql::models::{Credentials, credentials};
 
 #[cfg(feature = "mysql")]
 use crate::outbound::sql::test_containers::mysql_helpers;
 
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
 async fn assert_credentials_round_trip(db: Arc<DatabaseConnection>, issuer: &str) {
     let store = SeaOrmStore::<Credentials>::new(db);
 

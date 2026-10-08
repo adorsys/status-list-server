@@ -1,17 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::{
-    ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, MockDatabase, MockExecResult,
-    QueryFilter, QueryOrder, QuerySelect, Statement, Transaction, Value,
-};
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Statement, Transaction, Value};
 
 use super::fixtures;
-use crate::outbound::sql::models::{
-    Credentials, StatusList, StatusListHistoryRecord, StatusListRecord, status_list_allocations,
-    status_lists,
-};
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use crate::outbound::sql::models::Credentials;
+use crate::outbound::sql::models::{StatusList, StatusListRecord, status_lists};
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+use crate::outbound::sql::models::{StatusListHistoryRecord, status_list_allocations};
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
 #[cfg(feature = "mysql")]
