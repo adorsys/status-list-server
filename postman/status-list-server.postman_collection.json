@@ -256,10 +256,7 @@
                   "  pm.expect(body).to.have.property('size');",
                   "  pm.expect(body).to.have.property('bits');",
                   "  pm.expect([1, 2, 4, 8]).to.include(body.bits);",
-                  "});",
-                  "var historicalTime = Math.floor(Date.now() / 1000).toString();",
-                  "pm.collectionVariables.set('historical_time', historicalTime);",
-                  "pm.environment.set('historical_time', historicalTime);"
+                  "});"
                 ]
               }
             }
@@ -324,6 +321,13 @@
                   "  pm.collectionVariables.set('pre_update_status_list_lst', payload.status_list.lst);",
                   "  pm.environment.set('pre_update_status_list_lst', payload.status_list.lst);",
                   "});",
+                  "var preUpdateLastModified = pm.response.headers.get('Last-Modified') || '';",
+                  "var historicalTime = Math.floor(Date.parse(preUpdateLastModified) / 1000).toString();",
+                  "pm.test('pre-update server timestamp is usable for history lookup', function () {",
+                  "  pm.expect(historicalTime).to.not.equal('NaN');",
+                  "});",
+                  "pm.collectionVariables.set('historical_time', historicalTime);",
+                  "pm.environment.set('historical_time', historicalTime);",
                   "pm.collectionVariables.set('pre_update_etag', pm.response.headers.get('ETag') || '');",
                   "pm.collectionVariables.set('pre_update_last_modified', pm.response.headers.get('Last-Modified') || '');",
                   "pm.environment.set('pre_update_etag', pm.response.headers.get('ETag') || '');",
@@ -375,6 +379,56 @@
                   "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/statuslist+cwt');",
                   "  pm.expect(pm.response.headers.has('ETag')).to.equal(true);",
                   "  pm.expect(pm.response.headers.get('Content-Encoding')).to.not.equal('gzip');",
+                  "});",
+                  "function responseBytes() {",
+                  "  if (pm.response.stream) { return Array.prototype.slice.call(pm.response.stream); }",
+                  "  return Array.prototype.map.call(pm.response.text(), function (c) { return c.charCodeAt(0) & 255; });",
+                  "}",
+                  "function bytesToBase64url(bytes) {",
+                  "  return Buffer.from(bytes).toString('base64').replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+                  "}",
+                  "function CborReader(bytes) { this.bytes = bytes; this.offset = 0; }",
+                  "CborReader.prototype.readByte = function () {",
+                  "  if (this.offset >= this.bytes.length) { throw new Error('unexpected end of CBOR'); }",
+                  "  return this.bytes[this.offset++];",
+                  "};",
+                  "CborReader.prototype.readLength = function (additional) {",
+                  "  if (additional < 24) { return additional; }",
+                  "  var lengthBytes = additional === 24 ? 1 : additional === 25 ? 2 : additional === 26 ? 4 : additional === 27 ? 8 : 0;",
+                  "  if (!lengthBytes) { throw new Error('unsupported CBOR additional info ' + additional); }",
+                  "  var value = 0;",
+                  "  for (var i = 0; i < lengthBytes; i++) { value = value * 256 + this.readByte(); }",
+                  "  return value;",
+                  "};",
+                  "CborReader.prototype.read = function () {",
+                  "  var initial = this.readByte();",
+                  "  var major = initial >> 5;",
+                  "  var additional = initial & 31;",
+                  "  var length = this.readLength(additional);",
+                  "  if (major === 0) { return length; }",
+                  "  if (major === 1) { return -1 - length; }",
+                  "  if (major === 2) { return this.bytes.slice(this.offset, this.offset += length); }",
+                  "  if (major === 3) { var text = this.bytes.slice(this.offset, this.offset += length); return Buffer.from(text).toString('utf8'); }",
+                  "  if (major === 4) { var array = []; for (var ai = 0; ai < length; ai++) { array.push(this.read()); } return array; }",
+                  "  if (major === 5) { var pairs = []; for (var mi = 0; mi < length; mi++) { pairs.push([this.read(), this.read()]); } return { __map: pairs }; }",
+                  "  if (major === 6) { return { __tag: length, value: this.read() }; }",
+                  "  throw new Error('unsupported CBOR major type ' + major);",
+                  "};",
+                  "function mapGet(map, key) {",
+                  "  for (var i = 0; i < map.__map.length; i++) { if (map.__map[i][0] === key) { return map.__map[i][1]; } }",
+                  "  throw new Error('missing CBOR map key ' + key);",
+                  "}",
+                  "function decodeCwtStatusList(bytes) {",
+                  "  var sign1 = new CborReader(bytes).read();",
+                  "  pm.expect(sign1.__tag, 'CWT is tagged COSE_Sign1').to.equal(18);",
+                  "  pm.expect(sign1.value, 'COSE_Sign1 array').to.be.an('array').with.length(4);",
+                  "  var payload = new CborReader(sign1.value[2]).read();",
+                  "  return mapGet(payload, 65533);",
+                  "}",
+                  "pm.test('CWT payload has published status values [0, 1, 2]', function () {",
+                  "  var statusList = decodeCwtStatusList(responseBytes());",
+                  "  pm.expect(mapGet(statusList, 'bits')).to.equal(2);",
+                  "  pm.expect(bytesToBase64url(mapGet(statusList, 'lst'))).to.equal('eNpTAQAAJQAl');",
                   "});"
                 ]
               }
@@ -420,9 +474,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var historicalTime = Number(pm.collectionVariables.get('historical_time') || pm.environment.get('historical_time') || '0');",
-                  "var updateAfter = (historicalTime + 1) * 1000;",
-                  "while (historicalTime > 0 && Date.now() <= updateAfter) {}"
+                  "setTimeout(function () {}, 1200);"
                 ]
               }
             },
