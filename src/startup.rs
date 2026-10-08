@@ -48,41 +48,23 @@ pub struct HttpServer {
     router: Router,
 }
 
-/// Browser policy for the whole router, including management and public reads.
-fn cors_layer() -> CorsLayer {
-    CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_origin(Any)
-        .allow_headers(Any)
-        .expose_headers([hyper::header::ETAG, hyper::header::LINK])
-}
-
 impl HttpServer {
     pub async fn new(
         config: &Config,
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
-            .await
-            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
-        Self::from_listener(config, state, prometheus_registry, listener)
-    }
+        let cors = CorsLayer::new()
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::OPTIONS,
+            ])
+            .allow_origin(Any)
+            .allow_headers(Any);
 
-    /// Build the production router on an already-bound listener.
-    /// Useful when the assigned port must be known before constructing public URLs.
-    pub fn from_listener(
-        config: &Config,
-        state: AppState,
-        prometheus_registry: Registry,
-        listener: TcpListener,
-    ) -> color_eyre::Result<Self> {
         let max_body_size = config.limits.max_body_size_bytes;
 
         let (strict_governor, issuer_governor, permissive_governor) =
@@ -108,7 +90,7 @@ impl HttpServer {
             )
             .layer(CatchPanicLayer::new())
             .layer(middleware::from_fn(track_http_metrics))
-            .layer(cors_layer())
+            .layer(cors)
             .layer(RequestBodyLimitLayer::new(max_body_size))
             .layer(DefaultBodyLimit::disable())
             .with_state(state);
@@ -116,6 +98,10 @@ impl HttpServer {
         router = attach_metrics(router, config, prometheus_registry);
 
         validate_aggregation_uri(config)?;
+
+        let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
+            .await
+            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
 
         Ok(Self { router, listener })
     }
@@ -192,12 +178,6 @@ fn build_governor_configs(
     Ok((strict, issuer, permissive))
 }
 
-fn public_read_routes() -> Router<AppState> {
-    Router::new()
-        .route("/aggregation", get(get_aggregation))
-        .route("/status-lists/{list_id}", get(get_status_list))
-}
-
 fn api_v1_routes(
     state: AppState,
     strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
@@ -222,7 +202,10 @@ fn api_v1_routes(
         .route("/credentials", post(credential_handler))
         .layer(GovernorLayer::new(strict_governor));
 
-    let public_reads = public_read_routes().layer(GovernorLayer::new(permissive_governor));
+    let public_reads = Router::new()
+        .route("/aggregation", get(get_aggregation))
+        .route("/status-lists/{list_id}", get(get_status_list))
+        .layer(GovernorLayer::new(permissive_governor));
 
     Router::new()
         .merge(protected)

@@ -1059,8 +1059,8 @@ components:
             - string
             - "null"
           description: |
-            Opaque cursor for the next page, to pass back as `cursor`.
-            Always present; `null` on the last page.
+            Opaque cursor for the next page, to pass back as `cursor`. Always
+            present; `null` on the last page.
           example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
     ErrorResponse:

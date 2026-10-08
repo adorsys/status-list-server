@@ -1,6 +1,4 @@
-// Exercise production static-certificate setup. CI runs this target explicitly
-// with memory-only features; ACME provisioning has its own integration suite.
-#![cfg(not(feature = "acme"))]
+#![cfg(feature = "memory")]
 
 //! Draft-21 wire assertions: literal labels deliberately do not share issuer constants.
 use std::io::Read;
@@ -13,8 +11,8 @@ use base64::{
 use coset::{CborSerializable, TaggedCborSerializable, cbor::Value};
 use reqwest::{Response, StatusCode};
 use serde_json::json;
-mod support;
-use support::{CERT, TestServer};
+mod utils;
+use utils::{TestServer, certificate};
 
 async fn publish(app: &TestServer) -> String {
     let list_id = uuid::Uuid::new_v4();
@@ -66,7 +64,7 @@ fn verified_jwt(body: &[u8]) -> serde_json::Value {
     assert_eq!(header.typ.as_deref(), Some("statuslist+jwt"));
     assert_eq!(
         header.x5c.as_ref().unwrap(),
-        &[BASE64_STANDARD.encode(pem::parse(CERT).unwrap().contents())]
+        &[BASE64_STANDARD.encode(pem::parse(certificate()).unwrap().contents())]
     );
     let der = BASE64_STANDARD.decode(&header.x5c.unwrap()[0]).unwrap();
     let key = jsonwebtoken::DecodingKey::from_ec_der(&certificate_key(&der));
@@ -119,7 +117,6 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
         );
         assert!(!response.headers().contains_key("content-encoding"));
         assert_eq!(response.headers()["access-control-allow-origin"], "*");
-        assert_exposed_headers(&response);
         let claims = verified_jwt(&bytes(response).await);
         assert_eq!(claims["sub"], uri);
         assert!(claims["ttl"].as_u64().unwrap() > 0);
@@ -173,7 +170,7 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
             let cert = field(&protected, Value::Integer(33.into()))
                 .as_bytes()
                 .unwrap();
-            assert_eq!(cert, &pem::parse(CERT).unwrap().contents());
+            assert_eq!(cert, &pem::parse(certificate()).unwrap().contents());
             let key = certificate_key(cert);
             sign1
                 .verify_signature(&[], |signature, tbs| {
@@ -271,68 +268,6 @@ async fn cors_preflight_allows_public_get() {
                 .any(|method| method.trim() == "GET")
         );
     }
-}
-
-fn assert_exposed_headers(response: &Response) {
-    let exposed: Vec<_> = response.headers()["access-control-expose-headers"]
-        .to_str()
-        .unwrap()
-        .split(',')
-        .map(str::trim)
-        .collect();
-    for name in ["etag", "link"] {
-        assert!(
-            exposed
-                .iter()
-                .any(|header| header.eq_ignore_ascii_case(name)),
-            "browser must be able to read {name}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn browser_can_follow_aggregation_link_to_terminal_page() {
-    let app = TestServer::start(None).await;
-    let mut expected = vec![publish(&app).await, publish(&app).await];
-    expected.sort();
-    let mut uri = url::Url::parse(&app.url("/api/v1/aggregation?limit=1")).unwrap();
-    let mut seen = Vec::new();
-    for page_index in 0..2 {
-        let response = get(&app, uri.as_str(), "application/json", "identity").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["access-control-allow-origin"], "*");
-        assert_exposed_headers(&response);
-        let link = response
-            .headers()
-            .get("link")
-            .map(|value| value.to_str().unwrap().to_owned());
-        let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
-        assert_eq!(body["status_lists"].as_array().unwrap().len(), 1);
-        seen.push(body["status_lists"][0].as_str().unwrap().to_owned());
-        if page_index == 0 {
-            let link = link.expect("nonterminal page must advertise the next page");
-            let target = link
-                .strip_prefix('<')
-                .unwrap()
-                .strip_suffix(">; rel=\"next\"")
-                .unwrap();
-            uri = uri.join(target).unwrap();
-            assert_eq!(
-                uri.query_pairs()
-                    .find(|(key, _)| key == "cursor")
-                    .unwrap()
-                    .1,
-                body["next_cursor"].as_str().unwrap()
-            );
-        } else {
-            assert!(link.is_none());
-            assert_eq!(
-                body,
-                json!({"status_lists": [expected[1]], "next_cursor": null})
-            );
-        }
-    }
-    assert_eq!(seen, expected);
 }
 
 #[tokio::test]

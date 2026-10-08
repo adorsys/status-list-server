@@ -213,8 +213,3 @@ required-features = ["memory"]
 
 [profile.dev.package.backtrace]
 opt-level = 3
-
-[[test]]
-name = "conformance"
-path = "tests/conformance/status_list.rs"
-required-features = ["memory"]

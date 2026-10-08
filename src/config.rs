@@ -1456,7 +1456,7 @@ impl Config {
     }
 
     pub fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
-        let builder = base_builder()?
+        let mut builder = base_builder()?
             // Override config values via environment variables
             // The environment variables should be prefixed with 'APP_' and use '__' as a separator
             .add_source(
@@ -1465,19 +1465,6 @@ impl Config {
                     .separator("__"),
             );
 
-        Self::load_builder(builder, overrides)
-    }
-
-    /// Load validated defaults and explicit overrides without APP_* configuration sources.
-    /// Intended for embedded callers and isolated tests that own their configuration.
-    pub fn load_without_environment(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
-        Self::load_builder(base_builder_for_environment("development")?, overrides)
-    }
-
-    fn load_builder(
-        mut builder: ConfigBuilder<DefaultState>,
-        overrides: &[(&str, &str)],
-    ) -> Result<Self, ConfigError> {
         for &(key, val) in overrides {
             let normalized_key = key
                 .strip_prefix("APP_")
@@ -1516,12 +1503,6 @@ impl Config {
 /// `Config::load_from_overrides`) start from this shared set of defaults so
 /// that there is exactly one source of truth for the default configuration.
 fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
-    base_builder_for_environment(normalize_app_env())
-}
-
-fn base_builder_for_environment(
-    telemetry_environment: &str,
-) -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(feature = "postgres")]
     let default_db_backend = "postgres";
     #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
@@ -1534,6 +1515,8 @@ fn base_builder_for_environment(
         not(feature = "mysql")
     ))]
     let default_db_backend = "memory";
+
+    let telemetry_environment = normalize_app_env();
 
     let builder = ConfigLib::builder()
         .set_default("server.host", "localhost")?

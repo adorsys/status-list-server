@@ -311,7 +311,7 @@ impl TokenBytesCache {
     /// `(list, format)` for the latest generation within its window, which is
     /// bounded by the number of active lists. Each entry additionally expires at
     /// the end of its own validity window, independent of the byte budget.
-    pub(crate) fn new(max_capacity_bytes: u64) -> Self {
+    pub fn new(max_capacity_bytes: u64) -> Self {
         if max_capacity_bytes == 0 {
             tracing::info!("Signed-token bytes cache cold tier disabled (capacity=0)");
         }
