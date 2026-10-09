@@ -1,5 +1,15 @@
 # Local Testing Quickstart
 
+## Environment Configuration
+
+To initialize your local environment configuration:
+
+```bash
+cp .env.template .env
+```
+
+The `.env.template` file serves as a reference blueprint documenting all available environment variables, data types, and application defaults. Docker Compose automatically loads `.env` (when present) to inject container environment variables and resolve host string interpolations. `.env.template` is not loaded directly by Docker Compose, preventing unwanted placeholder overrides and configuration conflicts.
+
 ## Docker Compose profiles
 
 `docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
