@@ -78,23 +78,24 @@ repository rulesets to require the status check named
 unconventional commit subjects out of protected branches, where they would
 otherwise be ignored by `git-cliff` and `release-plz`.
 
-They must also require **`CI Success`**, and require _only_ that check from
-`CI.yml`. The jobs in `CI.yml` form several independent chains — the Rust jobs hang
-off `cargo-build`, the linters and scanners stand alone — deliberately, so that a
-network-dependent scanner is not the root of every Rust job. No single job therefore
-represents the suite; `ci-success` is what aggregates them, and it is the only thing
-that can represent the whole suite to branch protection.
+They must also require **`CI Success`** and **`Helm Checks Success`**, and require
+_only_ those checks from `CI.yml` and `helm-checks.yml`. `ci-success` aggregates
+the Rust jobs in `CI.yml`; `helm-success` aggregates the Helm jobs in
+`helm-checks.yml`. `helm-checks.yml` runs on every pull request but skips its
+expensive jobs when a PR touches none of its inputs (the chart under
+`deploy/helm/**`, the observability configs under `deploy/observability/**`, the
+render action, `.kube-linter.yaml` / `.trivyignore.yaml`, or the scripts in
+`scripts/`), so `helm-success` always reports a status and never strands a
+pure-Rust merge.
 
-As of this writing the `Rules` ruleset on `develop` requires exactly one status
-check — `Conventional Commits` — and the `main branch guards` ruleset requires none.
-Nothing in `CI.yml` blocks a merge today, so adding `CI Success` closes a real gap
-rather than reshuffling an existing list:
+As of this writing **`CI Success`** and **`Conventional Commits`** are already
+required; only **`Helm Checks Success`** is new:
 
-1. Merge the PR that introduces `ci-success`.
-2. Add **`CI Success`** to the required status checks on both rulesets.
-3. If individual `CI.yml` job names are ever added to a ruleset, remove them only
-   _after_ `CI Success` is required — doing it in the other order leaves a window
-   where a failing job blocks nothing.
+1. Merge the PR that introduces `helm-checks.yml` and its `helm-success` aggregate.
+2. Add **`Helm Checks Success`** to the required status checks on both rulesets.
+3. If individual workflow job names are ever added to a ruleset, remove them only
+   after **`Helm Checks Success`** (and **`CI Success`**) are required; doing it the
+   other way leaves a window where a failing job blocks nothing.
 
 `ci-success` fails if any job it needs reported `failure` or `cancelled`. It also
 fails if any job reported `skipped`, with one allowed exception — `cargo-test-doc`,
@@ -224,6 +225,46 @@ Automatic on merge:
 ## Development Setup
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
+
+Use the repository's Cargo xtask commands for repeatable development workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build --profile postgres
+cargo xtask build --profile sqlite --release
+cargo xtask test --profile postgres
+cargo xtask test --profile sqlite -- my_test --exact
+cargo xtask lint
+cargo xtask compose --profile postgres
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` default to the `postgres` profile. They also
+support `minimal`, `mysql`, `sqlite`, `aws`, `vault`, `gcp`, `azure` and `redis`; see the [README feature profile matrix](README.md#development-and-quality-checks)
+for their exact Cargo features and Compose services. The `ci` command runs the complete `local-ci.sh --full` pipeline.
+
+Before using `lint`, install the versions used by the local CI pipeline:
+
+```bash
+rustup component add rustfmt clippy
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-machete --version 0.9.2
+```
+
+Unlike `ci`, `lint` does not bootstrap missing tools. It runs every step and reports all failures.
+
+Rust files use LF line endings. Existing Windows checkouts may retain CRLF in files untouched by a pull. After saving your work, run `cargo fmt --all` once to rewrite those files with the required line endings, then run `cargo fmt --all --check`. `git add --renormalize .` updates the index alone and does not rewrite the working-tree files.
+
+`check-profiles` checks isolated libraries without default features as well as
+all supported targets. `test` enables `postgres-tests` for PostgreSQL-backed
+profiles and `redis-tests` for Redis; these profiles and MySQL need a running
+Docker daemon. Use `cargo xtask test --profile minimal` for tests without
+database containers.
+
+`test` prefers installed nextest and runs doctests separately. Without nextest, it falls back to `cargo test`, without nextest's test groups and timeouts.
+Install the CI version with `cargo install --locked cargo-nextest --version 0.9.101`. Test filters and
+options after `--` must be supported by both the selected runner and doctests;
+see the [README](README.md#development-and-quality-checks).
 
 ### Redis cache integration tests
 
