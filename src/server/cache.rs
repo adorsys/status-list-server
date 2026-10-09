@@ -198,8 +198,9 @@ fn compress_gzip(bytes: &[u8]) -> Bytes {
 /// pins the optimistic-concurrency generation (so a token reinstated to an
 /// earlier content state within the same window — where `content_hash` would
 /// otherwise be identical — is still a distinct identity and never reuses the
-/// stale bytes), `window_start` pins the token's validity window, and `format`
-/// pins the JWT/CWT serialization. `token_exp_secs` is a per-process constant
+/// stale bytes), `window_start` pins the token's validity window, `format`
+/// pins the JWT/CWT serialization, and `aggregation_uri` pins that claim, which
+/// a failed issuer lookup leaves out. `token_exp_secs` is a per-process constant
 /// retained so the per-entry expiry can free a closed window's bytes at the
 /// exact instant its window rolls.
 ///
@@ -214,6 +215,7 @@ pub(crate) struct TokenCacheKey {
     pub(crate) window_start: i64,
     pub(crate) version: u64,
     pub(crate) format: String,
+    pub(crate) aggregation_uri: Option<String>,
     pub(crate) token_exp_secs: u64,
 }
 
@@ -579,6 +581,7 @@ mod tests {
             window_start: w,
             version: 1,
             format: "jwt".to_string(),
+            aggregation_uri: None,
             token_exp_secs: 900,
         }
     }
@@ -991,6 +994,10 @@ mod tests {
             token_exp_secs: 1200,
             ..base.clone()
         };
+        let other_aggregation_uri = TokenCacheKey {
+            aggregation_uri: Some("https://example.com/api/v1/aggregation/a".to_string()),
+            ..base.clone()
+        };
 
         assert_ne!(base, other_window);
         assert_ne!(base, other_signer);
@@ -1002,6 +1009,10 @@ mod tests {
             "version must be in the key (reinstated content within a window)"
         );
         assert_ne!(base, other_exp, "token_exp_secs must be in the key");
+        assert_ne!(
+            base, other_aggregation_uri,
+            "aggregation_uri must be in the key"
+        );
         assert_eq!(base, base_key(TEST_WINDOW_START));
 
         // Encoding is deliberately NOT a key dimension (ticket 564 review): gzip

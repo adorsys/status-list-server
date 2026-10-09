@@ -101,7 +101,10 @@ fn fixture_state(config: &Config) -> AppState {
             Arc::new(FixtureCertificate(Arc::new(material))),
         )),
         public_base_url: config.server.resolved_public_base_url(),
-        aggregation_uri: config.server.aggregation_uri.clone(),
+        aggregation_uri: config
+            .server
+            .aggregation_uri(config.telemetry.environment)
+            .unwrap(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -119,13 +122,14 @@ const ISSUER: &str = "conformance-issuer";
 pub(super) struct TestServer {
     pub(super) base_url: String,
     pub(super) client: reqwest::Client,
+    pub(super) aggregation_id: String,
 }
 
 impl TestServer {
     pub(super) async fn start(aggregation_uri: Option<String>) -> Self {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut config = fixture_config();
-        config.server.aggregation_uri = aggregation_uri.filter(|value| !value.trim().is_empty());
+        config.server.aggregation_uri = aggregation_uri;
         // HttpServer::new owns binding. Retry if another parallel test/process
         // acquires the OS-selected port between releasing it and server startup.
         let (base_url, server) = {
@@ -171,7 +175,11 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let app = Self { base_url, client };
+        let mut app = Self {
+            base_url,
+            client,
+            aggregation_id: String::new(),
+        };
         let key = SigningKey::from_pem(KEY).unwrap();
         let public = key.public_key_bytes();
         let response = app
@@ -185,12 +193,10 @@ impl TestServer {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            response.status(),
-            reqwest::StatusCode::ACCEPTED,
-            "{}",
-            response.text().await.unwrap()
-        );
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        let registration: serde_json::Value = response.json().await.unwrap();
+        app.aggregation_id = registration["aggregation_id"].as_str().unwrap().to_owned();
+        uuid::Uuid::parse_str(&app.aggregation_id).unwrap();
         app
     }
 

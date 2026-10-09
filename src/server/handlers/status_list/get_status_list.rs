@@ -28,7 +28,7 @@ use super::utils::{
     constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT},
     etag::{content_hash, generate_historical_etag},
     negotiation::{AcceptType, client_accepts_gzip, negotiate_accept},
-    token::build_status_list_token,
+    token::{build_status_list_token, issuer_aggregation_uri},
     token_cache::signer_fingerprint,
 };
 use crate::server::cache::{CachedToken, TokenCacheKey, TokenEncoding};
@@ -87,6 +87,16 @@ async fn get_status_list_at(
     headers: HeaderMap,
     now: i64,
 ) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
+    // Not a UUID check like publish: lists created before list_id validation
+    // have other IDs, and issued credentials still point at them. NUL alone is
+    // rejected because Postgres refuses it in text, which would be a 500.
+    if list_id.contains('\0') {
+        return Err(ApiError::bad_request(
+            "invalid_list_id",
+            "list_id must not contain NUL",
+        ));
+    }
+
     let query = match query_result {
         Ok(Query(q)) => q,
         Err(e) => {
@@ -137,6 +147,7 @@ async fn get_status_list_at(
         .and_then(|h| h.to_str().ok());
 
     let status_record = fetch_status_record(&list_id, &state).await?;
+    let aggregation_uri = issuer_aggregation_uri(&state, &status_record.issuer).await;
 
     // Anchor the token and its validator to the current token validity window so
     // the representation identity — and hence the strong ETag over the signed
@@ -154,8 +165,15 @@ async fn get_status_list_at(
     // `signing_material` is the *same* snapshot used for the fingerprint, and is
     // threaded into the token builder so a concurrent certificate/key reload can
     // never cache bytes signed by one key under another key's cache entry.
-    let (key, signing_material) =
-        build_token_cache_key(&state, accept_type, &status_record, &list_id, window_start).await?;
+    let (key, signing_material) = build_token_cache_key(
+        &state,
+        accept_type,
+        &status_record,
+        &list_id,
+        window_start,
+        aggregation_uri.clone(),
+    )
+    .await?;
 
     // Serve the *uncompressed* signed token for this window (one sign per
     // `(list, window, format)`), then derive the client's encoding and the strong
@@ -233,9 +251,15 @@ async fn get_status_list_at(
         let new_exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
         let validity_window = (iat, new_exp);
 
-        let (key, signing_material) =
-            build_token_cache_key(&state, accept_type, &status_record, &list_id, window_start)
-                .await?;
+        let (key, signing_material) = build_token_cache_key(
+            &state,
+            accept_type,
+            &status_record,
+            &list_id,
+            window_start,
+            aggregation_uri,
+        )
+        .await?;
         let cached = get_or_build_live_token(
             &state,
             accept_type,
@@ -327,6 +351,7 @@ async fn build_token_cache_key(
     status_record: &StatusListRecord,
     list_id: &str,
     window_start: i64,
+    aggregation_uri: Option<String>,
 ) -> Result<(TokenCacheKey, Arc<SigningMaterial>), ApiError> {
     let format = match accept_type {
         AcceptType::Cwt => "cwt",
@@ -355,6 +380,7 @@ async fn build_token_cache_key(
         window_start,
         version: status_record.version,
         format: format.to_string(),
+        aggregation_uri,
         token_exp_secs: state.token_exp_secs,
     };
     Ok((key, signing_material))
@@ -374,7 +400,8 @@ async fn build_token_cache_key(
 ///
 /// The `signing_material` passed in is the exact snapshot that produced `key`'s
 /// signer fingerprint, so the signed bytes cached under `key` are always signed
-/// by the signer the key claims.
+/// by the signer the key claims. The `aggregation_uri` claim is likewise taken
+/// from `key`.
 async fn get_or_build_live_token(
     state: &AppState,
     accept_type: AcceptType,
@@ -400,6 +427,7 @@ async fn get_or_build_live_token(
                         state,
                         accept_type,
                         status_record,
+                        key.aggregation_uri.clone(),
                         Some(*validity_window),
                         false,
                         signing_material,
@@ -515,10 +543,12 @@ async fn handle_historical_request(
         .await
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
 
+    let aggregation_uri = issuer_aggregation_uri(state, &status_record.issuer).await;
     let (token_bytes, encoding) = build_status_list_token(
         state,
         accept_type,
         status_record,
+        aggregation_uri,
         Some((snapshot.iat, snapshot.exp)),
         client_accepts_gzip,
         signing_material,
@@ -585,14 +615,16 @@ fn build_cache_control(token_ttl_secs: u64, exp: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
+    use crate::domain::ports::CredentialRepo;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::update_status::update_status;
     use crate::server::handlers::status_list::utils::request::{
         Status, StatusEntry, StatusesRequest,
     };
     use crate::test_utils::{
-        RotatingCertProvider, authenticated_issuer, test_app_state,
-        test_app_state_with_cert_provider,
+        RotatingCertProvider, authenticated_issuer, metrics_after, publish_list, register_issuer,
+        test_app_state, test_app_state_with_cert_provider,
     };
     use axum::extract::Json;
     use axum::http::HeaderMap;
@@ -763,6 +795,44 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_rejects_nul_in_list_id() {
+        let app_state = test_app_state(None).await;
+        let past = time::OffsetDateTime::now_utc().unix_timestamp() - 60;
+
+        for time in [None, Some(past)] {
+            let err = get_status_list(
+                State(app_state.clone()),
+                Path("477121aa-b598\0-419e-916f-1e74654ff38b".to_string()),
+                Ok(Query(StatusListQuery { time })),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "time={time:?}");
+            assert_eq!(err.error, "invalid_list_id", "time={time:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_status_list_resolves_legacy_non_uuid_list_id() {
+        let app_state = test_app_state(None).await;
+        publish_list(&app_state.service, "issuer1", "legacy-list").await;
+
+        let response = get_status_list(
+            State(app_state),
+            Path("legacy-list".to_string()),
+            Ok(Query(StatusListQuery { time: None })),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1033,6 +1103,223 @@ mod tests {
             response.headers().get(header::VARY).unwrap(),
             "Accept, Accept-Encoding"
         );
+    }
+
+    const AGGREGATION_BASE: &str = "https://statuslist.example.com/api/v1/aggregation";
+
+    /// Publishes a list for `issuer1` and returns the `aggregation_uri` claim of
+    /// the token served for it in the `accept` format.
+    async fn served_aggregation_uri(app_state: AppState, accept: &str) -> Option<String> {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest { statuses: vec![] }),
+        )
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, accept.parse().unwrap());
+        let response = get_status_list(
+            State(app_state),
+            Path(token_id),
+            Ok(Query(StatusListQuery { time: None })),
+            headers,
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
+            cwt_aggregation_uri(&body)
+        } else {
+            decode_jwt_claims(&body)["status_list"]["aggregation_uri"]
+                .as_str()
+                .map(str::to_string)
+        }
+    }
+
+    fn cwt_aggregation_uri(cwt: &[u8]) -> Option<String> {
+        use crate::server::handlers::status_list::utils::constants::STATUS_LIST;
+        use coset::{TaggedCborSerializable as _, cbor::Value};
+
+        let payload = coset::CoseSign1::from_tagged_slice(cwt)
+            .unwrap()
+            .payload
+            .unwrap();
+        let claims: Value = coset::cbor::de::from_reader(payload.as_slice()).unwrap();
+        let status_list = claims
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| *key == Value::Integer(STATUS_LIST.into()))
+            .map(|(_, value)| value)
+            .unwrap();
+        status_list
+            .as_map()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| key.as_text() == Some("aggregation_uri"))
+            .and_then(|(_, value)| value.as_text())
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn test_token_carries_issuer_scoped_aggregation_uri() {
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+        let aggregation_id = register_issuer(&app_state.service, "issuer1").await;
+        let expected = format!("{AGGREGATION_BASE}/{aggregation_id}");
+
+        for accept in [
+            ACCEPT_STATUS_LISTS_HEADER_JWT,
+            ACCEPT_STATUS_LISTS_HEADER_CWT,
+        ] {
+            assert_eq!(
+                served_aggregation_uri(app_state.clone(), accept).await,
+                Some(expected.clone()),
+                "{accept}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_omits_aggregation_uri_when_not_configured() {
+        let app_state = test_app_state(None).await;
+        register_issuer(&app_state.service, "issuer1").await;
+
+        assert_eq!(
+            served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+            None
+        );
+    }
+
+    /// Gaining or losing the claim, as when a failed aggregation ID lookup
+    /// recovers or aggregation is withheld, makes a new token, so a client
+    /// revalidating the old one gets it instead of a 304.
+    #[tokio::test]
+    async fn test_revalidation_serves_a_new_token_when_aggregation_uri_changes() {
+        let scoped: Option<url::Url> = Some(AGGREGATION_BASE.parse().unwrap());
+        for (before, after) in [(None, scoped.clone()), (scoped, None)] {
+            for (condition, validator) in [
+                (header::IF_NONE_MATCH, header::ETAG),
+                (header::IF_MODIFIED_SINCE, header::LAST_MODIFIED),
+            ] {
+                let mut app_state = test_app_state(None).await;
+                app_state.aggregation_uri = before.clone();
+                register_issuer(&app_state.service, "issuer1").await;
+                let token_id = uuid::Uuid::new_v4().to_string();
+                publish_status(
+                    State(app_state.clone()),
+                    authenticated_issuer("issuer1"),
+                    Path(token_id.clone()),
+                    Json(StatusesRequest { statuses: vec![] }),
+                )
+                .await
+                .unwrap();
+                let now = OffsetDateTime::now_utc().unix_timestamp();
+                let fetch = |app_state: AppState, headers: HeaderMap| {
+                    get_status_list_at(
+                        State(app_state),
+                        token_id.clone(),
+                        Ok(Query(StatusListQuery { time: None })),
+                        headers,
+                        now,
+                    )
+                };
+
+                let first = fetch(app_state.clone(), HeaderMap::new())
+                    .await
+                    .unwrap()
+                    .into_response();
+                let mut revalidation = HeaderMap::new();
+                revalidation.insert(condition.clone(), first.headers()[&validator].clone());
+                app_state.aggregation_uri = after.clone();
+                let response = fetch(app_state, revalidation)
+                    .await
+                    .unwrap()
+                    .into_response();
+
+                assert_eq!(response.status(), StatusCode::OK, "{condition}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    decode_jwt_claims(&body)["status_list"]["aggregation_uri"].is_string(),
+                    after.is_some(),
+                    "{condition}"
+                );
+            }
+        }
+    }
+
+    struct UnavailableCredentials;
+
+    #[async_trait::async_trait]
+    impl CredentialRepo for UnavailableCredentials {
+        async fn find(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn find_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<AggregationId>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn find_issuer_by_aggregation_id(
+            &self,
+            _: AggregationId,
+        ) -> Result<Option<Issuer>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+    }
+
+    /// A revocation check must not fail because the aggregation ID could not
+    /// be looked up; the optional claim is left out and the miss counted.
+    #[test]
+    fn test_token_omits_aggregation_uri_when_lookup_fails() {
+        let metrics = metrics_after(async {
+            let mut app_state = test_app_state(None).await;
+            app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+            let service = &app_state.service;
+            app_state.service = std::sync::Arc::new(crate::domain::service::Service::from_arcs(
+                service.status_list_repo.clone(),
+                std::sync::Arc::new(UnavailableCredentials),
+                service.status_list_cache.clone(),
+                service.snapshot_repo.clone(),
+                service.cert_provider.clone(),
+            ));
+
+            assert_eq!(
+                served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+                None
+            );
+        });
+        let omitted = metrics
+            .lines()
+            .find(|line| line.starts_with("aggregation_uri_omitted_total"))
+            .unwrap_or_else(|| panic!("aggregation_uri_omitted not exported:\n{metrics}"));
+        assert!(omitted.ends_with(" 1"), "{omitted}");
     }
 
     #[tokio::test]

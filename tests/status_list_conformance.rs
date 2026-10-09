@@ -107,7 +107,9 @@ async fn jwt_get_conforms_with_and_without_aggregation_uri() {
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
         let app = TestServer::start(aggregation_uri.clone()).await;
-        let aggregation_uri = aggregation_uri.filter(|value| !value.trim().is_empty());
+        let aggregation_uri = aggregation_uri
+            .filter(|value| !value.trim().is_empty())
+            .map(|base| format!("{base}/{}", app.aggregation_id));
         let uri = publish(&app).await;
         let response = get(&app, &uri, "application/statuslist+jwt", "identity").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -143,7 +145,9 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
         Some("https://example.com/api/v1/aggregation".to_owned()),
     ] {
         let app = TestServer::start(aggregation_uri.clone()).await;
-        let aggregation_uri = aggregation_uri.filter(|value| !value.trim().is_empty());
+        let aggregation_uri = aggregation_uri
+            .filter(|value| !value.trim().is_empty())
+            .map(|base| format!("{base}/{}", app.aggregation_id));
         let uri = publish(&app).await;
         for encoding in ["identity", "gzip", "gzip, deflate, br, zstd", "*"] {
             let response = get(&app, &uri, "application/statuslist+cwt", encoding).await;
@@ -214,7 +218,8 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
 #[tokio::test]
 async fn aggregation_body_and_list_uris_conform() {
     let app = TestServer::start(None).await;
-    let response = get(&app, "/api/v1/aggregation", "application/json", "identity").await;
+    let aggregation_path = format!("/api/v1/aggregation/{}", app.aggregation_id);
+    let response = get(&app, &aggregation_path, "application/json", "identity").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "application/json");
     assert_eq!(
@@ -223,7 +228,7 @@ async fn aggregation_body_and_list_uris_conform() {
     );
     let mut uris = vec![publish(&app).await, publish(&app).await];
     uris.sort();
-    let response = get(&app, "/api/v1/aggregation", "application/json", "identity").await;
+    let response = get(&app, &aggregation_path, "application/json", "identity").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "application/json");
     assert_eq!(
@@ -240,7 +245,12 @@ async fn aggregation_body_and_list_uris_conform() {
 #[tokio::test]
 async fn cors_preflight_allows_public_get() {
     let app = TestServer::start(None).await;
-    for path in ["/api/v1/aggregation", "/api/v1/status-lists/test"] {
+    let aggregation_path = format!("/api/v1/aggregation/{}", app.aggregation_id);
+    for path in [
+        "/api/v1/aggregation",
+        &aggregation_path,
+        "/api/v1/status-lists/test",
+    ] {
         let response = app
             .client
             .request(reqwest::Method::OPTIONS, app.url(path))

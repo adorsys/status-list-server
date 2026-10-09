@@ -682,11 +682,15 @@ impl SeaOrmStore<StatusListRecord> {
     }
 
     /// Up to `limit` `(list_id, sub)` rows with `list_id` after `after`, via a
-    /// keyset scan on the primary key. `list_id` is used rather than
-    /// `updated_at`, which every status update moves.
-    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
+    /// keyset scan on the primary key, or on `(issuer, list_id)` when scoped to
+    /// an `issuer`. `list_id` is used rather than `updated_at`, which every
+    /// status update moves.
+    ///
+    /// `after` comes from a client-supplied cursor, so it stays out of the span.
+    #[tracing::instrument(skip(self, after), fields(db.system = "sea-orm"))]
     pub async fn find_status_list_uris_after(
         &self,
+        issuer: Option<&str>,
         after: Option<&str>,
         limit: u64,
     ) -> Result<Vec<(String, String)>, RepositoryError> {
@@ -696,6 +700,9 @@ impl SeaOrmStore<StatusListRecord> {
                 .select_only()
                 .column(status_lists::Column::ListId)
                 .column(status_lists::Column::Sub);
+            if let Some(issuer) = issuer {
+                query = query.filter(status_lists::Column::Issuer.eq(issuer));
+            }
             if let Some(after) = after {
                 query = query.filter(status_lists::Column::ListId.gt(after));
             }
@@ -1028,6 +1035,66 @@ impl SeaOrmStore<Credentials> {
                 .one(&*db)
                 .await
                 .map(|opt| opt.map(Credentials::from))
+                .map_err(find_err)
+        })
+        .await
+    }
+
+    /// `None` for an unknown issuer, `Some(None)` for one registered by a
+    /// release that predates aggregation IDs.
+    pub async fn find_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<String>>, RepositoryError> {
+        time_query("find_aggregation_id", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find_by_id(issuer)
+                .select_only()
+                .column(credentials::Column::AggregationId)
+                .into_tuple::<Option<String>>()
+                .one(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
+    }
+
+    /// Sets the issuer's aggregation ID unless it already has one.
+    pub async fn assign_aggregation_id(
+        &self,
+        issuer: &str,
+        aggregation_id: &str,
+    ) -> Result<(), RepositoryError> {
+        time_query("assign_aggregation_id", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::update_many()
+                .col_expr(
+                    credentials::Column::AggregationId,
+                    Expr::value(aggregation_id),
+                )
+                .filter(credentials::Column::Issuer.eq(issuer))
+                .filter(credentials::Column::AggregationId.is_null())
+                .exec(&*db)
+                .await
+                .map_err(map_update_err)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn find_issuer_by_aggregation_id(
+        &self,
+        aggregation_id: &str,
+    ) -> Result<Option<String>, RepositoryError> {
+        time_query("find_issuer_by_aggregation_id", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find()
+                .select_only()
+                .column(credentials::Column::Issuer)
+                .filter(credentials::Column::AggregationId.eq(aggregation_id))
+                .into_tuple::<String>()
+                .one(&*db)
+                .await
                 .map_err(find_err)
         })
         .await
