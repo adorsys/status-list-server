@@ -326,21 +326,28 @@ done
         script = (ROOT / 'local-ci.sh').read_text()
         pins = dict(re.findall(r'^([A-Z_0-9]+)="([^"$]+)"$', script, re.M))
         workflow = (ROOT / '.github/workflows/CI.yml').read_text()
+        helm_checks = (ROOT / '.github/workflows/helm-checks.yml').read_text()
         deny = (ROOT / '.github/workflows/cargo_deny.yml').read_text()
         for key, tool in [('NEXT_VERSION', 'nextest'), ('MACHETE_VERSION', 'cargo-machete'),
                           ('VET_VERSION', 'cargo-vet'), ('AUDIT_VERSION', 'cargo-audit'),
                           ('LLVM_COV_VERSION', 'cargo-llvm-cov'), ('TYPOS_VERSION', 'typos-cli')]:
             self.assertIn(tool + '@' + pins[key], workflow + deny)
-        for job in yaml.safe_load(workflow)['jobs'].values():
-            for step in job.get('steps', []):
-                if step.get('uses', '').startswith('azure/setup-helm@'):
-                    self.assertEqual(step['with']['version'], pins['HELM_VERSION'])
+        for wf in (workflow, helm_checks):
+            for job in yaml.safe_load(wf)['jobs'].values():
+                for step in job.get('steps', []):
+                    if step.get('uses', '').startswith('azure/setup-helm@'):
+                        self.assertEqual(step['with']['version'], pins['HELM_VERSION'])
+        # The Helm/observability image pins live in the path-gated helm-checks.yml,
+        # not CI.yml, since the extraction moved those jobs out of the Rust lifecycle.
+        self.assertIn(pins['ZIZMOR_IMAGE'], workflow)
+        self.assertIn(pins['OTEL_COLLECTOR_IMAGE'], helm_checks)
+        self.assertIn(pins['PROMETHEUS_IMAGE'], helm_checks)
+        self.assertIn(pins['JAEGER_IMAGE'], helm_checks)
         for key in ['ZIZMOR_IMAGE', 'OTEL_COLLECTOR_IMAGE', 'PROMETHEUS_IMAGE', 'JAEGER_IMAGE']:
-            self.assertIn(pins[key], workflow)
             self.assertRegex(pins[key], r'@sha256:[0-9a-f]{64}$')
         self.assertIn(pins['PROMETHEUS_IMAGE'], (ROOT / 'scripts/check-helm-prometheus.sh').read_text())
         self.assertIn('yamlfmt@' + pins['YAMLFMT_VERSION'], workflow)
-        self.assertIn(pins['KUBE_LINTER_SHA256'], workflow)
+        self.assertIn(pins['KUBE_LINTER_SHA256'], helm_checks)
         package = json.loads((ROOT / 'scripts/local-ci/node/package.json').read_text())
         self.assertEqual(package['dependencies']['tombi'], pins['TOMBI_VERSION'])
         self.assertEqual(package['dependencies']['markdownlint-cli2'], pins['MARKDOWNLINT_VERSION'])
@@ -352,12 +359,12 @@ done
             'tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090',
             'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25',
         ]:
-            self.assertIn(reference, workflow + deny)
+            self.assertIn(reference, workflow + helm_checks + deny)
         self.assertEqual(pins['DENY_VERSION'], '0.20.2')
         self.assertEqual(pins['TRIVY_VERSION'], '0.70.0')
         self.assertEqual(pins['TOMBI_VERSION'], '1.2.4')
         self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.1')
-        self.assertIn(pins['KUBE_LINTER_VERSION'], workflow)
+        self.assertIn(pins['KUBE_LINTER_VERSION'], helm_checks)
         self.assertTrue(pins['TRIVY_IMAGE'].startswith('aquasec/trivy:' + pins['TRIVY_VERSION'] + '@sha256:'))
 
     @unittest.skipUnless(shutil.which("yamlfmt"), "yamlfmt is tested in the full local mode")
