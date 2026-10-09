@@ -106,8 +106,7 @@ pub(crate) fn record_rotation(target: &'static str, success: bool) {
     }
 }
 
-#[cfg(feature = "history")]
-type InstrumentSlot<T> = OnceLock<Mutex<Option<(u64, T)>>>;
+pub(crate) type InstrumentSlot<T> = OnceLock<Mutex<Option<(u64, T)>>>;
 #[cfg(feature = "history")]
 static LIST_QUOTA_METRICS: InstrumentSlot<Gauge<u64>> = OnceLock::new();
 
@@ -455,10 +454,12 @@ mod tests {
         let rendered = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
             .block_on(metrics_handler(registry));
+        // Only its presence: SQL tests running in parallel record it on every
+        // publish, so its value here is whatever the last one wrote.
         assert!(
             rendered
                 .lines()
-                .any(|line| line.starts_with("list_quota_enforced") && line.ends_with(" 0")),
+                .any(|line| line.starts_with("list_quota_enforced")),
             "{rendered}"
         );
     }

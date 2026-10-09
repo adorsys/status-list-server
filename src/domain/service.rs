@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer};
+use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
     Status, StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
     StatusListUriPage, validate_unique_indices,
@@ -323,7 +323,29 @@ impl Service {
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError> {
-        self.status_list_repo.list_uris(after, limit).await
+        self.status_list_repo.list_uris(None, after, limit).await
+    }
+
+    /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
+    /// `None` when no issuer has it.
+    pub async fn list_issuer_uris(
+        &self,
+        aggregation_id: AggregationId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<StatusListUriPage>, StatusListError> {
+        let Some(issuer) = self
+            .credential_repo
+            .find_issuer_by_aggregation_id(aggregation_id)
+            .await
+            .map_err(|e| StatusListError::Backend(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
+            .map(Some)
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -360,8 +382,25 @@ impl Service {
     /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
     /// `impl From<RepositoryError> for CredentialError` maps it to
     /// `AlreadyExists`, so the 409 is unchanged.
-    pub async fn publish_credential(&self, credential: Credential) -> Result<(), CredentialError> {
-        self.credential_repo.insert(credential).await
+    ///
+    /// Returns the aggregation ID the issuer was registered under.
+    pub async fn publish_credential(
+        &self,
+        credential: Credential,
+    ) -> Result<AggregationId, CredentialError> {
+        let aggregation_id = AggregationId::generate();
+        self.credential_repo
+            .insert(credential, aggregation_id)
+            .await?;
+        Ok(aggregation_id)
+    }
+
+    /// The issuer's aggregation ID, or `None` for an unknown issuer.
+    pub async fn find_aggregation_id(
+        &self,
+        issuer: &Issuer,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        self.credential_repo.find_aggregation_id(&issuer.0).await
     }
 
     /// Retrieve credentials by issuer identifier.
@@ -501,6 +540,7 @@ async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusLis
 mod tests {
     use super::*;
     use crate::domain::models::status_list::StatusList;
+    use crate::test_utils::{publish_list, register_issuer, test_app_state};
 
     fn record_with_updated_at(updated_at: i64) -> StatusListRecord {
         StatusListRecord {
@@ -554,5 +594,41 @@ mod tests {
                 if iat == 1_000 && token_exp_secs == u64::MAX),
             "expected TokenExpiryOverflow, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_lists_only_that_issuers_lists() {
+        let state = test_app_state(None).await;
+        let service = &state.service;
+        let one = register_issuer(service, "one").await;
+        register_issuer(service, "two").await;
+        let a = publish_list(service, "one", "a").await;
+        publish_list(service, "two", "b").await;
+
+        let page = service.list_issuer_uris(one, None, 10).await.unwrap();
+        assert_eq!(page.unwrap().status_lists, [a]);
+        assert_eq!(
+            service
+                .list_uris(None, 10)
+                .await
+                .unwrap()
+                .status_lists
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_is_none_for_an_unknown_aggregation_id() {
+        let state = test_app_state(None).await;
+        register_issuer(&state.service, "one").await;
+        publish_list(&state.service, "one", "a").await;
+
+        let page = state
+            .service
+            .list_issuer_uris(AggregationId::generate(), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page, None);
     }
 }

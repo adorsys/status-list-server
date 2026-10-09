@@ -147,7 +147,8 @@ async fn test_status_list_find_all() {
     assert_eq!(records[1].status_list.lst, "xyz");
 }
 
-/// Pins the keyset shape, in particular the `LIMIT` that bounds the read.
+/// Pins the keyset shape, in particular the `LIMIT` that bounds the read, and
+/// the `issuer` equality a scoped page adds for the `(issuer, list_id)` index.
 #[tokio::test]
 async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
     let row = |id: &str| {
@@ -162,16 +163,16 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
 
     let db_conn = Arc::new(
         MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![
-                row("b"),
-                row("c"),
-            ]])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![
+                vec![row("b"), row("c")],
+                vec![row("b")],
+            ])
             .into_connection(),
     );
     let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
 
     let rows = store
-        .find_status_list_uris_after(Some("a"), 3)
+        .find_status_list_uris_after(None, Some("a"), 3)
         .await
         .unwrap();
     assert_eq!(
@@ -187,16 +188,27 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
             ),
         ]
     );
+    store
+        .find_status_list_uris_after(Some("issuer-1"), Some("a"), 3)
+        .await
+        .unwrap();
 
     drop(store);
     let db_conn = Arc::try_unwrap(db_conn).expect("test should own the only DB handle");
     assert_eq!(
         db_conn.into_transaction_log(),
-        [Transaction::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
-            ["a".into(), 3u64.into()],
-        )]
+        [
+            Transaction::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
+                ["a".into(), 3u64.into()],
+            ),
+            Transaction::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."issuer" = $1 AND "status_lists"."list_id" > $2 ORDER BY "status_lists"."list_id" ASC LIMIT $3"#,
+                ["issuer-1".into(), "a".into(), 3u64.into()],
+            ),
+        ]
     );
 }
 
