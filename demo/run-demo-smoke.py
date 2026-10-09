@@ -66,6 +66,10 @@ WORKFLOWS = [
 SERVER_START_TIMEOUT_SECONDS = 120
 HEALTH_POLL_INTERVAL_SECONDS = 1
 WORKFLOW_TIMEOUT_SECONDS = 120
+# If the port was auto-selected, a stale free port can race with another process
+# (find_free_port releases the port before the server binds it). Bound the retries
+# so a transient AddressInUse turns into a healthy run instead of a flake.
+SERVER_START_RETRIES = 3
 
 # The server rate-limits credential registration and status-list writes per client
 # IP. Each of the four workflow scripts makes a bounded number of such requests
@@ -98,7 +102,7 @@ def run(command: list[str], *, cwd: pathlib.Path, env: dict[str, str], timeout: 
     )
 
 
-def wait_for_health(base_url: str, timeout: int, server: ServerProcess | None = None) -> bool:
+def wait_for_health(base_url: str, timeout: int, server: ServerProcess) -> bool:
     import urllib.error
     import urllib.request
 
@@ -107,7 +111,7 @@ def wait_for_health(base_url: str, timeout: int, server: ServerProcess | None = 
         # If the server process has already exited (e.g. a startup failure such
         # as a compile error or a certificate/key mismatch), fail fast instead of
         # polling for the full timeout. The caller reports the server log.
-        if server is not None and server.proc.poll() is not None:
+        if server.proc.poll() is not None:
             return False
         try:
             with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
@@ -192,7 +196,13 @@ def _signal_server_process_group(server: ServerProcess, sig: signal.Signals) -> 
     if os.name == "nt":
         server.proc.send_signal(sig)
     else:
-        os.killpg(os.getpgid(server.proc.pid), sig)
+        # The process group can already be gone if the server exited between the
+        # poll() check in stop_server and this call. Treat that as already-stopped
+        # rather than letting the race surface as a ProcessLookupError.
+        try:
+            os.killpg(os.getpgid(server.proc.pid), sig)
+        except ProcessLookupError:
+            pass
 
 
 def stop_server(server: ServerProcess) -> None:
@@ -204,6 +214,34 @@ def stop_server(server: ServerProcess) -> None:
             _signal_server_process_group(server, signal.SIGKILL)
             server.proc.wait(timeout=10)
     server.log_file.close()
+
+
+def start_server_and_wait_for_health(
+    signing_dir: pathlib.Path, log_dir: pathlib.Path, *, requested_port: int | None
+) -> tuple[ServerProcess, int]:
+    """Start the server and wait for it to become healthy.
+
+    When ``requested_port`` is None the port is auto-selected. ``find_free_port``
+    releases the port it probes before the server binds it, so a concurrent
+    process can take it in between (a TOCTOU race). In that case startup fails;
+    retry with a fresh free port so the flake becomes a healthy run. A caller-pinned
+    port is never retried with a different one, because the caller chose it.
+
+    Returns the healthy server and the port it is bound to. Raises if no attempt
+    succeeds.
+    """
+    attempts = SERVER_START_RETRIES if requested_port is None else 1
+    last_port = requested_port
+    for attempt in range(1, attempts + 1):
+        port = requested_port if requested_port is not None else find_free_port()
+        last_port = port
+        base_url = f"http://localhost:{port}"
+        server = start_server(port, signing_dir, log_dir)
+        if wait_for_health(base_url, SERVER_START_TIMEOUT_SECONDS, server):
+            return server, port
+        log(f"server did not become healthy on port {port}; stopping and retrying")
+        stop_server(server)
+    raise RuntimeError(f"server failed to start on any of {attempts} port(s); last tried port {last_port}")
 
 
 def run_workflows(port: int, log_dir: pathlib.Path) -> None:
@@ -247,7 +285,12 @@ def run_workflows(port: int, log_dir: pathlib.Path) -> None:
         log(f"workflow {workflow} passed")
 
 
-def run_interactive(port: int, log_root: pathlib.Path, log_dir: pathlib.Path, signing_dir: pathlib.Path) -> int:
+def run_interactive(
+    requested_port: int | None,
+    log_root: pathlib.Path,
+    log_dir: pathlib.Path,
+    signing_dir: pathlib.Path,
+) -> int:
     """Start the server and open Jupyter Lab for interactive use.
 
     Keeps the server running for the whole Jupyter session and stops it (and
@@ -257,17 +300,10 @@ def run_interactive(port: int, log_root: pathlib.Path, log_dir: pathlib.Path, si
     try:
         sync_environment()
         generate_signing_material(signing_dir)
-        server = start_server(port, signing_dir, log_dir)
+        server, port = start_server_and_wait_for_health(
+            signing_dir, log_dir, requested_port=requested_port
+        )
         base_url = f"http://localhost:{port}"
-
-        if not wait_for_health(base_url, SERVER_START_TIMEOUT_SECONDS, server):
-            print(
-                f"::error::server did not become healthy (or exited early) within "
-                f"{SERVER_START_TIMEOUT_SECONDS}s (see {log_dir / 'server.log'})",
-                file=sys.stderr,
-            )
-            return 1
-
         log(f"server is healthy on {base_url}")
         log("opening Jupyter Lab (workflow scripts live in ./workflows)")
 
@@ -303,16 +339,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Resolve the port and temporary-artifact directories inside a guard so a bad
-    # APP_SERVER__PORT or a filesystem error is reported cleanly instead of
+    # Resolve the requested port and temporary-artifact directories inside a guard so a
+    # bad APP_SERVER__PORT or a filesystem error is reported cleanly instead of
     # escaping as an uncaught traceback.
     try:
-        port = args.port or int(os.environ.get("APP_SERVER__PORT") or find_free_port())
-        base_url = f"http://localhost:{port}"
+        # A caller-pinned port (--port or APP_SERVER__PORT) is used as-is; otherwise the
+        # port is auto-selected per attempt, so a stale free port is retried with a fresh
+        # one instead of failing the run.
+        requested_port = args.port or (
+            int(os.environ["APP_SERVER__PORT"]) if os.environ.get("APP_SERVER__PORT") else None
+        )
 
         # CI points SMOKE_LOG_DIR at a workspace-relative path so failure logs can be
         # uploaded as artifacts. Locally it is unset and logs live under a temp dir.
-        log_root = pathlib.Path(os.environ["SMOKE_LOG_DIR"]) if os.environ.get("SMOKE_LOG_DIR") else None
+        smoke_log_dir = os.environ.get("SMOKE_LOG_DIR")
+        log_root = pathlib.Path(smoke_log_dir) if smoke_log_dir else None
         if log_root is None:
             log_root = pathlib.Path(tempfile.mkdtemp(prefix="status-list-demo-smoke-"))
             log_root.mkdir(parents=True, exist_ok=True)
@@ -327,24 +368,19 @@ def main() -> int:
 
     # Interactive mode manages its own server lifetime and cleanup.
     if args.interactive:
-        return run_interactive(port, log_root, log_dir, signing_dir)
+        return run_interactive(requested_port, log_root, log_dir, signing_dir)
 
     server_proc = None
     success = False
     try:
         sync_environment()
         generate_signing_material(signing_dir)
-        server_proc = start_server(port, signing_dir, log_dir)
+        server_proc, port = start_server_and_wait_for_health(
+            signing_dir, log_dir, requested_port=requested_port
+        )
+        base_url = f"http://localhost:{port}"
 
-        if not wait_for_health(base_url, SERVER_START_TIMEOUT_SECONDS, server_proc):
-            print(
-                f"::error::server did not become healthy (or exited early) within "
-                f"{SERVER_START_TIMEOUT_SECONDS}s (see {log_dir / 'server.log'})",
-                file=sys.stderr,
-            )
-            raise RuntimeError("server failed to start")
-
-        log("server is healthy")
+        log(f"server is healthy on {base_url}")
         run_workflows(port, log_dir)
         log("all workflows passed")
         success = True
