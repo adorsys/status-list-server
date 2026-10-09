@@ -162,7 +162,6 @@ non-zero and names the failing script.
 To use an IDE instead, select the interpreter in `demo/.venv` as the Python
 interpreter for the `demo` directory.
 
-
 ## Smoke check
 
 The repository runs every workflow script end to end against a freshly started

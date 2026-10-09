@@ -1109,7 +1109,7 @@ jobs:
       - name: Install uv
         # Pinned by SHA; the version comment tracks the upstream release. uv manages
         # the Python pinned in demo/.python-version and the locked dependencies.
-        uses: astral-sh/setup-uv@b06acff4b6a41bdd9cdac56507ead0bd7734e757 # v0.6.7
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: "demo/uv.lock"

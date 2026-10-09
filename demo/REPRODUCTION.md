@@ -22,7 +22,7 @@ Launching Jupyter Lab with `uv run jupyter lab` started the server process, but
 every request to serve a static asset (`/static/lab/main.*.js`,
 `/static/favicons/favicon.ico`) returned **HTTP 500** with:
 
-```
+```text
 AttributeError: 'FileFindHandler' object has no attribute 'allowed_symlink_directory'
 ```
 
