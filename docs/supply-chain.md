@@ -59,7 +59,7 @@ Any HIGH or CRITICAL finding that survives the exception ledger fails `scan-imag
 
 `ignore-unfixed` is off. That flag exists to mute distro base-image noise, and there is no distro here — the runtime image is `FROM scratch`. The single justification for the flag does not apply, and leaving it on would suppress exactly the class most worth a human decision: a fresh CRITICAL in a crate before upstream ships a fix.
 
-These thresholds do not match the `trivy-config` job in `CI.yml`. That job keeps Trivy's default unfixed handling for Helm misconfigurations; this one deliberately surfaces unfixed crate advisories, for the reason above.
+These thresholds do not match the `trivy-config` job in `helm-checks.yml`. That job keeps Trivy's default unfixed handling for Helm misconfigurations; this one deliberately surfaces unfixed crate advisories, for the reason above.
 
 Turning the flag off was safe to do because the surface was measured first rather than assumed, and it was zero — no HIGH or CRITICAL anywhere in the tree at the pinned versions. `rsa` and `rkyv`, the two advisories `deny.toml` ignores, produce nothing under Trivy at these versions, which is why neither needs a `.trivyignore.yaml` entry; see [Two Ledgers](#two-ledgers).
 
@@ -92,7 +92,7 @@ If you want SARIF from a particular release run, derive it from the artifact —
 trivy convert --format sarif --output image-amd64.sarif trivy-image-report-amd64.json
 ```
 
-Helm and workflow findings are unaffected — `kube-linter` and `zizmor` upload SARIF from `CI.yml`, which does run on branches and pull requests.
+Helm and workflow findings are unaffected — `kube-linter` (in `helm-checks.yml`) and `zizmor` upload SARIF, and both workflows run on branches and pull requests.
 
 ### The Scheduled Re-scan
 
@@ -391,7 +391,7 @@ vulnerabilities:
 
 `expired_at` is what keeps the ledger honest. Without it, an exception taken once becomes permanent and nobody revisits it. When an entry expires the finding reappears and must be re-argued.
 
-These fields are enforced, not merely documented. `scripts/check-trivyignore.py` runs in the `trivy-config` job before Trivy reads the file, and in `local-ci.sh`. It rejects invalid YAML, unknown top-level sections (a section named `vulnerability` parses fine and suppresses nothing), entries with no `id`, entries with no `statement`, vulnerability entries with no `expired_at`, and malformed dates. An already-expired entry is reported as a warning rather than an error: it has stopped suppressing anything, so it is dead configuration rather than a broken gate.
+These fields are enforced, not merely documented. `scripts/check-trivyignore.py` runs in CI.yml's `config-guards` job on every pull request, and in `local-ci.sh`. It rejects invalid YAML, unknown top-level sections (a section named `vulnerability` parses fine and suppresses nothing), entries with no `id`, entries with no `statement`, vulnerability entries with no `expired_at`, and malformed dates. An already-expired entry is reported as a warning rather than an error: it has stopped suppressing anything, so it is dead configuration rather than a broken gate.
 
 The validator has its own tests in `scripts/tests/`, which CI runs before the validator itself. An untested validator guarding an ignore file has the same problem as an untested vulnerability gate: it looks identical whether it works or does nothing.
 
@@ -426,7 +426,7 @@ When adding to either ledger, check the other. Consolidating them is not current
 
 The [scheduled re-scan](#the-scheduled-re-scan) is what keeps that from landing on the release path. It lists entries lapsing within 30 days, nightly, so an expiry is notice given days ahead rather than a blocked release discovered by whoever is trying to ship. Without it the first symptom of a lapsed exception is a red release, which is the worst moment to be re-arguing one.
 
-This file is read by two consumers on different cadences — the `trivy-config` job in `CI.yml` on every pull request, and the image scan on releases. A malformed entry added here under incident pressure breaks pull request CI for the whole repository, not just the release path.
+This file is read by two consumers on different cadences — CI.yml's `config-guards` job validates it on every pull request (and the `trivy-config` job in `helm-checks.yml` reads it when the Helm chart changes), and the image scan reads it on releases. A malformed entry added here under incident pressure breaks pull request CI for the whole repository, not just the release path.
 
 ## Tool Ownership
 
