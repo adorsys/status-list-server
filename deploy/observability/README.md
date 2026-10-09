@@ -53,7 +53,7 @@ node deploy/observability/slo/lint-thresholds.mjs
 # The DEPLOYED rule copy (the Helm `PrometheusRule`, `prometheusRule.enabled: true`)
 # is rendered and run through the same `promtool test rules` suite in CI, and a
 # drift guard asserts it defines exactly the same rule names as these tested
-# standalone files. See `.github/workflows/CI.yml` -> `prometheus-rules-validation`.
+# standalone files. See `.github/workflows/helm-checks.yml` -> `prometheus-rules-validation`.
 
 # Server + observability stack (set GRAFANA_ADMIN_PASSWORD first)
 APP_TELEMETRY__ENABLED=true \
