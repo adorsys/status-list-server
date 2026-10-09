@@ -66,7 +66,7 @@ use crate::domain::{
 ))]
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
-use crate::outbound::azure_kv::AzureKeyVaultClient;
+use crate::outbound::azure::AzureKeyVaultClient;
 #[cfg(feature = "redis")]
 use crate::outbound::cache::RedisStatusListCache;
 use crate::outbound::cache::{CachingCredentialRepo, DisabledStatusListCache, MokaStatusListCache};
@@ -1198,9 +1198,10 @@ async fn build_dns_challenge_handler(
 mod tests {
     use super::*;
     use crate::cert_manager::challenge::Dns01Handler;
+    #[cfg(feature = "gcp")]
+    use crate::config::GcloudDnsConfig;
     use crate::config::{
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
-        GcloudDnsConfig,
     };
 
     fn build_dns_challenge_handler(
@@ -1257,12 +1258,15 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &domains).is_ok()
         );
 
-        config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
-            project_id: "test-project".into(),
-        });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
-        );
+        #[cfg(feature = "gcp")]
+        {
+            config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
+                project_id: "test-project".into(),
+            });
+            assert!(
+                build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
+            );
+        }
     }
 }
 
