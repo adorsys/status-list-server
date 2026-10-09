@@ -19,7 +19,9 @@ pub use store::{SeaOrmStore, SwappableDatabaseConnection};
 
 use async_trait::async_trait;
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer, PublicJwk};
+use crate::domain::models::credential::{
+    AggregationId, Credential, CredentialError, Issuer, PublicJwk,
+};
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -80,13 +82,51 @@ impl CredentialRepo for SqlCredentialRepo {
         }))
     }
 
-    async fn insert(&self, credential: Credential) -> Result<(), CredentialError> {
+    async fn insert(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
         let public_key = serde_json::from_slice(credential.public_key.as_bytes())
             .map_err(|e| CredentialError::InvalidPublicJwk(format!("parse failed: {e}")))?;
-        self.store
-            .insert_one(models::Credentials::new(credential.issuer.0, public_key))
-            .await
-            .map_err(Into::into)
+        let entity = models::Credentials::new(credential.issuer.0, public_key)
+            .with_aggregation_id(aggregation_id.to_string());
+        self.store.insert_one(entity).await.map_err(Into::into)
+    }
+
+    async fn find_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        let aggregation_id = match self.store.find_aggregation_id(issuer).await? {
+            // Registered before aggregation IDs existed. Another pod may be
+            // assigning one right now, so read back whichever landed.
+            Some(None) => {
+                self.store
+                    .assign_aggregation_id(issuer, &AggregationId::generate().to_string())
+                    .await?;
+                self.store.find_aggregation_id(issuer).await?
+            }
+            found => found,
+        };
+        aggregation_id
+            .flatten()
+            .map(|id| {
+                id.parse()
+                    .map_err(|e| CredentialError::Backend(Box::new(e)))
+            })
+            .transpose()
+    }
+
+    async fn find_issuer_by_aggregation_id(
+        &self,
+        aggregation_id: AggregationId,
+    ) -> Result<Option<Issuer>, CredentialError> {
+        let issuer = self
+            .store
+            .find_issuer_by_aggregation_id(&aggregation_id.to_string())
+            .await?;
+        Ok(issuer.map(Issuer))
     }
 }
 
@@ -141,12 +181,13 @@ impl StatusListRepo for SqlStatusListRepo {
 
     async fn list_uris(
         &self,
+        issuer: Option<&str>,
         after: Option<&str>,
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError> {
         let rows = self
             .store
-            .find_status_list_uris_after(after, (limit as u64).saturating_add(1))
+            .find_status_list_uris_after(issuer, after, (limit as u64).saturating_add(1))
             .await?;
         Ok(StatusListUriPage::from_rows(rows, limit))
     }

@@ -5,7 +5,7 @@ mod publish_status;
 mod update_status;
 pub(crate) mod utils;
 
-pub use aggregation::{AggregationQuery, get_aggregation};
+pub use aggregation::{AggregationQuery, get_aggregation, get_issuer_aggregation};
 pub use allocate_indices::{allocate_indices, allocate_indices_route};
 pub use get_status_list::{StatusListQuery, get_status_list};
 pub use publish_status::{publish_status, publish_status_route};
