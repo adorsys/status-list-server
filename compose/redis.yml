@@ -1,0 +1,4 @@
+services:
+  app:
+    environment:
+      APP_CACHE__BACKEND: redis
