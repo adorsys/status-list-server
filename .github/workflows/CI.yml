@@ -562,11 +562,7 @@ jobs:
     name: Config Guards (trivyignore + variant parity)
     runs-on: ubuntu-latest
 
-    # These are repo-wide guards, not Helm-specific, so they live in CI.yml and run on
-    # every pull request. They were originally steps on the trivy-config job; when that
-    # job moved to the deploy/helm-path-gated helm-checks.yml, a pure-Rust PR would no
-    # longer exercise either guard. Kept here so a malformed .trivyignore.yaml or an
-    # image-variant drift fails for whoever introduces it, while they are looking at it.
+    # Repo-wide guards, not Helm-specific, so they run on every PR.
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
