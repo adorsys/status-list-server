@@ -1,17 +1,18 @@
 # Demo Workflows with the Status List Server
 
 Typical scenarios for interacting with the Status List Server are showcased
-by means of notebooks. To run the notebooks, you will need a Python environment
-and a live server. The setup works on macOS, Linux, and Windows.
+by means of plain Python scripts. To run them, you will need a Python environment
+and a live server. The setup works on macOS, Linux, and Windows; Linux is the
+only platform exercised in CI (see [Smoke check](#smoke-check)).
 
-## Catalog of notebook workflows
+## Catalog of workflow scripts
 
-You'll find notebooks for the following scenarios in the `./workflows` directory:
+You'll find the following scenarios in the `./workflows` directory:
 
-- [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.ipynb)
-- [Token Issuers can maintain multiple Token Status Lists](./workflows/02-issuers-can-maintain-multiple-status-lists.ipynb)
-- [Issuer B cannot update Issuer A's list](./workflows/03-issuer-b-cannot-update-issuer-a-list.ipynb)
-- [Unregistered issuers cannot publish lists](./workflows/04-unregistered-issuers-cannot-publish-lists.ipynb)
+- [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.py)
+- [Token Issuers can maintain multiple Token Status Lists](./workflows/02-issuers-can-maintain-multiple-status-lists.py)
+- [Issuer B cannot update Issuer A's list](./workflows/03-issuer-b-cannot-update-issuer-a-list.py)
+- [Unregistered issuers cannot publish lists](./workflows/04-unregistered-issuers-cannot-publish-lists.py)
 
 ## Set up the Python environment
 
@@ -106,9 +107,9 @@ no `.env` file or database is needed.
 
 The server rate-limits credential registration and status list writes per
 client IP address. By default each allows 10 requests and then gets back one
-request per minute, which is less than the notebooks need when run back to back.
-The commands below raise the limit to 100 for this local server, enough for
-several full runs of all four notebooks.
+request per minute, which is less than the workflow scripts need when run back
+to back. The commands below raise the limit to 100 for this local server,
+enough for several full runs of all four workflow scripts.
 
 macOS or Linux (bash / zsh):
 
@@ -137,29 +138,78 @@ set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
 cargo run
 ```
 
-If a cell still fails with HTTP `429`, restart the server. The limit refills
-slowly, so waiting a minute only allows one more request, and requests rejected
-for missing or invalid authentication count against it too.
+If a workflow still fails with HTTP `429`, restart the server. The limit
+refills slowly, so waiting a minute only allows one more request, and requests
+rejected for missing or invalid authentication count against it too.
 
-The notebooks connect to `http://localhost:8000` by default. If
-`APP_SERVER__PORT` is set in the environment of the notebook kernel, or in a
-`.env` file at the root of the repository, the notebooks use that port instead.
+The workflow scripts connect to `http://localhost:8000` by default. If
+`APP_SERVER__PORT` is set in the environment, or in a `.env` file at the root of
+the repository, the scripts use that port instead.
 
-## Run the notebooks
+## Run the workflows
 
-From the `demo` directory, open Jupyter Lab to explore and run the workflows:
-
-```bash
-uv run jupyter lab
-```
-
-To execute a notebook top to bottom without opening Jupyter Lab:
+Each workflow is a plain Python script in `./workflows`. With a live server
+running (see above), execute one from the `demo` directory:
 
 ```bash
-uv run jupyter execute workflows/01-an-issuer-maintains-a-status-list.ipynb
+uv run python workflows/01-an-issuer-maintains-a-status-list.py
 ```
 
-To use an IDE instead, select the interpreter in `demo/.venv` as the kernel.
+Each script uses fresh random issuer credentials and status list IDs, so a run
+never depends on state left behind by an earlier one. An assertion failure exits
+non-zero and names the failing script.
+
+To use an IDE instead, select the interpreter in `demo/.venv` as the Python
+interpreter for the `demo` directory.
+
+
+## Smoke check
+
+The repository runs every workflow script end to end against a freshly started
+server in CI, so the scripts cannot silently drift from the server API or the
+setup instructions. The same driver is available locally as a one-shot,
+non-interactive command. This is the single command to run all four workflows
+end to end: it does **not** require the manual environment, certificate, or
+server-start steps above — it provisions everything itself.
+
+```bash
+uv run python run-demo-smoke.py
+```
+
+From a clean checkout it:
+
+1. syncs the isolated demo environment with `uv sync --locked`;
+2. generates temporary signing material (self-signed certificate and key);
+3. starts the Status List Server on a free port with in-memory storage and a
+   raised rate limit;
+4. executes all four workflow scripts in order from fresh state;
+5. stops the server and removes the temporary material even on failure.
+
+On failure, the exit code is non-zero and the logs (server and per-workflow) are
+kept and reported so the owning script can be identified. The retained material
+also includes the freshly generated signing key and certificate; these are
+throwaway self-signed demo credentials (never committed) and are kept so the
+server and workflow logs remain inspectable when uploaded as CI artifacts. The
+smoke check is covered in CI by the `demo-smoke` job (Linux only), which runs
+this driver **twice** with a bounded timeout (proving repeated runs are
+isolated), then asserts that `demo/workflows` is unchanged by execution, and
+uploads the logs as artifacts when it fails.
+
+## Start the demo interactively
+
+To explore the workflows by hand instead of running them headlessly, use the
+same driver in interactive mode. It starts the server with temporary signing
+material and in-memory storage, then opens Jupyter Lab rooted at the `demo`
+directory so you can run and step through the workflow scripts. The scripts are
+plain Python files (not notebooks), so in Jupyter Lab each opens in a code
+editor; you can run them with the editor's "Run" action, or in your IDE of
+choice (select the interpreter in `demo/.venv`). The server stays up for the
+whole session and is stopped (and the temporary material removed) when you exit
+Jupyter.
+
+```bash
+uv run python run-demo-smoke.py --interactive
+```
 
 ## Update dependencies
 
