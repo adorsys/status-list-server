@@ -59,7 +59,7 @@ The runner uses repository configurations unless an explicit flag is shown.
 | Rust format                         | Default | `cargo fmt --all --check`                                                                                                                                                                                                                             |
 | Build                               | Default | `cargo build --workspace --all-targets --all-features`                                                                                                                                                                                                |
 | Memory-only build                   | Default | `cargo check --no-default-features --features memory`                                                                                                                                                                                                 |
-| Feature profiles                    | Default | `cargo xtask check-profiles` checks isolated libraries and supported targets for every profile |
+| Feature profiles                    | Full    | `cargo xtask check-profiles` checks isolated libraries and supported targets for every profile, with warnings denied |
 | Release image features              | Default | Read `ARG FEATURES` from Dockerfile; `cargo check --workspace --features "$features"`                                                                                                                                                                 |
 | Domain purity                       | Default | Grep `src/domain/` for the same infrastructure imports as CI                                                                                                                                                                                          |
 | Clippy                              | Default | `cargo clippy --workspace --all-targets --all-features -- -D warnings`                                                                                                                                                                                |
@@ -83,11 +83,10 @@ The runner uses repository configurations unless an explicit flag is shown.
 | Coverage                            | Full    | `cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html`                                                                                                                                                          |
 
 Full mode includes every default gate. Lint exclusions are shared with GitHub CI:
-build output, virtual environments, and node_modules are not source inputs.
-This matters because Rust tests generate Helm template copies under `target/`.
-TOML lint also excludes Git metadata, which can contain reflogs with `.toml`
-filenames. YAML uses the repository Git-ignore rules in addition to its explicit
+build output, virtual environments, and node_modules are not source inputs. This matters because Rust tests generate Helm template copies under `target/`. TOML lint also excludes Git metadata, which can contain reflogs with `.toml` filenames. YAML uses the repository Git-ignore rules in addition to its explicit
 Helm template exclusions.
+
+The default Rust gate keeps its quick memory-only check. The full feature matrix runs in a separate gate with `-D warnings`, matching GitHub CI while preserving existing `RUSTFLAGS`. Run it alone with `./local-ci.sh --gate profiles`. GitHub's required profile job includes the memory-only check through the minimal profile.
 
 Dedicated local-runner tests compare version constants with the workflows and
 pinned action references. Release variants are read directly from CI.yml. All

@@ -195,7 +195,7 @@ cargo xtask ci
 
 Vault, GCP, and Azure use externally configured provider endpoints and credentials, so those profiles do not start provider emulators. Configure them in `.env` before starting the profile.
 
-`check-profiles` checks each library with `--no-default-features` and the listed features to detect dependence on other default features. It also checks all supported targets with the normal profile selection. Non-minimal builds and tests retain the default `memory` feature, which the binary and existing test helpers require. Every check runs, and failures are summarized at the end. The required CI profile-check job and the local CI pipeline run these checks.
+`check-profiles` checks each library with `--no-default-features` and the listed features to detect dependence on other default features. It also checks all supported targets with the normal profile selection. Non-minimal builds and tests retain the default `memory` feature, which the binary and existing test helpers require. Every check runs, and failures are summarized at the end. The required CI profile-check job and the full local CI pipeline run these checks. Default local CI retains the quick memory-only check; run `./local-ci.sh --gate profiles` to check the full matrix separately.
 
 `test` adds `postgres-tests` to every PostgreSQL-backed profile and also adds
 `redis-tests` to the Redis profile. These profiles and MySQL require a running

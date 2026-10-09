@@ -48,16 +48,49 @@ class LocalCiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("unexpected-install", result.stderr)
 
-    def test_rust_gates_run_profiles_and_stop_on_failure(self):
+    def test_default_rust_gates_keep_memory_check_without_profile_matrix(self):
         result = self.shell('''
-run() { printf '%s\\n' "$*"; [[ "$*" != 'cargo xtask check-profiles' ]] || return 17; }
+run() { printf '%s\\n' "$*"; }
+require_tool() { :; }
+require_docker() { :; }
+release_image_features_check() { :; }
+domain_purity_check() { :; }
+crate_kind_detection() { CRATE_IS_LIB=true; }
 rust_default_gates
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cargo check --no-default-features --features memory", result.stdout)
+        self.assertNotIn("cargo xtask check-profiles", result.stdout)
+
+    def test_profile_gate_preserves_flags_and_stops_on_failure(self):
+        result = self.shell('''
+export RUSTFLAGS='-C debuginfo=0'
+run() { printf '%s\\n' "$*"; return 17; }
+profile_checks
 echo unexpected-success
 ''')
         self.assertEqual(result.returncode, 17, result.stderr)
-        self.assertIn("cargo xtask check-profiles", result.stdout)
-        self.assertNotIn("cargo clippy", result.stdout)
+        self.assertIn("env RUSTFLAGS=-C debuginfo=0 -D warnings cargo xtask check-profiles", result.stdout)
         self.assertNotIn("unexpected-success", result.stdout)
+
+    def test_profile_matrix_runs_once_in_full_mode_and_not_in_default(self):
+        for mode in ("default", "full"):
+            with self.subTest(mode=mode):
+                result = self.shell('''
+execute_gate() { printf 'GATE %s\\n' "$1"; }
+''' + f'MODE={mode}; main')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.count("GATE profiles\n"), int(mode == "full"))
+                self.assertEqual(result.stdout.count("GATE rust\n"), 1)
+
+    def test_profiles_can_run_as_a_standalone_gate(self):
+        result = self.shell('''
+bootstrap_gate() { :; }
+profile_checks() { echo profile-matrix; }
+dispatch_gate profiles
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("profile-matrix", result.stdout)
 
     def test_llvm_cov_version_uses_cargo_subcommand_protocol(self):
         self.stub("cargo-llvm-cov", "[[ \"$*\" == 'llvm-cov --version' ]] || exit 2; echo 'cargo-llvm-cov 0.6.16'")

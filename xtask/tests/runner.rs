@@ -124,3 +124,17 @@ fn release_build_only_adds_the_requested_build_mode() {
         "COMMAND\nbuild\n--package\nstatus-list-server\n--bin\nstatus-list-server\n--no-default-features\n--features\nmemory\n--release\n"
     );
 }
+
+#[test]
+fn ci_uses_bash_for_the_full_local_pipeline() {
+    let fixture = Fixture::new();
+    fixture.executable("sh", "echo unexpected-posix-shell >&2\nexit 90");
+    fixture.executable(
+        "bash",
+        // Exercise the actual Bash script's help path without bootstrapping tools.
+        "test \"$1\" = local-ci.sh\ntest \"$2\" = --full\nPATH=/usr/bin:/bin exec /bin/bash \"$1\" --help",
+    );
+    let result = fixture.run(&["ci"]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Usage: ./local-ci.sh"));
+}

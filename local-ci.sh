@@ -53,17 +53,17 @@ usage() {
 Usage: ./local-ci.sh [--full] [--no-bootstrap] [--gate NAME] [--help]
 
 Modes:
-  default       Fast day-to-day gates: fmt, build, profile/release feature checks,
+  default       Fast day-to-day gates: fmt, build, memory/release feature checks,
                 domain purity, clippy, nextest, docs, doctests, machete, and
                 fast local workflow/script wiring checks.
   --full        Practical local parity with GitHub CI: default gates plus zizmor,
-                release feature matrix, Docker smoke build, cargo vet/deny/audit,
-                typos, tombi, markdownlint, Helm/Trivy/KubeLinter, yamlfmt,
+                feature profiles, release feature matrix, Docker smoke build,
+                cargo vet/deny/audit, typos, tombi, markdownlint, Helm/Trivy/KubeLinter, yamlfmt,
                 OpenTelemetry/Prometheus validation, and cargo llvm-cov.
 
 Options:
   --no-bootstrap  Require matching installed CLIs; print install guidance otherwise.
-  --gate NAME     Run only: rust, wiring, style, zizmor, variants, docker,
+  --gate NAME     Run only: rust, profiles, wiring, style, zizmor, variants, docker,
                   supply-chain, helm, otel, prometheus, coverage.
   --help          Show this help.
 EOF
@@ -75,7 +75,7 @@ while [ "$#" -gt 0 ]; do
         --gate)
             [ "$#" -ge 2 ] || { echo "--gate requires a name" >&2; exit 2; }
             shift; GATE="$1"
-            case "$GATE" in rust|wiring|style|zizmor|variants|docker|supply-chain|helm|otel|prometheus|coverage) ;;
+            case "$GATE" in rust|profiles|wiring|style|zizmor|variants|docker|supply-chain|helm|otel|prometheus|coverage) ;;
                 *) echo "unknown gate: $GATE" >&2; exit 2 ;; esac ;;
         --no-bootstrap) BOOTSTRAP=0 ;;
         --help|-h) usage; exit 0 ;;
@@ -321,6 +321,7 @@ bootstrap_node() {
 bootstrap_gate() {
     case "$1" in
         rust) bootstrap_default_tools; rust_version_check ;;
+        profiles) require_tool cargo "Install Rust/Cargo."; rust_version_check ;;
         wiring) bootstrap_python ;;
         style)
             bootstrap_node
@@ -408,8 +409,6 @@ rust_default_gates() {
     run cargo build --workspace --all-targets --all-features
     log "Memory-only build"
     run cargo check --no-default-features --features memory
-    log "Cargo feature profiles"
-    run cargo xtask check-profiles
     release_image_features_check
     domain_purity_check
     log "Cargo clippy"
@@ -429,6 +428,11 @@ rust_default_gates() {
     log "Cargo nextest"
     require_docker
     run cargo nextest run --workspace --all-targets --all-features
+}
+
+profile_checks() {
+    log "Cargo feature profiles"
+    run env RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" cargo xtask check-profiles
 }
 
 fast_wiring_checks() {
@@ -639,6 +643,7 @@ dispatch_gate() {
     bootstrap_gate "$1"
     case "$1" in
         rust) rust_default_gates ;;
+        profiles) profile_checks ;;
         wiring) fast_wiring_checks ;;
         style) style_config_checks ;;
         zizmor) zizmor_checks ;;
@@ -658,7 +663,7 @@ main() {
     if [ -n "$GATE" ]; then
         execute_gate "$GATE"
     elif [ "$MODE" = full ]; then
-        for gate in style wiring zizmor helm otel prometheus rust variants supply-chain docker coverage; do
+        for gate in style wiring zizmor helm otel prometheus rust profiles variants supply-chain docker coverage; do
             execute_gate "$gate"
         done
     else
