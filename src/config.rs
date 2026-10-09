@@ -6,6 +6,9 @@ use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer};
 use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
+use url::Url;
+
+use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -173,6 +176,15 @@ impl LimitsConfig {
             return Err(ConfigError::Message(
                 "limits.max_lists_per_issuer must be greater than 0".to_string(),
             ));
+        }
+        if self.max_lists_per_issuer > AGGREGATION_DEFAULT_LIMIT as u64 {
+            return Err(ConfigError::Message(format!(
+                "limits.max_lists_per_issuer ({}) must not exceed AGGREGATION_DEFAULT_LIMIT \
+                 ({AGGREGATION_DEFAULT_LIMIT}), the aggregation page size: an issuer's \
+                 aggregation would no longer fit in one response, and clients that do not page \
+                 would silently see part of it",
+                self.max_lists_per_issuer
+            )));
         }
 
         Ok(())
@@ -413,6 +425,60 @@ fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+impl ServerConfig {
+    /// The aggregation endpoint's public URL, `None` when not configured.
+    /// Tokens advertise it with `/<aggregation_id>` appended for relying parties
+    /// to fetch, so it must be the endpoint itself: `{public_base_url}/aggregation`
+    /// over http(s) without credentials, https in production, and no query or
+    /// fragment.
+    pub fn aggregation_uri(
+        &self,
+        environment: TelemetryEnvironment,
+    ) -> Result<Option<Url>, ConfigError> {
+        let Some(uri) = trim_non_empty(self.aggregation_uri.as_deref()) else {
+            return Ok(None);
+        };
+        let uri = Url::parse(uri).map_err(|e| {
+            ConfigError::Message(format!("server.aggregation_uri is not a valid URL: {e}"))
+        })?;
+        match uri.scheme() {
+            "https" => {}
+            "http" if !environment.is_production() => {}
+            "http" => {
+                return Err(ConfigError::Message(
+                    "server.aggregation_uri must use https in production".to_string(),
+                ));
+            }
+            _ => {
+                return Err(ConfigError::Message(
+                    "server.aggregation_uri must be an http or https URL".to_string(),
+                ));
+            }
+        }
+        if !uri.username().is_empty() || uri.password().is_some() {
+            return Err(ConfigError::Message(
+                "server.aggregation_uri must not contain credentials".to_string(),
+            ));
+        }
+        // Routed under the same base path as `sub`, which may carry a proxy prefix.
+        let base = Url::parse(&self.resolved_public_base_url())
+            .expect("the resolved public base URL is a valid URL");
+        let route = format!("{}/aggregation", base.path().trim_end_matches('/'));
+        if uri.path() != route {
+            return Err(ConfigError::Message(format!(
+                "server.aggregation_uri path '{}' does not match the aggregation route '{route}'",
+                uri.path()
+            )));
+        }
+        if uri.query().is_some() || uri.fragment().is_some() {
+            return Err(ConfigError::Message(
+                "server.aggregation_uri must not have a query or fragment".to_string(),
+            ));
+        }
+        Ok(Some(uri))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1493,6 +1559,9 @@ impl Config {
         config.management_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
+        config
+            .server
+            .aggregation_uri(config.telemetry.environment)?;
         Ok(config)
     }
 }
@@ -1743,7 +1812,10 @@ mod tests {
         let overridden = Config::load_from_overrides(&[
             ("server.host", "0.0.0.0"),
             ("server.port", "5002"),
-            ("server.aggregation_uri", "https://example.com/aggregation"),
+            (
+                "server.aggregation_uri",
+                "https://example.com/api/v1/aggregation",
+            ),
             (
                 "database.url",
                 "postgres://user:password@localhost:5432/status-list",
@@ -1807,7 +1879,7 @@ mod tests {
         assert_eq!(overridden.server.port, 5002);
         assert_eq!(
             overridden.server.aggregation_uri.as_deref(),
-            Some("https://example.com/aggregation")
+            Some("https://example.com/api/v1/aggregation")
         );
         assert_eq!(
             overridden
@@ -2467,6 +2539,113 @@ mod tests {
             zero_quota.is_err(),
             "a zero list quota would refuse every publish and must fail config loading"
         );
+    }
+
+    #[test]
+    fn test_list_quota_above_aggregation_page_is_rejected() {
+        let over = (AGGREGATION_DEFAULT_LIMIT + 1).to_string();
+        let err = Config::load_from_overrides(&[("limits.max_lists_per_issuer", &over)])
+            .expect_err("a quota larger than one aggregation page must fail config loading")
+            .to_string();
+        assert!(
+            err.contains(&format!("limits.max_lists_per_issuer ({over})")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "AGGREGATION_DEFAULT_LIMIT ({AGGREGATION_DEFAULT_LIMIT})"
+            )),
+            "{err}"
+        );
+
+        let at_page = AGGREGATION_DEFAULT_LIMIT.to_string();
+        assert!(Config::load_from_overrides(&[("limits.max_lists_per_issuer", &at_page)]).is_ok());
+    }
+
+    fn aggregation_uri(uri: &str) -> Result<Option<Url>, ConfigError> {
+        aggregation_uri_in("development", uri)
+    }
+
+    fn aggregation_uri_in(environment: &str, uri: &str) -> Result<Option<Url>, ConfigError> {
+        Config::load_from_overrides(&[
+            ("telemetry.environment", environment),
+            ("server.aggregation_uri", uri),
+        ])
+        .map(|config| {
+            config
+                .server
+                .aggregation_uri(config.telemetry.environment)
+                .expect("a config that loaded has a valid aggregation_uri")
+        })
+    }
+
+    #[test]
+    fn test_aggregation_uri_accepts_the_endpoint_url() {
+        let uri = aggregation_uri(" https://statuslist.example.com/api/v1/aggregation ").unwrap();
+        assert_eq!(
+            uri.unwrap().as_str(),
+            "https://statuslist.example.com/api/v1/aggregation"
+        );
+    }
+
+    #[test]
+    fn test_aggregation_uri_follows_the_public_base_url_path() {
+        let behind_proxy = |uri: &str| {
+            Config::load_from_overrides(&[
+                (
+                    "server.public_base_url",
+                    "https://host.example.com/statuslist/api/v1",
+                ),
+                ("server.aggregation_uri", uri),
+            ])
+        };
+        assert!(behind_proxy("https://host.example.com/statuslist/api/v1/aggregation").is_ok());
+        let err = behind_proxy("https://host.example.com/api/v1/aggregation")
+            .expect_err("the route sits under the proxy prefix")
+            .to_string();
+        assert!(err.contains("'/statuslist/api/v1/aggregation'"), "{err}");
+    }
+
+    #[test]
+    fn test_aggregation_uri_unset_or_blank_is_none() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(
+            config
+                .server
+                .aggregation_uri(config.telemetry.environment)
+                .unwrap(),
+            None
+        );
+        assert_eq!(aggregation_uri("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn test_aggregation_uri_allows_plain_http_only_outside_production() {
+        let uri = "http://localhost:8000/api/v1/aggregation";
+        assert!(aggregation_uri(uri).unwrap().is_some());
+        let err = aggregation_uri_in("production", uri)
+            .expect_err("plain http must be rejected in production")
+            .to_string();
+        assert!(err.contains("https in production"), "{err}");
+    }
+
+    #[test]
+    fn test_aggregation_uri_rejects_anything_but_the_endpoint_url() {
+        for uri in [
+            "not a url",
+            "file:///api/v1/aggregation",
+            "ftp://statuslist.example.com/api/v1/aggregation",
+            "https://user:secret@statuslist.example.com/api/v1/aggregation",
+            "https://user@statuslist.example.com/api/v1/aggregation",
+            "https://statuslist.example.com/statuslists/aggregation",
+            "https://statuslist.example.com/api/v1/aggregation/",
+            "https://statuslist.example.com/api/v1/aggregation?aggregation_id=x",
+            "https://statuslist.example.com/api/v1/aggregation?",
+            "https://statuslist.example.com/api/v1/aggregation#top",
+        ] {
+            let err = aggregation_uri(uri).expect_err(uri).to_string();
+            assert!(err.contains("server.aggregation_uri"), "{uri}: {err}");
+        }
     }
 
     #[test]

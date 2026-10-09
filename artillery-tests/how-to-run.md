@@ -74,10 +74,13 @@ The values below (the highest of the four) are safe for every suite -- raising
 the write (strict) limit especially matters, since the authenticated update
 flows send two writes back to back. Use the per-suite values above when running
 a single suite so the limits stay high enough to avoid `429`s yet still let the
-server shed truly excessive load:
+server shed truly excessive load. `APP_SERVER__AGGREGATION_URI` makes every
+served token carry `aggregation_uri`, so the read scenarios also measure the
+aggregation ID lookup that comes with it:
 
 ```bash
 APP_SERVER__ENABLE_METRICS=true \
+APP_SERVER__AGGREGATION_URI=http://localhost:8000/api/v1/aggregation \
 APP_TELEMETRY__ENABLED=true \
 APP_TELEMETRY__ENVIRONMENT=development \
 APP_RATE_LIMIT__STRICT_BURST_SIZE=60000 \

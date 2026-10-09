@@ -1,6 +1,9 @@
 //! Credential domain model, error types, and core domain business operations.
 
+use std::{fmt, str::FromStr};
+
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Domain errors encountered during issuer credential management.
 ///
@@ -38,6 +41,32 @@ impl From<String> for Issuer {
 impl From<&str> for Issuer {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+/// Opaque identifier that names an issuer's Status List Aggregation in public
+/// URIs, so tokens never disclose the issuer identifier itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AggregationId(pub Uuid);
+
+impl AggregationId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl fmt::Display for AggregationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for AggregationId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
     }
 }
 

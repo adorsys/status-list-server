@@ -36,10 +36,12 @@ info:
       * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
         `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
         the peer IP) — `PUT`/`PATCH`
-        `/api/v1/status-lists/{list_id}/statuses`.
+        `/api/v1/status-lists/{list_id}/statuses` and the authenticated
+        `GET /api/v1/credentials`.
         Tunables: `strict_burst_size`, `strict_period_secs`.
       * **permissive** (per source IP) — public read routes
-        (`GET /api/v1/aggregation`,
+        (`GET /api/v1/aggregation/{aggregation_id}`,
+        `GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
         Tunables: `permissive_burst_size`, `permissive_period_secs`
         (defaults: 100 / 60s).
@@ -186,6 +188,38 @@ paths:
           $ref: "#/components/responses/InternalServerError"
 
   /api/v1/credentials:
+    get:
+      operationId: getIssuerRegistration
+      summary: Get the calling issuer's aggregation ID and URI
+      description: |
+        Returns the aggregation ID and URI of the issuer the Bearer token
+        belongs to. Issuers registered before aggregation IDs existed never got
+        theirs in the registration response, and get them here.
+      responses:
+        "200":
+          description: The issuer's registration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            The issuer's credential was removed after the token was checked
+            (`issuer_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "issuer_not_found"
+                error_description: "Issuer is not registered"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
     post:
       operationId: registerIssuer
       summary: Register issuer credentials
@@ -202,12 +236,15 @@ paths:
               $ref: "#/components/schemas/CredentialsRequest"
       responses:
         "202":
-          description: Credentials accepted and stored successfully
+          description: |
+            Credentials accepted and stored. The body tells the issuer its
+            aggregation ID, which it cannot derive itself, and the aggregation
+            URI to publish in its metadata (draft-21 §9.1).
+            `GET /api/v1/credentials` returns them again later.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-              example: "Credentials stored successfully"
+                $ref: "#/components/schemas/CredentialsResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
@@ -221,79 +258,116 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/aggregation/{aggregation_id}:
+    get:
+      operationId: getIssuerAggregation
+      summary: List one issuer's status list URIs
+      description: |
+        Returns the `sub` URIs of one issuer's status lists as a draft-21 §9.3
+        Status List Aggregation, plus a `next_cursor` for paging. Status list
+        tokens advertise this URI in `aggregation_uri`.
+
+        The response is complete in one page and `next_cursor` is `null`: the
+        server refuses to start when `limits.max_lists_per_issuer` exceeds the
+        default page size, and the list quota holds each issuer to it. When an
+        issuer has more lists anyway, for example while the quota is off, a
+        request without `limit` gets `409 paging_required` rather than part of
+        the aggregation. Send `limit` to page as described under
+        `getAggregation`.
+      security: []
+      parameters:
+        - name: aggregation_id
+          in: path
+          required: true
+          description: |
+            The issuer's aggregation ID, as returned at registration and by
+            `GET /api/v1/credentials`.
+          schema:
+            type: string
+            format: uuid
+            example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        - $ref: "#/components/parameters/AggregationLimit"
+        - $ref: "#/components/parameters/AggregationCursor"
+        - $ref: "#/components/parameters/AggregationIfNoneMatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/AggregationPage"
+        "304":
+          $ref: "#/components/responses/AggregationNotModified"
+        "400":
+          description: |
+            `aggregation_id` is not a UUID (`invalid_aggregation_id`), or
+            `limit`, `cursor` or the query string is invalid (`invalid_query`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_aggregation_id"
+                error_description: "aggregation_id must be a UUID"
+        "404":
+          description: No issuer has this aggregation ID (`aggregation_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "aggregation_not_found"
+                error_description: "No issuer has this aggregation ID"
+        "409":
+          description: |
+            The issuer has more status lists than one page and the request
+            sent neither `limit` nor `cursor` (`paging_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "paging_required"
+                error_description: "this aggregation has more than 1000 status lists; send limit to page through it"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /api/v1/aggregation:
     get:
       operationId: getAggregation
-      summary: Aggregate status list URIs, one page at a time
+      summary: List every issuer's status list URIs, one page at a time
+      deprecated: true
       description: |
-        Returns the `sub` URIs of the status lists hosted by this server,
-        issuer-agnostic, one bounded page per request. Intended for relying
-        parties that need to enumerate the set of status lists to poll. The
-        response carries the draft-21 §9.3 `status_lists` array plus a
-        `next_cursor` for the following page.
+        Returns the `sub` URIs of every hosted status list, across issuers,
+        one bounded page per request. Kept for status list tokens issued
+        before `aggregation_uri` named one issuer; use
+        `GET /api/v1/aggregation/{aggregation_id}` instead. A client that
+        reads only `status_lists` sees the first page and nothing else.
 
         **Paging.** Pages are ordered by `list_id` and hold at most `limit`
         URIs (default and maximum 1000). While `next_cursor` is non-null, pass
         it back as `cursor` to fetch the next page; the same next page is also
         advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
         returns exactly once every list that existed when the walk started
-        and still exists when its page is read; lists are never deleted through
-        the API, but an operator may delete them directly in the database.
-        A list published during a walk may be missed, and not only because it
-        was published late: `list_id` is chosen by the publisher and can be any
-        UUID, so a new list can sort before the current cursor.
-
-        **Clients that do not page.** A client that reads only `status_lists`
-        (all draft-21 §9.3 requires) sees the first page and nothing else. The
-        large default page only moves the point at which such a client silently
-        sees a partial set; it does not remove it. Follow `next_cursor` or
-        `Link` to see every list.
+        and still exists when its page is read; lists are never deleted
+        through the API, but an operator may delete them directly in the
+        database. A list published during a walk may be missed, and not only
+        because it was published late: `list_id` is chosen by the publisher
+        and can be any UUID, so a new list can sort before the current cursor.
+        The same applies to the paged exceptions of `getIssuerAggregation`.
 
         There is no total count: counting every list is itself an unbounded
         read on a public endpoint.
-
-        When `server.aggregation_uri` is configured, that URI is advertised
-        inside issued status list tokens (draft-21 §4.2/§4.3).
       security: []
       parameters:
-        - name: limit
-          in: query
-          required: false
-          description: Maximum number of URIs on this page.
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 1000
-            default: 1000
-        - name: cursor
-          in: query
-          required: false
-          description: |
-            Opaque `next_cursor` value from the previous page. Omit for the
-            first page. Clients must not construct or modify cursors.
-          schema:
-            type: string
+        - $ref: "#/components/parameters/AggregationLimit"
+        - $ref: "#/components/parameters/AggregationCursor"
+        - $ref: "#/components/parameters/AggregationIfNoneMatch"
       responses:
         "200":
-          description: One page of hosted status list URIs.
-          headers:
-            Link:
-              schema:
-                type: string
-              description: |
-                Present only when another page follows, as
-                `<?limit=<limit>&cursor=<next_cursor>>; rel="next"` (RFC 8288).
-                The target is a relative reference resolved against this
-                request's URI.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AggregationResponse"
-              example:
-                status_lists:
-                  - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
-                  - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
-                next_cursor: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
+          $ref: "#/components/responses/AggregationPage"
+        "304":
+          $ref: "#/components/responses/AggregationNotModified"
         "400":
           description: |
             `limit` is outside 1–1000, `cursor` is not a value this endpoint
@@ -729,6 +803,18 @@ paths:
               schema:
                 type: string
               description: Always `Accept, Accept-Encoding`.
+        "400":
+          description: |
+            `list_id` contains a NUL character (`invalid_list_id`), `time` is
+            not a positive timestamp in the past (`invalid_historical_time`),
+            or the query string could not be parsed (`invalid_query`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_list_id"
+                error_description: "list_id must not contain NUL"
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
@@ -781,6 +867,51 @@ components:
           example: "my-issuer"
         public_key:
           $ref: "#/components/schemas/JWK"
+
+    CredentialsResponse:
+      type: object
+      required:
+        - status
+        - aggregation_id
+      properties:
+        status:
+          type: string
+          example: "Credentials stored successfully"
+        aggregation_id:
+          type: string
+          format: uuid
+          description: |
+            Opaque ID that names this issuer in public aggregation URIs, in
+            place of the issuer identifier.
+          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            The issuer's Status List Aggregation URI. Absent when status list
+            tokens do not carry one (see `StatusList.aggregation_uri`).
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+
+    RegistrationResponse:
+      type: object
+      required:
+        - issuer
+        - aggregation_id
+      properties:
+        issuer:
+          type: string
+          example: "my-issuer"
+        aggregation_id:
+          type: string
+          format: uuid
+          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            Absent when status list tokens do not carry one (see
+            `StatusList.aggregation_uri`).
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
 
     JWK:
       type: object
@@ -987,6 +1118,18 @@ components:
           description: |
             Base64url-encoded zlib-compressed status byte array.
           example: "eJxLTAQAASUAw3s"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            The issuing issuer's Status List Aggregation URI (draft-21 §4.2,
+            §4.3). Present when the server has `server.aggregation_uri`
+            configured, the list quota is enforced and no issuer has more
+            status lists than one aggregation page, unless looking up the
+            issuer's aggregation ID failed.
+            Tokens served before issuer scoping carried the unscoped URI, which
+            still resolves.
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
 
     StatusListToken:
       type: object
@@ -1036,10 +1179,11 @@ components:
     AggregationResponse:
       type: object
       description: |
-        Response body of `GET /api/v1/aggregation`: one page of the `sub` URIs
-        of the status lists hosted by the server, issuer-agnostic. The
-        `status_lists` member is the draft-21 §9.3 Status List Aggregation
-        structure; `next_cursor` is an extension for paging.
+        Response body of `GET /api/v1/aggregation/{aggregation_id}` and
+        `GET /api/v1/aggregation`: one page of the `sub` URIs of one issuer's
+        status lists, or of every issuer's. The `status_lists` member is the
+        draft-21 §9.3 Status List Aggregation structure; `next_cursor` is an
+        extension for paging.
       required:
         - status_lists
         - next_cursor
@@ -1094,6 +1238,7 @@ components:
             - invalid_count
             - duplicate_index
             - list_quota_exceeded
+            - invalid_aggregation_id
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
             - invalid_token
@@ -1105,6 +1250,7 @@ components:
             # 404
             - status_list_not_found
             - historical_status_list_not_found
+            - aggregation_not_found
             # 406
             - invalid_accept_header
             # 409
@@ -1115,6 +1261,7 @@ components:
             - list_not_fixed_size
             - allocation_exhausted
             - write_contention
+            - paging_required
             # 413
             - payload_too_large
             # 422
@@ -1132,7 +1279,74 @@ components:
             part of the contract and may change without notice.
           example: "Status list already exists"
 
+  parameters:
+    AggregationLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of URIs on this page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 1000
+    AggregationCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque `next_cursor` value from the previous page. Omit for the first
+        page. Clients must not construct or modify cursors, and a cursor only
+        works on the aggregation that returned it.
+      schema:
+        type: string
+    AggregationIfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: |
+        `ETag` of a page fetched earlier. The server answers `304 Not Modified`
+        while that page is unchanged.
+      schema:
+        type: string
+        example: 'W/"3b1f..."'
+
   responses:
+    AggregationPage:
+      description: One page of status list URIs.
+      headers:
+        ETag:
+          schema:
+            type: string
+          description: Weak validator of this page.
+        Link:
+          schema:
+            type: string
+          description: |
+            Present only when another page follows, as
+            `<?limit=<limit>&cursor=<next_cursor>>; rel="next"` (RFC 8288).
+            The target is a relative reference resolved against this
+            request's URI, so it keeps the request's path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AggregationResponse"
+          example:
+            status_lists:
+              - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+              - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+            next_cursor: null
+
+    AggregationNotModified:
+      description: |
+        Not Modified. The page matching `If-None-Match` is unchanged, so no
+        body is sent.
+      headers:
+        ETag:
+          schema:
+            type: string
+          description: The same weak validator the page was served with.
+
     BadRequest:
       description: |
         Invalid request data. In addition to schema/validation failures
