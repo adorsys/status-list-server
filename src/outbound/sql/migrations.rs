@@ -18,6 +18,8 @@ impl MigratorTrait for Migrator {
             Box::new(status_list_allocations::Migration),
             Box::new(add_status_list_version::Migration),
             Box::new(add_status_list_history_version::Migration),
+            Box::new(credentials_aggregation_id::Migration),
+            Box::new(status_lists_issuer_list_id_index::Migration),
         ]
     }
 }
@@ -963,6 +965,150 @@ pub(crate) mod status_list_allocations {
     #[derive(Iden)]
     enum StatusLists {
         Table,
+        ListId,
+    }
+}
+
+/// Migration adding the opaque per-issuer ID that aggregation URIs carry.
+pub(crate) mod credentials_aggregation_id {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260929_000001_credentials_aggregation_id"
+        }
+    }
+
+    const INDEX: &str = "idx_credentials_aggregation_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Nullable so pods on the previous release keep registering during a
+            // rolling deploy; the first lookup of such a row fills it in. Each
+            // step is guarded because MySQL commits DDL on its own, so a failed
+            // run is re-run.
+            if !manager.has_column("credentials", "aggregation_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(
+                                ColumnDef::new(Credentials::AggregationId)
+                                    .string_len(36)
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("credentials", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .col(Credentials::AggregationId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        // `has_index` rather than `if_exists()`, which sea-query cannot render
+        // for MySQL.
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_index("credentials", INDEX).await? {
+                manager
+                    .drop_index(
+                        Index::drop()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if manager.has_column("credentials", "aggregation_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .drop_column(Credentials::AggregationId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        AggregationId,
+    }
+}
+
+/// Migration indexing `status_lists` by `(issuer, list_id)`, so an issuer-scoped
+/// aggregation page is a range scan. Postgres and SQLite indexes on `issuer`
+/// alone do not carry `list_id`, which would read and sort all of an issuer's
+/// lists for every page.
+pub(crate) mod status_lists_issuer_list_id_index {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260929_000002_status_lists_issuer_list_id_index"
+        }
+    }
+
+    const INDEX: &str = "idx_status_lists_issuer_list_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_index("status_lists", INDEX).await? {
+                return Ok(());
+            }
+            manager
+                .create_index(
+                    Index::create()
+                        .name(INDEX)
+                        .table(StatusLists::Table)
+                        .col(StatusLists::Issuer)
+                        .col(StatusLists::ListId)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_index("status_lists", INDEX).await? {
+                return Ok(());
+            }
+            manager
+                .drop_index(
+                    Index::drop()
+                        .name(INDEX)
+                        .table(StatusLists::Table)
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        Issuer,
         ListId,
     }
 }
