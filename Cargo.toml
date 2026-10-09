@@ -127,7 +127,7 @@ thiserror = "2.0"
 color-eyre = "0.6"
 
 # Utility Libraries
-uuid = { version = "1.23", features = ["v4"] }
+uuid = { version = "1.23", features = ["serde", "v4"] }
 base64 = "0.22"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
@@ -199,6 +199,7 @@ optional = true
 rcgen = { version = "0.14", features = ["pem"] }
 wiremock = "0.6"
 sea-orm = { version = "1.1", features = ["mock"] }
+tempfile = "3"
 [dev-dependencies.testcontainers-modules]
 version = "0.15"
 features = ["hashicorp_vault", "http_wait", "mysql", "postgres"]

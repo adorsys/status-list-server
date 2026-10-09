@@ -381,7 +381,7 @@ mod tests {
         let page = app_state
             .service
             .status_list_repo
-            .list_uris(None, 10)
+            .list_uris(None, None, 10)
             .await
             .expect("stored rows are readable");
         assert!(
