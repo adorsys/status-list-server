@@ -119,7 +119,6 @@ const ISSUER: &str = "conformance-issuer";
 pub(super) struct TestServer {
     pub(super) base_url: String,
     pub(super) client: reqwest::Client,
-    task: tokio::task::JoinHandle<color_eyre::Result<()>>,
 }
 
 impl TestServer {
@@ -160,7 +159,8 @@ impl TestServer {
             }
             started.expect("server bound within retry limit")
         };
-        let task = tokio::spawn(server.run());
+        // Each #[tokio::test] owns its runtime; shutdown drops its server tasks.
+        tokio::spawn(server.run());
         let client = reqwest::Client::builder()
             .no_proxy()
             .no_gzip()
@@ -171,11 +171,7 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let app = Self {
-            base_url,
-            client,
-            task,
-        };
+        let app = Self { base_url, client };
         let key = SigningKey::from_pem(KEY).unwrap();
         let public = key.public_key_bytes();
         let response = app
@@ -214,11 +210,5 @@ impl TestServer {
         } else {
             uri.to_owned()
         }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
