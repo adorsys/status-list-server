@@ -371,19 +371,24 @@ relying parties that do not page; pods refuse to start above it (see
 It only holds while the list quota is enforced. With
 `APP_LIMITS__LIST_QUOTA_TRANSITION` set, publishes past the cap are accepted and
 an issuer can outgrow one page, so tokens carry no `aggregation_uri` until the
-quota is enforced. Nor do they while an issuer still holds more than 1000 lists
-from under an earlier, higher cap; pods name such issuers at startup.
+quota is enforced. Nor do they while any one issuer still holds more than 1000
+lists from under an earlier, higher cap: pods decide this at startup, so that one
+issuer removes `aggregation_uri` from the tokens of **every** issuer until it is
+back under the cap and the pods restart. Pods name such issuers at startup.
+Per-issuer withholding is tracked in #623.
 
 ### Upgrading to issuer-scoped aggregation
 
 Before the upgrade:
 
 - Make sure `APP_LIMITS__MAX_LISTS_PER_ISSUER` is at most `1000`.
-- Find issuers at or near 1000 lists. Those above it keep their lists, and their
-  aggregation spans several pages. While the quota is enforced, **every further
-  publish is refused** with `400 list_quota_exceeded` until they are back under
-  the cap, which only deleting lists does. Those near it reach it sooner than
-  under a higher cap:
+- Find issuers at or near 1000 lists. Those above it keep their lists, but on a
+  shared server **any one of them turns `aggregation_uri` off for every
+  issuer's tokens**, and its own aggregation requests without `limit` get
+  `409 paging_required` instead of a multi-page answer. While the quota is
+  enforced, **every further publish is refused** with `400 list_quota_exceeded`
+  until they are back under the cap, which only deleting lists does. Those near
+  it reach it sooner than under a higher cap:
 
   ```sql
   SELECT issuer, COUNT(*) AS lists FROM status_lists
@@ -448,7 +453,7 @@ registering it again does the same to that issuer.
 
 ### Metrics
 
-- `aggregation_pages_total{scope="issuer",outcome="truncated"}` should stay at
+- `aggregation_pages_total{scope="issuer",outcome="refused"}` should stay at
   `0`. Anything else counts requests refused with `409 paging_required` because
   an issuer's aggregation did not fit in one page: an issuer from the
   pre-upgrade query above, or any issuer while the list quota is off.

@@ -237,21 +237,22 @@ The ID is a path segment rather than a query parameter so that a cache or CDN
 that ignores query strings still keeps issuers apart, and so that the relative
 `Link` to the next page keeps the issuer without repeating it.
 
-An issuer's aggregation is complete in one response: the server refuses to start
-while `limits.max_lists_per_issuer` exceeds the default page size (1000), and the
-list quota holds each issuer to it. So a relying party that reads only
-`status_lists`, as draft-21 §9.3 defines it, gets every list. That holds only
-while the quota is enforced. While an operator runs with
-`limits.list_quota_transition`, publishes past the cap are accepted, so tokens
-carry no `aggregation_uri` until the quota is enforced. An issuer can also hold
-more lists than one page from under an earlier, higher cap. It keeps paging, and
-while one does, tokens carry no `aggregation_uri` either. Tokens already served,
-or pods that started while the quota was on, can still point at an issuer that
-outgrew a page, for example after `list-quota disable`. So the endpoint itself
-never answers in part: a request without `limit` for an aggregation that does
-not fit gets `409 paging_required`, and sending `limit` opts in to paging.
-Cursors name the aggregation they came from, so one replayed elsewhere is
-refused rather than skipping lists. Pages are read by a keyset scan on
+A relying party that reads only `status_lists`, as draft-21 §9.3 defines it,
+takes one response as the whole aggregation. The server refuses to start while
+`limits.max_lists_per_issuer` exceeds the default page size (1000), so the list
+quota normally keeps every issuer within one page. Changes must preserve:
+
+1. An unpaged scoped request never gets part of an aggregation: it is complete,
+   or `409 paging_required`. Sending `limit` opts in to paging.
+2. Tokens advertise `aggregation_uri` only when the quota is enforced and no
+   issuer exceeded one page at startup. This withholding applies to the whole
+   pod, not per issuer (#623).
+3. A cursor only works on the aggregation that issued it, so one replayed
+   elsewhere cannot skip lists.
+
+How an issuer can still outgrow a page (quota transition, `list-quota disable`)
+is covered in the [runbook](deployment-runbook.md#status-list-aggregation) and
+[troubleshooting](troubleshooting.md). Pages are read by a keyset scan on
 `(issuer, list_id)` and there is no total count.
 
 An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale

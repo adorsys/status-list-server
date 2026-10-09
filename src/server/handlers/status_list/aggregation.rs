@@ -45,8 +45,8 @@ fn aggregation_pages() -> Counter<u64> {
         global::meter("status-list-server")
             .u64_counter("aggregation_pages")
             .with_description(
-                "Aggregation pages served, by scope (issuer|all) and outcome \
-                 (complete|truncated|paged).",
+                "Aggregation requests, by scope (issuer|all) and outcome \
+                 (complete|truncated|paged|refused).",
             )
             .build()
     })
@@ -124,29 +124,20 @@ async fn aggregation_page(
         .as_deref()
         .map(|list_id| encode_cursor(&cursor_scope, list_id));
 
+    let outcome = PageOutcome::of(
+        scope.is_some(),
+        query.cursor.is_some(),
+        query.limit.is_some(),
+        next_cursor.is_some(),
+    );
     aggregation_pages().add(
         1,
         &[
             KeyValue::new("scope", if scope.is_some() { "issuer" } else { "all" }),
-            KeyValue::new(
-                "outcome",
-                page_outcome(
-                    query.cursor.is_some(),
-                    query.limit.is_some(),
-                    next_cursor.is_some(),
-                ),
-            ),
+            KeyValue::new("outcome", outcome.as_str()),
         ],
     );
-    tracing::info!(
-        "Serving status list aggregation page with {} list(s)",
-        page.status_lists.len()
-    );
-    // A draft-21 §9.3 client takes one response as the whole aggregation. The
-    // quota normally keeps an issuer's in one page, but not while it is off on
-    // running pods, so a request that does not page is refused rather than
-    // answered in part. Sending `limit` opts in to paging.
-    if scope.is_some() && query.limit.is_none() && query.cursor.is_none() && next_cursor.is_some() {
+    if outcome == PageOutcome::Refused {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "paging_required",
@@ -155,6 +146,10 @@ async fn aggregation_page(
             )),
         ));
     }
+    tracing::info!(
+        "Serving status list aggregation page with {} list(s)",
+        page.status_lists.len()
+    );
 
     let mut response_headers = HeaderMap::new();
     if let Some(cursor) = &next_cursor {
@@ -190,13 +185,37 @@ async fn aggregation_page(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
-/// `truncated` is a first page with more lists following, for a client that
-/// did not page: served by the unscoped endpoint, refused for one issuer's.
-fn page_outcome(has_cursor: bool, has_limit: bool, has_next: bool) -> &'static str {
-    match (has_cursor, has_limit, has_next) {
-        (false, _, false) => "complete",
-        (false, false, true) => "truncated",
-        _ => "paged",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageOutcome {
+    /// No more lists follow.
+    Complete,
+    /// The unscoped endpoint's first page, with more lists following, for a
+    /// client that did not page.
+    Truncated,
+    /// The client asked for a page with `limit` or `cursor`.
+    Paged,
+    /// As `Truncated`, but for one issuer's aggregation, which a draft-21 §9.3
+    /// client takes as the whole of it: answered `409 paging_required`.
+    Refused,
+}
+
+impl PageOutcome {
+    fn of(scoped: bool, has_cursor: bool, has_limit: bool, has_next: bool) -> Self {
+        match (has_cursor, has_limit, has_next) {
+            (false, _, false) => Self::Complete,
+            (false, false, true) if scoped => Self::Refused,
+            (false, false, true) => Self::Truncated,
+            _ => Self::Paged,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "truncated",
+            Self::Paged => "paged",
+            Self::Refused => "refused",
+        }
     }
 }
 
@@ -741,27 +760,41 @@ mod tests {
 
     #[test]
     fn test_page_outcome() {
-        assert_eq!(page_outcome(false, false, false), "complete");
-        assert_eq!(page_outcome(false, true, false), "complete");
-        assert_eq!(page_outcome(false, false, true), "truncated");
-        assert_eq!(page_outcome(false, true, true), "paged");
-        assert_eq!(page_outcome(true, false, true), "paged");
-        assert_eq!(page_outcome(true, false, false), "paged");
+        use PageOutcome::*;
+        for (scoped, has_cursor, has_limit, has_next, expected) in [
+            (false, false, false, false, Complete),
+            (true, false, true, false, Complete),
+            (false, false, false, true, Truncated),
+            (true, false, false, true, Refused),
+            (true, false, true, true, Paged),
+            (false, true, false, true, Paged),
+            (true, true, false, false, Paged),
+        ] {
+            assert_eq!(
+                PageOutcome::of(scoped, has_cursor, has_limit, has_next),
+                expected
+            );
+        }
     }
 
+    /// `issuer/refused` is the runbook's alert for an issuer over one page.
     #[test]
     fn test_aggregation_pages_are_counted_by_scope_and_outcome() {
         let metrics = metrics_after(async {
             let state = test_app_state(None).await;
             let aggregation_id = register_issuer(&state.service, "issuer1").await;
+            let over_one_page = register_issuer(&state.service, "issuer2").await;
             publish(&state, "issuer1").await;
-            for _ in 0..AGGREGATION_DEFAULT_LIMIT {
+            for _ in 0..=AGGREGATION_DEFAULT_LIMIT {
                 publish(&state, "issuer2").await;
             }
 
             get_scoped(&state, aggregation_id, None, None)
                 .await
                 .unwrap();
+            get_scoped(&state, over_one_page, None, None)
+                .await
+                .unwrap_err();
             get(&state, None, None).await.unwrap();
             get(&state, Some(1), None).await.unwrap();
         });
@@ -772,6 +805,7 @@ mod tests {
             .collect();
         for (scope, outcome) in [
             ("issuer", "complete"),
+            ("issuer", "refused"),
             ("all", "truncated"),
             ("all", "paged"),
         ] {
