@@ -3,6 +3,11 @@ name = "status-list-server"
 version = "1.0.1"
 edition = "2024"
 
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+resolver = "3"
+
 [features]
 default = ["memory"]
 memory = []
@@ -30,7 +35,10 @@ acme = ["dep:instant-acme", "dep:rcgen"]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
 unsafe_op_in_unsafe_fn = "warn"
@@ -38,7 +46,7 @@ unused_extern_crates = "warn"
 unused_lifetimes = "warn"
 unreachable_pub = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 ## lint groups.
 complexity = { level = "warn", priority = -1 }
 correctness = { level = "deny", priority = -1 }

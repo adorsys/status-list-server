@@ -8,7 +8,13 @@ semver_check = false
 name = "status-list-server"
 publish = false
 git_only = true
+git_tag_name = "v{{ version }}"
 
 git_release_body = """
 {{ changelog }}
 """
+
+[[package]]
+name = "xtask"
+release = false
+publish = false
