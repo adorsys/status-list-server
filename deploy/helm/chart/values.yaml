@@ -201,8 +201,10 @@ statuslist:
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"
     APP_LIMITS__MAX_SERIALIZED_LIST_SIZE: "1048576"
-    # Status lists one issuer may publish; must be > 0. Lists cannot be deleted
-    # via the API, so an issuer at this limit stays there until it is raised.
+    # Status lists one issuer may publish; 1 to 1000, so an issuer's aggregation
+    # fits in one page (pods refuse to start otherwise). Lists cannot be deleted
+    # via the API, so an issuer at this limit stays there unless it is raised,
+    # and at 1000 only deleting lists helps.
     APP_LIMITS__MAX_LISTS_PER_ISSUER: "1000"
     # Upgrading an existing database from a release without the list quota:
     # pods refuse to start until the quota is enabled. Set this to "true" for
