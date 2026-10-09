@@ -96,34 +96,6 @@ curl -i http://localhost:8000/api/v1/status-lists/477121aa-b598-419e-916f-1e7465
 - `Accept-Encoding: gzip`: Compresses JWT responses using gzip. CWT tokens are binary and not gzip-compressed.
 - `?time=<unix-timestamp>`: Optional query parameter for historical status resolution.
 
-### Publishing a Status List
-
-Issuers create a status list with:
-
-```http
-PUT /api/v1/status-lists/{list_id}/statuses
-```
-
-The response is `201 Created` with a `Location` header and a JSON body naming
-the created list:
-
-```json
-{
-  "uri": "https://statuslist.example.com/api/v1/status-lists/{list_id}",
-  "list_id": "{list_id}"
-}
-```
-
-For full spec compliance (§5.1/§5.2/§8.3), the issuer MUST embed this exact
-`uri` in the Referenced Token's `status.status_list.uri`; the status list
-token's own `sub` carries the same URI so relying parties can resolve it.
-
-The `uri` is fixed when the list is published: the server signs it into every
-token it issues and stores it as the list's subject. Changing
-`server.public_base_url` (or `server.domain`) only affects lists published
-after the change; existing lists keep their original URI, and the old host has
-to keep serving them, because already-issued credentials still point there.
-
 The complete OpenAPI 3.1 REST API specification is available at [OpenAPI Specification](docs/openapi.yaml).
 
 ## Cargo Feature Matrix
@@ -195,15 +167,71 @@ For production deployments:
 
 ## Development and Quality Checks
 
-Run unit and integration tests:
+The repository provides a standard Cargo xtask entry point for common workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build                         # defaults to postgres
+cargo xtask build --profile sqlite --release
+cargo xtask test --profile minimal
+cargo xtask test --profile sqlite -- my_test --exact
+cargo xtask lint
+cargo xtask compose --profile redis
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` accept `--profile <name>`. The supported profiles and their Cargo features are:
+
+| Profile    | Cargo feature selection                   | Compose services                       |
+| ---------- | ----------------------------------------- | -------------------------------------- |
+| `minimal`  | `--no-default-features --features memory` | app only                               |
+| `postgres` | `postgres`                                | app and PostgreSQL                     |
+| `mysql`    | `mysql`                                   | app and MySQL                          |
+| `sqlite`   | `sqlite`                                  | app and SQLite volume initialization   |
+| `aws`      | `postgres,aws`                            | app, PostgreSQL, and AWS               |
+| `vault`    | `postgres,vault`                          | app and PostgreSQL                     |
+| `gcp`      | `postgres,gcp`                            | app and PostgreSQL                     |
+| `azure`    | `postgres,azure`                          | app and PostgreSQL                     |
+| `redis`    | `postgres,redis`                          | app, PostgreSQL, and Redis             |
+
+Vault, GCP, and Azure use externally configured provider endpoints and credentials, so those profiles do not start provider emulators. Configure them in `.env` before starting the profile.
+
+`check-profiles` checks each library with `--no-default-features` and the listed features to detect dependence on other default features. It also checks all supported targets with the normal profile selection. Non-minimal builds and tests retain the default `memory` feature, which the binary and existing test helpers require. Every check runs, and failures are summarized at the end. The required CI profile-check job and the full local CI pipeline run these checks. Default local CI retains the quick memory-only check; run `./local-ci.sh --gate profiles` to check the full matrix separately.
+
+`test` adds `postgres-tests` to every PostgreSQL-backed profile and also adds
+`redis-tests` to the Redis profile. These profiles and MySQL require a running
+Docker daemon for their container tests. `minimal` and SQLite tests need no
+database containers. Cloud integration tests may require additional provider
+configuration; see the contributing guide.
+
+`test` uses installed `cargo-nextest` with the repository's test groups and timeouts, then runs doctests separately. If nextest is absent, it uses `cargo test`; that fallback has no nextest timeouts or process isolation.
+A failing nextest run does not trigger a fallback. Arguments after `--` are passed to the selected runner and doctests; use options supported by both. For the same nextest version as CI, run `cargo install --locked cargo-nextest --version 0.9.101`.
+
+`lint` runs formatting, Clippy for all targets and features, `cargo audit`, and
+`cargo machete`, then summarizes all failures. Install its tools first:
+
+```bash
+rustup component add rustfmt clippy
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-machete --version 0.9.2
+```
+
+`compose` selects the MySQL, SQLite, or Redis override file when needed. MySQL uses `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from the shell or `.env` for both the database service and application. SQLite stores its database in the `sqlitedata` named volume, preserving lists across container restarts; `down --volumes` deletes that data. Plain Compose continues to read database configuration from its environment files. The overrides can also be used directly:
+
+```bash
+docker compose -f docker-compose.yml -f compose/mysql.yml --profile mysql up -d --build
+docker compose -f docker-compose.yml -f compose/sqlite.yml up -d --build
+```
+
+These local overrides select their connection mode. Remove incompatible
+`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the MySQL override, and password-file entries before using SQLite.
+
+`ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
+
+You can still invoke individual Cargo commands directly. For example, run unit and integration tests or verify the zero-infrastructure in-memory build with:
 
 ```bash
 cargo test
-```
-
-Verify zero-infrastructure in-memory compilation:
-
-```bash
 cargo check --no-default-features --features memory
 ```
 

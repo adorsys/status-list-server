@@ -226,6 +226,46 @@ Automatic on merge:
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
 
+Use the repository's Cargo xtask commands for repeatable development workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build --profile postgres
+cargo xtask build --profile sqlite --release
+cargo xtask test --profile postgres
+cargo xtask test --profile sqlite -- my_test --exact
+cargo xtask lint
+cargo xtask compose --profile postgres
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` default to the `postgres` profile. They also
+support `minimal`, `mysql`, `sqlite`, `aws`, `vault`, `gcp`, `azure` and `redis`; see the [README feature profile matrix](README.md#development-and-quality-checks)
+for their exact Cargo features and Compose services. The `ci` command runs the complete `local-ci.sh --full` pipeline.
+
+Before using `lint`, install the versions used by the local CI pipeline:
+
+```bash
+rustup component add rustfmt clippy
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-machete --version 0.9.2
+```
+
+Unlike `ci`, `lint` does not bootstrap missing tools. It runs every step and reports all failures.
+
+Rust files use LF line endings. Existing Windows checkouts may retain CRLF in files untouched by a pull. After saving your work, run `cargo fmt --all` once to rewrite those files with the required line endings, then run `cargo fmt --all --check`. `git add --renormalize .` updates the index alone and does not rewrite the working-tree files.
+
+`check-profiles` checks isolated libraries without default features as well as
+all supported targets. `test` enables `postgres-tests` for PostgreSQL-backed
+profiles and `redis-tests` for Redis; these profiles and MySQL need a running
+Docker daemon. Use `cargo xtask test --profile minimal` for tests without
+database containers.
+
+`test` prefers installed nextest and runs doctests separately. Without nextest, it falls back to `cargo test`, without nextest's test groups and timeouts.
+Install the CI version with `cargo install --locked cargo-nextest --version 0.9.101`. Test filters and
+options after `--` must be supported by both the selected runner and doctests;
+see the [README](README.md#development-and-quality-checks).
+
 ### Redis cache integration tests
 
 Run the Redis cache integration tests with Docker/testcontainers, or point them at
