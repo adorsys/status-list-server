@@ -1,0 +1,89 @@
+name: "Linker Benchmark"
+
+# Reproduces the measurements behind docs/adr/0003-linux-linker-selection.md on the
+# CI runner image. Not part of CI.yml or ci-success: it is evidence for a decision,
+# not a gate, and takes far longer than a pull request should wait for.
+#
+# Runs on demand, and on pull requests that change an input of that decision: the
+# toolchain (which carries rust-lld), Cargo configuration, or the benchmark itself.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Measured runs per incremental scenario"
+        default: "5"
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/linker-bench.yml"
+      - "rust-toolchain.toml"
+      - "scripts/install-linker.sh"
+      - "scripts/linker-bench.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  linker-bench:
+    name: Linker Benchmark (${{ matrix.group.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # Split so the release build's LTO does not double the debug job's wall time.
+        # Each job still runs every candidate on one machine, so linkers are only ever
+        # compared against numbers from the same runner.
+        group:
+          - name: debug
+            scenarios: clean-debug,edit-bin,edit-lib-tests
+          - name: release
+            scenarios: clean-release
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          # Every candidate must start from an empty target directory.
+          cache: false
+          # The benchmark sets RUSTFLAGS per candidate; see scripts/linker-bench.sh.
+          rustflags: ""
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Install candidate linkers
+        # Pinned, checksum-verified, and installed beside rather than over the system
+        # linker, so GNU ld and rust-lld are still measured as the runner ships them.
+        run: |
+          set -euo pipefail
+          for linker in mold wild; do
+            scripts/install-linker.sh "$linker" "$RUNNER_TOOL_CACHE/linkers" >> "$GITHUB_PATH"
+          done
+
+      - name: Run benchmark
+        env:
+          SCENARIOS: ${{ matrix.group.scenarios }}
+          RUNS: ${{ inputs.runs || '5' }}
+        run: scripts/linker-bench.sh --linkers bfd,lld,mold,wild --scenarios "$SCENARIOS" --runs "$RUNS" --out target/linker-bench
+
+      - name: Upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linker-bench-${{ matrix.group.name }}
+          path: |
+            target/linker-bench/*.md
+            target/linker-bench/*.tsv
+          if-no-files-found: error
