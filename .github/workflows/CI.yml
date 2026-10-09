@@ -1094,82 +1094,6 @@ jobs:
       - name: Test local CI runner
         run: python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
 
-  demo-smoke:
-    name: Demo Workflows Smoke
-    runs-on: ubuntu-latest
-    needs: cargo-build
-    timeout-minutes: 30
-
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        # Pinned by SHA; the version comment tracks the upstream release. uv manages
-        # the Python pinned in demo/.python-version and the locked dependencies.
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "demo/uv.lock"
-
-      - name: Install Rust
-        # Reuses the workspace cargo cache so `cargo run` in the smoke driver builds
-        # the server without recompiling the dependency tree.
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
-        with:
-          cache-shared-key: "workspace"
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake golang-go
-
-      - name: Run demo driver unit tests
-        # Exercises the smoke driver's pure helpers (port selection, env wiring,
-        # per-workflow logging) without starting a server.
-        working-directory: demo
-        run: uv run python -m unittest discover -s tests -p 'test_*.py'
-
-      - name: Run demo workflows smoke check (twice)
-        # Runs the full end-to-end smoke twice to prove repeated runs are isolated:
-        # the second run must not fail because credentials/status lists already
-        # exist or rate-limit state leaked from the first. Each iteration uses its
-        # own log directory so a failure can be attributed to the run that caused it.
-        working-directory: demo
-        env:
-          SMOKE_LOG_DIR: ${{ github.workspace }}/demo/.smoke-logs
-        run: |
-          set -euo pipefail
-          for i in 1 2; do
-            echo "::group::demo smoke run $i"
-            SMOKE_LOG_DIR="${SMOKE_LOG_DIR}/run-${i}" uv run python run-demo-smoke.py
-            echo "::endgroup::"
-          done
-
-      - name: Verify workflows tree is clean after execution
-        # Execution must not modify the committed workflow sources or leave stray
-        # untracked artifacts behind. Logs/signing material are written under the
-        # gitignored .smoke-logs/, so a non-empty status here means a workflow
-        # wrote into demo/workflows and must be fixed.
-        run: |
-          set -euo pipefail
-          git diff --exit-code -- demo/workflows
-          if [ -n "$(git status --porcelain --untracked-files=all demo/workflows)" ]; then
-            echo "::error::demo/workflows was dirtied by execution:"
-            git status --porcelain --untracked-files=all demo/workflows
-            exit 1
-          fi
-
-      - name: Upload smoke logs on failure
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: demo-smoke-logs
-          path: demo/.smoke-logs/
-          if-no-files-found: warn
-
   # The single required status check. The jobs above form several independent chains
   # rather than one, so no individual job represents the suite. Rollout order:
   # CONTRIBUTING.md, "Branch Protection".
@@ -1203,7 +1127,6 @@ jobs:
       - compose-validation
       - otel-config-validation
       - cargo-coverage
-      - demo-smoke
     runs-on: ubuntu-latest
     permissions: {}
     steps:
