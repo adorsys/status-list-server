@@ -6,14 +6,18 @@ cert.yml
 .kilo/
 tls.crt
 tls.key
+.smoke-logs/
 
-### JupyterNotebooks ###
+### Python ###
 __pycache__
+.venv/
+*.pyc
+
+# Local tool/notebook state (kept for users who still open the demos in Jupyter)
 profile_default/
 ipython_config.py
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
-.venv/
 *.tgz
 
 # MacOs store files

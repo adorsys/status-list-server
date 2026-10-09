@@ -46,46 +46,60 @@ def get_base_url():
     return f"http://localhost:{port}"
 
 
+def decode_cwt_status_list(cwt_data: bytes) -> dict:
+    """
+    Decodes the `status_list` claim from a status list CWT.
+
+    Verifies the payload is a tagged COSE_Sign1 structure (RFC 9052 §4.2) whose
+    payload carries a `status_list` claim of the expected shape, and returns that
+    claim as a dict with `bits` (int) and `lst` (raw zlib-compressed bytes)
+    keys.
+
+    Note: unlike the JWT representation, the CWT carries `lst` as the raw
+    compressed bytes (not a base64url string), so callers should decompress it
+    with `decompress_bytes`, not `decode_and_decompress`.
+
+    Raises:
+        ValueError: if the data is not a status list CWT or lacks a valid
+            `status_list` claim.
+    """
+    decoded = cbor2.loads(cwt_data)
+
+    if not (isinstance(decoded, cbor2.CBORTag) and decoded.tag == COSE_SIGN1_TAG):
+        raise ValueError(f"not a COSE_Sign1 (CBOR tag {COSE_SIGN1_TAG})")
+
+    # cbor2 decodes arrays nested in a tag as tuples.
+    sign1 = decoded.value
+    if not (isinstance(sign1, (list, tuple)) and len(sign1) == 4):
+        raise ValueError("not a COSE_Sign1 structure (array of 4 elements)")
+
+    _, _, payload, _ = sign1
+    if not isinstance(payload, bytes):
+        raise ValueError("COSE_Sign1 payload is not bytes")
+
+    cwt_claims = cbor2.loads(payload)
+    if not isinstance(cwt_claims, dict):
+        raise ValueError("decoded payload is not a dict")
+
+    status_list = cwt_claims.get(CWT_STATUS_LIST_CLAIM)
+    if not (
+        isinstance(status_list, dict)
+        and isinstance(status_list.get("bits"), int)
+        and isinstance(status_list.get("lst"), bytes)
+    ):
+        raise ValueError("missing a valid status_list claim")
+
+    return status_list
+
+
 def is_valid_cwt(cwt_data: bytes) -> bool:
     """
     Verifies if provided bytes represent a status list CWT: a tagged COSE_Sign1
     structure (RFC 9052 §4.2) whose payload carries a status_list claim.
     """
     try:
-        decoded = cbor2.loads(cwt_data)
-
-        if not (isinstance(decoded, cbor2.CBORTag) and decoded.tag == COSE_SIGN1_TAG):
-            print(f"Decoded data is not tagged as COSE_Sign1 (CBOR tag {COSE_SIGN1_TAG}).")
-            return False
-
-        # cbor2 decodes arrays nested in a tag as tuples.
-        sign1 = decoded.value
-        if not (isinstance(sign1, (list, tuple)) and len(sign1) == 4):
-            print("Decoded data is not a COSE_Sign1 structure (array of 4 elements).")
-            return False
-
-        protected, unprotected, payload, signature = sign1
-        if not isinstance(payload, bytes):
-            print("COSE_Sign1 payload is not bytes.")
-            return False
-
-        # Now decode the payload (the actual CWT claims)
-        cwt_claims = cbor2.loads(payload)
-        if not isinstance(cwt_claims, dict):
-            print("Decoded payload but not a dict.")
-            return False
-
-        status_list = cwt_claims.get(CWT_STATUS_LIST_CLAIM)
-        if not (
-            isinstance(status_list, dict)
-            and isinstance(status_list.get("bits"), int)
-            and isinstance(status_list.get("lst"), bytes)
-        ):
-            print("Decoded CWT payload but missing a valid status_list claim.")
-            return False
-
+        decode_cwt_status_list(cwt_data)
         return True
-
     except (cbor2.CBORDecodeError, ValueError) as e:
         print(f"Failed to decode CBOR: {e}")
         return False
@@ -103,6 +117,11 @@ def get_status(statuses: bytes, index: int, bits: int) -> int:
         raise IndexError(f"index {index} out of range (0..{max_index})")
     position = index * bits
     return (statuses[position // 8] >> (position % 8)) & ((1 << bits) - 1)
+
+
+def decompress_bytes(compressed: bytes) -> bytes:
+    """Decompresses the raw zlib stream used by the CWT status list `lst` value."""
+    return zlib.decompress(compressed)
 
 
 def decode_and_decompress(encoded: str) -> bytes:
