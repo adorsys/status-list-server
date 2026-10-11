@@ -172,7 +172,7 @@ end to end: it does **not** require the manual environment, certificate, or
 server-start steps above — it provisions everything itself.
 
 ```bash
-uv run python run-demo-smoke.py
+uv run python run-demo.py
 ```
 
 From a clean checkout it:
@@ -207,7 +207,7 @@ whole session and is stopped (and the temporary material removed) when you exit
 Jupyter.
 
 ```bash
-uv run python run-demo-smoke.py --interactive
+uv run python run-demo.py --interactive
 ```
 
 ## Update dependencies

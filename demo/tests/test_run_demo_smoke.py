@@ -1,6 +1,6 @@
 """Unit tests for the demo smoke driver's pure helpers.
 
-The driver (``run-demo-smoke.py``) is a CLI script, so it is loaded as a module
+The driver (``run-demo.py``) is a CLI script, so it is loaded as a module
 here to exercise its helpers without starting a server. External side effects
 (subprocess calls, sockets) are mocked.
 """
@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 DEMO_DIR = pathlib.Path(__file__).resolve().parents[1]
-DRIVER_PATH = DEMO_DIR / "run-demo-smoke.py"
+DRIVER_PATH = DEMO_DIR / "run-demo.py"
 
 
 def load_driver():

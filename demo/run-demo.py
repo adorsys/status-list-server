@@ -1,39 +1,44 @@
 #!/usr/bin/env python3
-"""Driver for the demo Status List workflows.
+"""Run the demo Status List workflows manually.
 
 From a clean checkout it creates an isolated environment, generates temporary
 signing material, starts the Status List Server against in-memory storage, and
-either runs the workflows headlessly or opens Jupyter Lab for interactive use.
+opens Jupyter Lab so the workflow scripts in `./workflows` can be stepped
+through by hand.
 
-Headless (default, used by CI):
+Interactive (default):
 
   1. creates/uses the isolated demo environment (uv sync --locked),
   2. generates temporary signing material (self-signed cert + key),
   3. starts the Status List Server against in-memory storage,
-  4. executes every workflow script in `./workflows` from a fresh state,
-  5. stops the server and removes the temporary material even on failure.
+  4. opens Jupyter Lab rooted at the demo directory.
 
-Interactive (--interactive): steps 1-3, then opens Jupyter Lab rooted at the
-demo directory so the workflow scripts can be stepped through by hand. The
-server stays running for the whole session and is stopped when Jupyter exits.
+The server stays running for the whole Jupyter session and is stopped, and the
+temporary material removed, when Jupyter exits.
+
+Headless (--headless): steps 1-3, then executes every workflow script in
+`./workflows` once from a fresh state, stops the server and removes the
+temporary material. This is a convenient way to check locally that the demo
+still works end to end.
 
 Usage (from the `demo` directory):
 
-    uv run python run-demo-smoke.py            # headless smoke check
-    uv run python run-demo-smoke.py --interactive   # start server + Jupyter Lab
+    uv run python run-demo.py              # start server + Jupyter Lab
+    uv run python run-demo.py --headless   # run all workflows once, then exit
 
 Environment:
 
     APP_SERVER__PORT   port to run the server on (default: a free port)
 
-Exit code is non-zero if the server fails to start, any workflow script fails,
-or cleanup itself fails. The owning workflow script is named in the failure
-output. Logs are written under a temporary directory reported at startup.
+Exit code is non-zero if the server fails to start, any workflow script fails
+(headless mode), or Jupyter exits with an error. The failing workflow script is
+named in the output. Logs are written under a temporary directory reported at
+startup.
 
-On failure, the signing key and certificates are deliberately retained under the
-log directory (defaulting to SMOKE_LOG_DIR) so the server and per-workflow logs
-can be uploaded as CI artifacts. The key is a freshly generated, throwaway
-self-signed demo key and is never committed.
+On failure, the signing key, certificates and logs are deliberately retained in
+that temporary directory so you can inspect the server and per-workflow logs.
+The key is a freshly generated, throwaway self-signed demo key and is never
+committed.
 """
 
 from __future__ import annotations
@@ -74,15 +79,15 @@ SERVER_START_RETRIES = 3
 # The server rate-limits credential registration and status-list writes per client
 # IP. Each of the four workflow scripts makes a bounded number of such requests
 # (roughly 6-9 each, ~28 in total). A burst of 100 gives a generous safety margin
-# over that volume so a full run cannot trip the limiter, while still being small
-# enough that a runaway loop fails the smoke check instead of hammering the server.
+# over that volume so a full demo run cannot trip the limiter, while still being
+# small enough that a runaway loop fails the run instead of hammering the server.
 # If a future workflow adds many more requests, raise this constant and add a note
 # here explaining the new volume.
 STRICT_BURST_SIZE = 100
 
 
 def log(message: str) -> None:
-    print(f"[smoke] {message}", flush=True)
+    print(f"[demo] {message}", flush=True)
 
 
 def find_free_port() -> int:
@@ -259,7 +264,7 @@ def run_workflows(port: int, log_dir: pathlib.Path) -> None:
             )
         except subprocess.TimeoutExpired as exc:
             # Persist whatever the workflow produced before it was killed so the
-            # timed-out run leaves an inspectable log identifying the owning cell.
+            # timed-out run leaves an inspectable log identifying the owning script.
             # exc.stdout/stderr are str when run() uses text=True; coerce bytes
             # defensively in case that ever changes.
             def _text(chunk):
@@ -269,7 +274,7 @@ def run_workflows(port: int, log_dir: pathlib.Path) -> None:
             with open(out_file, "w") as handle:
                 handle.write(partial)
             print(
-                f"::error::workflow timed out after {WORKFLOW_TIMEOUT_SECONDS}s: {workflow} "
+                f"error: workflow timed out after {WORKFLOW_TIMEOUT_SECONDS}s: {workflow} "
                 f"(see {out_file})",
                 file=sys.stderr,
             )
@@ -278,7 +283,7 @@ def run_workflows(port: int, log_dir: pathlib.Path) -> None:
             handle.write(result.stdout)
             handle.write(result.stderr)
         if result.returncode != 0:
-            print(f"::error::workflow FAILED: {workflow} (see {out_file})", file=sys.stderr)
+            print(f"error: workflow FAILED: {workflow} (see {out_file})", file=sys.stderr)
             print(result.stdout[-4000:] if result.stdout else "")
             print(result.stderr[-4000:] if result.stderr else "")
             raise RuntimeError(f"workflow {workflow} failed with exit code {result.returncode}")
@@ -294,9 +299,11 @@ def run_interactive(
     """Start the server and open Jupyter Lab for interactive use.
 
     Keeps the server running for the whole Jupyter session and stops it (and
-    removes the temporary material) when Jupyter exits.
+    removes the temporary material) when Jupyter exits. If startup fails, the
+    logs and signing material are kept so the failure can be inspected.
     """
     server = None
+    success = False
     try:
         sync_environment()
         generate_signing_material(signing_dir)
@@ -316,16 +323,23 @@ def run_interactive(
             env=env,
         )
         log(f"Jupyter Lab exited with code {jupyter.returncode}")
+        success = jupyter.returncode == 0
         return jupyter.returncode
+    except Exception as exc:  # noqa: BLE001 - always clean up and report
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     finally:
         if server is not None:
             stop_server(server)
-        shutil.rmtree(log_root, ignore_errors=True)
-        log("stopped server and removed temporary material")
+        if success:
+            shutil.rmtree(log_root, ignore_errors=True)
+            log("stopped server and removed temporary material")
+        else:
+            log(f"stopped server; logs retained at {log_root}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--port",
         type=int,
@@ -333,13 +347,13 @@ def main() -> int:
         help="port for the server (default: a free port, or APP_SERVER__PORT if set)",
     )
     parser.add_argument(
-        "--interactive",
+        "--headless",
         action="store_true",
-        help="start the server and open Jupyter Lab instead of running the workflows headlessly",
+        help="run every workflow once without Jupyter and exit (default: open Jupyter Lab)",
     )
     args = parser.parse_args()
 
-    # Resolve the requested port and temporary-artifact directories inside a guard so a
+    # Resolve the requested port and temporary directories inside a guard so a
     # bad APP_SERVER__PORT or a filesystem error is reported cleanly instead of
     # escaping as an uncaught traceback.
     try:
@@ -350,24 +364,18 @@ def main() -> int:
             int(os.environ["APP_SERVER__PORT"]) if os.environ.get("APP_SERVER__PORT") else None
         )
 
-        # CI points SMOKE_LOG_DIR at a workspace-relative path so failure logs can be
-        # uploaded as artifacts. Locally it is unset and logs live under a temp dir.
-        smoke_log_dir = os.environ.get("SMOKE_LOG_DIR")
-        log_root = pathlib.Path(smoke_log_dir) if smoke_log_dir else None
-        if log_root is None:
-            log_root = pathlib.Path(tempfile.mkdtemp(prefix="status-list-demo-smoke-"))
-            log_root.mkdir(parents=True, exist_ok=True)
+        log_root = pathlib.Path(tempfile.mkdtemp(prefix="status-list-demo-"))
         log_dir = log_root / "logs"
         signing_dir = log_root / "signing"
         log_dir.mkdir(parents=True, exist_ok=True)
         signing_dir.mkdir(parents=True, exist_ok=True)
         log(f"temporary artifacts: {log_root}")
     except Exception as exc:  # noqa: BLE001
-        print(f"::error::{exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    # Interactive mode manages its own server lifetime and cleanup.
-    if args.interactive:
+    # Interactive mode (the default) manages its own server lifetime and cleanup.
+    if not args.headless:
         return run_interactive(requested_port, log_root, log_dir, signing_dir)
 
     server_proc = None
@@ -386,7 +394,7 @@ def main() -> int:
         success = True
         return 0
     except Exception as exc:  # noqa: BLE001 - driver must always clean up and report
-        print(f"::error::{exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
         if server_proc is not None:
@@ -395,7 +403,7 @@ def main() -> int:
             shutil.rmtree(log_root, ignore_errors=True)
             log("cleaned up temporary material")
         else:
-            # Keep logs and signing material for CI artifact upload on failure.
+            # Keep logs and signing material so the failure can be inspected.
             log(f"FAILURE: logs retained at {log_root}")
 
 
