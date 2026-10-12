@@ -20,3 +20,7 @@ __pycache__
 
 # Locally installed JavaScript dependencies
 node_modules/
+
+# Local CI output captured at the repository root
+/result.txt
+/results.txt

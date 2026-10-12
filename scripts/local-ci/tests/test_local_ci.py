@@ -148,7 +148,7 @@ exit 14
         self.stub("npm", """
 [[ "$*" == *'ci --prefix'* ]] || exit 90
 mkdir -p "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin"
-printf '#!/bin/sh\\necho tombi 1.2.4\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
+printf '#!/bin/sh\\necho tombi 1.7.3\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 chmod +x "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 """)
         result = self.shell('install_node_bin tombi "$TOMBI_VERSION"')
@@ -399,15 +399,14 @@ done
         # An action upgrade must review these local defaults as well.
         for reference in [
             'EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25',
-            'DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe',
-            'tombi-toml/setup-tombi@f2ae7247d62521245eb2793d653b9df472b9e090',
+            'tombi-toml/setup-tombi@d8f3250344c4e9107b91c02bc11efcf72baf5793',
             'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25',
         ]:
             self.assertIn(reference, workflow + helm_checks + deny)
         self.assertEqual(pins['DENY_VERSION'], '0.20.2')
         self.assertEqual(pins['TRIVY_VERSION'], '0.70.0')
-        self.assertEqual(pins['TOMBI_VERSION'], '1.2.4')
-        self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.1')
+        self.assertEqual(pins['TOMBI_VERSION'], '1.7.3')
+        self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.3')
         self.assertIn(pins['KUBE_LINTER_VERSION'], helm_checks)
         self.assertTrue(pins['TRIVY_IMAGE'].startswith('aquasec/trivy:' + pins['TRIVY_VERSION'] + '@sha256:'))
 

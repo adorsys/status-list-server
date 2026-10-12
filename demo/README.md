@@ -167,6 +167,11 @@ After changing the dependencies in `pyproject.toml`, refresh the lock file and
 the pip fallback, then commit both:
 
 ```bash
-uv lock
-uv export --format requirements-txt -o requirements.txt
+uv lock --upgrade
+uv export --locked --format requirements-txt -o requirements.txt
 ```
+
+Review upgrades for all supported Python versions (3.10–3.12). Dependabot owns
+`pyproject.toml` and `uv.lock`; refresh the pip export in the same update PR.
+CI rejects a stale lockfile or export. Keep breaking dependency migrations in
+separate PRs; see the [dependency audit](../docs/dependency-audit-618.md).

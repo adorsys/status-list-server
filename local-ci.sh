@@ -31,8 +31,8 @@ AUDIT_VERSION="0.22.2"
 LLVM_COV_VERSION="0.6.16"
 # Defaults embedded in the pinned GitHub actions (see docs/local-ci.md).
 DENY_VERSION="0.20.2"
-TOMBI_VERSION="1.2.4"
-MARKDOWNLINT_VERSION="0.23.1"
+TOMBI_VERSION="1.7.3"
+MARKDOWNLINT_VERSION="0.23.3"
 TRIVY_VERSION="0.70.0"
 TRIVY_IMAGE="aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
 TYPOS_VERSION="1.49.0"
@@ -539,8 +539,8 @@ trivy_and_helm_checks() {
         echo "ERROR: APP_ENV=development not found in rendered template" >&2
         exit 1
     fi
-    if ! grep -q 'image: busybox:1.38' "$output_file"; then
-        echo "ERROR: init container image 'busybox:1.38' not found in rendered template" >&2
+    if ! grep -q 'image: busybox:1.37.0' "$output_file"; then
+        echo "ERROR: init container image 'busybox:1.37.0' not found in rendered template" >&2
         exit 1
     fi
     mkdir -p "$CARGO_TARGET_DIR"

@@ -1,7 +1,7 @@
 statuslist:
   initContainers:
     - name: wait-for-db
-      image: busybox:1.38
+      image: busybox:1.37.0
       command:
         - "sh"
         - "-c"
