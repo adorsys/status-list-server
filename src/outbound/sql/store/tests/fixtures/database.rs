@@ -1,0 +1,73 @@
+use std::sync::Arc;
+
+use jsonwebtoken::jwk::Jwk;
+use sea_orm::DatabaseConnection;
+
+use super::TEST_EC_JWK;
+use crate::outbound::sql::SeaOrmStore;
+use crate::outbound::sql::models::Credentials;
+
+/// Quota argument for tests that exercise something other than the quota.
+pub(in super::super) const NO_LIST_QUOTA: u64 = u64::MAX;
+
+#[cfg(feature = "sqlite")]
+pub(in super::super) async fn sqlite_connection() -> Arc<DatabaseConnection> {
+    sqlite_connection_migrated(None).await
+}
+
+/// Applies only the first `steps` migrations (`None` applies all).
+#[cfg(feature = "sqlite")]
+pub(in super::super) async fn sqlite_connection_migrated(
+    steps: Option<u32>,
+) -> Arc<DatabaseConnection> {
+    crate::test_utils::sqlite_test_db(steps).await
+}
+
+/// Seeds a credential whose `issuer` backs the `status_lists.issuer` foreign
+/// key and returns the JWK it was seeded with.
+pub(in super::super) async fn seed_credential(db: &Arc<DatabaseConnection>, issuer: &str) -> Jwk {
+    let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
+    let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+    cred_store
+        .insert_one(Credentials::new(issuer.to_string(), key.clone()))
+        .await
+        .unwrap();
+    key
+}
+
+/// The issuer's stored `credentials.list_count`.
+pub(in super::super) async fn list_count(db: &DatabaseConnection, issuer: &str) -> i64 {
+    use crate::outbound::sql::models::credentials;
+    use sea_orm::{EntityTrait, QuerySelect};
+
+    credentials::Entity::find_by_id(issuer)
+        .select_only()
+        .column(credentials::Column::ListCount)
+        .into_tuple::<i64>()
+        .one(db)
+        .await
+        .unwrap()
+        .expect("issuer must have a credential row")
+}
+
+pub(in super::super) async fn enforce_list_quota(db: &DatabaseConnection) {
+    crate::outbound::sql::list_quota::enable(db, u64::MAX)
+        .await
+        .expect("enabling the list quota with no cap must succeed");
+}
+
+/// Inserts a list without counting it, as a pre-quota pod did.
+pub(in super::super) async fn insert_list_as_old_pod(
+    db: &DatabaseConnection,
+    list_id: &str,
+    issuer: &str,
+) {
+    use sea_orm::ConnectionTrait;
+
+    db.execute_unprepared(&format!(
+        "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+         VALUES ('{list_id}', '{issuer}', '{{\"bits\":1,\"lst\":\"\"}}', 'sub-{list_id}', 0)"
+    ))
+    .await
+    .unwrap();
+}

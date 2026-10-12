@@ -10,6 +10,9 @@ url = "https://raw.githubusercontent.com/google/rust-crate-audits/main/audits.to
 [imports.mozilla]
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
+[policy.xtask]
+criteria = "safe-to-run"
+
 [[exemptions.addr2line]]
 version = "0.25.1"
 criteria = "safe-to-deploy"
@@ -33,6 +36,26 @@ criteria = "safe-to-deploy"
 [[exemptions.android_system_properties]]
 version = "0.1.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.anstream]]
+version = "1.0.0"
+criteria = "safe-to-run"
+
+[[exemptions.anstyle]]
+version = "1.0.14"
+criteria = "safe-to-run"
+
+[[exemptions.anstyle-parse]]
+version = "1.0.0"
+criteria = "safe-to-run"
+
+[[exemptions.anstyle-query]]
+version = "1.1.5"
+criteria = "safe-to-run"
+
+[[exemptions.anstyle-wincon]]
+version = "3.0.11"
+criteria = "safe-to-run"
 
 [[exemptions.anyhow]]
 version = "1.0.104"
@@ -278,6 +301,22 @@ criteria = "safe-to-deploy"
 version = "1.9.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.7"
+criteria = "safe-to-run"
+
+[[exemptions.clap_builder]]
+version = "4.6.7"
+criteria = "safe-to-run"
+
+[[exemptions.clap_derive]]
+version = "4.6.7"
+criteria = "safe-to-run"
+
+[[exemptions.clap_lex]]
+version = "1.1.1"
+criteria = "safe-to-run"
+
 [[exemptions.cmake]]
 version = "0.1.58"
 criteria = "safe-to-deploy"
@@ -293,6 +332,10 @@ criteria = "safe-to-deploy"
 [[exemptions.color-spantrace]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.colorchoice]]
+version = "1.0.5"
+criteria = "safe-to-run"
 
 [[exemptions.combine]]
 version = "4.6.8"
@@ -862,6 +905,10 @@ criteria = "safe-to-deploy"
 version = "2.12.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.is_terminal_polyfill]]
+version = "1.70.2"
+criteria = "safe-to-run"
+
 [[exemptions.itertools]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
@@ -1105,6 +1152,10 @@ criteria = "safe-to-deploy"
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.once_cell_polyfill]]
+version = "1.70.2"
+criteria = "safe-to-run"
 
 [[exemptions.openssl-probe]]
 version = "0.2.1"
@@ -1809,10 +1860,6 @@ criteria = "safe-to-deploy"
 [[exemptions.tap]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
-
-[[exemptions.tempfile]]
-version = "3.27.0"
-criteria = "safe-to-run"
 
 [[exemptions.testcontainers]]
 version = "0.27.3"

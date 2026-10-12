@@ -40,6 +40,7 @@ ARG FEATURES="postgres,aws,redis"
 # counted so a rust-audit-info crash fails as itself rather than as a count of 0.
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=test_data,target=test_data \
+    --mount=type=bind,source=xtask,target=xtask \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=cache,target=/app/target,id=target-cache-${TARGETPLATFORM} \

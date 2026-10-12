@@ -431,6 +431,12 @@ paths:
         Referenced Token's `status.status_list.uri`; the status list token's own
         `sub` carries the same URI so relying parties can resolve it.
 
+        The URI is fixed when the list is published and stored as its subject.
+        Changing `server.public_base_url` (or `server.domain`) affects only
+        subsequently published lists. Existing lists keep their original URI;
+        the old endpoint must continue serving them because already-issued
+        credentials still reference it.
+
         Each issuer may hold at most `limits.max_lists_per_issuer` status lists
         (default 1000). A publish past that is refused with `400`
         `list_quota_exceeded`; status lists cannot be deleted through the API,

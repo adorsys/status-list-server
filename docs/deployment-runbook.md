@@ -169,6 +169,9 @@ separate TLS-terminating layer covering the public URL. If the service is
 reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
 (e.g. `https://host:8443/api/v1`), since `server.domain` cannot carry a port.
 
+The subject URI is fixed when a status list is published. Changing
+`server.public_base_url` or `server.domain` affects only new lists; existing lists retain their original URI. Keep the old endpoint serving those lists because already-issued credentials still reference it. A hostname change does not migrate published lists or update those credentials.
+
 ### Content negotiation at the edge
 
 The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format

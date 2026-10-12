@@ -215,9 +215,6 @@ jobs:
       - name: Cargo Build
         run: cargo build --workspace --all-targets --all-features
 
-      - name: Memory-only Build
-        run: cargo check --no-default-features --features memory
-
       - name: Release image feature set
         # The Dockerfile default is still the local smoke-build feature set.
         # Release variants, including Redis status-cache support, are checked by `release-variant-checks` below.
@@ -240,6 +237,32 @@ jobs:
             echo "ERROR: Infrastructure dependencies or imports found in src/domain/"
             exit 1
           fi
+
+  cargo-check-profiles:
+    name: Cargo Feature Profiles
+    runs-on: ubuntu-latest
+    needs: cargo-build
+    timeout-minutes: 45
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache-shared-key: "workspace"
+          cache-save-if: "false"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang-go
+
+      - name: Check all feature profiles
+        run: cargo xtask check-profiles
 
   release-variant-checks:
     name: Release Variant Check with Redis Status Cache (${{ matrix.variant.suffix }})
@@ -604,6 +627,9 @@ jobs:
       - name: Validate Docker Compose model
         run: docker compose --profile "*" config --quiet
 
+      - name: Validate backend override configuration
+        run: python3 -m unittest discover -s scripts/tests -p test_compose_backends.py -v
+
       - name: Validate profiles and application defaults
         run: |
           python3 - <<'PY'
@@ -779,6 +805,7 @@ jobs:
       - zizmor-security
       - cargo-fmt
       - cargo-build
+      - cargo-check-profiles
       - release-variant-checks
       - docker-build
       - cargo-clippy
