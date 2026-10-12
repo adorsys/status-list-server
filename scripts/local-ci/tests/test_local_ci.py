@@ -373,11 +373,8 @@ done
         import yaml
         model = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())
         env = model['services']['app']['environment']
-        self.assertEqual(env.get('APP_DATABASE__HOST'), '${APP_DATABASE__HOST:-}')
-        self.assertEqual(env.get('APP_DATABASE__PORT'), '${APP_DATABASE__PORT:-}')
-        self.assertEqual(env.get('APP_DATABASE__USERNAME'), '${APP_DATABASE__USERNAME:-}')
-        self.assertEqual(env.get('APP_DATABASE__PASSWORD'), '${APP_DATABASE__PASSWORD:-}')
-        self.assertEqual(env.get('APP_DATABASE__NAME'), '${APP_DATABASE__NAME:-}')
+        for key in ('HOST', 'PORT', 'USERNAME', 'PASSWORD', 'NAME'):
+            self.assertNotIn(f'APP_DATABASE__{key}', env)
 
     def test_ci_versions_match_local_pins(self):
         import json

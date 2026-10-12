@@ -54,9 +54,29 @@ class ComposeBackendTests(unittest.TestCase):
         app = config["services"]["app"]
         self.assertEqual(app["build"]["args"]["FEATURES"], "memory")
         env = app["environment"]
+        self.assertEqual(env["APP_SERVER__HOST"], "0.0.0.0")
         self.assertNotIn("APP_DATABASE__URL", env)
-        self.assertEqual(env["APP_DATABASE__HOST"], "db")
-        self.assertEqual(env["APP_DATABASE__PASSWORD"], "postgres")
+        self.assertNotIn("APP_DATABASE__HOST", env)
+        self.assertNotIn("APP_DATABASE__PASSWORD", env)
+
+    def test_partial_env_keeps_container_listener_reachable(self):
+        (self.project / ".env").write_text("APP_ENV=production\n", encoding="utf-8")
+        config = self.render()
+        env = config["services"]["app"]["environment"]
+        self.assertEqual(env["APP_SERVER__HOST"], "0.0.0.0")
+
+    def test_url_only_database_config_does_not_gain_split_fields(self):
+        (self.project / ".env").write_text(
+            "APP_DATABASE__BACKEND=sqlite\n"
+            "APP_DATABASE__URL=sqlite::memory:?cache=shared\n",
+            encoding="utf-8",
+        )
+        config = self.render()
+        env = config["services"]["app"]["environment"]
+        self.assertEqual(env["APP_DATABASE__BACKEND"], "sqlite")
+        self.assertEqual(env["APP_DATABASE__URL"], "sqlite::memory:?cache=shared")
+        for key in ("HOST", "PORT", "USERNAME", "PASSWORD", "NAME"):
+            self.assertNotIn(f"APP_DATABASE__{key}", env)
 
     def test_mysql_uses_the_same_custom_credentials_for_app_and_service(self):
         (self.project / ".env").write_text(
