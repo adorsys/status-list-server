@@ -105,8 +105,8 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
 /// point at.
 const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
 
-/// Every migration's `down`: the schema only moves forward. See
-/// `docs/adr/0003-schema-migrations-are-forward-only.md`.
+/// Every migration's `down`: the schema only moves forward. See "Migrations
+/// are forward-only" in `src/outbound/sql/README.md`.
 fn refuse_down(migration: &str) -> Result<(), DbErr> {
     Err(forward_only(&format!(
         "migration '{migration}' cannot be rolled back"
@@ -502,8 +502,7 @@ pub(crate) mod add_status_list_version {
         /// Adds the version column to the status_lists table.
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // MySQL commits the ALTER on its own, so a failed backfill leaves the
-            // column behind with the migration unrecorded; the re-run must skip it.
+            // A re-run after a rollback finds the column already there.
             if !manager.has_column("status_lists", "version").await? {
                 manager
                     .alter_table(
@@ -1137,6 +1136,18 @@ mod tests {
             runbook.contains(&format!("### {ROLLBACK_RUNBOOK_SECTION}")),
             "docs/deployment-runbook.md must have the section refuse_down names"
         );
+    }
+
+    #[test]
+    fn every_migration_has_a_row_in_the_runbook_table() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        for migration in Migrator::migrations() {
+            let name = migration.name();
+            assert!(
+                runbook.contains(&format!("| `{name}` |")),
+                "docs/deployment-runbook.md must say whether {name} is safe to leave in place"
+            );
+        }
     }
 
     #[tokio::test]

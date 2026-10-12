@@ -1,6 +1,7 @@
 //! Migrations only move forward: `down`, `reset`, `refresh` and `fresh` are
 //! refused, and rolling back relies on every migration re-running once its
-//! record is deleted. See `docs/adr/0003-schema-migrations-are-forward-only.md`.
+//! record is deleted. See "Migrations are forward-only" in
+//! `src/outbound/sql/README.md`.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
 use super::fixtures;
 use crate::outbound::sql::Migrator;
+use crate::outbound::sql::list_quota;
 use crate::outbound::sql::migrations::apply_migrations;
 
 #[cfg(feature = "mysql")]
@@ -135,6 +137,7 @@ async fn assert_every_migration_reruns_after_a_rollback(
         .unwrap();
 
     for first in PREDATE_RERUN_RULE.len()..names.len() {
+        let enforced = list_quota::is_enforced(&db).await.unwrap();
         fixtures::forget_migrations(&db, &names[first..]).await;
         Migrator::up(db.as_ref(), None).await.unwrap_or_else(|e| {
             panic!(
@@ -163,6 +166,13 @@ async fn assert_every_migration_reruns_after_a_rollback(
             "a re-run must keep the list's version after a rollback to before {} on {backend}",
             names[first]
         );
+        assert_eq!(
+            list_quota::is_enforced(&db).await.unwrap(),
+            enforced,
+            "a re-run must keep the quota switch after a rollback to before {} on {backend}",
+            names[first]
+        );
+        fixtures::enforce_list_quota(&db).await;
     }
 }
 
@@ -190,7 +200,7 @@ async fn test_postgres_every_migration_reruns_after_a_rollback() {
 /// The previous release refuses a database a newer one migrated, naming each
 /// migration it does not know, and starts once their records are deleted. That
 /// is the migrator's half of the rollback recovery; whether the previous release
-/// then runs correctly on the newer schema is rule 1, which no test covers.
+/// then runs correctly on the newer schema is not covered by any test.
 async fn assert_previous_release_starts_once_unknown_records_are_deleted(
     db: Arc<DatabaseConnection>,
     backend: &str,
