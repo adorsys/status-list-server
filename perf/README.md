@@ -17,8 +17,7 @@ Each test targets `http://localhost:8000` by default.
 
 ## Prerequisites
 
-- Node.js (>= 22.18.0) — the current harness (`artillery@2.0.34`) declares
-  `engines.node: ">=22.18.0"`
+- Node.js (>= 22.18.0), as required by `package.json`
 - A running StatusList Server instance reachable at the test `target`
 - The server's default rate limits must be raised for meaningful results (see
   [Rate limits](#rate-limits) below)
