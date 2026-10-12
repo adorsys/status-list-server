@@ -363,6 +363,12 @@ done
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('secret-do-not-log', result.stdout + result.stderr)
 
+    def test_compose_defaults_server_host_to_zeroes(self):
+        import yaml
+        model = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())
+        env = model['services']['app']['environment']
+        self.assertEqual(env.get('APP_SERVER__HOST'), '${APP_SERVER__HOST:-0.0.0.0}')
+
     def test_ci_versions_match_local_pins(self):
         import json
         import re

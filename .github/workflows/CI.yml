@@ -679,6 +679,8 @@ jobs:
                   raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
               if app_config["ports"][0].get("host_ip") != "127.0.0.1":
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
+              if environment.get("APP_SERVER__HOST") != "0.0.0.0":
+                  raise SystemExit(f"{label}: APP_SERVER__HOST must default to 0.0.0.0 inside the container")
 
           postgres_config = json.loads(subprocess.check_output(
               ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
@@ -720,6 +722,7 @@ jobs:
 
           cleanup() {
             docker compose down --volumes --remove-orphans
+            rm -f .env.partial
           }
           trap cleanup EXIT
 
@@ -735,10 +738,19 @@ jobs:
             return 1
           }
 
+          # 1. Test missing .env startup
           docker compose up -d --build
           wait_until_ready
           docker compose down --volumes --remove-orphans
 
+          # 2. Test partial .env startup (omitting APP_SERVER__HOST)
+          echo "APP_ENV=development" > .env.partial
+          docker compose --env-file .env.partial up -d
+          wait_until_ready
+          docker compose down --volumes --remove-orphans
+          rm -f .env.partial
+
+          # 3. Test template .env startup
           docker compose --env-file .env.template up -d
           wait_until_ready
 
