@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 GENERATOR="$REPO_ROOT/deploy/observability/prometheus/generate-alertmanager-config.sh"
 MOCK="$REPO_ROOT/deploy/observability/alertmanager/tests/mock_webhook.py"
-AM_IMAGE="prom/alertmanager:v0.28.1"
+AM_IMAGE="prom/alertmanager:v0.34.1"
 TMP="$(mktemp -d)"
 HUMAN_PID=""
 DMS_PID=""

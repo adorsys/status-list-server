@@ -42,7 +42,7 @@ class LocalCiTests(unittest.TestCase):
         )
 
     def test_matching_version_does_not_install(self):
-        self.stub("cargo-nextest", "echo 'cargo-nextest 0.9.101 (test build)'")
+        self.stub("cargo-nextest", "echo 'cargo-nextest 0.9.148 (test build)'")
         self.stub("cargo", "echo unexpected-install >&2; exit 99")
         result = self.shell('install_cargo_bin cargo-nextest cargo-nextest "$NEXT_VERSION"')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -93,23 +93,23 @@ dispatch_gate profiles
         self.assertIn("profile-matrix", result.stdout)
 
     def test_llvm_cov_version_uses_cargo_subcommand_protocol(self):
-        self.stub("cargo-llvm-cov", "[[ \"$*\" == 'llvm-cov --version' ]] || exit 2; echo 'cargo-llvm-cov 0.6.16'")
+        self.stub("cargo-llvm-cov", "[[ \"$*\" == 'llvm-cov --version' ]] || exit 2; echo 'cargo-llvm-cov 0.9.1'")
         result = self.shell('BOOTSTRAP=0; install_cargo_bin cargo-llvm-cov cargo-llvm-cov "$LLVM_COV_VERSION"')
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_wrong_version_is_rejected_without_bootstrap(self):
-        self.stub("cargo-nextest", "echo 'cargo-nextest 0.9.1010'")
+        self.stub("cargo-nextest", "echo 'cargo-nextest 0.9.1480'")
         result = self.shell('BOOTSTRAP=0; install_cargo_bin cargo-nextest cargo-nextest "$NEXT_VERSION"')
         self.assertEqual(result.returncode, 127)
-        self.assertIn("--version 0.9.101", result.stderr)
+        self.assertIn("--version 0.9.148", result.stderr)
         self.assertIn("--root", result.stderr)
 
     def test_wrong_version_installs_into_isolated_root(self):
         self.stub("cargo-nextest", "echo 'cargo-nextest 0.9.99'")
         self.stub("cargo", """
 [[ "$*" == *"--root $LOCAL_CI_TOOLS_ROOT"* ]] || exit 90
-[[ "$*" == *"--version 0.9.101"* ]] || exit 91
-printf '#!/bin/sh\\necho cargo-nextest 0.9.101\\n' > "$LOCAL_CI_TOOLS_ROOT/bin/cargo-nextest"
+[[ "$*" == *"--version 0.9.148"* ]] || exit 91
+printf '#!/bin/sh\\necho cargo-nextest 0.9.148\\n' > "$LOCAL_CI_TOOLS_ROOT/bin/cargo-nextest"
 chmod +x "$LOCAL_CI_TOOLS_ROOT/bin/cargo-nextest"
 """)
         result = self.shell('install_cargo_bin cargo-nextest cargo-nextest "$NEXT_VERSION"')
@@ -404,7 +404,7 @@ done
         ]:
             self.assertIn(reference, workflow + helm_checks + deny)
         self.assertEqual(pins['DENY_VERSION'], '0.20.2')
-        self.assertEqual(pins['TRIVY_VERSION'], '0.70.0')
+        self.assertEqual(pins['TRIVY_VERSION'], '0.75.0')
         self.assertEqual(pins['TOMBI_VERSION'], '1.7.3')
         self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.3')
         self.assertIn(pins['KUBE_LINTER_VERSION'], helm_checks)

@@ -1,6 +1,6 @@
 {
-  "helm-v4.2.4-linux-amd64.tar.gz": "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3",
-  "helm-v4.2.4-linux-arm64.tar.gz": "564de2191b881e9f71b5606b25345821ea1682f06ab90499d3ab22b530176da1",
-  "helm-v4.2.4-darwin-amd64.tar.gz": "6c163d687ca03c3b5c01928e53bbbcf9518278f47ce7a2f249a5a08e8bdaa2bc",
-  "helm-v4.2.4-darwin-arm64.tar.gz": "d747eb4e28bd2727173d15b759fa0a17822291ec09db7ced3d55af290a3661a2"
+  "helm-v4.3.0-linux-amd64.tar.gz": "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
+  "helm-v4.3.0-linux-arm64.tar.gz": "31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08",
+  "helm-v4.3.0-darwin-amd64.tar.gz": "347a784877e0e20eac865e8d1c36a80f6bb0861d6f29abd34defb6570ef95d92",
+  "helm-v4.3.0-darwin-arm64.tar.gz": "d3870437e1e95b67f8edbde964156c84a26503f560821d40c542441658934fba"
 }

@@ -140,7 +140,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
 pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
+    use sea_orm::{FromQueryResult, Statement, Value};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -196,7 +196,7 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
 ///
 /// No-op on PostgreSQL and SQLite.
 pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+    use sea_orm::{FromQueryResult, Statement};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -456,7 +456,7 @@ pub(crate) mod add_updated_at {
                 .to_owned();
             manager
                 .get_connection()
-                .execute(manager.get_database_backend().build(&update_stmt))
+                .execute_raw(manager.get_database_backend().build(&update_stmt))
                 .await
                 .map(|_| ())
         }
@@ -816,7 +816,7 @@ pub(crate) mod list_quota {
             let db = manager.get_connection();
             let backend = manager.get_database_backend();
             let existing = db
-                .query_one(
+                .query_one_raw(
                     backend.build(
                         Query::select()
                             .column(ListQuota::Id)
@@ -826,7 +826,7 @@ pub(crate) mod list_quota {
                 )
                 .await?;
             if existing.is_none() {
-                db.execute(
+                db.execute_raw(
                     backend.build(
                         Query::insert()
                             .into_table(ListQuota::Table)

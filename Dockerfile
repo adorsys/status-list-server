@@ -19,7 +19,7 @@ WORKDIR /app
 # docs/supply-chain.md, "Tool Ownership", for the bump path.
 #
 # Declared above ARG FEATURES so a feature-set change does not invalidate this layer.
-ARG CARGO_AUDITABLE_VERSION=0.7.5
+ARG CARGO_AUDITABLE_VERSION=0.7.7
 ARG RUST_AUDIT_INFO_VERSION=0.5.4
 # Unset CARGO_BUILD_TARGET so cargo compiles the build tools natively for the builder host
 # (e.g. x86_64) rather than cross-compiling them for TARGETARCH.

@@ -21,7 +21,7 @@ services:
       - status-list-network
 
   mysql:
-    image: mysql:9.2
+    image: mysql:9.7.2
     restart: always
     container_name: status-list-mysql
     profiles: ["mysql"]
@@ -228,7 +228,7 @@ services:
       - '--web.enable-lifecycle'
 
   alertmanager:
-    image: prom/alertmanager:v0.28.1
+    image: prom/alertmanager:v0.34.1
     profiles: ["observability"]
     container_name: alertmanager
     restart: unless-stopped
@@ -268,7 +268,7 @@ services:
         exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml
 
   grafana:
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:13.2.3
     profiles: ["observability"]
     container_name: grafana
     restart: unless-stopped
@@ -292,7 +292,7 @@ services:
       - status-list-network
 
   pushgateway:
-    image: prom/pushgateway:v1.11.2
+    image: prom/pushgateway:v1.11.3
     profiles: ["observability"]
     container_name: pushgateway
     ports:

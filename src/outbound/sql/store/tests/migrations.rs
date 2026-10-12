@@ -152,7 +152,7 @@ async fn assert_every_migration_reruns_after_a_rollback(
             names[first]
         );
         let version = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 db.get_database_backend(),
                 "SELECT version FROM status_lists WHERE list_id = 'list-rerun'",
             ))
