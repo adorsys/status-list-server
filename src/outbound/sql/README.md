@@ -103,6 +103,32 @@ Stores historical status list snapshots for time-travel queries.
 | ----------------------------------- | ---------------------------------- |
 | `idx_status_list_history_list_time` | `list_id, valid_from, valid_until` |
 
+## Migrations are forward-only
+
+Every migration's `down` returns an error, and so do `reset`, `refresh` and
+`fresh` (decided in #596). Nothing in production ran `down`, it could not run
+to zero on MySQL, and undoing `m20260929_000001_credentials_aggregation_id`
+discards aggregation IDs that are already in tokens and issuer metadata.
+
+A release is rolled back by deleting the `seaql_migrations` records of the
+migrations it does not know and keeping the schema; upgrading again re-runs
+them. The procedure is "Rolling back across migrations" in
+`docs/deployment-runbook.md`.
+
+A new migration must therefore:
+
+1. Leave a database the previous release still runs correctly on. In practice
+   it is additive: new tables, nullable or defaulted columns, indexes. Say so
+   in its row of the runbook's table of migrations safe to leave in place, or
+   say what rolling back past it costs.
+2. Run again cleanly after its record is deleted, over the schema and data it
+   left. Guard each step with `has_column`, `has_index` or `if_not_exists()`,
+   and do not overwrite data a first run already wrote.
+
+Tests in `store/tests/migrations.rs` enforce the second rule for every
+migration after the four oldest, which predate it. Nothing tests the first; it
+rests on review.
+
 ## Entity Relationship Diagram
 
 ```mermaid

@@ -529,16 +529,25 @@ a restart, scale-up or node drain replaces them with pods that crash-loop.
 When the rollback does have to start pods, it stalls, and `helm rollback --wait`
 times out: the pods it starts never become ready. How many of the newer
 release's pods keep serving meanwhile depends on the rolling-update strategy.
-The chart sets none, so Kubernetes' defaults apply: a quarter of the desired
-pods may be unavailable, rounded down, and a quarter more may start, rounded
-up. At two or three replicas, production's usual size, every pod of the newer
-release keeps serving. From four up (production's HPA allows ten) a quarter of
-them are replaced by pods that crash-loop. A `Recreate` strategy or a larger
-`maxUnavailable` would turn the same rollback into an outage.
+The chart's default (`statuslist.strategy`) is a plain `RollingUpdate` with no
+overrides, so Kubernetes' defaults apply: a quarter of the desired pods may be
+unavailable, rounded down, and a quarter more may start, rounded up. At two or
+three replicas, production's usual size, every pod of the newer release keeps
+serving. From four up (production's HPA allows ten) a quarter of them are
+replaced by pods that crash-loop. A larger `maxUnavailable` takes more of them.
+
+**An upgrade deployed with `Recreate` is different.** `Recreate` stops every
+pod of the previous release before the first new pod starts. If that upgrade
+fails after migrating, the automatic rollback has no running pod to fall back
+on and cannot start one, so nothing serves until the records are deleted.
+Treat it as an outage and go straight to the steps below.
 
 The recovery is to delete the records of the migrations the previous release
-does not know, and keep the schema. The newer release's pods keep serving
-throughout.
+does not know, and keep the schema. Under a rolling update the newer release's
+pods keep serving throughout, alongside the previous release's pods as they
+come up. One migration does not allow that overlap; see
+[Rolling back past `add_status_list_version`](#rolling-back-past-add_status_list_version)
+before you start if the rollback crosses it.
 
 You need a SQL session on the server's database, as the account the server
 uses: the deployment's `APP_DATABASE__USERNAME`, on `APP_DATABASE__NAME`. With
@@ -578,6 +587,10 @@ For an external database, MySQL included, connect with its usual client.
    The client reports the rows deleted (`DELETE 2` in `psql`, `2 rows
    affected` in `mysql`). If that is the number of versions you listed, run
    `COMMIT;`. If it is anything else, run `ROLLBACK;` and check the versions.
+
+   Never delete the records of the four oldest migrations (the first four rows
+   of the table below). Every release knows them, and they cannot run twice:
+   the next pod to start would fail on them.
 4. Delete the crash-looping pods, so their replacements start without waiting
    out the back-off. As they become ready, the rollout finishes and removes the
    newer release's pods.
@@ -586,7 +599,8 @@ For an external database, MySQL included, connect with its usual client.
    recorded them; delete the records again and repeat step 4.
 
 Do not scale the newer release down first: until the previous release's pods
-are ready, its pods are the only ones serving.
+are ready, its pods are the only ones serving. The exception is a rollback
+past `add_status_list_version`, below.
 
 Upgrading again re-runs the deleted migrations, which find their changes
 already made and skip them. Steps a particular release needs on top of this
@@ -595,18 +609,47 @@ still apply; the table below lists them. Re-running
 of every row of `credentials`. On PostgreSQL the migrations run in one
 transaction, so those rows stay locked until every pending migration has run,
 and registrations, credential updates and publishes that update the count
-wait for it.
+wait for it. With many issuers, upgrade again in a quiet period.
 
-There is no other way back. The server refuses to run down migrations
-([ADR 0003](adr/0003-schema-migrations-are-forward-only.md)), and undoing a
-migration by hand can lose data nothing can recreate, such as the
+There is no other way back. The server refuses to run down migrations, and
+undoing a migration by hand can lose data nothing can recreate, such as the
 [aggregation IDs](#rolling-back).
+
+#### Rolling back past `add_status_list_version`
+
+Pods from before this migration and pods from after it must never serve at
+the same time: each guards updates on a column the other ignores, so they
+overwrite each other's status changes without a conflict, revocations
+included ([Upgrade strategy for this release](#upgrade-strategy-for-this-release)).
+The steps above let both serve while the rollout finishes, so a rollback that
+crosses this migration takes a short outage instead:
+
+1. Do steps 1 and 2 above.
+2. Stop every pod, and wait for them to be gone:
+
+   ```bash
+   kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+   kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+   ```
+
+3. Delete the records, as in step 3 above.
+4. Scale back up. Only the previous release's pods start:
+
+   ```bash
+   kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+   ```
+
+5. With the Redis cache, clear it before serving traffic again.
+
+If you cannot take the outage, roll forward instead: `helm rollback` to the
+newer revision, whose pods are still serving. Upgrading again later is the
+same `Recreate` upgrade as the first time.
 
 #### Which migrations are safe to leave in place
 
 A migration is safe to leave in place when the release that does not know it
 still runs correctly on the database it leaves. Every new migration adds a row
-here ([ADR 0003](adr/0003-schema-migrations-are-forward-only.md), rule 1).
+here; a test fails until it does.
 
 | Migration | Safe to leave in place? | Before deleting its record | When upgrading again |
 |---|---|---|---|
@@ -617,7 +660,7 @@ here ([ADR 0003](adr/0003-schema-migrations-are-forward-only.md), rule 1).
 | `m20260923_000001_credentials_list_count` | Yes: the column defaults to `0` | `list-quota disable`, or the quota undercounts the previous release's publishes | Pods refuse to start without `APP_LIMITS__LIST_QUOTA_TRANSITION`; follow [Upgrading to the list quota](troubleshooting.md#upgrading-to-the-list-quota) |
 | `m20260923_000002_list_quota` | Yes, once the quota is disabled | As above | As above |
 | `m20260925_000001_status_list_allocations` | **No, for fixed-size lists** (see below) | Decide whether to roll forward instead | Find the lists the previous release converted |
-| `add_status_list_version` | Yes: the column defaults to `1` | None | With the Redis cache, clear it: the previous release changes lists without advancing `version`, so cached tokens can be stale |
+| `add_status_list_version` | **Only if old and new pods never serve together**: the column defaults to `1`, but the two lose each other's status changes | Follow [Rolling back past `add_status_list_version`](#rolling-back-past-add_status_list_version) | Deploy with `Recreate` again. With the Redis cache, clear it: the previous release changes lists without advancing `version`, so cached tokens can be stale |
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
