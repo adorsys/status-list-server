@@ -1,4 +1,4 @@
-# Performance tests
+# Performance / load-validation tests
 
 This workspace holds the **performance / load-validation tests** for the Status
 List Server. It is independent of the specific load-generation harness: the
@@ -6,6 +6,12 @@ tooling is described here as the *current implementation* so the workspace
 contract is not tied to one tool. Today the harness is
 [Artillery](https://www.artillery.io/) (`artillery@2.0.34`), invoked through the
 `npm` scripts below.
+
+> **Swapping the harness.** Replacing the load generator means updating the
+> `npm` scripts in [`package.json`](package.json) and the scenario files in
+> [`tests/`](tests/) only — the workspace layout, the generated
+> `scripts/test-tokens.json` / `scripts/seed-lists.json` contract, and this
+> documentation remain tool-agnostic.
 
 > **Performance vs correctness.** The suites in `perf/` validate behaviour
 > *under load* (latency percentiles, error rates, concurrency). They are distinct

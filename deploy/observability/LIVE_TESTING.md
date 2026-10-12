@@ -209,8 +209,8 @@ The issuer key and signed JWTs used below are generated locally by
 `perf/scripts/token-generator.js` (`npm run generate-tokens` in
 `perf/`). They are git-ignored and never shipped with the repo, so
 generate them before running the simulation (Section 7b). The script writes a
-single `scripts/test-tokens.json` containing the issuer ID, the public JWK and
-the signed JWTs, all of which the following commands read.
+single `perf/scripts/test-tokens.json` containing the issuer ID, the public JWK
+and the signed JWTs, all of which the following commands read.
 
 ### 7a. Optional: restart the app with raised rate limits (recommended for the demo)
 
