@@ -154,6 +154,11 @@ pub(crate) mod mysql_helpers {
 
     impl MysqlTestDb {
         pub(crate) async fn start() -> Self {
+            Self::start_migrated(None).await
+        }
+
+        /// Applies only the first `steps` migrations (`None` applies all).
+        pub(crate) async fn start_migrated(steps: Option<u32>) -> Self {
             let node = super::lifecycle::start_with_retry("MySQL", || {
                 MysqlImage::default().with_tag("26.7")
             })
@@ -188,7 +193,7 @@ pub(crate) mod mysql_helpers {
 
             let url = format!("mysql://{host}:{port}/{db_name}");
             let db = Self::connect_pinned(&url).await;
-            crate::outbound::sql::Migrator::up(db.as_ref(), None)
+            crate::outbound::sql::Migrator::up(db.as_ref(), steps)
                 .await
                 .expect("Failed to run migrations on MySQL");
 
@@ -284,6 +289,11 @@ pub(crate) mod postgres_helpers {
     }
 
     pub(crate) async fn postgres_connection() -> PostgresTestDb {
+        postgres_connection_migrated(None).await
+    }
+
+    /// Applies only the first `steps` migrations (`None` applies all).
+    pub(crate) async fn postgres_connection_migrated(steps: Option<u32>) -> PostgresTestDb {
         let node =
             super::lifecycle::start_with_retry("Postgres", || PostgresImage::default().into())
                 .await;
@@ -318,7 +328,7 @@ pub(crate) mod postgres_helpers {
         let db = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to connect to Postgres");
-        crate::outbound::sql::Migrator::up(&db, None)
+        crate::outbound::sql::Migrator::up(&db, steps)
             .await
             .expect("Failed to run migrations on Postgres");
 
