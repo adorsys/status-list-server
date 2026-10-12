@@ -12,7 +12,7 @@ contract is not tied to one tool. Today the harness is
 > [`tests/`](tests/) only — the workspace layout, the generated
 > `scripts/test-tokens.json` / `scripts/seed-lists.json` contract, and this
 > documentation remain tool-agnostic.
-
+>
 > **Performance vs correctness.** The suites in `perf/` validate behaviour
 > *under load* (latency percentiles, error rates, concurrency). They are distinct
 > from the correctness tests in the repository root (`cargo test`, `tests/`),
