@@ -92,19 +92,6 @@ def decode_cwt_status_list(cwt_data: bytes) -> dict:
     return status_list
 
 
-def is_valid_cwt(cwt_data: bytes) -> bool:
-    """
-    Verifies if provided bytes represent a status list CWT: a tagged COSE_Sign1
-    structure (RFC 9052 §4.2) whose payload carries a status_list claim.
-    """
-    try:
-        decode_cwt_status_list(cwt_data)
-        return True
-    except (cbor2.CBORDecodeError, ValueError) as e:
-        print(f"Failed to decode CBOR: {e}")
-        return False
-
-
 def get_status(statuses: bytes, index: int, bits: int) -> int:
     """
     Reads the status at a given index from a decompressed status list.

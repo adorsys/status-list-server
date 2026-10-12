@@ -154,7 +154,7 @@ running (see above), execute one from the `demo` directory:
 uv run python workflows/01-an-issuer-maintains-a-status-list.py
 ```
 
-Each script uses fresh random issuer credentials and status list IDs, so a run
+Each script uses fresh random issuer names and status list IDs, so a run
 never depends on state left behind by an earlier one. An assertion failure exits
 non-zero and names the failing script.
 

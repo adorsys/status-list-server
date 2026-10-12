@@ -12,6 +12,9 @@ __pycache__
 .venv/
 *.pyc
 
+# Helm chart dependency archives (helm dependency update)
+*.tgz
+
 # MacOs store files
 **/.DS_Store
 

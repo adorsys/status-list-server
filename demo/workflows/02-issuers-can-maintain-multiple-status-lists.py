@@ -4,7 +4,6 @@ from helpers import fixtures, utils
 from helpers.utils import tc, Status
 import requests
 import uuid
-import random
 
 BASE_URL = utils.get_base_url()
 print(f"Using base URL: {BASE_URL}")
@@ -50,7 +49,7 @@ for issuer_data in [gondwana_digital_pole, scott_holdings]:
         response = requests.put(
             status_publish_endpoint,
             json={
-                "statuses": [{"index": i, "status": Status.VALID} for i in range(random.randint(1, 5))]
+                "statuses": [{"index": i, "status": Status.VALID} for i in range(5)]
             },
             headers={"Authorization": f"Bearer {bearer_token}"},
         )
