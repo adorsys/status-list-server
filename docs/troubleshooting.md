@@ -825,7 +825,8 @@ quota starts off on such a database, and a pod does not serve without it unless 
 
 No pod of an older release can start once a new pod has migrated the database: it finds a migration
 it has no file for and exits. Only pods already running can still write, which is why step 2 waits
-for them to be gone.
+for them to be gone. To start one anyway, see
+[Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations).
 
 `enable` checks every issuer against the lists that exist and the configured cap. If any issuer
 has more lists than the cap, or a `list_count` that differs from its lists, it leaves the quota off
@@ -847,7 +848,8 @@ refusing to enable the list quota
 `enable` and `recount` wait for publishes that are in flight and hold off new ones until they
 finish, so a publish is either counted by the check or refused by the enforced quota.
 
-**Rolling back** to a release that predates the quota: run `list-quota disable` first. Its pods
+**Rolling back** to a release that predates the quota: run `list-quota disable` first, then follow
+[Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations). Its pods
 publish without counting, and an enforced quota would then undercount. Rolling forward again is
 the upgrade above.
 

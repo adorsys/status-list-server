@@ -71,3 +71,27 @@ pub(in super::super) async fn insert_list_as_old_pod(
     .await
     .unwrap();
 }
+
+/// Deletes the `seaql_migrations` records of `versions`, as rolling back a
+/// release does.
+pub(in super::super) async fn forget_migrations(db: &DatabaseConnection, versions: &[&str]) {
+    use sea_orm::ConnectionTrait;
+
+    let list = versions
+        .iter()
+        .map(|version| format!("'{version}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let deleted = db
+        .execute_unprepared(&format!(
+            "DELETE FROM seaql_migrations WHERE version IN ({list})"
+        ))
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(
+        deleted,
+        versions.len() as u64,
+        "every version must be recorded"
+    );
+}
