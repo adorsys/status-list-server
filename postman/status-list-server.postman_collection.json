@@ -452,8 +452,11 @@
                   "  pm.expect(function () { decodeCwtStatusList(bytes.slice(0, -8)); }).to.throw();",
                   "});",
                   "pm.test('CWT decoder rejects arrays where byte strings are required', function () {",
-                  "  var malformed = [0xd2, 0x84, 0x40, 0xa0, 0x40, 0x83, 0x01, 0x02, 0x03];",
-                  "  pm.expect(function () { decodeCwtStatusList(malformed); }).to.throw();",
+                  "  var valid = [0xd2, 0x84, 0x40, 0xa0, 0x50, 0xa1, 0x19, 0xff, 0xfd, 0xa2, 0x64, 0x62, 0x69, 0x74, 0x73, 0x02, 0x63, 0x6c, 0x73, 0x74, 0x40, 0x43, 0x01, 0x02, 0x03];",
+                  "  var statusList = decodeCwtStatusList(valid);",
+                  "  pm.expect(isByteString(mapGet(statusList, 'lst')), 'valid control status_list.lst is bstr').to.equal(true);",
+                  "  var signatureArray = [0xd2, 0x84, 0x40, 0xa0, 0x50, 0xa1, 0x19, 0xff, 0xfd, 0xa2, 0x64, 0x62, 0x69, 0x74, 0x73, 0x02, 0x63, 0x6c, 0x73, 0x74, 0x40, 0x83, 0x01, 0x02, 0x03];",
+                  "  pm.expect(function () { decodeCwtStatusList(signatureArray); }).to.throw('COSE signature is bstr');",
                   "});"
                 ]
               }
