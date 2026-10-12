@@ -66,6 +66,16 @@ info:
     `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
     configuration; operators who lower a bound via configuration should treat
     the documented schema maximums as defaults, not guarantees.
+
+    ## Planned changes
+
+    This document describes the API as it is served today. The next major
+    release changes issuer authentication and splits the server into public,
+    management and admin listeners (ADR-0002). The agreed contract, including
+    every breaking change and its migration, is in
+    `docs/issuer-trust-contract.md`; the new admin API is in
+    `docs/openapi-admin.yaml`. Each part moves into this document when it
+    ships.
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -223,10 +233,19 @@ paths:
     post:
       operationId: registerIssuer
       summary: Register issuer credentials
+      deprecated: true
       description: |
         Registers an issuer by storing its unique identifier and public key
         (JWK). The registered public key is used later to validate signed JWT
         Bearer tokens for the protected management endpoints.
+
+        **Deprecated.** Self-registration is removed in the next major
+        release (ADR-0002 §9). Issuers are then listed by the operator in the
+        issuer registry file, and
+        `cargo xtask issuer export` turns existing registrations into that
+        file while keeping every issuer id and `aggregation_id`. The route
+        stays available only with `management_auth.open_registration` in
+        development. See `docs/issuer-trust-contract.md` §7.
       security: []
       requestBody:
         required: true
