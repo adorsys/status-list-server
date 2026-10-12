@@ -259,6 +259,29 @@ fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
     }
 }
 
+/// Encode the §4.3 status_list map shared by CWT issuance and reference vectors.
+fn cwt_status_list(
+    status_list: &crate::domain::models::status_list::StatusList,
+    aggregation_uri: Option<String>,
+) -> Result<CborValue, StatusListError> {
+    let (bits, lst_bytes) = status_list.token_lst_bytes()?;
+
+    let mut entries = vec![
+        (
+            CborValue::Text("bits".into()),
+            CborValue::Integer(bits.into()),
+        ),
+        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
+    ];
+    if let Some(uri) = aggregation_uri {
+        entries.push((
+            CborValue::Text("aggregation_uri".into()),
+            CborValue::Text(uri),
+        ));
+    }
+    Ok(CborValue::Map(entries))
+}
+
 fn issue_cwt(
     status_record: &StatusListRecord,
     signer: &(impl TokenSigner + ?Sized),
@@ -287,24 +310,9 @@ fn issue_cwt(
         ),
     ];
 
-    let (bits, lst_bytes) = status_record.status_list.token_lst_bytes()?;
-
-    let mut status_list = vec![
-        (
-            CborValue::Text("bits".into()),
-            CborValue::Integer(bits.into()),
-        ),
-        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
-    ];
-    if let Some(uri) = aggregation_uri {
-        status_list.push((
-            CborValue::Text("aggregation_uri".into()),
-            CborValue::Text(uri),
-        ));
-    }
     claims.push((
         CborValue::Integer(STATUS_LIST.into()),
-        CborValue::Map(status_list),
+        cwt_status_list(&status_record.status_list, aggregation_uri)?,
     ));
 
     let payload = CborValue::Map(claims)
@@ -464,6 +472,94 @@ mod tests {
                 UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes())
                     .verify(tbs, signature)
             }
+        }
+    }
+
+    fn inflate_vector(lst: &str) -> Vec<u8> {
+        use std::io::Read as _;
+        let compressed = base64::prelude::BASE64_URL_SAFE_NO_PAD.decode(lst).unwrap();
+        let mut bytes = Vec::new();
+        flate2::read::ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn draft21_section_4_3_cbor_vector() {
+        use crate::domain::models::status_list::{Status, StatusEntry};
+        let list = StatusList::create(
+            (0..16)
+                .map(|index| StatusEntry {
+                    index,
+                    status: if [0xb9u8, 0xa3][index as usize / 8] & (1 << (index % 8)) != 0 {
+                        Status::Invalid
+                    } else {
+                        Status::Valid
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(inflate_vector(&list.token_lst().unwrap().1), [0xb9, 0xa3]);
+        assert_eq!(
+            hex::encode(cwt_status_list(&list, None).unwrap().to_vec().unwrap()),
+            "a2646269747301636c73744a78dadbb918000217015d"
+        );
+    }
+
+    #[test]
+    fn draft21_appendix_c_1_and_c_2_vectors() {
+        use crate::domain::models::status_list::{Status, StatusEntry};
+        // Indices, status values, and expected lst strings are from the specification:
+        // draft-ietf-oauth-status-list-21, Appendix C.1 (1-bit) and C.2 (2-bit).
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.1
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.2
+        let indices = [
+            0, 1993, 25460, 159495, 495669, 554353, 645645, 723232, 854545, 934534, 1000345,
+        ];
+        let cases = [
+            (
+                1,
+                [1; 11],
+                "eNrt3AENwCAMAEGogklACtKQPg9LugC9k_ACvreiogEAAKkeCQAAAAAAAAAAAAAAAAAAAIBylgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXG9IAAAAAAAAAPwsJAAAAAAAAAAAAAAAvhsSAAAAAAAAAAAA7KpLAAAAAAAAAAAAAAAAAAAAAJsLCQAAAAAAAAAAADjelAAAAAAAAAAAKjDMAQAAAACAZC8L2AEb",
+            ),
+            (
+                2,
+                [1, 2, 1, 3, 1, 1, 2, 1, 1, 2, 3],
+                "eNrt2zENACEQAEEuoaBABP5VIO01fCjIHTMStt9ovGVIAAAAAABAbiEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEB5WwIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAID0ugQAAAAAAAAAAAAAAAAAQG12SgAAAAAAAAAAAAAAAAAAAAAAAAAAAOCSIQEAAAAAAAAAAAAAAAAAAAAAAAD8ExIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwJEuAQAAAAAAAAAAAAAAAAAAAAAAAMB9SwIAAAAAAAAAAAAAAAAAAACoYUoAAAAAAAAAAAAAAEBqH81gAQw",
+            ),
+        ];
+        for (bits, values, expected) in cases {
+            let mut entries: Vec<_> = indices
+                .into_iter()
+                .zip(values)
+                .map(|(index, value)| StatusEntry {
+                    index,
+                    status: match value {
+                        1 => Status::Invalid,
+                        2 => Status::Suspended,
+                        3 => Status::ApplicationSpecific(3),
+                        _ => unreachable!(),
+                    },
+                })
+                .collect();
+            // Appendix C lists have exactly 2^20 entries, including the trailing zeros.
+            entries.push(StatusEntry {
+                index: 1_048_575,
+                status: Status::Valid,
+            });
+            let list = StatusList::create(entries).unwrap();
+            let (actual_bits, actual) = list.token_lst().unwrap();
+            assert_eq!(actual_bits, bits);
+            let raw = inflate_vector(&actual);
+            assert_eq!(
+                raw,
+                inflate_vector(expected),
+                "decompressed reference bytes"
+            );
+            // Different conforming DEFLATE encoders need not produce identical bytes.
+            // Keep miniz in production; compare the Appendix C vectors after inflation.
         }
     }
 

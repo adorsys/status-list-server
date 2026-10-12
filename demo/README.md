@@ -1,17 +1,17 @@
 # Demo Workflows with the Status List Server
 
 Typical scenarios for interacting with the Status List Server are showcased
-by means of notebooks. To run the notebooks, you will need a Python environment
+by means of plain Python scripts. To run them, you will need a Python environment
 and a live server. The setup works on macOS, Linux, and Windows.
 
-## Catalog of notebook workflows
+## Catalog of workflow scripts
 
-You'll find notebooks for the following scenarios in the `./workflows` directory:
+You'll find the following scenarios in the `./workflows` directory:
 
-- [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.ipynb)
-- [Token Issuers can maintain multiple Token Status Lists](./workflows/02-issuers-can-maintain-multiple-status-lists.ipynb)
-- [Issuer B cannot update Issuer A's list](./workflows/03-issuer-b-cannot-update-issuer-a-list.ipynb)
-- [Unregistered issuers cannot publish lists](./workflows/04-unregistered-issuers-cannot-publish-lists.ipynb)
+- [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.py)
+- [Token Issuers can maintain multiple Token Status Lists](./workflows/02-issuers-can-maintain-multiple-status-lists.py)
+- [Issuer B cannot update Issuer A's list](./workflows/03-issuer-b-cannot-update-issuer-a-list.py)
+- [Unregistered issuers cannot publish lists](./workflows/04-unregistered-issuers-cannot-publish-lists.py)
 
 ## Set up the Python environment
 
@@ -106,9 +106,9 @@ no `.env` file or database is needed.
 
 The server rate-limits credential registration and status list writes per
 client IP address. By default each allows 10 requests and then gets back one
-request per minute, which is less than the notebooks need when run back to back.
-The commands below raise the limit to 100 for this local server, enough for
-several full runs of all four notebooks.
+request per minute, which is less than the workflow scripts need when run back
+to back. The commands below raise the limit to 100 for this local server,
+enough for several full runs of all four workflow scripts.
 
 macOS or Linux (bash / zsh):
 
@@ -137,29 +137,29 @@ set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
 cargo run
 ```
 
-If a cell still fails with HTTP `429`, restart the server. The limit refills
-slowly, so waiting a minute only allows one more request, and requests rejected
-for missing or invalid authentication count against it too.
+If a workflow still fails with HTTP `429`, restart the server. The limit
+refills slowly, so waiting a minute only allows one more request, and requests
+rejected for missing or invalid authentication count against it too.
 
-The notebooks connect to `http://localhost:8000` by default. If
-`APP_SERVER__PORT` is set in the environment of the notebook kernel, or in a
-`.env` file at the root of the repository, the notebooks use that port instead.
+The workflow scripts connect to `http://localhost:8000` by default. If
+`APP_SERVER__PORT` is set in the environment, or in a `.env` file at the root of
+the repository, the scripts use that port instead.
 
-## Run the notebooks
+## Run the workflows
 
-From the `demo` directory, open Jupyter Lab to explore and run the workflows:
-
-```bash
-uv run jupyter lab
-```
-
-To execute a notebook top to bottom without opening Jupyter Lab:
+Each workflow is a plain Python script in `./workflows`. With a live server
+running (see above), execute one from the `demo` directory:
 
 ```bash
-uv run jupyter execute workflows/01-an-issuer-maintains-a-status-list.ipynb
+uv run python workflows/01-an-issuer-maintains-a-status-list.py
 ```
 
-To use an IDE instead, select the interpreter in `demo/.venv` as the kernel.
+Each script uses fresh random issuer names and status list IDs, so a run
+never depends on state left behind by an earlier one. An assertion failure exits
+non-zero and names the failing script.
+
+To use an IDE instead, select the interpreter in `demo/.venv` as the Python
+interpreter for the `demo` directory.
 
 ## Update dependencies
 
