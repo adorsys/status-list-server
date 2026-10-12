@@ -118,7 +118,7 @@ jobs:
       - name: Install CRD validator
         run: sudo apt-get install -y python3-jsonschema
       - name: Render Helm templates
-        uses: ./.github/workflows/render-helm-templates
+        uses: $/.github/workflows/render-helm-templates
 
       - name: Verify image reference resolution
         # Runs here rather than in its own workflow because it asserts against the
@@ -209,7 +209,7 @@ jobs:
       - name: Install CRD validator
         run: sudo apt-get install -y python3-jsonschema
       - name: Render Helm templates
-        uses: ./.github/workflows/render-helm-templates
+        uses: $/.github/workflows/render-helm-templates
 
       - name: Install KubeLinter
         # Fetched directly rather than through stackrox/kube-linter-action, which

@@ -424,7 +424,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   check-crate-type:
-    uses: ./.github/workflows/crate_type.yml
+    uses: $/.github/workflows/crate_type.yml
 
   cargo-test-doc:
     needs:
@@ -504,7 +504,7 @@ jobs:
         run: cargo vet --locked
 
   cargo-deny:
-    uses: ./.github/workflows/cargo_deny.yml
+    uses: $/.github/workflows/cargo_deny.yml
 
   typos-cli:
     name: typos

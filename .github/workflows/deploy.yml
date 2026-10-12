@@ -67,7 +67,7 @@ jobs:
     name: CI
     # A malformed tag fails in seconds; without this the whole suite runs first.
     needs: validate-tag
-    uses: ./.github/workflows/CI.yml
+    uses: $/.github/workflows/CI.yml
     # A called workflow can only narrow the caller's token. CI.yml needs nothing
     # beyond read, so grant the minimum.
     permissions:
@@ -77,7 +77,7 @@ jobs:
     name: Helm Checks
     # A malformed tag fails in seconds; without this the whole suite runs first.
     needs: validate-tag
-    uses: ./.github/workflows/helm-checks.yml
+    uses: $/.github/workflows/helm-checks.yml
     # A called workflow can only narrow the caller's token. helm-checks.yml's
     # kube-linter job needs its SARIF upload scope granted here too.
     permissions:
