@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/adorsys/status-list-server/blob/develop/docs/schemas/issuers.v1.schema.json",
   "title": "Status List Server issuer trust registry, version 1",
-  "description": "Shape of the file named by `management_auth.issuers_file` (ADR-0002 §3a). The file lists the issuers and admin principals the server trusts, with their PUBLIC keys only. Rules that span several entries (unique ids, unique kids across the whole file, RSA modulus size) cannot be expressed here; they are listed in docs/issuer-trust-contract.md, and the loader enforces them in addition to this schema.",
+  "description": "Shape of the file named by `management_auth.issuers_file` (ADR-0002). The file lists the issuers and admin principals the server trusts, with their PUBLIC keys only. Rules that span several entries (unique ids, unique kids across the whole file, RSA modulus size) cannot be expressed here; they are listed in docs/issuer-trust-contract.md, and the loader enforces them in addition to this schema.",
   "type": "object",
   "required": [
     "version"

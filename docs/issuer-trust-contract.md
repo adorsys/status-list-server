@@ -1,6 +1,6 @@
 # Issuer trust contract
 
-**Status: planned.** This document turns [ADR-0002](adr/0002-issuer-trust-onboarding-and-access-control.md) into the interfaces that the EPIC [#187](https://github.com/adorsys/status-list-server/issues/187) implementation issues build against. Nothing here is served yet. [`openapi.yaml`](openapi.yaml) keeps describing what the server does today. When an issue ships its part, it moves that part into `openapi.yaml` and marks the matching section below **Implemented**.
+**Status: planned.** This document turns [ADR-0002](adr/0002-issuer-trust-onboarding-and-access-control.md) into the interfaces that the EPIC [#187](https://github.com/adorsys/status-list-server/issues/187) implementation issues build against. Nothing here is served yet. [`openapi.yaml`](openapi.yaml) keeps describing what the server does today. When an issue ships its part, it moves that part into `openapi.yaml` and marks the matching section below **Implemented**. Anything in this document may change as long as it stays within the rules that ADR-0002 states with *must* or *never*.
 
 The key words MUST, MUST NOT, SHOULD and MAY are to be read as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals.
 

@@ -5,7 +5,7 @@ info:
   description: |
     **Status: planned contract, not served yet.** This document is the
     agreed interface for the admin listener defined in
-    [ADR-0002](adr/0002-issuer-trust-onboarding-and-access-control.md) §5.
+    [ADR-0002](adr/0002-issuer-trust-onboarding-and-access-control.md).
     Implementation is tracked by #625 (list and query), #626 (create and
     manage portal issuers), #373 (lifecycle enforcement) and #627 (quota
     usage). When an operation ships, its issue removes it from this banner.

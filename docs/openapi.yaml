@@ -240,7 +240,7 @@ paths:
         Bearer tokens for the protected management endpoints.
 
         **Deprecated.** Self-registration is removed in the next major
-        release (ADR-0002 §9). Issuers are then listed by the operator in the
+        release (ADR-0002). Issuers are then listed by the operator in the
         issuer registry file, and
         `cargo xtask issuer export` turns existing registrations into that
         file while keeping every issuer id and `aggregation_id`. The route
