@@ -363,8 +363,10 @@ mod tests {
         let response = get(&state, None, None).await.unwrap();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(json["next_cursor"].is_null());
-        assert!(json.as_object().unwrap().contains_key("next_cursor"));
+        assert_eq!(
+            json,
+            serde_json::json!({"status_lists": [], "next_cursor": null})
+        );
     }
 
     #[tokio::test]
