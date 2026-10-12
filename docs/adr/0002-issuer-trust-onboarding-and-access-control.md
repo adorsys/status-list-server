@@ -141,7 +141,7 @@ These live in SQL tables (`issuers`, `issuer_keys`) and are written **only** thr
 
 **Verification order:** decode the header only, then check `typ`, the allowlist, and that `kid` is present. Resolve `kid`, then reject on an `alg` mismatch, an inactive key or issuer, or a time outside `[not_before, not_after]`. Verify the signature and claims with the **pinned** `alg`. Check that `iss` equals the owner, apply the tier rate limit (§6), and insert the principal. This removes today's `insecure_decode` of `iss` before verification.
 
-**Uniform failure (W5):** every authentication failure returns `401` with `{"error":"invalid_token"}` and `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750 §3 and §3.1). The specific reason is logged server-side with `kid` and `iss`, never the token. An admin token on the management listener, or a management token on the admin listener, fails the same way.
+**Uniform failure (W5):** every presented token that fails, for whatever reason, returns `401` with `{"error":"invalid_token"}` and `WWW-Authenticate: Bearer error="invalid_token"` (RFC 6750 §3 and §3.1). The specific reason is logged server-side with `kid` and `iss`, never the token. An admin token on the management listener, or a management token on the admin listener, fails the same way. A request that presents **no** bearer token gets `401` with `{"error":"missing_token"}` and a bare `WWW-Authenticate: Bearer`, because RFC 6750 §3.1 says a server SHOULD NOT include an error code when no authentication information was sent. That distinction tells a client nothing it did not already know, so it opens no enumeration oracle.
 
 ### 5. Admin API (protected issuer list, query and lifecycle)
 
