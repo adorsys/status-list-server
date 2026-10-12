@@ -1,4 +1,19 @@
-# How to run the performance test
+# Performance tests
+
+This workspace holds the **performance / load-validation tests** for the Status
+List Server. It is independent of the specific load-generation harness: the
+tooling is described here as the *current implementation* so the workspace
+contract is not tied to one tool. Today the harness is
+[Artillery](https://www.artillery.io/) (`artillery@2.0.34`), invoked through the
+`npm` scripts below.
+
+> **Performance vs correctness.** The suites in `perf/` validate behaviour
+> *under load* (latency percentiles, error rates, concurrency). They are distinct
+> from the correctness tests in the repository root (`cargo test`, `tests/`),
+> which assert functional behaviour. These suites exercise a *local* server and
+> are **not** a claim about production capacity — treat any number produced here
+> as a signal about the machine and configuration they ran on, not the capacity
+> of a production deployment.
 
 This suite contains four tests exercising the StatusList Server:
 
@@ -11,7 +26,8 @@ Each test targets `http://localhost:8000` by default.
 
 ## Prerequisites
 
-- Node.js (>= 22.18.0) — `artillery@2.0.34` declares `engines.node: ">=22.18.0"`
+- Node.js (>= 22.18.0) — the current harness (`artillery@2.0.34`) declares
+  `engines.node: ">=22.18.0"`
 - A running StatusList Server instance reachable at the test `target`
 - The server's default rate limits must be raised for meaningful results (see
   [Rate limits](#rate-limits) below)
@@ -19,8 +35,8 @@ Each test targets `http://localhost:8000` by default.
 ## Setup
 
 ```bash
-# go to the test directory
-cd artillery-tests
+# go to the test workspace
+cd perf
 
 # install dependencies
 npm install
@@ -44,8 +60,8 @@ flows work on a fresh server — without registration the token's `iss` is
 unknown and every authenticated request returns `401 issuer_not_found` — and it
 gives the read scenarios real list IDs to query.
 
-Registering the issuer used to be attempted from an Artillery `before:` hook,
-but that hook does not execute processor `function:` steps in this Artillery
+Registering the issuer used to be attempted from a harness `before:` hook, but
+that hook does not execute processor `function:` steps in the current Artillery
 version, so the registration silently never ran. Running it as a Node script
 before the load is deterministic and applies to every suite.
 
@@ -104,12 +120,12 @@ npm run test:all
 ```
 
 Each test config declares `ensure` thresholds (max error rate, latency
-percentiles). With the `ensure` plugin enabled, Artillery fails the run if a
+percentiles). With the `ensure` plugin enabled, the harness fails the run if a
 threshold is breached.
 
 ## Run a test and capture a JSON report
 
-Every test has a `:report` variant that writes the raw Artillery report (JSON)
+Every test has a `:report` variant that writes the raw harness report (JSON)
 into `results/` (git-ignored):
 
 ```bash
@@ -119,9 +135,10 @@ npm run test:spike:report  # -> results/spike-test.json
 npm run test:auth:report   # -> results/auth-test.json
 ```
 
-`artillery report` is deprecated and no longer generates an HTML report, so the
-scripts stop after writing the JSON report to `results/`. Inspect the JSON files
-directly or pipe them into other reporting tooling.
+The current harness's `artillery report` command is deprecated and no longer
+generates an HTML report, so the scripts stop after writing the JSON report to
+`results/`. Inspect the JSON files directly or pipe them into other reporting
+tooling.
 
 ## Memory and CPU usage
 
