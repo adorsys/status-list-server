@@ -1069,9 +1069,10 @@ jobs:
             fi
             echo "::warning::ESO verification failed; restoring the previous release state"
             if [ -n "$prev_rev" ]; then
-              helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m || \
+              if ! helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m; then
                 echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
-              echo "::error title=Check for migrations the restored release does not know::Rolled back to revision $prev_rev after a successful upgrade, so every migration the new release carries has already run. If it carries any, the restored release cannot start a new pod, and this rollback stalls, until their records are deleted. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
+                echo "::error title=Check for migrations the restored release does not know::The rollback to revision $prev_rev did not finish. It followed a successful upgrade, so every migration the new release carries has already run. If it carries any, the restored release cannot start a pod until their records are deleted. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
+              fi
             else
               # Fresh install: nothing to roll back to, so remove the release entirely.
               helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 5m || \
