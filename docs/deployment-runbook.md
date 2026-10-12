@@ -527,14 +527,10 @@ has run. Pods of the previous release that are still running keep serving, but
 a restart, scale-up or node drain replaces them with pods that crash-loop.
 
 When the rollback does have to start pods, it stalls, and `helm rollback --wait`
-times out: the pods it starts never become ready. How many of the newer
-release's pods keep serving meanwhile depends on the rolling-update strategy.
-The chart's default (`statuslist.strategy`) is a plain `RollingUpdate` with no
-overrides, so Kubernetes' defaults apply: a quarter of the desired pods may be
-unavailable, rounded down, and a quarter more may start, rounded up. At two or
-three replicas, production's usual size, every pod of the newer release keeps
-serving. From four up (production's HPA allows ten) a quarter of them are
-replaced by pods that crash-loop. A larger `maxUnavailable` takes more of them.
+times out: the pods it starts never become ready. Under a rolling update the
+newer release's pods keep serving meanwhile, except the ones
+[`maxUnavailable`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#max-unavailable)
+lets the stalled rollback replace with pods that crash-loop.
 
 **An upgrade deployed with `Recreate` is different.** `Recreate` stops every
 pod of the previous release before the first new pod starts. If that upgrade
