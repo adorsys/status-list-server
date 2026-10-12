@@ -226,9 +226,6 @@ Automatic on merge:
 
 See the [README](README.md) and [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for instructions on building and running the project locally.
 
-For performance / load-validation tests (load, stress, spike, authentication),
-see the [performance-test workspace](perf/README.md).
-
 Use the repository's Cargo xtask commands for repeatable development workflows:
 
 ```bash

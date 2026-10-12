@@ -1,10 +1,4 @@
-# Performance / load-validation tests
-
-Performance and load-validation tests for the Status List Server, currently
-implemented with [Artillery](https://www.artillery.io/) and run through the
-`npm` scripts below. They measure latency and error rates under load against a
-local server. They do not replace the correctness tests (`cargo test`), and
-their results describe the machine they ran on, not production capacity.
+# How to run the performance test
 
 This suite contains four tests exercising the StatusList Server:
 
@@ -17,7 +11,7 @@ Each test targets `http://localhost:8000` by default.
 
 ## Prerequisites
 
-- Node.js (>= 22.18.0), as required by `package.json`
+- Node.js (>= 22.18.0) — `artillery@2.0.34` declares `engines.node: ">=22.18.0"`
 - A running StatusList Server instance reachable at the test `target`
 - The server's default rate limits must be raised for meaningful results (see
   [Rate limits](#rate-limits) below)
@@ -25,8 +19,8 @@ Each test targets `http://localhost:8000` by default.
 ## Setup
 
 ```bash
-# go to the test workspace
-cd perf
+# go to the test directory
+cd artillery-tests
 
 # install dependencies
 npm install
@@ -50,8 +44,10 @@ flows work on a fresh server — without registration the token's `iss` is
 unknown and every authenticated request returns `401 issuer_not_found` — and it
 gives the read scenarios real list IDs to query.
 
-Setup runs as a separate Node script rather than an Artillery `before:` hook,
-which does not execute processor `function:` steps.
+Registering the issuer used to be attempted from an Artillery `before:` hook,
+but that hook does not execute processor `function:` steps in this Artillery
+version, so the registration silently never ran. Running it as a Node script
+before the load is deterministic and applies to every suite.
 
 ## Rate limits
 
@@ -123,10 +119,9 @@ npm run test:spike:report  # -> results/spike-test.json
 npm run test:auth:report   # -> results/auth-test.json
 ```
 
-Artillery's `artillery report` command is deprecated and no longer
-generates an HTML report, so the scripts stop after writing the JSON report to
-`results/`. Inspect the JSON files directly or pipe them into other reporting
-tooling.
+`artillery report` is deprecated and no longer generates an HTML report, so the
+scripts stop after writing the JSON report to `results/`. Inspect the JSON files
+directly or pipe them into other reporting tooling.
 
 ## Memory and CPU usage
 
