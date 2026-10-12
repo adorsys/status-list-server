@@ -10,7 +10,9 @@ mod database;
 
 #[cfg(any(feature = "sqlite", feature = "mysql"))]
 use database::assert_guarded_update_rejects_stale_write;
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
+use database::assert_update_snapshot_rolls_back;
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 pub(super) use database::list_count_migration_index;
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 use database::{
@@ -19,8 +21,6 @@ use database::{
     assert_list_uris_walk_survives_concurrent_publishes,
     assert_sql_allocations_are_distinct_and_rollback_exhausted,
 };
-#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-use database::assert_update_snapshot_rolls_back;
 
 use super::fixtures;
 #[cfg(feature = "sqlite")]

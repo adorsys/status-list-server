@@ -610,15 +610,17 @@ here ([ADR 0003](adr/0003-schema-migrations-are-forward-only.md), rule 1).
 
 | Migration | Safe to leave in place? | Before deleting its record | When upgrading again |
 |---|---|---|---|
-| `mod` | Never deleted: every release from v1.0.0 on knows it | — | — |
-| `add_updated_at` | Never deleted, as above | — | — |
-| `m20250101_000003_status_list_history` | Never deleted, as above | — | — |
-| `m20260727_000001_status_list_history_exp_index` | Never deleted, as above | — | — |
+| `mod` | Never deleted: every release from v1.0.0 on knows it | None | None |
+| `add_updated_at` | Never deleted, as above | None | None |
+| `m20250101_000003_status_list_history` | Never deleted, as above | None | None |
+| `m20260727_000001_status_list_history_exp_index` | Never deleted, as above | None | None |
 | `m20260923_000001_credentials_list_count` | Yes: the column defaults to `0` | `list-quota disable`, or the quota undercounts the previous release's publishes | Pods refuse to start without `APP_LIMITS__LIST_QUOTA_TRANSITION`; follow [Upgrading to the list quota](troubleshooting.md#upgrading-to-the-list-quota) |
 | `m20260923_000002_list_quota` | Yes, once the quota is disabled | As above | As above |
 | `m20260925_000001_status_list_allocations` | **No, for fixed-size lists** (see below) | Decide whether to roll forward instead | Find the lists the previous release converted |
-| `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | — | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
-| `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | — | — |
+| `add_status_list_version` | Yes: the column defaults to `1` | None | With the Redis cache, clear it: the previous release changes lists without advancing `version`, so cached tokens can be stale |
+| `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
+| `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
+| `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

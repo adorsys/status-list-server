@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
 use super::fixtures;
@@ -130,6 +130,9 @@ async fn assert_every_migration_reruns_after_a_rollback(
 
     fixtures::seed_credential(&db, "issuer-rerun").await;
     fixtures::insert_list_as_old_pod(&db, "list-rerun", "issuer-rerun").await;
+    db.execute_unprepared("UPDATE status_lists SET version = 7 WHERE list_id = 'list-rerun'")
+        .await
+        .unwrap();
 
     for first in PREDATE_RERUN_RULE.len()..names.len() {
         fixtures::forget_migrations(&db, &names[first..]).await;
@@ -139,12 +142,25 @@ async fn assert_every_migration_reruns_after_a_rollback(
                 names[first]
             )
         });
-        // The list went in uncounted. The first re-run's recount must count it,
-        // and no later re-run may lose it.
         assert_eq!(
             fixtures::list_count(&db, "issuer-rerun").await,
             1,
             "list_count must match the issuer's lists after a rollback to before {} on {backend}",
+            names[first]
+        );
+        let version = db
+            .query_one(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT version FROM status_lists WHERE list_id = 'list-rerun'",
+            ))
+            .await
+            .unwrap()
+            .expect("the list must survive the re-run")
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(
+            version, 7,
+            "a re-run must keep the list's version after a rollback to before {} on {backend}",
             names[first]
         );
     }

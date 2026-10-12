@@ -997,10 +997,7 @@ jobs:
           fi
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
-          # A pod of the new release may have migrated the database before the upgrade
-          # failed. The release Helm restores then cannot start a new pod until the
-          # migration records are deleted, even though the rollback itself succeeds and
-          # its running pods keep serving, so say so where the operator is looking.
+          # A clean-looking rollback can still leave migration records the old release cannot start on.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \

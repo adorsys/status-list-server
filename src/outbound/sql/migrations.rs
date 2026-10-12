@@ -499,7 +499,7 @@ pub(crate) mod add_status_list_version {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Adds the version column to the status_lists table and backfills it.
+        /// Adds the version column to the status_lists table.
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             // MySQL commits the ALTER on its own, so a failed backfill leaves the
@@ -519,32 +519,13 @@ pub(crate) mod add_status_list_version {
                     )
                     .await?;
             }
-
-            // Backfill pre-existing rows so their concurrency guard is
-            // immediately usable: the first post-migration update expects
-            // `version = 1` and matches. `updated_at` is left untouched.
-            let update_stmt = sea_query::Query::update()
-                .table(StatusLists::Table)
-                .value(StatusLists::Version, 1)
-                .to_owned();
-            manager
-                .get_connection()
-                .execute(manager.get_database_backend().build(&update_stmt))
-                .await
-                .map(|_| ())
+            // No backfill: DEFAULT 1 fills existing rows, and a re-run must not reset versions.
+            Ok(())
         }
 
-        /// Removes the version column from the status_lists table
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusLists::Table)
-                        .drop_column(StatusLists::Version)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -595,15 +576,8 @@ pub(crate) mod add_status_list_history_version {
             Ok(())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusListHistory::Table)
-                        .drop_column(StatusListHistory::Version)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
