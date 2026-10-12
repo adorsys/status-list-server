@@ -369,6 +369,16 @@ done
         env = model['services']['app']['environment']
         self.assertEqual(env.get('APP_SERVER__HOST'), '${APP_SERVER__HOST:-0.0.0.0}')
 
+    def test_compose_leaves_database_split_fields_empty(self):
+        import yaml
+        model = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())
+        env = model['services']['app']['environment']
+        self.assertEqual(env.get('APP_DATABASE__HOST'), '${APP_DATABASE__HOST:-}')
+        self.assertEqual(env.get('APP_DATABASE__PORT'), '${APP_DATABASE__PORT:-}')
+        self.assertEqual(env.get('APP_DATABASE__USERNAME'), '${APP_DATABASE__USERNAME:-}')
+        self.assertEqual(env.get('APP_DATABASE__PASSWORD'), '${APP_DATABASE__PASSWORD:-}')
+        self.assertEqual(env.get('APP_DATABASE__NAME'), '${APP_DATABASE__NAME:-}')
+
     def test_ci_versions_match_local_pins(self):
         import json
         import re

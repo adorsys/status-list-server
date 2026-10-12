@@ -681,10 +681,30 @@ jobs:
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
               if environment.get("APP_SERVER__HOST") != "0.0.0.0":
                   raise SystemExit(f"{label}: APP_SERVER__HOST must default to 0.0.0.0 inside the container")
+              if label == "default":
+                  for split_key in ("APP_DATABASE__HOST", "APP_DATABASE__PORT", "APP_DATABASE__USERNAME", "APP_DATABASE__PASSWORD", "APP_DATABASE__NAME"):
+                      if environment.get(split_key):
+                          raise SystemExit(f"{label}: default Compose config must not inject unconditional split database field {split_key}")
+
+          with open(".env", "w") as f:
+              f.write("APP_DATABASE__BACKEND=sqlite\nAPP_DATABASE__URL=sqlite::memory:?cache=shared\n")
+          try:
+              url_only_config = json.loads(subprocess.check_output(
+                  ["docker", "compose", "config", "--format", "json"],
+                  text=True,
+              ))["services"]["app"]["environment"]
+              if url_only_config.get("APP_DATABASE__URL") != "sqlite::memory:?cache=shared":
+                  raise SystemExit("URL-only check: APP_DATABASE__URL was not passed to container")
+              for split_key in ("APP_DATABASE__HOST", "APP_DATABASE__USERNAME", "APP_DATABASE__PASSWORD", "APP_DATABASE__NAME"):
+                  if url_only_config.get(split_key):
+                      raise SystemExit(f"URL-only check: explicit URL received unwanted split field {split_key}={url_only_config[split_key]}")
+          finally:
+              if os.path.exists(".env"):
+                  os.remove(".env")
 
           postgres_config = json.loads(subprocess.check_output(
               ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
-              env={**os.environ, "FEATURES": "postgres"},
+              env={**os.environ, "FEATURES": "postgres", "APP_DATABASE__HOST": "db"},
               text=True,
           ))
           postgres_app = postgres_config["services"]["app"]
@@ -722,7 +742,7 @@ jobs:
 
           cleanup() {
             docker compose down --volumes --remove-orphans
-            rm -f .env.partial
+            rm -f .env .env.partial
           }
           trap cleanup EXIT
 
@@ -750,7 +770,17 @@ jobs:
           docker compose down --volumes --remove-orphans
           rm -f .env.partial
 
-          # 3. Test template .env startup
+          # 3. Test URL-only database configuration regression check
+          cat << 'EOF' > .env
+          APP_DATABASE__BACKEND=sqlite
+          APP_DATABASE__URL=sqlite::memory:?cache=shared
+          EOF
+          docker compose up -d
+          wait_until_ready
+          docker compose down --volumes --remove-orphans
+          rm -f .env
+
+          # 4. Test template .env startup
           docker compose --env-file .env.template up -d
           wait_until_ready
 
