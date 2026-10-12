@@ -1,25 +1,10 @@
 # Performance / load-validation tests
 
-This workspace holds the **performance / load-validation tests** for the Status
-List Server. It is independent of the specific load-generation harness: the
-tooling is described here as the *current implementation* so the workspace
-contract is not tied to one tool. Today the harness is
-[Artillery](https://www.artillery.io/) (`artillery@2.0.34`), invoked through the
-`npm` scripts below.
-
-> **Swapping the harness.** Replacing the load generator means updating the
-> `npm` scripts in [`package.json`](package.json) and the scenario files in
-> [`tests/`](tests/) only — the workspace layout, the generated
-> `scripts/test-tokens.json` / `scripts/seed-lists.json` contract, and this
-> documentation remain tool-agnostic.
->
-> **Performance vs correctness.** The suites in `perf/` validate behaviour
-> *under load* (latency percentiles, error rates, concurrency). They are distinct
-> from the correctness tests in the repository root (`cargo test`, `tests/`),
-> which assert functional behaviour. These suites exercise a *local* server and
-> are **not** a claim about production capacity — treat any number produced here
-> as a signal about the machine and configuration they ran on, not the capacity
-> of a production deployment.
+Performance and load-validation tests for the Status List Server, currently
+implemented with [Artillery](https://www.artillery.io/) and run through the
+`npm` scripts below. They measure latency and error rates under load against a
+local server. They do not replace the correctness tests (`cargo test`), and
+their results describe the machine they ran on, not production capacity.
 
 This suite contains four tests exercising the StatusList Server:
 
@@ -66,10 +51,8 @@ flows work on a fresh server — without registration the token's `iss` is
 unknown and every authenticated request returns `401 issuer_not_found` — and it
 gives the read scenarios real list IDs to query.
 
-Registering the issuer used to be attempted from a harness `before:` hook, but
-that hook does not execute processor `function:` steps in the current Artillery
-version, so the registration silently never ran. Running it as a Node script
-before the load is deterministic and applies to every suite.
+Setup runs as a separate Node script rather than an Artillery `before:` hook,
+which does not execute processor `function:` steps.
 
 ## Rate limits
 
@@ -126,12 +109,12 @@ npm run test:all
 ```
 
 Each test config declares `ensure` thresholds (max error rate, latency
-percentiles). With the `ensure` plugin enabled, the harness fails the run if a
+percentiles). With the `ensure` plugin enabled, Artillery fails the run if a
 threshold is breached.
 
 ## Run a test and capture a JSON report
 
-Every test has a `:report` variant that writes the raw harness report (JSON)
+Every test has a `:report` variant that writes the raw Artillery report (JSON)
 into `results/` (git-ignored):
 
 ```bash
@@ -141,7 +124,7 @@ npm run test:spike:report  # -> results/spike-test.json
 npm run test:auth:report   # -> results/auth-test.json
 ```
 
-The current harness's `artillery report` command is deprecated and no longer
+Artillery's `artillery report` command is deprecated and no longer
 generates an HTML report, so the scripts stop after writing the JSON report to
 `results/`. Inspect the JSON files directly or pipe them into other reporting
 tooling.
