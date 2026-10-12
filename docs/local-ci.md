@@ -93,16 +93,24 @@ pinned action references. Release variants are read directly from CI.yml. All
 CI Helm jobs explicitly pin the same version.
 Some versions come from pinned action implementations rather than workflow
 inputs: cargo-deny-action v2.1.1 embeds cargo-deny 0.20.2;
-markdownlint-cli2-action v24.1.0 embeds markdownlint-cli2 0.23.1;
-setup-tombi v1.2.4 defaults to Tombi 1.2.4; trivy-action v0.36.0 defaults to
+setup-tombi v1.7.3 defaults to Tombi 1.7.3; trivy-action v0.36.0 defaults to
 Trivy 0.70.0. Zizmor, OpenTelemetry Collector, Prometheus, and Jaeger use the same
 digest-pinned images as CI. Multi-platform manifest digests preserve architecture
 selection while preventing mutable tags from changing the checked image. A matching
 native Trivy is accepted; otherwise the runner uses its digest-pinned container with a persistent cache.
 Helm downloads are verified against the published SHA-256 checksum. Node tools
-use a committed lockfile with `npm ci`; Python fallback dependencies use hashes
+use a committed lockfile with `npm ci`; the Markdown workflow installs that same
+lockfile and runs markdownlint-cli2 0.23.3 directly. Python fallback dependencies use hashes
 for every pinned package. Broken fallback virtual environments are removed on
 installation failure.
+
+The demo dependency export gate additionally uses uv 0.12.24. Run it from `demo`
+with `uv lock --check`, then `uv export --locked --format requirements-txt -o requirements.txt`
+and `git diff --exit-code -- requirements.txt`. It is not part of the local Rust
+runner; it checks the independently maintained notebook environment.
+
+To refresh local CI's Python lock from its direct dependency input, run
+`uv pip compile scripts/local-ci/requirements.in --upgrade --generate-hashes --no-header --output-file scripts/local-ci/requirements.txt`.
 
 ## Verification and limits
 

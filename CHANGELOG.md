@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Refreshed compatible Rust, demo Python, performance-test, and local CI dependencies, and updated pinned GitHub Actions. This maintenance batch requires no new server configuration or data migration. Breaking upgrades and remaining npm security blockers are recorded in [the dependency audit](docs/dependency-audit-618.md).
+- Added automated npm and uv dependency updates and a CI check that keeps the demo's hashed pip requirements synchronized with its uv lockfile.
+
 - Bump the Helm chart to `0.5.0` for render-time validation changes.
 - Helm MySQL deployments are external-only and now require `statuslist.env.APP_DATABASE__HOST` plus an explicit `statuslist.image.tag` or `statuslist.image.digest`; when NetworkPolicy is enabled they also require `statuslist.networkPolicy.databaseEgress`.
 - The Helm chart intentionally accepts only `postgres` and `mysql` backends. Use non-Helm local/custom deployment paths for `sqlite` or `memory`.
@@ -23,5 +26,4 @@ All notable changes to this project will be documented in this file.
 
 - [f4ea335](
 https://github.com/adorsys/status-list-server/commit/f4ea335c21bc5b85aa9f39b2cc4ebc74c096471b) *(uncategorized)* Initialize project baseline for release automation by @Hermann-Core
-
 

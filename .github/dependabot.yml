@@ -22,11 +22,7 @@ updates:
           - "*"
         update-types:
           - "minor"
-      major-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "major"
+      # Leave major upgrades ungrouped so migrations remain independently reviewable.
     cooldown:
       default-days: 7
 
@@ -42,11 +38,65 @@ updates:
       github-actions-updates:
         patterns:
           - "*"
+        update-types:
+          - "patch"
+          - "minor"
     cooldown:
       default-days: 7
 
   - package-ecosystem: docker
     directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: npm
+    directories:
+      - /artillery-tests
+      - /scripts/local-ci/node
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    cooldown:
+      default-days: 7
+
+  # uv owns both pyproject.toml and uv.lock. Do not add a competing pip updater
+  # for demo/requirements.txt; regenerate that export in each uv update PR.
+  - package-ecosystem: uv
+    directory: /demo
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: pip
+    directory: /scripts/local-ci
     schedule:
       interval: weekly
       day: monday

@@ -928,7 +928,7 @@ mod tests {
             .await;
 
         // Wait for the slow v1 build to complete.
-        slow_build.await.expect("slow build task");
+        slow_build.await.expect("slow build task").expect("infallible");
 
         // Give moka a moment to process the invalidation.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
