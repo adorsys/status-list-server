@@ -206,11 +206,11 @@ running server):
    traffic just under them.
 
 The issuer key and signed JWTs used below are generated locally by
-`artillery-tests/scripts/token-generator.js` (`npm run generate-tokens` in
-`artillery-tests/`). They are git-ignored and never shipped with the repo, so
+`perf/scripts/token-generator.js` (`npm run generate-tokens` in
+`perf/`). They are git-ignored and never shipped with the repo, so
 generate them before running the simulation (Section 7b). The script writes a
-single `scripts/test-tokens.json` containing the issuer ID, the public JWK and
-the signed JWTs, all of which the following commands read.
+single `perf/scripts/test-tokens.json` containing the issuer ID, the public JWK
+and the signed JWTs, all of which the following commands read.
 
 ### 7a. Optional: restart the app with raised rate limits (recommended for the demo)
 
@@ -230,14 +230,14 @@ RUST_LOG=info \
 ### 7b. Generate tokens (once)
 
 ```bash
-cd artillery-tests
+cd perf
 npm install
 # token-generator.js resolves paths via __dirname, so it can run from anywhere;
-# here it is launched from inside artillery-tests:
+# here it is launched from inside perf:
 npm run generate-tokens
 ```
 
-This writes a single git-ignored `artillery-tests/scripts/test-tokens.json`.
+This writes a single git-ignored `perf/scripts/test-tokens.json`.
 It holds the public JWK and the signed JWTs (the private signing key is used
 only in-memory to sign and is never persisted), and the run scripts read the key
 from `test-tokens.json`, so the key always matches the tokens.
@@ -250,7 +250,7 @@ import requests, uuid, time, json
 
 BASE = "http://localhost:8000"
 s = requests.Session()
-data = json.load(open("artillery-tests/scripts/test-tokens.json"))
+data = json.load(open("perf/scripts/test-tokens.json"))
 jwk, issuer, tokens = data["publicKeyJwk"], data["issuerId"], data["tokens"]
 
 # 1) Register issuer with a JWK (202 = new, 409 = already exists)
