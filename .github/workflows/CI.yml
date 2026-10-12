@@ -702,19 +702,25 @@ jobs:
               if os.path.exists(".env"):
                   os.remove(".env")
 
-          postgres_config = json.loads(subprocess.check_output(
-              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
-              env={**os.environ, "FEATURES": "postgres", "APP_DATABASE__HOST": "db"},
-              text=True,
-          ))
-          postgres_app = postgres_config["services"]["app"]
-          postgres_environment = postgres_app["environment"]
-          if postgres_app["build"]["args"]["FEATURES"] != "postgres":
-              raise SystemExit("postgres: app image must compile the postgres feature")
-          if "APP_DATABASE__BACKEND" in postgres_environment:
-              raise SystemExit("postgres: Compose must not override the feature-selected backend")
-          if postgres_environment["APP_DATABASE__HOST"] != "db":
-              raise SystemExit("postgres: app must address the Compose PostgreSQL service")
+          with open(".env", "w") as f:
+              f.write("APP_DATABASE__HOST=db\n")
+          try:
+              postgres_config = json.loads(subprocess.check_output(
+                  ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
+                  env={**os.environ, "FEATURES": "postgres"},
+                  text=True,
+              ))
+              postgres_app = postgres_config["services"]["app"]
+              postgres_environment = postgres_app["environment"]
+              if postgres_app["build"]["args"]["FEATURES"] != "postgres":
+                  raise SystemExit("postgres: app image must compile the postgres feature")
+              if "APP_DATABASE__BACKEND" in postgres_environment:
+                  raise SystemExit("postgres: Compose must not override the feature-selected backend")
+              if postgres_environment.get("APP_DATABASE__HOST") != "db":
+                  raise SystemExit("postgres: app must address the Compose PostgreSQL service")
+          finally:
+              if os.path.exists(".env"):
+                  os.remove(".env")
 
           all_profiles = json.loads(subprocess.check_output(
               ["docker", "compose", "--profile", "*", "config", "--format", "json"],
@@ -775,13 +781,13 @@ jobs:
           APP_DATABASE__BACKEND=sqlite
           APP_DATABASE__URL=sqlite::memory:?cache=shared
           EOF
-          docker compose up -d
+          FEATURES=sqlite docker compose up -d --build
           wait_until_ready
           docker compose down --volumes --remove-orphans
           rm -f .env
 
           # 4. Test template .env startup
-          docker compose --env-file .env.template up -d
+          docker compose --env-file .env.template up -d --build
           wait_until_ready
 
   cargo-coverage:
