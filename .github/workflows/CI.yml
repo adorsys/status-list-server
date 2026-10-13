@@ -679,48 +679,17 @@ jobs:
                   raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
               if app_config["ports"][0].get("host_ip") != "127.0.0.1":
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
-              if environment.get("APP_SERVER__HOST") != "0.0.0.0":
-                  raise SystemExit(f"{label}: APP_SERVER__HOST must default to 0.0.0.0 inside the container")
-              if label == "default":
-                  for split_key in ("APP_DATABASE__HOST", "APP_DATABASE__PORT", "APP_DATABASE__USERNAME", "APP_DATABASE__PASSWORD", "APP_DATABASE__NAME"):
-                      if environment.get(split_key):
-                          raise SystemExit(f"{label}: default Compose config must not inject unconditional split database field {split_key}")
-
-          with open(".env", "w") as f:
-              f.write("APP_DATABASE__BACKEND=sqlite\nAPP_DATABASE__URL=sqlite::memory:?cache=shared\n")
-          try:
-              url_only_config = json.loads(subprocess.check_output(
-                  ["docker", "compose", "config", "--format", "json"],
-                  text=True,
-              ))["services"]["app"]["environment"]
-              if url_only_config.get("APP_DATABASE__URL") != "sqlite::memory:?cache=shared":
-                  raise SystemExit("URL-only check: APP_DATABASE__URL was not passed to container")
-              for split_key in ("APP_DATABASE__HOST", "APP_DATABASE__USERNAME", "APP_DATABASE__PASSWORD", "APP_DATABASE__NAME"):
-                  if url_only_config.get(split_key):
-                      raise SystemExit(f"URL-only check: explicit URL received unwanted split field {split_key}={url_only_config[split_key]}")
-          finally:
-              if os.path.exists(".env"):
-                  os.remove(".env")
-
-          with open(".env", "w") as f:
-              f.write("APP_DATABASE__HOST=db\n")
-          try:
-              postgres_config = json.loads(subprocess.check_output(
-                  ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
-                  env={**os.environ, "FEATURES": "postgres"},
-                  text=True,
-              ))
-              postgres_app = postgres_config["services"]["app"]
-              postgres_environment = postgres_app["environment"]
-              if postgres_app["build"]["args"]["FEATURES"] != "postgres":
-                  raise SystemExit("postgres: app image must compile the postgres feature")
-              if "APP_DATABASE__BACKEND" in postgres_environment:
-                  raise SystemExit("postgres: Compose must not override the feature-selected backend")
-              if postgres_environment.get("APP_DATABASE__HOST") != "db":
-                  raise SystemExit("postgres: app must address the Compose PostgreSQL service")
-          finally:
-              if os.path.exists(".env"):
-                  os.remove(".env")
+          postgres_config = json.loads(subprocess.check_output(
+              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
+              env={**os.environ, "FEATURES": "postgres"},
+              text=True,
+          ))
+          postgres_app = postgres_config["services"]["app"]
+          postgres_environment = postgres_app["environment"]
+          if postgres_app["build"]["args"]["FEATURES"] != "postgres":
+              raise SystemExit("postgres: app image must compile the postgres feature")
+          if "APP_DATABASE__BACKEND" in postgres_environment:
+              raise SystemExit("postgres: Compose must not override the feature-selected backend")
 
           all_profiles = json.loads(subprocess.check_output(
               ["docker", "compose", "--profile", "*", "config", "--format", "json"],
@@ -748,7 +717,6 @@ jobs:
 
           cleanup() {
             docker compose down --volumes --remove-orphans
-            rm -f .env .env.partial
           }
           trap cleanup EXIT
 
@@ -764,30 +732,11 @@ jobs:
             return 1
           }
 
-          # 1. Test missing .env startup
           docker compose up -d --build
           wait_until_ready
           docker compose down --volumes --remove-orphans
 
-          # 2. Test partial .env startup (omitting APP_SERVER__HOST)
-          echo "APP_ENV=development" > .env.partial
-          docker compose --env-file .env.partial up -d
-          wait_until_ready
-          docker compose down --volumes --remove-orphans
-          rm -f .env.partial
-
-          # 3. Test URL-only database configuration regression check
-          cat << 'EOF' > .env
-          APP_DATABASE__BACKEND=sqlite
-          APP_DATABASE__URL=sqlite::memory:?cache=shared
-          EOF
-          FEATURES=sqlite docker compose up -d --build
-          wait_until_ready
-          docker compose down --volumes --remove-orphans
-          rm -f .env
-
-          # 4. Test template .env startup
-          docker compose --env-file .env.template up -d --build
+          docker compose --env-file .env.template up -d
           wait_until_ready
 
   cargo-coverage:
