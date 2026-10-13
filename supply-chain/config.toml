@@ -778,7 +778,7 @@ version = "0.10.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.h2]]
-version = "0.4.16"
+version = "0.4.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.half]]
@@ -846,7 +846,7 @@ version = "0.4.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.hyper]]
-version = "1.11.0"
+version = "1.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.hyper-named-pipe]]
@@ -1222,27 +1222,27 @@ version = "0.32.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-appender-tracing]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-http]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-otlp]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-prometheus]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-proto]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry-semantic-conventions]]
@@ -1254,7 +1254,7 @@ version = "0.32.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.opentelemetry_sdk]]
-version = "0.33.0"
+version = "0.33.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ordered-float]]
@@ -1766,7 +1766,7 @@ version = "0.10.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.sha2]]
-version = "0.11.0"
+version = "0.11.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sharded-slab]]
@@ -1818,7 +1818,7 @@ version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.spki]]
-version = "0.8.0"
+version = "0.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqlx]]
@@ -2142,7 +2142,7 @@ version = "0.8.1"
 criteria = "safe-to-run"
 
 [[exemptions.uuid]]
-version = "1.24.1"
+version = "1.28.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
@@ -2166,7 +2166,7 @@ version = "2.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.want]]
-version = "0.3.1"
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasi]]

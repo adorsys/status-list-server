@@ -72,13 +72,13 @@ opt-level = 1
 
 [dependencies]
 # Async runtime and utilities
-tokio = { version = "1.5", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 arc-swap = "1.9"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
 # Web frameworks
-hyper = "1.10"
+hyper = "1.12"
 hyper-util = "0.1"
 reqwest = { version = "0.13", features = ["form", "json", "query"] }
 tower = "0.5"
@@ -92,7 +92,7 @@ moka = { version = "0.12", features = ["future"] }
 
 # Cryptography and Security
 aws-lc-rs = "1"
-pem = "4"
+pem = "4.0"
 pkcs8 = { version = "0.11", features = ["std"] }
 sec1 = { version = "0.8", features = ["alloc"] }
 der = { version = "0.8", features = ["alloc"] }
@@ -135,7 +135,7 @@ thiserror = "2.0"
 color-eyre = "0.6"
 
 # Utility Libraries
-uuid = { version = "1.23", features = ["serde", "v4"] }
+uuid = { version = "1.28", features = ["serde", "v4"] }
 base64 = "0.23"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
