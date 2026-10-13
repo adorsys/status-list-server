@@ -8,7 +8,7 @@ To initialize your local environment configuration:
 cp .env.template .env
 ```
 
-The `.env.template` file serves as a reference blueprint documenting all available environment variables, data types, and application defaults. Docker Compose automatically loads `.env` (when present) to inject container environment variables and resolve host string interpolations. `.env.template` is not loaded directly by Docker Compose, preventing unwanted placeholder overrides and configuration conflicts.
+Compose reads `.env` only; `.env.template` is a reference to copy from and is never loaded.
 
 ## Docker Compose profiles
 
@@ -51,6 +51,8 @@ APP_TELEMETRY__ENABLED=true \
 ```
 
 Profiles can be combined. To configure the server to use PostgreSQL and ACME, and export telemetry, set `GRAFANA_ADMIN_PASSWORD` and run:
+
+Database-backed builds need connection settings in `.env`; the PostgreSQL and MySQL profiles start the database services but do not provide the app's connection fields. The template contains local PostgreSQL defaults. For MySQL, set the `APP_DATABASE__*` connection values for MySQL. If you configure `APP_DATABASE__URL`, remove the split connection fields from `.env`.
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
