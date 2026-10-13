@@ -107,7 +107,7 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 matching Cargo feature to make it the server's default backend:
 
 ```bash
-FEATURES=postgres docker compose --profile postgres up --build
+FEATURES=postgres docker compose -f docker-compose.yml -f compose/postgres.yml --profile postgres up --build
 
 # Put the MySQL host, port, username, password, and database name in .env first.
 FEATURES=mysql docker compose --profile mysql up --build

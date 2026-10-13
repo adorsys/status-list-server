@@ -42,6 +42,7 @@ class ComposeBackendTests(unittest.TestCase):
             text=True,
             check=True,
         )
+        self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
 
     def test_plain_compose_does_not_forward_shell_database_settings(self):
@@ -54,9 +55,68 @@ class ComposeBackendTests(unittest.TestCase):
         app = config["services"]["app"]
         self.assertEqual(app["build"]["args"]["FEATURES"], "memory")
         env = app["environment"]
+        self.assertEqual(env["APP_SERVER__HOST"], "0.0.0.0")
         self.assertNotIn("APP_DATABASE__URL", env)
-        self.assertEqual(env["APP_DATABASE__HOST"], "db")
-        self.assertEqual(env["APP_DATABASE__PASSWORD"], "postgres")
+        self.assertNotIn("APP_DATABASE__HOST", env)
+        self.assertNotIn("APP_DATABASE__PASSWORD", env)
+
+    def test_partial_env_keeps_container_listener_reachable(self):
+        (self.project / ".env").write_text("APP_ENV=production\n", encoding="utf-8")
+        config = self.render()
+        env = config["services"]["app"]["environment"]
+        self.assertEqual(env["APP_SERVER__HOST"], "0.0.0.0")
+
+    def test_template_copied_to_env_renders_all_profiles_without_warnings(self):
+        shutil.copyfile(self.project / ".env.template", self.project / ".env")
+        config = self.render(profiles=("*",))
+        environment = config["services"]["app"]["environment"]
+        self.assertEqual(environment["APP_DATABASE__HOST"], "db")
+        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "postgres")
+
+    def test_postgres_override_matches_database_credentials_and_fixes_address(self):
+        defaults = self.render("postgres", ("postgres",), {"FEATURES": "postgres"})
+        default_app = defaults["services"]["app"]["environment"]
+        self.assertEqual(default_app["APP_DATABASE__HOST"], "db")
+        self.assertEqual(default_app["APP_DATABASE__PORT"], "5432")
+        self.assertEqual(default_app["APP_DATABASE__USERNAME"], "postgres")
+        self.assertEqual(default_app["APP_DATABASE__PASSWORD"], "postgres")
+        self.assertEqual(default_app["APP_DATABASE__NAME"], "status-list")
+
+        (self.project / ".env").write_text(
+            "POSTGRES_USER=custom-user\n"
+            "POSTGRES_PASSWORD=custom-password\n"
+            "POSTGRES_DB=custom-db\n",
+            encoding="utf-8",
+        )
+        config = self.render("postgres", ("postgres",), {
+            "FEATURES": "postgres",
+            "APP_DATABASE__HOST": "localhost",
+        })
+        app = config["services"]["app"]
+        environment = app["environment"]
+        self.assertEqual(app["build"]["args"]["FEATURES"], "postgres")
+        self.assertEqual(environment["APP_DATABASE__HOST"], "db")
+        self.assertEqual(environment["APP_DATABASE__PORT"], "5432")
+        self.assertEqual(environment["APP_DATABASE__USERNAME"], "custom-user")
+        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "custom-password")
+        self.assertEqual(environment["APP_DATABASE__NAME"], "custom-db")
+        database = config["services"]["db"]["environment"]
+        self.assertEqual(database["POSTGRES_USER"], environment["APP_DATABASE__USERNAME"])
+        self.assertEqual(database["POSTGRES_PASSWORD"], environment["APP_DATABASE__PASSWORD"])
+        self.assertEqual(database["POSTGRES_DB"], environment["APP_DATABASE__NAME"])
+
+    def test_url_only_database_config_does_not_gain_split_fields(self):
+        (self.project / ".env").write_text(
+            "APP_DATABASE__BACKEND=sqlite\n"
+            "APP_DATABASE__URL=sqlite::memory:?cache=shared\n",
+            encoding="utf-8",
+        )
+        config = self.render()
+        env = config["services"]["app"]["environment"]
+        self.assertEqual(env["APP_DATABASE__BACKEND"], "sqlite")
+        self.assertEqual(env["APP_DATABASE__URL"], "sqlite::memory:?cache=shared")
+        for key in ("HOST", "PORT", "USERNAME", "PASSWORD", "NAME"):
+            self.assertNotIn(f"APP_DATABASE__{key}", env)
 
     def test_mysql_uses_the_same_custom_credentials_for_app_and_service(self):
         (self.project / ".env").write_text(

@@ -53,12 +53,14 @@ set keeps cardinality in check.
 
 ### Why these targets
 
-- **p95 < 300 ms latency**: the SLO from the artillery `load-test.yml` commits to
+- **p95 < 300 ms latency**: the SLO from the performance load test
+  (`perf/tests/load-test.yml`) commits to
   p95 < 800 ms under load; production target is set tighter (300 ms) to leave
   headroom so the loaded test does not itself breach the objective.
 - **99.5% success**: err budget of 0.5%, chosen so a single cloud-provider
   routing hiccup or DB blip does not consume the whole month at once while still
-  holding the service to a high bar. Matches the artillery `err < 5%` load test
+  holding the service to a high bar. Matches the performance load test's
+  `err < 5%` threshold
   with margin.
 - **≥ 85% cache hit**: token reads are the traffic path; a hit avoids a DB round
   trip. 85% is conservative — a well-warmed status list should sit near 100%,
