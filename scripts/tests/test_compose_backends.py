@@ -42,6 +42,7 @@ class ComposeBackendTests(unittest.TestCase):
             text=True,
             check=True,
         )
+        self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
 
     def test_plain_compose_does_not_forward_shell_database_settings(self):
@@ -64,6 +65,24 @@ class ComposeBackendTests(unittest.TestCase):
         config = self.render()
         env = config["services"]["app"]["environment"]
         self.assertEqual(env["APP_SERVER__HOST"], "0.0.0.0")
+
+    def test_template_copied_to_env_renders_all_profiles_without_warnings(self):
+        shutil.copyfile(self.project / ".env.template", self.project / ".env")
+        config = self.render(profiles=("*",))
+        environment = config["services"]["app"]["environment"]
+        self.assertEqual(environment["APP_DATABASE__HOST"], "db")
+        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "postgres")
+
+    def test_postgres_override_supplies_database_defaults(self):
+        config = self.render("postgres", ("postgres",), {"FEATURES": "postgres"})
+        app = config["services"]["app"]
+        environment = app["environment"]
+        self.assertEqual(app["build"]["args"]["FEATURES"], "postgres")
+        self.assertEqual(environment["APP_DATABASE__HOST"], "db")
+        self.assertEqual(environment["APP_DATABASE__PORT"], "5432")
+        self.assertEqual(environment["APP_DATABASE__USERNAME"], "postgres")
+        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "postgres")
+        self.assertEqual(environment["APP_DATABASE__NAME"], "status-list")
 
     def test_url_only_database_config_does_not_gain_split_fields(self):
         (self.project / ".env").write_text(

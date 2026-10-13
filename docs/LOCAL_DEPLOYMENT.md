@@ -9,6 +9,7 @@ cp .env.template .env
 ```
 
 Compose reads `.env` only; `.env.template` is a reference to copy from and is never loaded.
+For variables listed under `environment:` in `docker-compose.yml`, Compose uses the shell first, then `.env`, then the Compose default. Other variables in `.env` reach the container through `env_file`; Compose does not pass unrelated shell variables through automatically. `APP_TELEMETRY__OTLP_ENDPOINT` is fixed in the Compose file, so setting it in `.env` has no effect. Quote values containing `$` with single quotes, for example `APP_X='a$b'`.
 
 ## Docker Compose profiles
 
@@ -24,6 +25,8 @@ Compose reads `.env` only; `.env.template` is a reference to copy from and is ne
 - `redis`: Redis.
 
 > **NOTE**: The `postgres` and `mysql` profiles are alternatives. Do not activate both for the same application instance.
+
+Database-backed builds read their connection settings from `.env`; the `postgres` and `mysql` profiles only start the database. The template's `APP_DATABASE__*` values match the `postgres` profile; for `mysql`, use the MySQL values commented in the template. With `APP_DATABASE__URL`, remove the split fields.
 
 Start one optional subsystem beside the default in-memory server:
 
@@ -52,11 +55,10 @@ APP_TELEMETRY__ENABLED=true \
 
 Profiles can be combined. To configure the server to use PostgreSQL and ACME, and export telemetry, set `GRAFANA_ADMIN_PASSWORD` and run:
 
-Database-backed builds need connection settings in `.env`; the PostgreSQL and MySQL profiles start the database services but do not provide the app's connection fields. The template contains local PostgreSQL defaults. For MySQL, set the `APP_DATABASE__*` connection values for MySQL. If you configure `APP_DATABASE__URL`, remove the split connection fields from `.env`.
-
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 

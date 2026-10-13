@@ -635,6 +635,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import shutil
           import subprocess
 
           expected = {
@@ -658,8 +659,10 @@ jobs:
 
           for label, compose_args in (
               ("default", []),
-              (".env.template", ["--env-file", ".env.template"]),
+              (".env.template copied to .env", []),
           ):
+              if label != "default":
+                  shutil.copyfile(".env.template", ".env")
               app_config = json.loads(subprocess.check_output(
                   ["docker", "compose", *compose_args, "config", "--format", "json"],
                   text=True,
@@ -679,8 +682,9 @@ jobs:
                   raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
               if app_config["ports"][0].get("host_ip") != "127.0.0.1":
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
+
           postgres_config = json.loads(subprocess.check_output(
-              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
+              ["docker", "compose", "-f", "compose/postgres.yml", "--profile", "postgres", "config", "--format", "json"],
               env={**os.environ, "FEATURES": "postgres"},
               text=True,
           ))
@@ -732,11 +736,13 @@ jobs:
             return 1
           }
 
+          rm -f .env
           docker compose up -d --build
           wait_until_ready
           docker compose down --volumes --remove-orphans
 
-          docker compose --env-file .env.template up -d
+          cp .env.template .env
+          docker compose up -d
           wait_until_ready
 
   cargo-coverage:
