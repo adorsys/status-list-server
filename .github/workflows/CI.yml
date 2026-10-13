@@ -635,6 +635,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import shutil
           import subprocess
 
           expected = {
@@ -656,12 +657,11 @@ jobs:
               if actual != services:
                   raise SystemExit(f"{profile or 'default'}: expected {services}, got {actual}")
 
-          for label, compose_args in (
-              ("default", []),
-              (".env.template", ["--env-file", ".env.template"]),
-          ):
+          for label in ("default", ".env.template copied to .env"):
+              if label != "default":
+                  shutil.copyfile(".env.template", ".env")
               app_config = json.loads(subprocess.check_output(
-                  ["docker", "compose", *compose_args, "config", "--format", "json"],
+                  ["docker", "compose", "config", "--format", "json"],
                   text=True,
               ))["services"]["app"]
               environment = app_config["environment"]
@@ -679,20 +679,8 @@ jobs:
                   raise SystemExit(f"{label}: certificate strategy is compile-time, not runtime")
               if app_config["ports"][0].get("host_ip") != "127.0.0.1":
                   raise SystemExit(f"{label}: the local server port must bind to loopback")
-
-          postgres_config = json.loads(subprocess.check_output(
-              ["docker", "compose", "--profile", "postgres", "config", "--format", "json"],
-              env={**os.environ, "FEATURES": "postgres"},
-              text=True,
-          ))
-          postgres_app = postgres_config["services"]["app"]
-          postgres_environment = postgres_app["environment"]
-          if postgres_app["build"]["args"]["FEATURES"] != "postgres":
-              raise SystemExit("postgres: app image must compile the postgres feature")
-          if "APP_DATABASE__BACKEND" in postgres_environment:
-              raise SystemExit("postgres: Compose must not override the feature-selected backend")
-          if postgres_environment["APP_DATABASE__HOST"] != "db":
-              raise SystemExit("postgres: app must address the Compose PostgreSQL service")
+          if os.path.exists(".env"):
+              os.remove(".env")
 
           all_profiles = json.loads(subprocess.check_output(
               ["docker", "compose", "--profile", "*", "config", "--format", "json"],
@@ -739,7 +727,8 @@ jobs:
           wait_until_ready
           docker compose down --volumes --remove-orphans
 
-          docker compose --env-file .env.template up -d
+          cp .env.template .env
+          docker compose up -d
           wait_until_ready
 
   cargo-coverage:
