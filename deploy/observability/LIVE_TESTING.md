@@ -61,7 +61,8 @@ Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first.
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 

@@ -60,7 +60,8 @@ Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use P
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 
@@ -216,15 +217,16 @@ cargo install --locked cargo-audit --version 0.22.2
 cargo install --locked cargo-machete --version 0.9.2
 ```
 
-`compose` selects the MySQL, SQLite, or Redis override file when needed. MySQL uses `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from the shell or `.env` for both the database service and application. SQLite stores its database in the `sqlitedata` named volume, preserving lists across container restarts; `down --volumes` deletes that data. Plain Compose continues to read database configuration from its environment files. The overrides can also be used directly:
+`compose` selects the PostgreSQL, MySQL, SQLite, or Redis override file when needed. MySQL uses `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from the shell or `.env` for both the database service and application. SQLite stores its database in the `sqlitedata` named volume, preserving lists across container restarts; `down --volumes` deletes that data. Plain Compose reads runtime values from `.env`. The overrides can also be used directly:
 
 ```bash
+docker compose -f docker-compose.yml -f compose/postgres.yml --profile postgres up -d --build
 docker compose -f docker-compose.yml -f compose/mysql.yml --profile mysql up -d --build
 docker compose -f docker-compose.yml -f compose/sqlite.yml up -d --build
 ```
 
 These local overrides select their connection mode. Remove incompatible
-`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the MySQL override, and password-file entries before using SQLite.
+`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the PostgreSQL or MySQL override, and password-file entries before using SQLite.
 
 `ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
 
