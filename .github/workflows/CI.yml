@@ -374,7 +374,7 @@ jobs:
           version: v4.2.4
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           # Same pin as the coverage job below, so both run the same test harness.
           tool: nextest@0.9.101
@@ -453,7 +453,7 @@ jobs:
           cache: false
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-machete@0.9.2
 
@@ -477,7 +477,7 @@ jobs:
           cache: false
 
       - name: Install cargo-vet
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-vet@0.10.2
 
@@ -498,7 +498,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Typos
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: typos-cli@1.49.0
 
@@ -516,7 +516,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Taplo
-        uses: tombi-toml/setup-tombi@f6c2e810bb1ae4728d9269b7e354a3fd711a88ed # v1.7.2
+        uses: tombi-toml/setup-tombi@ebc771afde2bfb9192c91338a71b2c5d6152e2c3 # v1.8.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -748,7 +748,7 @@ jobs:
           cache-shared-key: "coverage"
 
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           # Both pinned: cargo-llvm-cov and nextest have to agree on the test-runner
           # interface, so they are bumped together rather than floating independently.
@@ -758,7 +758,7 @@ jobs:
         run: cargo llvm-cov nextest --workspace --all-features --html --output-dir target/llvm-cov/html
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-report
           path: target/llvm-cov/html

@@ -262,7 +262,7 @@ jobs:
           done
 
       - name: Upload built digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-digest-${{ matrix.variant.suffix }}
           path: image-digest-${{ matrix.variant.suffix }}.txt
@@ -491,7 +491,7 @@ jobs:
         # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
         # Failing here would only add a second red step.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-scan-reports-${{ matrix.variant.suffix }}
           path: |
@@ -505,7 +505,7 @@ jobs:
         # Separate artifact: a lost SBOM must not take down the upload carrying the
         # scan results. Absence is caught by the assertion below instead.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-sboms-${{ matrix.variant.suffix }}
           path: |
@@ -856,7 +856,7 @@ jobs:
       - name: Install kubectl
         # v5.1.0, not v5.0.1: that SHA is the v5.1.0 tag upstream. Both sides of this
         # merge pinned the same commit and only disagreed about the comment.
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
