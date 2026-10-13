@@ -26,7 +26,7 @@ For variables listed under `environment:` in `docker-compose.yml`, Compose uses 
 
 > **NOTE**: The `postgres` and `mysql` profiles are alternatives. Do not activate both for the same application instance.
 
-Database-backed builds read their connection settings from `.env`; the `postgres` and `mysql` profiles only start the database. The template's `APP_DATABASE__*` values match the `postgres` profile; for `mysql`, use the MySQL values commented in the template. With `APP_DATABASE__URL`, remove the split fields.
+Database-backed builds read their connection settings from `.env`; the `postgres` and `mysql` profiles start the local database and set matching app connection fields. The template's `APP_DATABASE__*` values match the `postgres` profile; for `mysql`, use the MySQL values commented in the template. For an external database URL, remove the split fields from `.env` and do not select the local database profile or its override file.
 
 Start one optional subsystem beside the default in-memory server:
 

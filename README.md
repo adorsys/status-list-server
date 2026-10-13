@@ -226,7 +226,7 @@ docker compose -f docker-compose.yml -f compose/sqlite.yml up -d --build
 ```
 
 These local overrides select their connection mode. Remove incompatible
-`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the MySQL override, and password-file entries before using SQLite.
+`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the PostgreSQL or MySQL override, and password-file entries before using SQLite.
 
 `ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
 

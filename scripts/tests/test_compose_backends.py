@@ -73,16 +73,37 @@ class ComposeBackendTests(unittest.TestCase):
         self.assertEqual(environment["APP_DATABASE__HOST"], "db")
         self.assertEqual(environment["APP_DATABASE__PASSWORD"], "postgres")
 
-    def test_postgres_override_supplies_database_defaults(self):
-        config = self.render("postgres", ("postgres",), {"FEATURES": "postgres"})
+    def test_postgres_override_matches_database_credentials_and_fixes_address(self):
+        defaults = self.render("postgres", ("postgres",), {"FEATURES": "postgres"})
+        default_app = defaults["services"]["app"]["environment"]
+        self.assertEqual(default_app["APP_DATABASE__HOST"], "db")
+        self.assertEqual(default_app["APP_DATABASE__PORT"], "5432")
+        self.assertEqual(default_app["APP_DATABASE__USERNAME"], "postgres")
+        self.assertEqual(default_app["APP_DATABASE__PASSWORD"], "postgres")
+        self.assertEqual(default_app["APP_DATABASE__NAME"], "status-list")
+
+        (self.project / ".env").write_text(
+            "POSTGRES_USER=custom-user\n"
+            "POSTGRES_PASSWORD=custom-password\n"
+            "POSTGRES_DB=custom-db\n",
+            encoding="utf-8",
+        )
+        config = self.render("postgres", ("postgres",), {
+            "FEATURES": "postgres",
+            "APP_DATABASE__HOST": "localhost",
+        })
         app = config["services"]["app"]
         environment = app["environment"]
         self.assertEqual(app["build"]["args"]["FEATURES"], "postgres")
         self.assertEqual(environment["APP_DATABASE__HOST"], "db")
         self.assertEqual(environment["APP_DATABASE__PORT"], "5432")
-        self.assertEqual(environment["APP_DATABASE__USERNAME"], "postgres")
-        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "postgres")
-        self.assertEqual(environment["APP_DATABASE__NAME"], "status-list")
+        self.assertEqual(environment["APP_DATABASE__USERNAME"], "custom-user")
+        self.assertEqual(environment["APP_DATABASE__PASSWORD"], "custom-password")
+        self.assertEqual(environment["APP_DATABASE__NAME"], "custom-db")
+        database = config["services"]["db"]["environment"]
+        self.assertEqual(database["POSTGRES_USER"], environment["APP_DATABASE__USERNAME"])
+        self.assertEqual(database["POSTGRES_PASSWORD"], environment["APP_DATABASE__PASSWORD"])
+        self.assertEqual(database["POSTGRES_DB"], environment["APP_DATABASE__NAME"])
 
     def test_url_only_database_config_does_not_gain_split_fields(self):
         (self.project / ".env").write_text(
