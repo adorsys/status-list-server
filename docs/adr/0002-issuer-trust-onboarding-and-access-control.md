@@ -25,7 +25,7 @@ One part of the existing design is sound and is kept. Issuers authenticate every
 
 ## Decision
 
-The statements below that use *must* or *never* are constraints on every implementation. They hold through any refactoring, and changing one requires a new ADR that supersedes this one. Concrete values, such as token type names, routes, configuration keys and defaults, are not part of this decision; they are in the issuer trust contract listed under References.
+The statements below that use *must* or *never* are constraints on every implementation. They hold through any refactoring, and changing one requires a new ADR that supersedes this one. Concrete values, such as token type names, routes, configuration keys and defaults, are not part of this decision.
 
 ### Deployment profiles
 
@@ -152,7 +152,6 @@ Keeping a single listener and controlling exposure with path-based proxy rules w
 
 ## References
 
-- Issuer trust contract: `docs/issuer-trust-contract.md`, `docs/openapi-admin.yaml` and the registry schema in `docs/schemas/`. These hold the concrete values (token type names, header and claim rules, routes, configuration keys and defaults, tier values, error codes and the registry format), which may change without amending this ADR as long as the decision above still holds.
 - RFC 6750, *The OAuth 2.0 Authorization Framework: Bearer Token Usage*
 - RFC 7515, *JSON Web Signature*; RFC 7517, *JSON Web Key*; RFC 7519, *JSON Web Token*
 - RFC 7638, *JSON Web Key (JWK) Thumbprint*
