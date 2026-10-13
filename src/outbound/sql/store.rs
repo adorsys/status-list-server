@@ -5,7 +5,8 @@ use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
-    Set, Statement, TransactionTrait, Value, sea_query::Expr,
+    Set, Statement, TransactionTrait, Value,
+    sea_query::{Expr, ExprTrait},
 };
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::warn;
@@ -730,7 +731,7 @@ impl SeaOrmStore<StatusListRecord> {
             let lock_result = status_lists::Entity::update_many()
                 .col_expr(
                     status_lists::Column::UpdatedAt,
-                    Expr::col(status_lists::Column::UpdatedAt).into(),
+                    Expr::col(status_lists::Column::UpdatedAt),
                 )
                 .filter(status_lists::Column::ListId.eq(list_id))
                 .exec(&txn)
@@ -974,7 +975,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 };
 
                 let count = (*db)
-                    .execute(Statement::from_sql_and_values(
+                    .execute_raw(Statement::from_sql_and_values(
                         backend,
                         sql,
                         vec![Value::from(cutoff), Value::from(BATCH_SIZE)],

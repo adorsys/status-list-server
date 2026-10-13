@@ -98,10 +98,13 @@ fn contention_code(err: &sea_orm::DbErr) -> Option<&'static str> {
     {
         use sea_orm::{DbErr, RuntimeErr, SqlxError};
 
-        let (DbErr::Exec(RuntimeErr::SqlxError(SqlxError::Database(db)))
-        | DbErr::Query(RuntimeErr::SqlxError(SqlxError::Database(db)))) = err
-        else {
-            return None;
+        let db = match err {
+            DbErr::Exec(RuntimeErr::SqlxError(inner))
+            | DbErr::Query(RuntimeErr::SqlxError(inner)) => match inner.as_ref() {
+                SqlxError::Database(db) => db,
+                _ => return None,
+            },
+            _ => return None,
         };
 
         #[cfg(feature = "mysql")]

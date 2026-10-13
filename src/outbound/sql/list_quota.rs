@@ -12,7 +12,7 @@ use std::fmt::Write;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeriveIden, FromQueryResult,
     Statement,
-    sea_query::{Expr, LockType, Query},
+    sea_query::{Expr, ExprTrait, LockType, Query},
 };
 
 use super::migrations::RECOUNT_LIST_COUNT_SQL;
@@ -241,7 +241,7 @@ async fn read_switch<C: ConnectionTrait>(conn: &C, lock: Option<LockType>) -> Re
     if let Some(lock) = lock {
         query.lock(lock);
     }
-    conn.query_one(conn.get_database_backend().build(&query))
+    conn.query_one_raw(conn.get_database_backend().build(&query))
         .await?
         .ok_or_else(|| DbErr::RecordNotFound("the list_quota row is missing".to_string()))?
         .try_get_by_index(0)
@@ -253,7 +253,7 @@ async fn set_switch(txn: &DatabaseTransaction, enforced: bool) -> Result<(), DbE
         .value(ListQuota::Enforced, enforced)
         .and_where(Expr::col(ListQuota::Id).eq(ROW_ID))
         .to_owned();
-    txn.execute(txn.get_database_backend().build(&update))
+    txn.execute_raw(txn.get_database_backend().build(&update))
         .await?;
     Ok(())
 }
