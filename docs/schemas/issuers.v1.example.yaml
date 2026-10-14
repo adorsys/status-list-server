@@ -1,0 +1,40 @@
+# Example issuer trust registry (docs/schemas/issuers.v1.schema.json).
+# Public keys only: this file needs integrity, not confidentiality.
+# Every key below is synthetic and has no matching private key anywhere.
+version: 1
+
+issuers:
+  - id: "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
+    aggregation_id: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+    display_name: "Acme Wallet Issuer"
+    tier: standard
+    keys:
+      # Current key, retired at the end of the rotation overlap.
+      - kid: "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50"
+        alg: ES256
+        jwk:
+          kty: EC
+          crv: P-256
+          x: "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY"
+          y: "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"
+        not_after: "2026-11-15T00:00:00Z"
+      # Next key, added ahead of the switch.
+      - kid: "QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M"
+        alg: ES256
+        jwk:
+          kty: EC
+          crv: P-256
+          x: "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY"
+          y: "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+        not_before: "2026-10-12T00:00:00Z"
+
+admins:
+  - id: "portal-backend"
+    scopes: ["issuers:read", "issuers:write"]
+    keys:
+      - kid: "CO8SkimGYd7niQ8KCHGbmaO7KFA3ZvNwwYLTYLqyaZ8"
+        alg: EdDSA
+        jwk:
+          kty: OKP
+          crv: Ed25519
+          x: "qoyIh_A133b772ZBFHksvC6Zq18NygYQRSDeHVnGRDM"

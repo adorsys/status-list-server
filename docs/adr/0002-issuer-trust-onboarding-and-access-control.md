@@ -93,7 +93,7 @@ Every issuer belongs to a tier, and limits are enforced per authenticated issuer
 
 ### Self-registration
 
-Unauthenticated self-registration is removed. It survives only as an explicit development switch, and is never available in a production environment. Migrating existing issuers to the registry preserves both of their identifiers. Because this changes the external contract, it ships in a major version.
+Unauthenticated self-registration is removed, in every environment. Migrating existing issuers to the registry preserves both of their identifiers. Because this changes the external contract, it ships in a major version.
 
 ## Considered options
 
