@@ -1,6 +1,7 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
 mod error;
+pub mod list_quota;
 mod migrations;
 mod models;
 mod store;
@@ -10,7 +11,7 @@ mod store;
 pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
-pub use migrations::Migrator;
+pub use migrations::{Migrator, run_migrations};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};
 pub use models::*;
@@ -18,9 +19,16 @@ pub use store::{SeaOrmStore, SwappableDatabaseConnection};
 
 use async_trait::async_trait;
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer, PublicJwk};
-use crate::domain::models::status_list::{StatusListError, StatusListRecord, StatusListSnapshot};
-use crate::domain::ports::{CredentialRepo, StatusListRepo, StatusListSnapshotRepo};
+use crate::domain::models::credential::{
+    AggregationId, Credential, CredentialError, Issuer, PublicJwk,
+};
+use crate::domain::models::status_list::{
+    StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
+};
+use crate::domain::ports::{
+    AllocateStatusListIndices, CreateStatusList, CredentialRepo, StatusListRepo,
+    StatusListSnapshotRepo,
+};
 
 /// SQL relational adapter implementing `StatusListRepo`.
 #[derive(Clone)]
@@ -74,13 +82,51 @@ impl CredentialRepo for SqlCredentialRepo {
         }))
     }
 
-    async fn insert(&self, credential: Credential) -> Result<(), CredentialError> {
+    async fn insert(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
         let public_key = serde_json::from_slice(credential.public_key.as_bytes())
             .map_err(|e| CredentialError::InvalidPublicJwk(format!("parse failed: {e}")))?;
-        self.store
-            .insert_one(models::Credentials::new(credential.issuer.0, public_key))
-            .await
-            .map_err(Into::into)
+        let entity = models::Credentials::new(credential.issuer.0, public_key)
+            .with_aggregation_id(aggregation_id.to_string());
+        self.store.insert_one(entity).await.map_err(Into::into)
+    }
+
+    async fn find_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        let aggregation_id = match self.store.find_aggregation_id(issuer).await? {
+            // Registered before aggregation IDs existed. Another pod may be
+            // assigning one right now, so read back whichever landed.
+            Some(None) => {
+                self.store
+                    .assign_aggregation_id(issuer, &AggregationId::generate().to_string())
+                    .await?;
+                self.store.find_aggregation_id(issuer).await?
+            }
+            found => found,
+        };
+        aggregation_id
+            .flatten()
+            .map(|id| {
+                id.parse()
+                    .map_err(|e| CredentialError::Backend(Box::new(e)))
+            })
+            .transpose()
+    }
+
+    async fn find_issuer_by_aggregation_id(
+        &self,
+        aggregation_id: AggregationId,
+    ) -> Result<Option<Issuer>, CredentialError> {
+        let issuer = self
+            .store
+            .find_issuer_by_aggregation_id(&aggregation_id.to_string())
+            .await?;
+        Ok(issuer.map(Issuer))
     }
 }
 
@@ -94,9 +140,14 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn insert(&self, record: StatusListRecord) -> Result<(), StatusListError> {
+    async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
         self.store
-            .insert_one(record.into())
+            .create_status_list(
+                command.record.into(),
+                command.initial_snapshot.map(Into::into),
+                &command.initial_allocations,
+                command.max_lists_per_issuer,
+            )
             .await
             .map_err(Into::into)
     }
@@ -104,11 +155,12 @@ impl StatusListRepo for SqlStatusListRepo {
     async fn update(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
     ) -> Result<bool, StatusListError> {
         let id = record.list_id.clone();
+        let expected = i64::try_from(expected_version).unwrap_or(i64::MAX);
         self.store
-            .update_one(&id, record.into(), expected_updated_at)
+            .update_one(&id, record.into(), expected)
             .await
             .map_err(Into::into)
     }
@@ -116,30 +168,47 @@ impl StatusListRepo for SqlStatusListRepo {
     async fn update_with_snapshot(
         &self,
         record: StatusListRecord,
-        expected_updated_at: i64,
+        expected_version: u64,
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError> {
         let id = record.list_id.clone();
+        let expected = i64::try_from(expected_version).unwrap_or(i64::MAX);
         self.store
-            .update_one_with_snapshot(&id, record.into(), expected_updated_at, snapshot.into())
+            .update_one_with_snapshot(&id, record.into(), expected, snapshot.into())
             .await
             .map_err(Into::into)
     }
 
-    async fn insert_with_snapshot(
+    async fn list_uris(
         &self,
-        record: StatusListRecord,
-        snapshot: StatusListSnapshot,
-    ) -> Result<(), StatusListError> {
+        issuer: Option<&str>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        let rows = self
+            .store
+            .find_status_list_uris_after(issuer, after, (limit as u64).saturating_add(1))
+            .await?;
+        Ok(StatusListUriPage::from_rows(rows, limit))
+    }
+
+    async fn allocate_indices(
+        &self,
+        command: AllocateStatusListIndices,
+    ) -> Result<Vec<i32>, StatusListError> {
         self.store
-            .insert_one_with_snapshot(record.into(), snapshot.into())
+            .allocate_indices(&command.list_id, &command.issuer.0, command.count)
             .await
             .map_err(Into::into)
     }
 
-    async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
+    async fn first_unallocated_index(
+        &self,
+        list_id: &str,
+        indices: &[i32],
+    ) -> Result<Option<i32>, StatusListError> {
         self.store
-            .find_all_status_list_uris()
+            .first_unallocated_index(list_id, indices)
             .await
             .map_err(Into::into)
     }
@@ -183,8 +252,11 @@ impl From<models::StatusListRecord> for StatusListRecord {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
+            version: u64::try_from(record.version).unwrap_or(0),
         }
     }
 }
@@ -198,8 +270,11 @@ impl From<StatusListRecord> for models::StatusListRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             updated_at: record.updated_at,
+            version: i64::try_from(record.version).unwrap_or(i64::MAX),
         }
     }
 }
@@ -213,10 +288,13 @@ impl From<models::StatusListHistoryRecord> for StatusListSnapshot {
             status_list: crate::domain::models::status_list::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: u64::try_from(record.version).unwrap_or(0),
         }
     }
 }
@@ -230,10 +308,13 @@ impl From<StatusListSnapshot> for models::StatusListHistoryRecord {
             status_list: models::StatusList {
                 bits: record.status_list.bits,
                 lst: record.status_list.lst,
+                size: record.status_list.size,
+                default_status: record.status_list.default_status,
             },
             sub: record.sub,
             iat: record.iat,
             exp: record.exp,
+            version: i64::try_from(record.version).unwrap_or(i64::MAX),
         }
     }
 }
@@ -253,6 +334,13 @@ impl From<RepositoryError> for StatusListError {
         match value {
             RepositoryError::DuplicateEntry => StatusListError::AlreadyExists,
             RepositoryError::Contention { code } => StatusListError::Contention { code },
+            RepositoryError::QuotaExceeded { count, max } => {
+                StatusListError::QuotaExceeded { count, max }
+            }
+            RepositoryError::NotFound => StatusListError::NotFound,
+            RepositoryError::IssuerMismatch => StatusListError::IssuerMismatch,
+            RepositoryError::ListNotFixedSize => StatusListError::ListNotFixedSize,
+            RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,
             other => StatusListError::Backend(Box::new(other)),
         }
     }
@@ -300,6 +388,16 @@ mod tests {
             credential.into_api_error().error,
             "credentials_already_exist"
         );
+    }
+
+    #[test]
+    fn quota_exceeded_reaches_the_client_as_400_list_quota_exceeded() {
+        let status_list: StatusListError =
+            RepositoryError::QuotaExceeded { count: 3, max: 3 }.into();
+        let api = status_list.into_api_error();
+        assert_eq!(api.status, StatusCode::BAD_REQUEST);
+        assert_eq!(api.error, "list_quota_exceeded");
+        assert!(api.retry_after_secs.is_none());
     }
 
     /// The classification carves out contention; it must not soften every

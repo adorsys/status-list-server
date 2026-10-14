@@ -1,0 +1,28 @@
+services:
+  sqlite-data:
+    image: alpine:3.24
+    network_mode: none
+    command: ["sh", "-ec", "chown 65534:65534 /data && chmod 0700 /data"]
+    volumes:
+      - sqlitedata:/data
+
+  app:
+    build:
+      args:
+        FEATURES: ${FEATURES:-sqlite}
+    environment:
+      APP_DATABASE__BACKEND: sqlite
+      APP_DATABASE__URL: sqlite:///var/lib/status-list/status-list.db?mode=rwc
+      APP_DATABASE__HOST: ""
+      APP_DATABASE__USERNAME: ""
+      APP_DATABASE__PASSWORD: ""
+      APP_DATABASE__NAME: ""
+    volumes:
+      - sqlitedata:/var/lib/status-list
+    depends_on:
+      sqlite-data:
+        condition: service_completed_successfully
+
+volumes:
+  sqlitedata:
+    driver: local

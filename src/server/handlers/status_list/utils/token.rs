@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use coset::{
     self, CborSerializable, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable,
@@ -7,22 +7,24 @@ use coset::{
     iana::{Algorithm, EnumI64, HeaderParameter},
 };
 use flate2::{Compression, write::GzEncoder};
-use jsonwebtoken::{EncodingKey, Header};
 use opentelemetry::{KeyValue, global, metrics::Counter};
-use p256::ecdsa::{Signature, signature::Signer};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::domain::models::credential::Issuer;
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
-use crate::utils::keygen::Keypair;
+use crate::domain::models::token::SigningAlgorithm;
+use crate::domain::ports::{SigningMaterial, TokenSigner};
 
 use super::constants::{
-    ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT, CWT_TYPE, EXP, GZIP_HEADER,
-    ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE, STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
+    CWT_TYPE, EXP, GZIP_HEADER, ISSUED_AT, STATUS_LIST, STATUS_LISTS_CWT_TYPE_VALUE,
+    STATUS_LISTS_HEADER_JWT, SUBJECT, TTL,
 };
+use super::negotiation::AcceptType;
 
 const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
 const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
+const AGGREGATION_URI_OMITTED_METRIC: &str = "aggregation_uri_omitted";
 
 /// Token-generation SLI counters. Cached after first use: the first token is
 /// only ever generated after `init_telemetry`/`setup_metrics` has installed the
@@ -32,6 +34,7 @@ const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
 struct TokenMetrics {
     attempts: Counter<u64>,
     failures: Counter<u64>,
+    aggregation_uri_omitted: Counter<u64>,
 }
 
 fn token_metrics() -> TokenMetrics {
@@ -47,16 +50,46 @@ fn token_metrics() -> TokenMetrics {
                 .u64_counter(TOKEN_FAILURES_METRIC)
                 .with_description("Total number of failed status-list token generations")
                 .build(),
+            aggregation_uri_omitted: meter
+                .u64_counter(AGGREGATION_URI_OMITTED_METRIC)
+                .with_description(
+                    "Tokens served without aggregation_uri because the aggregation ID lookup \
+                     failed",
+                )
+                .build(),
         }
     })
 }
 
-/// Classify the client's `Accept` header into the bounded `format` label value.
-fn token_format(accept: &str) -> &'static str {
-    if accept == ACCEPT_STATUS_LISTS_HEADER_CWT {
-        "cwt"
-    } else {
-        "jwt"
+/// The `aggregation_uri` claim for an issuer's tokens. The claim is optional,
+/// so a failed lookup leaves it out rather than failing the request. Falling
+/// back to the unscoped URI would be worse: relying parties may keep it.
+///
+/// Logged at DEBUG: the metric counts failures, and a database outage would
+/// otherwise log once per request.
+pub(crate) async fn issuer_aggregation_uri(
+    state: &crate::server::AppState,
+    issuer: &Issuer,
+) -> Option<String> {
+    state.aggregation_uri.as_ref()?;
+    match state.service.find_aggregation_id(issuer).await {
+        Ok(aggregation_id) => state.aggregation_uri_for(aggregation_id?),
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "aggregation ID lookup failed; aggregation_uri left out"
+            );
+            token_metrics().aggregation_uri_omitted.add(1, &[]);
+            None
+        }
+    }
+}
+
+/// Classify the client's negotiated format into the bounded `format` label value.
+fn token_format(accept: AcceptType) -> &'static str {
+    match accept {
+        AcceptType::Cwt => "cwt",
+        AcceptType::Jwt => "jwt",
     }
 }
 
@@ -77,29 +110,44 @@ pub(crate) struct StatusListToken {
     pub ttl: Option<i64>,
 }
 
+#[derive(Serialize)]
+struct JwtHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    x5c: &'a [String],
+}
+
 /// Build a signed status-list token (JWT or CWT) for the given record.
 ///
 /// # Parameters
-/// * `accept` – the `Accept` header value (e.g. `application/statuslist+jwt`)
+/// * `accept` – the negotiated format (`AcceptType::Jwt` or `AcceptType::Cwt`)
 /// * `status_record` – the status list data to encode
+/// * `aggregation_uri` – the `aggregation_uri` claim, if any
 /// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
 /// * `client_accepts_gzip` – whether to gzip-compress JWT output
+/// * `signing_material` – an already-fetched signing snapshot; this lets the
+///   caller pin the exact key/certificate used so a rotated key (whose
+///   fingerprint also keys the signed-bytes cache) never produces an entry under
+///   a mismatched fingerprint
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
-    accept: &str,
-    status_record: &StatusListRecord,
+    accept: AcceptType,
+    status_record: StatusListRecord,
+    aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let format = token_format(accept);
-    let attributes = [KeyValue::new("format", format)];
+    let attributes = [KeyValue::new("format", token_format(accept))];
     token_metrics().attempts.add(1, &attributes);
     match build_status_list_token_inner(
         state,
         accept,
         status_record,
+        aggregation_uri,
         validity_window,
         client_accepts_gzip,
+        signing_material,
     )
     .await
     {
@@ -113,56 +161,57 @@ pub(crate) async fn build_status_list_token(
 
 async fn build_status_list_token_inner(
     state: &crate::server::AppState,
-    accept: &str,
-    status_record: &StatusListRecord,
+    accept: AcceptType,
+    status_record: StatusListRecord,
+    aggregation_uri: Option<String>,
     validity_window: Option<(i64, i64)>,
     client_accepts_gzip: bool,
+    signing_material: Arc<SigningMaterial>,
 ) -> Result<(Vec<u8>, Option<&'static str>), StatusListError> {
-    let signing_material = state
-        .service
-        .cert_provider()
-        .signing_material()
-        .await
-        .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-    let certs_parts = signing_material
-        .certificate_chain
-        .ok_or(StatusListError::Unavailable)?;
-    let signing_key_pem = signing_material.signing_key_pem;
-
-    let accept = accept.to_string();
-    let status_record = status_record.clone();
-    let aggregation_uri = state.aggregation_uri.clone();
-    let validity_window = validity_window.unwrap_or_else(|| {
-        let iat = OffsetDateTime::now_utc().unix_timestamp();
-        (iat, iat + state.token_exp_secs as i64)
-    });
+    let validity_window = match validity_window {
+        Some(window) => window,
+        None => {
+            let iat = OffsetDateTime::now_utc().unix_timestamp();
+            let exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
+            (iat, exp)
+        }
+    };
     let token_ttl_secs = state.token_ttl_secs;
-    let should_gzip = client_accepts_gzip && accept == ACCEPT_STATUS_LISTS_HEADER_JWT;
+    let should_gzip = client_accepts_gzip && accept == AcceptType::Jwt;
 
     tokio::task::spawn_blocking(move || {
-        let keypair = Keypair::from_pkcs8_pem(&signing_key_pem)
-            .map_err(|e| StatusListError::Backend(Box::new(e)))?;
-
-        let token_bytes = match accept.as_str() {
-            ACCEPT_STATUS_LISTS_HEADER_CWT => issue_cwt(
-                &status_record,
-                &keypair,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?,
-            _ => issue_jwt(
-                &status_record,
-                &keypair,
-                &certs_parts,
-                &aggregation_uri,
-                validity_window.0,
-                validity_window.1,
-                token_ttl_secs,
-            )?
-            .into_bytes(),
+        let token_bytes = match accept {
+            AcceptType::Cwt => {
+                let x5chain = x5chain_from_der(
+                    signing_material
+                        .certificate_der()
+                        .ok_or_else(missing_chain_error)?,
+                );
+                issue_cwt(
+                    &status_record,
+                    signing_material.signing_key.as_ref(),
+                    x5chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+            }
+            AcceptType::Jwt => {
+                let cert_chain = signing_material
+                    .certificate_chain()
+                    .ok_or_else(missing_chain_error)?;
+                issue_jwt(
+                    &status_record,
+                    signing_material.signing_key.as_ref(),
+                    cert_chain,
+                    aggregation_uri,
+                    validity_window.0,
+                    validity_window.1,
+                    token_ttl_secs,
+                )?
+                .into_bytes()
+            }
         };
 
         if should_gzip {
@@ -182,11 +231,62 @@ async fn build_status_list_token_inner(
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
 }
 
+/// A missing certificate chain is a misconfiguration that will not recover on
+/// its own, so it is surfaced as a 500 (Backend) rather than a retryable 503.
+fn missing_chain_error() -> StatusListError {
+    StatusListError::Backend(Box::new(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no active certificate chain is configured",
+    )))
+}
+
+/// Build the CBOR `x5chain` protected-header value from the pre-decoded DER
+/// chain, following the status-list spec: a single certificate maps to a
+/// `ByteString`, multiple certificates to an `Array` of `ByteString`s.
+///
+/// The DER is already decoded and stored on [`crate::domain::ports::SigningMaterial`], so this runs
+/// without a base64 decode, a global lock, or a comparison on every request.
+fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
+    if certs.len() == 1 {
+        CborValue::Bytes(certs[0].to_vec())
+    } else {
+        CborValue::Array(
+            certs
+                .iter()
+                .map(|der| CborValue::Bytes(der.to_vec()))
+                .collect(),
+        )
+    }
+}
+
+/// Encode the §4.3 status_list map shared by CWT issuance and reference vectors.
+fn cwt_status_list(
+    status_list: &crate::domain::models::status_list::StatusList,
+    aggregation_uri: Option<String>,
+) -> Result<CborValue, StatusListError> {
+    let (bits, lst_bytes) = status_list.token_lst_bytes()?;
+
+    let mut entries = vec![
+        (
+            CborValue::Text("bits".into()),
+            CborValue::Integer(bits.into()),
+        ),
+        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
+    ];
+    if let Some(uri) = aggregation_uri {
+        entries.push((
+            CborValue::Text("aggregation_uri".into()),
+            CborValue::Text(uri),
+        ));
+    }
+    Ok(CborValue::Map(entries))
+}
+
 fn issue_cwt(
     status_record: &StatusListRecord,
-    keypair: &Keypair,
-    cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    signer: &(impl TokenSigner + ?Sized),
+    x5chain: CborValue,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
@@ -210,50 +310,30 @@ fn issue_cwt(
         ),
     ];
 
-    let lst_bytes = base64url::decode(&status_record.status_list.lst)
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-
-    let mut status_list = vec![
-        (
-            CborValue::Text("bits".into()),
-            CborValue::Integer(status_record.status_list.bits.into()),
-        ),
-        (CborValue::Text("lst".into()), CborValue::Bytes(lst_bytes)),
-    ];
-    if let Some(uri) = aggregation_uri {
-        status_list.push((
-            CborValue::Text("aggregation_uri".into()),
-            CborValue::Text(uri.clone()),
-        ));
-    }
     claims.push((
         CborValue::Integer(STATUS_LIST.into()),
-        CborValue::Map(status_list),
+        cwt_status_list(&status_record.status_list, aggregation_uri)?,
     ));
 
     let payload = CborValue::Map(claims)
         .to_vec()
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
-    let x5chain_value = build_x5chain(cert_chain)?;
+    let cose_alg = cose_algorithm(signer.algorithm())?;
     let protected = HeaderBuilder::new()
-        .algorithm(Algorithm::ES256)
-        .value(HeaderParameter::X5Chain.to_i64(), x5chain_value)
+        .algorithm(cose_alg)
+        .value(HeaderParameter::X5Chain.to_i64(), x5chain)
         .value(
             CWT_TYPE,
             CborValue::Text(STATUS_LISTS_CWT_TYPE_VALUE.into()),
         )
         .build();
 
-    let signing_key = keypair.signing_key();
-
     let sign1 = CoseSign1Builder::new()
         .protected(protected)
         .payload(payload)
-        .create_signature(&[], |payload| {
-            let signature: Signature = signing_key.sign(payload);
-            signature.to_vec()
-        })
+        .try_create_signature(&[], |tbs| signer.sign(tbs))
+        .map_err(|err| StatusListError::Backend(Box::new(err)))?
         .build();
 
     let cwt_bytes = sign1
@@ -263,39 +343,25 @@ fn issue_cwt(
     Ok(cwt_bytes)
 }
 
-fn build_x5chain(cert_chain: &[String]) -> Result<CborValue, StatusListError> {
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
-
-    let result: Result<Vec<Vec<u8>>, _> = cert_chain
-        .iter()
-        .map(|b64| BASE64_STANDARD.decode(b64))
-        .collect();
-    let certs_der = result.map_err(|err| StatusListError::Backend(Box::new(err)))?;
-
-    let x5chain_value = if certs_der.len() == 1 {
-        CborValue::Bytes(certs_der.into_iter().next().unwrap())
-    } else {
-        let cert_array: Vec<CborValue> = certs_der.into_iter().map(CborValue::Bytes).collect();
-        CborValue::Array(cert_array)
-    };
-
-    Ok(x5chain_value)
-}
-
 fn issue_jwt(
     status_record: &StatusListRecord,
-    keypair: &Keypair,
+    signer: &(impl TokenSigner + ?Sized),
     cert_chain: &[String],
-    aggregation_uri: &Option<String>,
+    aggregation_uri: Option<String>,
     iat: i64,
     exp: i64,
     token_ttl_secs: u64,
 ) -> Result<String, StatusListError> {
-    let ttl = token_ttl_secs as i64;
+    let ttl = i64::try_from(token_ttl_secs).map_err(|_| {
+        StatusListError::Backend(Box::new(std::io::Error::other(format!(
+            "token ttl {token_ttl_secs} exceeds the maximum supported i64 lifetime"
+        ))))
+    })?;
+    let (bits, lst) = status_record.status_list.token_lst()?;
     let status_list = StatusListClaims {
-        bits: status_record.status_list.bits,
-        lst: status_record.status_list.lst.clone(),
-        aggregation_uri: aggregation_uri.clone(),
+        bits,
+        lst,
+        aggregation_uri,
     };
     let claims = StatusListToken {
         exp: Some(exp),
@@ -304,16 +370,451 @@ fn issue_jwt(
         sub: status_record.sub.to_owned(),
         ttl: Some(ttl),
     };
-    let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
-    header.typ = Some(STATUS_LISTS_HEADER_JWT.into());
-    header.x5c = Some(cert_chain.to_vec());
+    let header = JwtHeader {
+        alg: signer.algorithm().jose_name(),
+        typ: STATUS_LISTS_HEADER_JWT,
+        x5c: cert_chain,
+    };
+    let header =
+        serde_json::to_vec(&header).map_err(|err| StatusListError::Backend(Box::new(err)))?;
+    let payload =
+        serde_json::to_vec(&claims).map_err(|err| StatusListError::Backend(Box::new(err)))?;
 
-    let pem_bytes = keypair
-        .to_pkcs8_pem_bytes()
+    let mut token = base64url::encode(header);
+    token.push('.');
+    token.push_str(&base64url::encode(payload));
+
+    let signature = signer
+        .sign(token.as_bytes())
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    let signer = EncodingKey::from_ec_pem(&pem_bytes)
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    let token = jsonwebtoken::encode(&header, &claims, &signer)
-        .map_err(|err| StatusListError::Backend(Box::new(err)))?;
+    token.push('.');
+    token.push_str(&base64url::encode(signature));
     Ok(token)
+}
+
+fn cose_algorithm(algorithm: SigningAlgorithm) -> Result<Algorithm, StatusListError> {
+    Algorithm::from_i64(algorithm.cose_id()).ok_or_else(|| {
+        StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported COSE algorithm id: {}", algorithm.cose_id()),
+        )))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::status_list::StatusList;
+    use crate::utils::crypto::SigningKey;
+    use aws_lc_rs::signature::{
+        ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256,
+        UnparsedPublicKey,
+    };
+    use coset::TaggedCborSerializable;
+    use jsonwebtoken::{DecodingKey, Validation, decode};
+    use std::sync::Arc;
+
+    use base64::prelude::Engine as _;
+
+    fn sample_record() -> StatusListRecord {
+        StatusListRecord {
+            list_id: "list-1".into(),
+            issuer: "test-issuer".into(),
+            sub: "https://example.com/status-list/1".into(),
+            status_list: StatusList {
+                bits: 1,
+                lst: base64url::encode(b"\x00\x01\x02\x03"),
+                size: None,
+                default_status: None,
+            },
+            updated_at: 1000,
+            version: 1,
+        }
+    }
+
+    fn jwt_algorithm(algorithm: SigningAlgorithm) -> jsonwebtoken::Algorithm {
+        match algorithm {
+            SigningAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
+            SigningAlgorithm::Es384 => jsonwebtoken::Algorithm::ES384,
+            SigningAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
+            SigningAlgorithm::Rs256 => jsonwebtoken::Algorithm::RS256,
+        }
+    }
+
+    fn jwt_decoding_key(key: &SigningKey) -> DecodingKey {
+        match key.algorithm() {
+            SigningAlgorithm::Es256 | SigningAlgorithm::Es384 => {
+                DecodingKey::from_ec_der(key.public_key_bytes())
+            }
+            SigningAlgorithm::EdDsa => DecodingKey::from_ed_der(key.public_key_bytes()),
+            SigningAlgorithm::Rs256 => DecodingKey::from_rsa_der(key.public_key_bytes()),
+        }
+    }
+
+    fn verify_cwt_signature(
+        key: &SigningKey,
+        signature: &[u8],
+        tbs: &[u8],
+    ) -> Result<(), aws_lc_rs::error::Unspecified> {
+        match key.algorithm() {
+            SigningAlgorithm::Es256 => {
+                UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
+            SigningAlgorithm::Es384 => {
+                UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
+            SigningAlgorithm::EdDsa => {
+                UnparsedPublicKey::new(&ED25519, key.public_key_bytes()).verify(tbs, signature)
+            }
+            SigningAlgorithm::Rs256 => {
+                UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public_key_bytes())
+                    .verify(tbs, signature)
+            }
+        }
+    }
+
+    fn inflate_vector(lst: &str) -> Vec<u8> {
+        use std::io::Read as _;
+        let compressed = base64::prelude::BASE64_URL_SAFE_NO_PAD.decode(lst).unwrap();
+        let mut bytes = Vec::new();
+        flate2::read::ZlibDecoder::new(compressed.as_slice())
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn draft21_section_4_3_cbor_vector() {
+        use crate::domain::models::status_list::{Status, StatusEntry};
+        let list = StatusList::create(
+            (0..16)
+                .map(|index| StatusEntry {
+                    index,
+                    status: if [0xb9u8, 0xa3][index as usize / 8] & (1 << (index % 8)) != 0 {
+                        Status::Invalid
+                    } else {
+                        Status::Valid
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(inflate_vector(&list.token_lst().unwrap().1), [0xb9, 0xa3]);
+        assert_eq!(
+            hex::encode(cwt_status_list(&list, None).unwrap().to_vec().unwrap()),
+            "a2646269747301636c73744a78dadbb918000217015d"
+        );
+    }
+
+    #[test]
+    fn draft21_appendix_c_1_and_c_2_vectors() {
+        use crate::domain::models::status_list::{Status, StatusEntry};
+        // Indices, status values, and expected lst strings are from the specification:
+        // draft-ietf-oauth-status-list-21, Appendix C.1 (1-bit) and C.2 (2-bit).
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.1
+        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.2
+        let indices = [
+            0, 1993, 25460, 159495, 495669, 554353, 645645, 723232, 854545, 934534, 1000345,
+        ];
+        let cases = [
+            (
+                1,
+                [1; 11],
+                "eNrt3AENwCAMAEGogklACtKQPg9LugC9k_ACvreiogEAAKkeCQAAAAAAAAAAAAAAAAAAAIBylgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXG9IAAAAAAAAAPwsJAAAAAAAAAAAAAAAvhsSAAAAAAAAAAAA7KpLAAAAAAAAAAAAAAAAAAAAAJsLCQAAAAAAAAAAADjelAAAAAAAAAAAKjDMAQAAAACAZC8L2AEb",
+            ),
+            (
+                2,
+                [1, 2, 1, 3, 1, 1, 2, 1, 1, 2, 3],
+                "eNrt2zENACEQAEEuoaBABP5VIO01fCjIHTMStt9ovGVIAAAAAABAbiEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEB5WwIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAID0ugQAAAAAAAAAAAAAAAAAQG12SgAAAAAAAAAAAAAAAAAAAAAAAAAAAOCSIQEAAAAAAAAAAAAAAAAAAAAAAAD8ExIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwJEuAQAAAAAAAAAAAAAAAAAAAAAAAMB9SwIAAAAAAAAAAAAAAAAAAACoYUoAAAAAAAAAAAAAAEBqH81gAQw",
+            ),
+        ];
+        for (bits, values, expected) in cases {
+            let mut entries: Vec<_> = indices
+                .into_iter()
+                .zip(values)
+                .map(|(index, value)| StatusEntry {
+                    index,
+                    status: match value {
+                        1 => Status::Invalid,
+                        2 => Status::Suspended,
+                        3 => Status::ApplicationSpecific(3),
+                        _ => unreachable!(),
+                    },
+                })
+                .collect();
+            // Appendix C lists have exactly 2^20 entries, including the trailing zeros.
+            entries.push(StatusEntry {
+                index: 1_048_575,
+                status: Status::Valid,
+            });
+            let list = StatusList::create(entries).unwrap();
+            let (actual_bits, actual) = list.token_lst().unwrap();
+            assert_eq!(actual_bits, bits);
+            let raw = inflate_vector(&actual);
+            assert_eq!(
+                raw,
+                inflate_vector(expected),
+                "decompressed reference bytes"
+            );
+            // Different conforming DEFLATE encoders need not produce identical bytes.
+            // Keep miniz in production; compare the Appendix C vectors after inflation.
+        }
+    }
+
+    #[test]
+    fn test_dynamic_jwt_alg_header() {
+        let record = sample_record();
+        let cert_chain = vec!["MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQE=".to_string()];
+
+        let rsa_pem = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
+
+        let test_keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(rsa_pem).unwrap(),
+        ];
+
+        for key in &test_keys {
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let token =
+                issue_jwt(&record, signer.as_ref(), &cert_chain, None, 1000, 2000, 300).unwrap();
+            let header = jsonwebtoken::decode_header(&token).unwrap();
+            assert_eq!(header.alg, jwt_algorithm(key.algorithm()));
+            assert_eq!(header.typ.as_deref(), Some(STATUS_LISTS_HEADER_JWT));
+
+            let mut validation = Validation::new(jwt_algorithm(key.algorithm()));
+            validation.validate_exp = false;
+            let decoded = decode::<StatusListToken>(&token, &jwt_decoding_key(key), &validation)
+                .expect("JWT signature verifies with its public key");
+            assert_eq!(decoded.claims.sub, record.sub);
+        }
+    }
+
+    #[test]
+    fn test_dynamic_cwt_alg_header() {
+        let record = sample_record();
+        let cert_chain = vec![base64::prelude::BASE64_STANDARD.encode(b"dummy-cert-der")];
+
+        let rsa_pem = include_str!("../../../../../test_data/gcloud_test_key.dummy.pem");
+
+        let test_keys = [
+            SigningKey::generate(SigningAlgorithm::Es256).unwrap(),
+            SigningKey::generate(SigningAlgorithm::Es384).unwrap(),
+            SigningKey::generate(SigningAlgorithm::EdDsa).unwrap(),
+            SigningKey::from_pem(rsa_pem).unwrap(),
+        ];
+
+        for key in &test_keys {
+            let signer: Arc<dyn TokenSigner> =
+                Arc::new(SigningKey::from_pem(&key.to_pkcs8_pem().unwrap()).unwrap());
+            let material =
+                crate::domain::ports::SigningMaterial::new(Some(cert_chain.clone()), signer)
+                    .expect("material");
+            let x5chain = x5chain_from_der(material.certificate_der().expect("der chain"));
+            let cwt_bytes = issue_cwt(
+                &record,
+                material.signing_key.as_ref(),
+                x5chain,
+                None,
+                1000,
+                2000,
+                300,
+            )
+            .unwrap();
+            let sign1 = coset::CoseSign1::from_tagged_slice(&cwt_bytes).unwrap();
+            let expected_alg = match key.algorithm() {
+                SigningAlgorithm::Es256 => Algorithm::ES256,
+                SigningAlgorithm::Es384 => Algorithm::ES384,
+                SigningAlgorithm::EdDsa => Algorithm::EdDSA,
+                SigningAlgorithm::Rs256 => Algorithm::RS256,
+            };
+            assert_eq!(
+                sign1.protected.header.alg,
+                Some(coset::RegisteredLabelWithPrivate::Assigned(expected_alg))
+            );
+            let x5chain_label = coset::Label::Int(HeaderParameter::X5Chain.to_i64());
+            let x5chain = sign1
+                .protected
+                .header
+                .rest
+                .iter()
+                .find(|(label, _)| *label == x5chain_label)
+                .map(|(_, value)| value.clone())
+                .expect("CWT must carry a spec-compliant x5chain protected header");
+            assert_eq!(
+                x5chain,
+                CborValue::Bytes(b"dummy-cert-der".to_vec()),
+                "x5chain must carry the DER bytes of the (single) certificate"
+            );
+            sign1
+                .verify_signature(&[], |signature, tbs| {
+                    verify_cwt_signature(key, signature, tbs)
+                })
+                .expect("CWT signature verifies with its public key");
+        }
+    }
+
+    #[tokio::test]
+    async fn default_validity_window_rejects_iat_plus_exp_overflow() {
+        // Synthetic issuance-time boundary: with a real (positive) `now`, an
+        // `APP_STATUS_LIST__TOKEN_EXP_SECS` of `i64::MAX` makes `iat + token_exp_secs`
+        // overflow the instant the default validity window is computed. The
+        // `checked_add` guard must fail closed instead of wrapping `exp` negative.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = i64::MAX as u64;
+
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("a positive iat plus i64::MAX token_exp_secs must overflow and be rejected");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_x5chain_single_cert_is_byte_string() {
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(vec![base64::prelude::BASE64_STANDARD.encode(b"only-cert")]),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der().unwrap());
+        assert_eq!(value, CborValue::Bytes(b"only-cert".to_vec()));
+    }
+
+    #[test]
+    fn test_x5chain_multi_cert_preserves_array_order() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let der = [b"leaf".to_vec(), b"intermediate".to_vec(), b"root".to_vec()];
+        let chain: Vec<String> = der.iter().map(|d| BASE64_STANDARD.encode(d)).collect();
+        let material = crate::domain::ports::SigningMaterial::new(
+            Some(chain),
+            Arc::new(SigningKey::generate(SigningAlgorithm::Es256).unwrap()),
+        )
+        .expect("material");
+        let value = x5chain_from_der(material.certificate_der().unwrap());
+        assert_eq!(
+            value,
+            CborValue::Array(vec![
+                CborValue::Bytes(b"leaf".to_vec()),
+                CborValue::Bytes(b"intermediate".to_vec()),
+                CborValue::Bytes(b"root".to_vec()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn default_validity_window_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_exp_secs = u64::MAX`
+        // on an AppState without going through config validation. The guard must
+        // convert via `i64::try_from` before `checked_add`, so `u64::MAX` does NOT
+        // silently become `-1` and produce a bogus (lower) exp. It must fail closed.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_exp_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { .. }),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_ttl_conversion_rejects_u64_max_via_try_from() {
+        // Direct-construction bypass: a caller could set `token_ttl_secs = u64::MAX`
+        // on an AppState without going through config validation. The TTL is emitted
+        // as an i64 claim, so the conversion must fail closed with a plain internal
+        // (Backend) error rather than silently wrapping negative or misleadingly
+        // reporting a token-exp overflow.
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.token_ttl_secs = u64::MAX;
+
+        let err = build_status_list_token(
+            &state,
+            AcceptType::Jwt,
+            sample_record(),
+            None,
+            None,
+            false,
+            state
+                .service
+                .cert_provider()
+                .signing_material()
+                .await
+                .expect("material"),
+        )
+        .await
+        .expect_err("u64::MAX token_ttl_secs must be rejected via i64::try_from");
+
+        assert!(
+            matches!(err, StatusListError::Backend(_)),
+            "expected Backend error for unrepresentable ttl, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_chain_surfaces_as_backend_500_for_cwt_and_jwt() {
+        use crate::domain::models::status_list::StatusListError;
+        use crate::test_utils::test_app_state_without_cert_chain;
+
+        let state = test_app_state_without_cert_chain().await;
+        let signing_material = state
+            .service
+            .cert_provider()
+            .signing_material()
+            .await
+            .expect("material");
+
+        for accept in [AcceptType::Cwt, AcceptType::Jwt] {
+            let result = build_status_list_token(
+                &state,
+                accept,
+                sample_record(),
+                None,
+                None,
+                false,
+                signing_material.clone(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(StatusListError::Backend(_))),
+                "missing chain must surface as a 500 (Backend) for accept `{accept:?}`, got {result:?}"
+            );
+        }
+    }
 }

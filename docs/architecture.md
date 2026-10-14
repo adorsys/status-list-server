@@ -160,9 +160,10 @@ each tier keyed and tuned independently:
 | Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
 | -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
 | **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`           | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                |                                                                 | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
-| **permissive** | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,          | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+|                | `GET /api/v1/credentials` (authenticated)                       | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
+| **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
+|                | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` |                                                             |                                                               |
 
 The writes tier is applied **before** the `auth` middleware (rate limiting by IP
 happens first, then authentication rejects unauthenticated requests with `401`).
@@ -180,12 +181,13 @@ When a bucket is exhausted the server returns `429 Too Many Requests`.
 Beyond rate limiting, hard bounds cap incoming request size and the size of
 persisted status lists:
 
-| Bound                      | Default | Exceeded response                     | Where enforced                       |
-| -------------------------- | ------- | ------------------------------------- | ------------------------------------ |
-| `max_body_size_bytes`      | 2 MiB   | `413 Payload Too Large`               | `RequestBodyLimitLayer` (all routes) |
-| `max_status_index`         | 100000  | `400 Bad Request` — `index` too large | publish / update handlers            |
-| `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries  | publish / update handlers            |
-| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`            | application services                 |
+| Bound                      | Default | Exceeded response                         | Where enforced                                 |
+| -------------------------- | ------- | ----------------------------------------- | ---------------------------------------------- |
+| `max_body_size_bytes`      | 2 MiB   | `413 Payload Too Large`                   | `RequestBodyLimitLayer` (all routes)           |
+| `max_status_index`         | 100000  | `400 Bad Request` — `index` too large     | publish / update handlers                      |
+| `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries      | publish / update handlers                      |
+| `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`                | application services                           |
+| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`credentials.list_count`) |
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -193,21 +195,102 @@ growth. The default schema maximums (`StatusEntry.index.maximum`,
 lower a bound via configuration should treat the documented maximums as
 defaults, not guarantees.
 
+`max_lists_per_issuer` is enforced exactly, including under concurrent
+publishes: each publish increments `credentials.list_count` with a guarded
+`UPDATE` in the same transaction as its `INSERT`, so a publish that fails
+gives its slot back.
+
+A pod that finds no migration applied (a fresh install) enforces the quota as
+soon as it has migrated. On a database a release without the quota has served,
+that release's pods publish without counting, so the quota starts off and a pod
+refuses to start while it is off, unless `APP_LIMITS__LIST_QUOTA_TRANSITION` is
+set for that rollout. Once no such pod is left, the operator runs
+`status-list-server list-quota recount` and then `list-quota enable` (see
+[troubleshooting](troubleshooting.md#upgrading-to-the-list-quota)). `enable`
+refuses, naming the issuers, while any issuer has more lists than the cap or a
+`list_count` that differs from its lists, so once enabled no issuer is over the
+cap. Each publish reads the `list_quota` switch in its transaction, and while
+the switch is off re-reads it under a shared lock; `enable` holds the row's
+exclusive lock while it checks, so a publish in flight is either counted by
+the check or refused by the enforced quota. The memory backend enforces the
+quota from startup.
+
+It bounds lists **per issuer**, not in total: while
+`POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
+brings a fresh quota. Lists cannot be deleted through the API, so an issuer at
+its quota stays there until the operator raises it, which is possible only up
+to the aggregation page size (see
+[troubleshooting](troubleshooting.md#status-list-quota)).
+
+### Status list aggregation
+
+`GET /api/v1/aggregation/{aggregation_id}` returns one issuer's status list URIs
+(draft-21 §9). Each issuer gets a random `aggregation_id` at registration,
+returned in the registration response and by the authenticated
+`GET /api/v1/credentials`. An issuer registered before aggregation IDs existed
+gets one the first time it is looked up. Public URIs name the issuer by that ID,
+so tokens never disclose the issuer identifier, which may be an internal tenant
+name. With `server.aggregation_uri` set, each status list token carries its
+issuer's URI, `<aggregation_uri>/<aggregation_id>`.
+
+The ID is a path segment rather than a query parameter so that a cache or CDN
+that ignores query strings still keeps issuers apart, and so that the relative
+`Link` to the next page keeps the issuer without repeating it.
+
+A relying party that reads only `status_lists`, as draft-21 §9.3 defines it,
+takes one response as the whole aggregation. The server refuses to start while
+`limits.max_lists_per_issuer` exceeds the default page size (1000), so the list
+quota normally keeps every issuer within one page. Changes must preserve:
+
+1. An unpaged scoped request never gets part of an aggregation: it is complete,
+   or `409 paging_required`. Sending `limit` opts in to paging.
+2. Tokens advertise `aggregation_uri` only when the quota is enforced and no
+   issuer exceeded one page at startup. This withholding applies to the whole
+   pod, not per issuer (#623).
+3. A cursor only works on the aggregation that issued it, so one replayed
+   elsewhere cannot skip lists.
+
+How an issuer can still outgrow a page (quota transition, `list-quota disable`)
+is covered in the [runbook](deployment-runbook.md#status-list-aggregation) and
+[troubleshooting](troubleshooting.md). Pages are read by a keyset scan on
+`(issuer, list_id)` and there is no total count.
+
+An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
+finds out instead of caching an empty aggregation. Responses carry a weak `ETag`
+and answer a matching `If-None-Match` with `304`.
+
+Serving a status list token needs its issuer's aggregation ID, so
+`CachingCredentialRepo` keeps found IDs in memory; an ID never changes once
+assigned.
+
+Without an ID, `GET /api/v1/aggregation` still returns every issuer's lists, for
+tokens issued before issuer scoping. It is deprecated. No token this release
+serves points there, so it can be removed once `token_exp_secs` has passed since
+the rollout and `aggregation_pages_total{scope="all"}` stays at zero; the metric
+catches relying parties that stored the URI instead of reading it from each
+token.
+
+**Privacy.** Anyone holding one of an issuer's tokens can list all of that
+issuer's status lists, and from them count its lists and the share of its
+credentials that are revoked or suspended. Draft-21 §9 intends this, but on a
+server shared by several issuers it is per-tenant information the unscoped
+listing did not attribute. Tell tenants before setting `server.aggregation_uri`.
+
 ### Error response summary
 
-| Status | Meaning                                                               |
-| ------ | --------------------------------------------------------------------- |
-| `400`  | Malformed/invalid request, or an enforced count/index bound exceeded  |
-| `401`  | Missing or invalid Bearer token                                       |
-| `403`  | Authenticated issuer does not own the list                            |
-| `404`  | Status list not found                                                 |
-| `406`  | Unsupported `Accept` value                                            |
-| `409`  | List/credentials already exist, or a concurrent update won the race   |
-| `413`  | Request body exceeds `max_body_size_bytes`                            |
-| `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK |
-| `429`  | Rate-limit quota exhausted                                            |
-| `500`  | Internal server error                                                 |
-| `503`  | Service temporarily unavailable                                       |
+| Status | Meaning                                                                                             |
+| ------ | --------------------------------------------------------------------------------------------------- |
+| `400`  | Malformed/invalid request, an enforced count/index bound exceeded, or the issuer list quota is full |
+| `401`  | Missing or invalid Bearer token                                                                     |
+| `403`  | Authenticated issuer does not own the list                                                          |
+| `404`  | Status list not found                                                                               |
+| `406`  | Unsupported `Accept` value                                                                          |
+| `409`  | List/credentials already exist, or a concurrent update won the race                                 |
+| `413`  | Request body exceeds `max_body_size_bytes`                                                          |
+| `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK                               |
+| `429`  | Rate-limit quota exhausted                                                                          |
+| `500`  | Internal server error                                                                               |
+| `503`  | Service temporarily unavailable                                                                     |
 
 Authentication and handler-level errors use the shared JSON error shape
 `{"error": "<code>", "error_description": "<human-readable text>"}`. The body
