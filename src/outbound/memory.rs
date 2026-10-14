@@ -328,6 +328,7 @@ impl CredentialRepo for MemoryCredentials {
 
     async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError> {
         let values = self.values.read().await;
+        let mut matching_credential = None;
         for (credential, _) in values.by_issuer.values() {
             if credential
                 .public_key
@@ -335,10 +336,15 @@ impl CredentialRepo for MemoryCredentials {
                 .map(|(id, _)| id == kid)
                 .unwrap_or(false)
             {
-                return Ok(Some(credential.clone()));
+                if matching_credential.is_some() {
+                    return Err(CredentialError::InvalidPublicJwk(format!(
+                        "kid {kid:?} is registered for multiple credentials"
+                    )));
+                }
+                matching_credential = Some(credential.clone());
             }
         }
-        Ok(None)
+        Ok(matching_credential)
     }
 
     async fn insert(
