@@ -23,16 +23,8 @@ The environment exposes these variables:
 | `issuer_public_key`  | empty                               | Public JWK generated for issuer registration.                         |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
-The collection is organized into Health & Metrics, Issuer Management, Status
-Lists, and Aggregation folders. Send `Start new test run` first when you want a
-fresh status-list UUID; it generates and stores one `list_id` for the complete
-run. Then send `Register issuer credentials`. Its
-pre-request script uses Postman's built-in Web Crypto API to generate an ES256
-key pair when needed, stores the private JWK as an environment secret, registers
-the public JWK, and creates a one-hour JWT in `token`. Later sends reuse the same
-key pair and refresh the JWT automatically. Requests include Postman test scripts
-that check status codes, content types, token response headers, and JSON response
-shapes.
+Lists, and Aggregation folders. Requests include Postman test scripts that check
+status codes, content types, token response headers, and JSON response shapes.
 
 Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK registered through `POST /api/v1/credentials`.
