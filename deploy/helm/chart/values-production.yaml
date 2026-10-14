@@ -53,10 +53,18 @@ grafanaDashboard:
     release: kube-prometheus-stack
     grafana_dashboard: "1"
 
-# OpenTelemetry Collector Production Exporter Setup (Guidance):
-# In production, ensure opentelemetry-collector.config exporters are configured
-# to forward to your enterprise backends (e.g. Tempo for traces, Loki for logs)
-# rather than printing debug output to stdout.
+# OpenTelemetry Collector exporters are configured by default in the base
+# `values.yaml`: traces forward to Grafana Tempo (otlp/tempo) and logs to Grafana
+# Loki (loki), both in the shared `monitoring` namespace. Override the endpoints
+# here if your backends live elsewhere:
+#
+#   opentelemetry-collector:
+#     config:
+#       exporters:
+#         otlp/tempo:
+#           endpoint: "tempo.monitoring.svc.cluster.local:4317"
+#         loki:
+#           endpoint: "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
 #
 # Metrics: the /metrics endpoint discovered by the ServiceMonitor is the
 # authoritative Prometheus path for SLI metrics (see helm/chart/values.yaml
@@ -64,7 +72,7 @@ grafanaDashboard:
 # Prometheus -- the app exports the same instruments through both its pull reader
 # and its OTLP reader, so that would ingest identical series twice. If you export
 # OTLP metrics, send them to a different backend. Traces and logs are independent
-# and may flow through the configured OTLP exporters above.
+# and flow through the configured OTLP exporters above.
 
 # Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
 # Enable this block and set alerting.platform + credentials to receive SLO alert
