@@ -18,7 +18,7 @@ use uuid::Uuid;
 pub enum CredentialError {
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
-    #[error("credentials already exist for this issuer")]
+    #[error("credentials already exist for this issuer or key ID")]
     AlreadyExists,
     /// The write lost a lock race in storage and was rolled back; the request is
     /// safe to retry verbatim. Mirrors [`StatusListError::Contention`], `code`

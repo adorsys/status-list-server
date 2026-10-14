@@ -211,9 +211,16 @@ pub async fn auth(
         .service
         .find_credential_by_kid(&kid)
         .await
-        .map_err(|e| {
-            tracing::error!(kid = %kid, error = ?e, "Failed to resolve management JWT key");
-            AuthenticationError::InternalServer
+        .map_err(|error| {
+            if matches!(
+                error,
+                crate::domain::models::credential::CredentialError::InvalidPublicJwk(_)
+            ) {
+                invalid_auth(Some(&kid), None, error)
+            } else {
+                tracing::error!(kid = %kid, error = ?error, "Failed to resolve management JWT key");
+                AuthenticationError::InternalServer
+            }
         })?
         .ok_or_else(|| invalid_auth(Some(&kid), None, "unknown kid"))?;
     let (registered_kid, registered_alg) =
@@ -515,13 +522,13 @@ mod tests {
 
         let expired_claims = TestClaims {
             iss: "test-issuer".to_string(),
-            iat: now - 7200,
+            iat: now - 400,
             nbf: None,
-            exp: now - 3600,
+            exp: now - 100,
         };
 
         let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
-        let header = Header::new(Algorithm::ES256);
+        let header = management_header();
         let token = encode(&header, &expired_claims, &encoding_key).unwrap();
 
         let request = Request::builder()
@@ -623,7 +630,7 @@ mod tests {
             serde_json::json!({
                 "iss": "test-issuer",
                 "iat": now + 120,
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -645,7 +652,7 @@ mod tests {
                 "iss": "test-issuer",
                 "iat": now,
                 "nbf": now + 120,
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -689,7 +696,7 @@ mod tests {
                 "iss": "test-issuer",
                 "iat": now,
                 "aud": "other-service",
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -756,7 +763,7 @@ mod tests {
             serde_json::json!({
                 "iss": "test-issuer",
                 "iat": now,
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );

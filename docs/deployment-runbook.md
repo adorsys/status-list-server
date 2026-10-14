@@ -661,7 +661,7 @@ here; a test fails until it does.
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
-| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the index is additive | None | JWKs with a `kid` of at most 255 characters are backfilled; credentials whose JWK lacks the new required `kid`/`alg` contract or has a longer `kid` must be updated before they can authenticate |
+| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Existing credentials with duplicate `kid` values must be reconciled before upgrade | JWKs with a `kid` of at most 255 characters are backfilled; credentials whose JWK lacks the new required `kid`/`alg` contract or has a longer `kid` must be updated before they can authenticate |
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

@@ -65,6 +65,18 @@ pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
         "duplicate credential insert must map to DuplicateEntry, got {dup_cred:?}"
     );
 
+    // A different issuer cannot make the registered kid ambiguous either.
+    let dup_kid = cred_store
+        .insert_one(Credentials::new(
+            format!("{issuer}-other"),
+            serde_json::from_str(fixtures::TEST_EC_JWK).unwrap(),
+        ))
+        .await;
+    assert!(
+        matches!(dup_kid, Err(RepositoryError::DuplicateEntry)),
+        "duplicate kid must map to DuplicateEntry, got {dup_kid:?}"
+    );
+
     // Duplicate status list (same list_id primary key).
     let record = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), 0);
     store

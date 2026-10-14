@@ -985,7 +985,7 @@ pub(crate) mod credentials_aggregation_id {
     }
 }
 
-/// Stores and indexes the JWK `kid` used to resolve management tokens without
+/// Stores and uniquely indexes the JWK `kid` used to resolve management tokens without
 /// scanning and deserializing the complete credential registry per request.
 pub(crate) mod credentials_key_id {
     use super::*;
@@ -1043,6 +1043,7 @@ pub(crate) mod credentials_key_id {
                             .name(INDEX)
                             .table(Credentials::Table)
                             .col(Credentials::KeyId)
+                            .unique()
                             .to_owned(),
                     )
                     .await?;

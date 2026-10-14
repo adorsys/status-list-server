@@ -40,27 +40,29 @@ impl AuthenticationError {
 
 impl IntoApiError for AuthenticationError {
     fn into_api_error(self) -> ApiError {
-        ApiError::new(
+        let challenge = match &self {
+            AuthenticationError::MissingToken => Some("Bearer"),
+            AuthenticationError::InvalidToken => Some("Bearer error=\"invalid_token\""),
+            AuthenticationError::InternalServer => None,
+        };
+        let error = ApiError::new(
             self.get_status(),
             self.get_error_code(),
             Some(self.get_error_message()),
-        )
+        );
+        match challenge {
+            Some(challenge) => error.with_header(
+                hyper::header::WWW_AUTHENTICATE,
+                hyper::header::HeaderValue::from_static(challenge),
+            ),
+            None => error,
+        }
     }
 }
 
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
-        let challenge = match &self {
-            AuthenticationError::MissingToken => "Bearer",
-            AuthenticationError::InvalidToken => "Bearer error=\"invalid_token\"",
-            AuthenticationError::InternalServer => return self.into_api_error().into_response(),
-        };
-        let mut response = self.into_api_error().into_response();
-        response.headers_mut().insert(
-            hyper::header::WWW_AUTHENTICATE,
-            hyper::header::HeaderValue::from_static(challenge),
-        );
-        response
+        self.into_api_error().into_response()
     }
 }
 

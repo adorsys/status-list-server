@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map},
     ops::Bound,
     sync::Arc,
 };
@@ -353,12 +353,22 @@ impl CredentialRepo for MemoryCredentials {
         aggregation_id: AggregationId,
     ) -> Result<(), CredentialError> {
         let mut values = self.values.write().await;
-        let hash_map::Entry::Vacant(slot) = values.by_issuer.entry(credential.issuer.0.clone())
-        else {
+        if values.by_issuer.contains_key(&credential.issuer.0) {
             return Err(CredentialError::AlreadyExists);
-        };
+        }
+        let (kid, _) = credential.public_key.key_id_and_algorithm()?;
+        if values.by_issuer.values().any(|(existing, _)| {
+            existing
+                .public_key
+                .key_id_and_algorithm()
+                .is_ok_and(|(existing_kid, _)| existing_kid == kid)
+        }) {
+            return Err(CredentialError::AlreadyExists);
+        }
         let issuer = credential.issuer.clone();
-        slot.insert((credential, aggregation_id));
+        values
+            .by_issuer
+            .insert(issuer.0.clone(), (credential, aggregation_id));
         values
             .issuers_by_aggregation_id
             .insert(aggregation_id, issuer);
