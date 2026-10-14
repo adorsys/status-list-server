@@ -1041,6 +1041,18 @@ impl SeaOrmStore<Credentials> {
         .await
     }
 
+    pub async fn find_all_credentials(&self) -> Result<Vec<Credentials>, RepositoryError> {
+        time_query("find_all", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find()
+                .all(&*db)
+                .await
+                .map(|rows| rows.into_iter().map(Credentials::from).collect())
+                .map_err(find_err)
+        })
+        .await
+    }
+
     /// `None` for an unknown issuer, `Some(None)` for one registered by a
     /// release that predates aggregation IDs.
     pub async fn find_aggregation_id(

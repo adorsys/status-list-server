@@ -66,7 +66,7 @@ fn fixture_config() -> Config {
         "cache": {"backend": "memory", "ttl": 300, "max_capacity": 100},
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
-        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 3600, "audiences": []},
+        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": []},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,

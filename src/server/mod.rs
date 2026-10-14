@@ -24,7 +24,7 @@ impl Default for ManagementAuthConfig {
     fn default() -> Self {
         Self {
             leeway_secs: 60,
-            max_token_lifetime_secs: 3600,
+            max_token_lifetime_secs: 300,
             audiences: Vec::new(),
         }
     }

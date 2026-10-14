@@ -82,6 +82,22 @@ impl CredentialRepo for SqlCredentialRepo {
         }))
     }
 
+    async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError> {
+        for record in self.store.find_all_credentials().await? {
+            let bytes = serde_json::to_vec(&record.public_key).map_err(|e| {
+                CredentialError::InvalidPublicJwk(format!("serialization failed: {e}"))
+            })?;
+            let key = PublicJwk::try_new(bytes)?;
+            if key.key_id_and_algorithm()?.0 == kid {
+                return Ok(Some(Credential {
+                    issuer: Issuer(record.issuer),
+                    public_key: key,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     async fn insert(
         &self,
         credential: Credential,

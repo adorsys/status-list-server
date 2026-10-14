@@ -2,6 +2,10 @@
 
 use std::{fmt, str::FromStr};
 
+use jsonwebtoken::{
+    Algorithm,
+    jwk::{AlgorithmParameters, Jwk, KeyAlgorithm},
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -77,7 +81,7 @@ pub struct PublicJwk(pub Vec<u8>);
 impl PublicJwk {
     /// Create public JWK bytes from UTF-8 JSON.
     ///
-    /// Ensures the payload is a valid JSON object without enforcing key types.
+    /// Ensures the payload is a supported public signing key.
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, CredentialError> {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
             CredentialError::InvalidPublicJwk(format!("expected UTF-8 JSON: {err}"))
@@ -87,11 +91,96 @@ impl PublicJwk {
                 "expected a JSON object".to_string(),
             ));
         }
+        for private_member in ["d", "p", "q", "dp", "dq", "qi", "oth", "k"] {
+            if value.get(private_member).is_some() {
+                return Err(CredentialError::InvalidPublicJwk(format!(
+                    "private JWK member {private_member:?} is not permitted"
+                )));
+            }
+        }
+        let jwk: Jwk = serde_json::from_value(value)
+            .map_err(|err| CredentialError::InvalidPublicJwk(format!("invalid JWK: {err}")))?;
+        if matches!(jwk.algorithm, AlgorithmParameters::OctetKey(_)) {
+            return Err(CredentialError::InvalidPublicJwk(
+                "symmetric keys (kty=oct) are not permitted".to_string(),
+            ));
+        }
+        let key_id = jwk
+            .common
+            .key_id
+            .as_deref()
+            .ok_or_else(|| CredentialError::InvalidPublicJwk("kid is required".to_string()))?;
+        if key_id.is_empty() {
+            return Err(CredentialError::InvalidPublicJwk(
+                "kid must not be empty".to_string(),
+            ));
+        }
+        let algorithm = jwk
+            .common
+            .key_algorithm
+            .ok_or_else(|| CredentialError::InvalidPublicJwk("alg is required".to_string()))?;
+        if !matches!(
+            algorithm,
+            KeyAlgorithm::ES256 | KeyAlgorithm::ES384 | KeyAlgorithm::EdDSA | KeyAlgorithm::PS256
+        ) {
+            return Err(CredentialError::InvalidPublicJwk(
+                "alg must be one of ES256, ES384, EdDSA, or PS256".to_string(),
+            ));
+        }
+        match (&jwk.algorithm, algorithm) {
+            (AlgorithmParameters::EllipticCurve(params), KeyAlgorithm::ES256)
+                if matches!(params.curve, jsonwebtoken::jwk::EllipticCurve::P256) =>
+            {
+                Algorithm::ES256
+            }
+            (AlgorithmParameters::EllipticCurve(params), KeyAlgorithm::ES384)
+                if matches!(params.curve, jsonwebtoken::jwk::EllipticCurve::P384) =>
+            {
+                Algorithm::ES384
+            }
+            (AlgorithmParameters::OctetKeyPair(params), KeyAlgorithm::EdDSA)
+                if matches!(params.curve, jsonwebtoken::jwk::EllipticCurve::Ed25519) =>
+            {
+                Algorithm::EdDSA
+            }
+            (AlgorithmParameters::RSA(_), KeyAlgorithm::PS256) => Algorithm::PS256,
+            _ => {
+                return Err(CredentialError::InvalidPublicJwk(
+                    "alg does not match the JWK key type or curve".to_string(),
+                ));
+            }
+        };
         Ok(Self(bytes))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    pub fn key_id_and_algorithm(&self) -> Result<(String, Algorithm), CredentialError> {
+        let jwk: Jwk = serde_json::from_slice(&self.0)
+            .map_err(|err| CredentialError::InvalidPublicJwk(format!("invalid JWK: {err}")))?;
+        let kid = jwk
+            .common
+            .key_id
+            .clone()
+            .ok_or_else(|| CredentialError::InvalidPublicJwk("kid is required".to_string()))?;
+        let alg = jwk
+            .common
+            .key_algorithm
+            .ok_or_else(|| CredentialError::InvalidPublicJwk("alg is required".to_string()))?;
+        let alg = match alg {
+            KeyAlgorithm::ES256 => Algorithm::ES256,
+            KeyAlgorithm::ES384 => Algorithm::ES384,
+            KeyAlgorithm::EdDSA => Algorithm::EdDSA,
+            KeyAlgorithm::PS256 => Algorithm::PS256,
+            _ => {
+                return Err(CredentialError::InvalidPublicJwk(
+                    "unsupported alg".to_string(),
+                ));
+            }
+        };
+        Ok((kid, alg))
     }
 }
 
@@ -100,4 +189,32 @@ impl PublicJwk {
 pub struct Credential {
     pub issuer: Issuer,
     pub public_key: PublicJwk,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PublicJwk;
+
+    const VALID: &str = r#"{
+        "kty":"EC", "crv":"P-256", "kid":"key-1", "alg":"ES256",
+        "x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+        "y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
+    }"#;
+
+    #[test]
+    fn validates_management_public_key_contract() {
+        assert!(PublicJwk::try_new(VALID.as_bytes().to_vec()).is_ok());
+
+        let missing_metadata = VALID.replace(", \"kid\":\"key-1\", \"alg\":\"ES256\"", "");
+        assert!(PublicJwk::try_new(missing_metadata.into_bytes()).is_err());
+
+        let private = VALID.replace("\"y\":", "\"d\":\"secret\", \"y\":");
+        assert!(PublicJwk::try_new(private.into_bytes()).is_err());
+
+        let oct = r#"{"kty":"oct","kid":"key-1","alg":"HS256","k":"secret"}"#;
+        assert!(PublicJwk::try_new(oct.as_bytes().to_vec()).is_err());
+
+        let key = VALID.replace("\"alg\":\"ES256\"", "\"alg\":\"ES384\"");
+        assert!(PublicJwk::try_new(key.into_bytes()).is_err());
+    }
 }

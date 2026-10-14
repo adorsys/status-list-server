@@ -124,6 +124,8 @@ mod tests {
             r#"{
                 "kty": "EC",
                 "crv": "P-256",
+                "kid": "test-key",
+                "alg": "ES256",
                 "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
                 "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
             }

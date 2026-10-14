@@ -11,7 +11,7 @@ use axum::{
 };
 use errors::AuthenticationError;
 use hyper::{StatusCode, header};
-use jsonwebtoken::{DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,11 +21,7 @@ use crate::server::{AppState, error::ApiError};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
 const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
-
-#[derive(Debug, Serialize, Deserialize)]
-struct UnverifiedIssuerClaims {
-    iss: String,
-}
+const MANAGEMENT_TOKEN_TYPE: &str = "statuslist-management+jwt";
 
 /// Required management claims are non-optional (`iss`, `iat`, `exp`).
 /// Optional claims are deserialized as `Option` and validated when present.
@@ -44,35 +40,27 @@ impl ManagementClaims {
         now: u64,
         leeway_secs: u64,
         max_token_lifetime_secs: u64,
-    ) -> Result<(), AuthenticationError> {
+    ) -> Result<(), &'static str> {
         if self.exp <= self.iat {
-            tracing::error!("Management JWT rejected: exp must be later than iat");
-            return Err(AuthenticationError::InvalidClaims);
+            return Err("exp must be later than iat");
         }
 
         if self.iat > now.saturating_add(leeway_secs) {
-            tracing::error!(
-                "Management JWT rejected: iat is in the future beyond configured leeway"
-            );
-            return Err(AuthenticationError::InvalidClaims);
+            return Err("iat is in the future beyond configured leeway");
         }
 
         if let Some(nbf) = self.nbf
             && nbf > now.saturating_add(leeway_secs)
         {
-            tracing::error!(
-                "Management JWT rejected: nbf is in the future beyond configured leeway"
-            );
-            return Err(AuthenticationError::InvalidClaims);
+            return Err("nbf is in the future beyond configured leeway");
         }
 
-        let lifetime = self.exp.checked_sub(self.iat).ok_or_else(|| {
-            tracing::error!("Management JWT rejected: exp must be later than iat");
-            AuthenticationError::InvalidClaims
-        })?;
+        let lifetime = self
+            .exp
+            .checked_sub(self.iat)
+            .ok_or("exp must be later than iat")?;
         if lifetime > max_token_lifetime_secs {
-            tracing::error!("Management JWT rejected: token lifetime exceeds configured maximum");
-            return Err(AuthenticationError::InvalidClaims);
+            return Err("token lifetime exceeds configured maximum");
         }
 
         Ok(())
@@ -170,44 +158,85 @@ pub async fn auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
-    use jsonwebtoken::dangerous::insecure_decode;
-
-    let token = request
+    let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
-        .and_then(|header| header.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-        .ok_or(AuthenticationError::InvalidAuthorizationHeader)?;
+        .and_then(|value| value.to_str().ok());
+    let Some(auth_header) = auth_header else {
+        return Err(AuthenticationError::MissingToken);
+    };
+    let Some((scheme, token)) = auth_header.split_once(' ') else {
+        return Err(AuthenticationError::MissingToken);
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(AuthenticationError::MissingToken);
+    }
+    if token.is_empty() {
+        return Err(AuthenticationError::InvalidToken);
+    }
 
-    let alg = jsonwebtoken::decode_header(token)
-        .map_err(|e| {
-            tracing::error!("Failed to decode management JWT header: {e:?}");
-            AuthenticationError::JwtError(e)
-        })?
-        .alg;
-    let issuer = insecure_decode::<UnverifiedIssuerClaims>(token)
-        .map_err(|e| {
-            tracing::error!("Failed to decode management JWT issuer claim: {e:?}");
-            AuthenticationError::JwtError(e)
-        })?
-        .claims
-        .iss;
+    let header = jsonwebtoken::decode_header(token)
+        .map_err(|e| invalid_auth(None, None, format!("invalid JWT header: {e}")))?;
+    let typ_ok = header.typ.as_deref().is_some_and(|typ| {
+        typ.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE)
+            || typ.get(.."application/".len()).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("application/")
+                    && typ
+                        .get("application/".len()..)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE))
+            })
+    });
+    let Some(kid) = header.kid.clone() else {
+        return Err(invalid_auth(None, None, "missing kid"));
+    };
+    if !typ_ok {
+        return Err(invalid_auth(Some(&kid), None, "missing or invalid typ"));
+    }
+    if header.crit.is_some() {
+        return Err(invalid_auth(
+            Some(&kid),
+            None,
+            "crit header is not permitted",
+        ));
+    }
+    let allowed_algorithm = matches!(
+        header.alg,
+        Algorithm::ES256 | Algorithm::ES384 | Algorithm::EdDSA | Algorithm::PS256
+    );
+    if !allowed_algorithm {
+        return Err(invalid_auth(Some(&kid), None, "algorithm is not allowed"));
+    }
 
     let credential = state
         .service
-        .find_credential(&issuer)
+        .find_credential_by_kid(&kid)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to find credential for {issuer}: {e:?}");
+            tracing::error!(kid = %kid, error = ?e, "Failed to resolve management JWT key");
             AuthenticationError::InternalServer
         })?
-        .ok_or(AuthenticationError::IssuerNotFound)?;
+        .ok_or_else(|| invalid_auth(Some(&kid), None, "unknown kid"))?;
+    let (registered_kid, registered_alg) =
+        credential.public_key.key_id_and_algorithm().map_err(|e| {
+            tracing::error!(kid = %kid, error = ?e, "Registered management key is invalid");
+            AuthenticationError::InternalServer
+        })?;
+    if registered_kid != kid || registered_alg != header.alg {
+        return Err(invalid_auth(
+            Some(&kid),
+            None,
+            "algorithm or key id mismatch",
+        ));
+    }
 
-    let public_key = serde_json::from_slice(credential.public_key.as_bytes())
-        .map_err(|_| AuthenticationError::InternalServer)?;
-    let decoding_key = DecodingKey::from_jwk(&public_key)?;
+    let public_key = serde_json::from_slice(credential.public_key.as_bytes()).map_err(|e| {
+        tracing::error!(kid = %kid, error = ?e, "Registered management key could not be parsed");
+        AuthenticationError::InternalServer
+    })?;
+    let decoding_key = DecodingKey::from_jwk(&public_key)
+        .map_err(|e| invalid_auth(Some(&kid), None, format!("invalid verification key: {e}")))?;
 
-    let mut validation = Validation::new(alg);
+    let mut validation = Validation::new(registered_alg);
     validation.leeway = state.management_auth.leeway_secs;
     validation.validate_nbf = true;
     validation.set_issuer(&[&credential.issuer.0]);
@@ -223,20 +252,35 @@ pub async fn auth(
 
     let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
         .map_err(|e| {
-            tracing::error!("Failed to decode management JWT: {e:?}");
-            AuthenticationError::JwtError(e)
+            invalid_auth(
+                Some(&kid),
+                None,
+                format!("claim or signature validation failed: {e}"),
+            )
         })?;
     let now = current_unix_timestamp()?;
-    token_data.claims.validate_policy(
-        now,
-        state.management_auth.leeway_secs,
-        state.management_auth.max_token_lifetime_secs,
-    )?;
+    token_data
+        .claims
+        .validate_policy(
+            now,
+            state.management_auth.leeway_secs,
+            state.management_auth.max_token_lifetime_secs,
+        )
+        .map_err(|reason| invalid_auth(Some(&kid), Some(&token_data.claims.iss), reason))?;
 
     request
         .extensions_mut()
-        .insert(AuthenticatedIssuer::new(Issuer(token_data.claims.iss)));
+        .insert(AuthenticatedIssuer::new(credential.issuer));
     Ok(next.run(request).await)
+}
+
+fn invalid_auth(
+    kid: Option<&str>,
+    iss: Option<&str>,
+    reason: impl std::fmt::Display,
+) -> AuthenticationError {
+    tracing::warn!(kid = kid.unwrap_or("-"), iss = iss.unwrap_or("-"), reason = %reason, "Management JWT rejected");
+    AuthenticationError::InvalidToken
 }
 
 fn current_unix_timestamp() -> Result<u64, AuthenticationError> {
@@ -282,6 +326,8 @@ mod tests {
             r#"{
                 "kty": "EC",
                 "crv": "P-256",
+                "kid": "test-key",
+                "alg": "ES256",
                 "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
                 "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
             }"#
@@ -302,15 +348,19 @@ mod tests {
             iss: issuer.to_string(),
             iat: now,
             nbf: None,
-            exp: now + 3600,
+            exp: now + 300,
         };
 
-        let header = Header::new(alg);
+        let mut header = Header::new(alg);
+        header.typ = Some("statuslist-management+jwt".to_string());
+        header.kid = Some("test-key".to_string());
         encode(&header, &claims, secret).unwrap()
     }
 
     fn sign_claims(claims: serde_json::Value, secret: &EncodingKey) -> String {
-        let header = Header::new(Algorithm::ES256);
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some("statuslist-management+jwt".to_string());
+        header.kid = Some("test-key".to_string());
         encode(&header, &claims, secret).unwrap()
     }
 
@@ -480,7 +530,7 @@ mod tests {
         let token = sign_claims(
             serde_json::json!({
                 "iat": now,
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -520,7 +570,7 @@ mod tests {
         let token = sign_claims(
             serde_json::json!({
                 "iss": "test-issuer",
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -629,7 +679,7 @@ mod tests {
                 "iss": "test-issuer",
                 "iat": now,
                 "aud": "other-service",
-                "exp": now + 3600
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -651,8 +701,8 @@ mod tests {
             serde_json::json!({
                 "iss": "test-issuer",
                 "iat": now,
-                "aud": "status-list-server-management",
-                "exp": now + 3600
+                "aud": ["other-service", "status-list-server-management"],
+                "exp": now + 300
             }),
             &encoding_key,
         );
@@ -696,10 +746,14 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            "Bearer error=\"invalid_token\""
+        );
 
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["error"], "jwt_error");
+        assert_eq!(body["error"], "invalid_token");
         assert_eq!(body["error_description"], "Invalid authentication token");
     }
 

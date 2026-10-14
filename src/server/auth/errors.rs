@@ -1,24 +1,17 @@
 use crate::server::error::{ApiError, IntoApiError};
 use axum::response::IntoResponse;
 use hyper::StatusCode;
-use jsonwebtoken::errors::Error as JwtError;
 use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AuthenticationError {
-    #[error("Issuer not registered")]
-    IssuerNotFound,
     #[error("Internal server error")]
     InternalServer,
-    #[error("Missing or invalid Authorization header")]
-    InvalidAuthorizationHeader,
+    #[error("Missing bearer token")]
+    MissingToken,
     #[error("Invalid authentication token")]
-    InvalidClaims,
-    #[error("{0}")]
-    JwtError(#[from] JwtError),
-    #[error("Unsupported algorithm")]
-    UnsupportedAlgorithm,
+    InvalidToken,
 }
 
 impl AuthenticationError {
@@ -31,18 +24,15 @@ impl AuthenticationError {
 
     pub fn get_error_code(&self) -> Cow<'static, str> {
         match self {
-            AuthenticationError::IssuerNotFound => Cow::Borrowed("issuer_not_found"),
             AuthenticationError::InternalServer => Cow::Borrowed("internal_error"),
-            AuthenticationError::InvalidAuthorizationHeader => Cow::Borrowed("invalid_auth_header"),
-            AuthenticationError::InvalidClaims => Cow::Borrowed("invalid_token"),
-            AuthenticationError::JwtError(_) => Cow::Borrowed("jwt_error"),
-            AuthenticationError::UnsupportedAlgorithm => Cow::Borrowed("unsupported_algorithm"),
+            AuthenticationError::MissingToken => Cow::Borrowed("missing_token"),
+            AuthenticationError::InvalidToken => Cow::Borrowed("invalid_token"),
         }
     }
 
     pub fn get_error_message(&self) -> String {
         match self {
-            AuthenticationError::JwtError(_) => "Invalid authentication token".to_string(),
+            AuthenticationError::InvalidToken => "Invalid authentication token".to_string(),
             _ => self.to_string(),
         }
     }
@@ -60,7 +50,17 @@ impl IntoApiError for AuthenticationError {
 
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
-        self.into_api_error().into_response()
+        let challenge = match &self {
+            AuthenticationError::MissingToken => "Bearer",
+            AuthenticationError::InvalidToken => "Bearer error=\"invalid_token\"",
+            AuthenticationError::InternalServer => return self.into_api_error().into_response(),
+        };
+        let mut response = self.into_api_error().into_response();
+        response.headers_mut().insert(
+            hyper::header::WWW_AUTHENTICATE,
+            hyper::header::HeaderValue::from_static(challenge),
+        );
+        response
     }
 }
 
@@ -71,16 +71,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_authentication_error_into_response() {
-        let err = AuthenticationError::InvalidAuthorizationHeader;
+        let err = AuthenticationError::MissingToken;
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[hyper::header::WWW_AUTHENTICATE],
+            "Bearer"
+        );
 
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "invalid_auth_header");
-        assert_eq!(
-            json["error_description"],
-            "Missing or invalid Authorization header"
-        );
+        assert_eq!(json["error"], "missing_token");
+        assert_eq!(json["error_description"], "Missing bearer token");
     }
 }

@@ -326,6 +326,21 @@ impl CredentialRepo for MemoryCredentials {
             .map(|(credential, _)| credential.clone()))
     }
 
+    async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError> {
+        let values = self.values.read().await;
+        for (credential, _) in values.by_issuer.values() {
+            if credential
+                .public_key
+                .key_id_and_algorithm()
+                .map(|(id, _)| id == kid)
+                .unwrap_or(false)
+            {
+                return Ok(Some(credential.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     async fn insert(
         &self,
         credential: Credential,
