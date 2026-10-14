@@ -85,7 +85,7 @@ pub fn normalize_key(key: &str) -> String {
     if sanitized.len() > 127 {
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hex::encode(hasher.finalize());
         let hash_suffix = &digest[..16];
         // Invariant: `sanitized` contains only single-byte ASCII characters `[0-9a-zA-Z-]`
         // due to the character mapping above, so byte index 110 is guaranteed to be a valid

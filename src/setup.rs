@@ -12,12 +12,14 @@ use color_eyre::eyre::Context;
 use color_eyre::eyre::Result as EyeResult;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use sea_orm::{ConnectOptions, DbErr};
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use sea_orm_migration::MigratorTrait;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "mysql",
+    feature = "redis"
+))]
 use secrecy::ExposeSecret;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{num::NonZeroU64, sync::Arc, time::Duration};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -46,9 +48,12 @@ use crate::cert_manager::{
     CertManager,
     storage::{CryptoCachePolicy, Storage},
 };
+use crate::config::CacheBackend;
 use crate::config::{Config as AppConfig, DatabaseBackend};
 #[cfg(feature = "acme")]
-use crate::config::{DnsProviderKind, ENV_DEVELOPMENT, ENV_PRODUCTION, ResolvedDnsProvider};
+use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
@@ -61,8 +66,10 @@ use crate::domain::{
 ))]
 use crate::outbound::aws::AwsSecretsManager;
 #[cfg(all(feature = "azure", not(feature = "vault"), not(feature = "gcp")))]
-use crate::outbound::azure_kv::AzureKeyVaultClient;
-use crate::outbound::cache::MokaStatusListCache;
+use crate::outbound::azure::AzureKeyVaultClient;
+#[cfg(feature = "redis")]
+use crate::outbound::cache::RedisStatusListCache;
+use crate::outbound::cache::{CachingCredentialRepo, DisabledStatusListCache, MokaStatusListCache};
 #[cfg(feature = "acme")]
 use crate::outbound::cert::AcmeCertificateProvider;
 #[cfg(not(feature = "acme"))]
@@ -73,8 +80,10 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    Migrator, SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection, verify_binlog_format, verify_innodb_engines,
+    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
+    SwappableDatabaseConnection,
+    list_quota::{self, StartupState},
+    run_migrations, verify_binlog_format, verify_innodb_engines,
 };
 #[cfg(feature = "vault")]
 use crate::outbound::vault::VaultClient;
@@ -116,6 +125,7 @@ fn classify_db_connect_error(err: &DbErr) -> &'static str {
         DbErr::Migration(_) => "migration",
         DbErr::RecordNotInserted => "record_not_inserted",
         DbErr::RecordNotUpdated => "record_not_updated",
+        _ => "other",
     }
 }
 
@@ -295,6 +305,61 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
     });
 }
 
+/// Usage of `status-list-server list-quota`.
+pub const LIST_QUOTA_USAGE: &str =
+    "usage: status-list-server list-quota <status|recount|enable|disable>
+
+  status   show whether limits.max_lists_per_issuer is enforced
+  recount  recompute every issuer's list count (refused while enforced)
+  enable   enforce the quota; refused, naming the issuers, while any issuer
+           has more lists than the cap or a stale count
+  disable  stop enforcing the quota";
+
+/// Runs `list-quota <action>` and returns what to print. Does not migrate.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
+    if !matches!(action, "status" | "recount" | "enable" | "disable") {
+        return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
+    }
+    if config.database.backend == DatabaseBackend::Memory {
+        return Err(color_eyre::eyre::eyre!(
+            "the memory backend enforces the list quota from startup; list-quota applies to \
+             SQL backends"
+        ));
+    }
+    let db = connect_database_pool(config).await?;
+    let max = config.limits.max_lists_per_issuer;
+    match action {
+        "status" => {
+            let enforced = list_quota::is_enforced(&db).await?;
+            Ok(if enforced {
+                format!("list quota: enforced (max {max} lists per issuer)")
+            } else {
+                "list quota: not enforced".to_string()
+            })
+        }
+        "recount" => {
+            list_quota::recount(&db).await?;
+            Ok("recomputed every issuer's list count".to_string())
+        }
+        "enable" => {
+            list_quota::enable(&db, max).await?;
+            Ok(format!("list quota enforced: max {max} lists per issuer"))
+        }
+        _ => {
+            list_quota::disable(&db).await?;
+            Ok("list quota no longer enforced".to_string())
+        }
+    }
+}
+
+#[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
+pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeResult<String> {
+    Err(color_eyre::eyre::eyre!(
+        "this build has no SQL backend; the memory backend enforces the list quota from startup"
+    ))
+}
+
 /// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
@@ -338,6 +403,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
+    // Why tokens must leave out `aggregation_uri`, when they must.
+    let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -350,6 +417,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             {
                 db_arc = None;
             }
+            aggregation_withheld = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -368,7 +436,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         _db_backend => {
             let db = connect_database_pool(config).await?;
 
-            Migrator::up(&db, None)
+            let fresh = run_migrations(&db)
                 .await
                 .wrap_err("Failed to run database migrations")?;
 
@@ -383,6 +451,51 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                      isolation level this server pins on every write. See the logged error \
                      above for the fix.",
             )?;
+
+            let list_quota_enforced = match list_quota::on_startup(
+                &db,
+                fresh,
+                config.limits.list_quota_transition,
+                config.limits.max_lists_per_issuer,
+            )
+            .await
+            .wrap_err("Startup aborted: the list quota is not enforced")?
+            {
+                StartupState::Enforced => true,
+                StartupState::EnforcedWithTransitionSet => {
+                    tracing::warn!(
+                        "limits.list_quota_transition is set, but the list quota is already \
+                         enforced; remove APP_LIMITS__LIST_QUOTA_TRANSITION."
+                    );
+                    true
+                }
+                StartupState::Transition => {
+                    tracing::error!(
+                        "limits.max_lists_per_issuer is NOT enforced: \
+                         limits.list_quota_transition is set. Once no pod of the previous \
+                         release is left, run `status-list-server list-quota recount`, then \
+                         `status-list-server list-quota enable`, then remove \
+                         APP_LIMITS__LIST_QUOTA_TRANSITION."
+                    );
+                    false
+                }
+            };
+            aggregation_withheld = if list_quota_enforced {
+                let over = list_quota::issuers_over(&db, AGGREGATION_DEFAULT_LIMIT as u64)
+                    .await
+                    .wrap_err("Failed to count each issuer's status lists")?;
+                (!over.is_empty()).then(|| {
+                    format!(
+                        "{} issuer(s) have more status lists than one aggregation page \
+                         ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
+                         restart:{}",
+                        over.len(),
+                        list_quota::name_issuers(&over)
+                    )
+                })
+            } else {
+                Some("the list quota is not enforced".to_string())
+            };
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
@@ -413,7 +526,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Arc<dyn CertificateProvider>,
         Option<Arc<CertManager>>,
     ) = {
-        let app_env = std::env::var("APP_ENV").unwrap_or(ENV_DEVELOPMENT.to_string());
+        let app_env = crate::config::normalize_app_env();
         let cert_domains = [config.server.domain.as_str()];
         let material_storage = build_crypto_storage(config).await?;
 
@@ -432,9 +545,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .server
             .cert
             .dns
-            .resolve(&app_env)
+            .resolve(app_env)
             .wrap_err("Invalid DNS provider configuration")?;
-        if dns_provider.kind() == DnsProviderKind::Pebble && app_env == ENV_PRODUCTION {
+        if dns_provider.kind() == DnsProviderKind::Pebble
+            && crate::config::classify_app_env(app_env).is_production()
+        {
             warn!(
                 "The 'pebble' DNS provider is a development-only fake DNS server \
                  but APP_ENV=production; ACME challenges will not succeed against a real CA"
@@ -446,7 +561,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             .challenge_handler(challenge_handler)
             .acme_strategy();
 
-        if app_env == ENV_DEVELOPMENT {
+        if crate::config::classify_app_env(app_env) == TelemetryEnvironment::Development {
             let root_cert = include_bytes!("../test_data/pebble.pem");
             let http_client = DefaultHttpClient::new(Some(root_cert))?;
             cert_manager_builder = cert_manager_builder.acme_http_client(http_client);
@@ -526,7 +641,83 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         (provider, None)
     };
 
-    let status_list_cache = MokaStatusListCache::new(config.cache.ttl, config.cache.max_capacity);
+    let status_list_cache: Arc<dyn crate::domain::ports::StatusListCache> = if config.cache.ttl == 0
+    {
+        tracing::info!(
+            cache.backend = "disabled",
+            cache.reason = "ttl_zero",
+            "status-list cache disabled"
+        );
+        Arc::new(DisabledStatusListCache)
+    } else {
+        match config.cache.backend {
+            CacheBackend::Memory => {
+                tracing::info!(
+                    cache.backend = "memory",
+                    cache.ttl_secs = config.cache.ttl,
+                    cache.max_capacity = config.cache.max_capacity,
+                    "status-list cache backend selected"
+                );
+                Arc::new(MokaStatusListCache::new(
+                    NonZeroU64::new(config.cache.ttl)
+                        .expect("cache TTL is nonzero after disabled-cache selection"),
+                    config.cache.max_capacity,
+                ))
+            }
+            CacheBackend::Redis => {
+                #[cfg(feature = "redis")]
+                {
+                    let redis_url = config.cache.load_resolved_redis_url().await?;
+                    let ca_cert = match &config.cache.ca_file {
+                        Some(path) => Some(tokio::fs::read(path).await.map_err(|err| {
+                            color_eyre::eyre::eyre!(
+                                "failed to read Redis cache CA file '{}': {err}",
+                                path.display()
+                            )
+                        })?),
+                        None => None,
+                    };
+                    let cache = RedisStatusListCache::new(
+                        redis_url.expose_secret(),
+                        config.cache.ttl,
+                        config.cache.key_prefix.clone(),
+                        Duration::from_millis(config.cache.response_timeout_ms),
+                        Duration::from_millis(config.cache.connection_timeout_ms),
+                        Duration::from_millis(config.cache.reconnect_cooldown_ms),
+                        ca_cert,
+                    )
+                    .map_err(|error| {
+                        color_eyre::eyre::eyre!(
+                            "failed to configure Redis status-list cache client: {error}"
+                        )
+                    })?;
+                    if let Err(error) = cache.warm_up().await {
+                        tracing::warn!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            error = ?error,
+                            "Redis status-list cache unavailable at startup; continuing with lazy reconnecting cache"
+                        );
+                    } else {
+                        tracing::info!(
+                            cache.backend = "redis",
+                            cache.ttl_secs = config.cache.ttl,
+                            cache.target = %config.cache.redacted_redis_target(),
+                            "status-list cache backend selected"
+                        );
+                    }
+                    Arc::new(cache)
+                }
+                #[cfg(not(feature = "redis"))]
+                {
+                    return Err(color_eyre::eyre::eyre!(
+                        "cache.backend=redis is configured, but this binary was not built with the redis feature"
+                    ));
+                }
+            }
+        }
+    };
 
     let snapshot_option = if config.status_list.snapshot_retention_secs == 0 {
         None
@@ -536,8 +727,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     let service = Arc::new(Service::from_arcs(
         status_list_repo,
-        credential_repo,
-        Arc::new(status_list_cache),
+        Arc::new(CachingCredentialRepo::new(credential_repo)),
+        status_list_cache,
         snapshot_option,
         cert_provider,
     ));
@@ -572,17 +763,77 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
+    // A `localhost`/loopback `sub` can never be reached by a relying party, so a
+    // production profile refuses to start rather than silently signing tokens
+    // that every relying party rejects. Private/local addresses (`.local`,
+    // private IPv4, link-local, ULA) may be valid internal setups, so those only
+    // warn with an accurate message. The Helm chart falls back to `localhost`
+    // with APP_ENV=production when no host is configured, which this catches.
+    // `APP_ENV` is read directly (not telemetry.environment, which operators may
+    // override just to change the log format) so the guard is tied to the real
+    // deployment profile. `normalize_app_env` applies the same normalization as
+    // config (trim, lowercase, `prod`/`production`), so a production profile set
+    // with e.g. `APP_ENV=prod` is caught here exactly as config treats it.
+    let app_env = crate::config::normalize_app_env();
+    let base_url = config.server.resolved_public_base_url();
+    match check_production_base_url(app_env, &base_url) {
+        Err(message) => return Err(color_eyre::eyre::eyre!(message)),
+        Ok(Some(warning)) => tracing::warn!("{warning}"),
+        Ok(None) => {}
+    }
+
+    // ACME issues a certificate only for `server.domain`; when `sub` comes from
+    // a different host, relying parties that check the token signature against
+    // the host in `sub` will reject it.
+    //
+    // Both sides are compared as normalized hosts: the WHATWG parser lowercases
+    // domain names and brackets a bare IPv6 address the same way
+    // `resolved_public_base_url` renders the domain into the URL authority, so
+    // an identical host never false-positives here.
+    #[cfg(feature = "acme")]
+    {
+        let base_url = config.server.resolved_public_base_url();
+        let sub_host = url::Url::parse(&base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .and_then(|h| url::Host::parse(&h).ok());
+        let domain_host = config
+            .server
+            .domain
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(url::Host::Ipv6)
+            .or_else(|| url::Host::parse(&config.server.domain).ok());
+        if let (Some(sub_host), Some(domain_host)) = (sub_host, domain_host)
+            && sub_host != domain_host
+        {
+            tracing::warn!(
+                cert.host = %config.server.domain,
+                sub.host = %sub_host,
+                "server.public_base_url host differs from the ACME certificate host \
+                 (server.domain); tokens are signed with sub = {base_url} but the certificate \
+                 only covers {}. Relying parties that pin the token signature to sub's host \
+                 will reject them.",
+                config.server.domain
+            );
+        }
+    }
+
     let state = AppState {
         service,
-        server_domain: config.server.domain.clone(),
-        aggregation_uri: empty_to_none(config.server.aggregation_uri.clone()),
+        public_base_url: config.server.resolved_public_base_url(),
+        aggregation_uri: advertised_aggregation_uri(config, aggregation_withheld.as_deref())?,
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
         max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
+        max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
+        token_bytes_cache: crate::server::cache::TokenBytesCache::new(
+            config.token_bytes_cache.max_capacity,
+        ),
         readiness,
     };
 
@@ -594,6 +845,23 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         Ok((state,))
     }
+}
+
+/// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
+/// page of an issuer's aggregation as complete, so tokens leave the claim out,
+/// for the reason in `withheld`, while one might not fit in it.
+fn advertised_aggregation_uri(
+    config: &AppConfig,
+    withheld: Option<&str>,
+) -> EyeResult<Option<url::Url>> {
+    let uri = config
+        .server
+        .aggregation_uri(config.telemetry.environment)?;
+    if let (Some(_), Some(reason)) = (&uri, withheld) {
+        tracing::warn!("server.aggregation_uri is not advertised in tokens: {reason}");
+        return Ok(None);
+    }
+    Ok(uri)
 }
 
 pub async fn setup_snapshot_cleanup_scheduler(
@@ -653,8 +921,80 @@ pub async fn setup_snapshot_cleanup_scheduler(
     Ok(())
 }
 
-fn empty_to_none(value: Option<String>) -> Option<String> {
-    value.filter(|v| !v.trim().is_empty())
+/// Whether the resolved public base URL's authority is a localhost/loopback
+/// address that can never be reached by any relying party. `server.public_base_url`
+/// is authoritative, so this inspects it rather than `server.domain`.
+fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(public_base_url) else {
+        // Config validation already rejected an unparsable URL; be conservative.
+        return false;
+    };
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    match host {
+        url::Host::Domain(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "localhost"
+                || domain.starts_with("localhost.")
+                || domain.ends_with(".localhost")
+        }
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
+/// Whether the resolved public base URL's authority is a private or local
+/// address that may be valid for an internal deployment but is not generally
+/// reachable by external relying parties: `.local` domains, private IPv4,
+/// link-local addresses, and IPv6 unique-local/ULA addresses. Unlike
+/// [`resolved_base_url_is_localhost`], these are not categorically unusable, so
+/// production only warns about them.
+fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(public_base_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    match host {
+        url::Host::Domain(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "local" || domain.ends_with(".local")
+        }
+        url::Host::Ipv4(ip) => ip.is_private() || ip.is_link_local(),
+        url::Host::Ipv6(ip) => ip.is_unicast_link_local() || ip.is_unique_local(),
+    }
+}
+
+/// In a production profile the resolved base URL must be reachable by relying
+/// parties. A localhost/loopback host can never be, so it is returned as a hard
+/// startup error; a private/local host may be a valid internal deployment, so
+/// it is returned as a warning string. A public host returns `Ok(None)`.
+///
+/// Non-production profiles always return `Ok(None)`. `app_env` is passed
+/// explicitly so the decision is testable without mutating the process
+/// environment.
+fn check_production_base_url(app_env: &str, base_url: &str) -> Result<Option<String>, String> {
+    if !crate::config::classify_app_env(app_env).is_production() {
+        return Ok(None);
+    }
+    if resolved_base_url_is_localhost(base_url) {
+        return Err(format!(
+            "server.public_base_url ({base_url}) resolves to localhost/loopback in a \
+             production profile; status list tokens would be signed with a `sub` that every \
+             relying party rejects. Set APP_SERVER__DOMAIN (or APP_SERVER__PUBLIC_BASE_URL) \
+             to the public host."
+        ));
+    }
+    if resolved_base_url_is_private_or_local(base_url) {
+        return Ok(Some(format!(
+            "server.public_base_url ({base_url}) resolves to a private/local host in a \
+             production profile; internal-only relying parties may accept these tokens, but \
+             external ones may not. Confirm this host is reachable by every relying party."
+        )));
+    }
+    Ok(None)
 }
 
 #[cfg(feature = "acme")]
@@ -859,9 +1199,10 @@ async fn build_dns_challenge_handler(
 mod tests {
     use super::*;
     use crate::cert_manager::challenge::Dns01Handler;
+    #[cfg(feature = "gcp")]
+    use crate::config::GcloudDnsConfig;
     use crate::config::{
         AcmeDnsConfig, AzureDnsConfig, CloudflareDnsConfig, DnsProviderKind, ENV_PRODUCTION,
-        GcloudDnsConfig,
     };
 
     fn build_dns_challenge_handler(
@@ -918,12 +1259,15 @@ mod tests {
             build_dns_challenge_handler(DnsProviderKind::Acmedns, &mut config, &domains).is_ok()
         );
 
-        config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
-            project_id: "test-project".into(),
-        });
-        assert!(
-            build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
-        );
+        #[cfg(feature = "gcp")]
+        {
+            config.server.cert.dns.gcloud = Some(GcloudDnsConfig {
+                project_id: "test-project".into(),
+            });
+            assert!(
+                build_dns_challenge_handler(DnsProviderKind::Gcloud, &mut config, &domains).is_ok()
+            );
+        }
     }
 }
 
@@ -931,67 +1275,299 @@ mod tests {
 mod general_tests {
     use super::*;
 
+    #[test]
+    fn aggregation_uri_is_withheld_for_a_reason() {
+        let config = AppConfig::load_from_overrides(&[(
+            "server.aggregation_uri",
+            "https://statuslist.example.com/api/v1/aggregation",
+        )])
+        .unwrap();
+        assert!(advertised_aggregation_uri(&config, None).unwrap().is_some());
+        assert_eq!(
+            advertised_aggregation_uri(&config, Some("the list quota is not enforced")).unwrap(),
+            None
+        );
+    }
+
+    /// Overrides that let `build_state` start whichever features are built.
+    /// Keep it while the state is in use: it serves the mocked Vault.
+    struct Startable {
+        overrides: Vec<(&'static str, String)>,
+        #[cfg(feature = "vault")]
+        _vault: wiremock::MockServer,
+    }
+
+    impl Startable {
+        async fn new() -> Self {
+            #[cfg(feature = "vault")]
+            let vault = {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::path("/v1/auth/approle/login"))
+                    .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({
+                            "auth": {
+                                "client_token": "s.mock-token",
+                                "lease_duration": 3600,
+                                "renewable": true
+                            }
+                        }),
+                    ))
+                    .mount(&server)
+                    .await;
+                server
+            };
+            #[cfg(not(feature = "acme"))]
+            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate test cert and key");
+
+            Self {
+                overrides: Vec::from([
+                    #[cfg(not(feature = "acme"))]
+                    (
+                        "APP_SERVER__CERT__STORE__CERTIFICATE",
+                        certified_key.cert.pem(),
+                    ),
+                    #[cfg(not(feature = "acme"))]
+                    (
+                        "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                        certified_key.signing_key.serialize_pem(),
+                    ),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__ADDR", vault.uri()),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__ROLE_ID", "test-role".to_string()),
+                    #[cfg(feature = "vault")]
+                    ("APP_VAULT__SECRET_ID", "test-secret".to_string()),
+                    #[cfg(feature = "gcp")]
+                    (
+                        "APP_GCP_SECRET_MANAGER__PROJECT_ID",
+                        "test-project".to_string(),
+                    ),
+                    #[cfg(feature = "azure")]
+                    (
+                        "APP_AZURE_KEYVAULT__VAULT_URL",
+                        "https://test.vault.azure.net/".to_string(),
+                    ),
+                ]),
+                #[cfg(feature = "vault")]
+                _vault: vault,
+            }
+        }
+
+        fn config(&self, overrides: &[(&str, &str)]) -> AppConfig {
+            let overrides: Vec<_> = self
+                .overrides
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .chain(overrides.iter().copied())
+                .collect();
+            AppConfig::load_from_overrides(&overrides).expect("Failed to load config")
+        }
+    }
+
     /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
     /// the default feature set, catching missing test_data/ or config mismatch issues.
     /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
     #[tokio::test]
     async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        #[cfg(feature = "vault")]
-        let mock_vault = {
-            let server = wiremock::MockServer::start().await;
-            wiremock::Mock::given(wiremock::matchers::method("POST"))
-                .and(wiremock::matchers::path("/v1/auth/approle/login"))
-                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({
-                        "auth": {
-                            "client_token": "s.mock-token",
-                            "lease_duration": 3600,
-                            "renewable": true
-                        }
-                    }),
-                ))
-                .mount(&server)
-                .await;
-            server
-        };
-
-        #[cfg(not(feature = "acme"))]
-        let (cert_pem, key_pem) = {
-            let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-                .expect("generate test cert and key");
-            (
-                certified_key.cert.pem(),
-                certified_key.signing_key.serialize_pem(),
-            )
-        };
-
-        let config = AppConfig::load_from_overrides(&[
+        let startable = Startable::new().await;
+        let config = startable.config(&[
             ("APP_DATABASE__BACKEND", "memory"),
             ("APP_DATABASE__URL", "memory:"),
-            #[cfg(not(feature = "acme"))]
-            ("APP_SERVER__CERT__STORE__CERTIFICATE", &cert_pem),
-            #[cfg(not(feature = "acme"))]
-            ("APP_SERVER__CERT__STORE__SIGNING_KEY", &key_pem),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__ADDR", &mock_vault.uri()),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__ROLE_ID", "test-role"),
-            #[cfg(feature = "vault")]
-            ("APP_VAULT__SECRET_ID", "test-secret"),
-            #[cfg(feature = "gcp")]
-            ("APP_GCP_SECRET_MANAGER__PROJECT_ID", "test-project"),
-            #[cfg(feature = "azure")]
-            (
-                "APP_AZURE_KEYVAULT__VAULT_URL",
-                "https://test.vault.azure.net/",
-            ),
-        ])
-        .expect("Failed to load config");
+        ]);
 
         if let Err(ref e) = build_state(&config).await {
             panic!("build_state failed under default configuration: {e:?}");
         }
+    }
+
+    /// Pods of a deployment, restarted on one SQLite database.
+    #[cfg(feature = "sqlite")]
+    mod aggregation_withheld {
+        use super::*;
+        use crate::test_utils::{publish_list, publish_list_under_quota, register_issuer};
+
+        const AGGREGATION_URI: &str = "https://statuslist.example.com/api/v1/aggregation";
+
+        /// A database file, which outlives a restart as a deployment's does.
+        /// Returns its directory, to remove afterwards, and its URL.
+        fn database_file() -> (std::path::PathBuf, String) {
+            let dir = std::env::temp_dir().join(format!("status-list-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            let url = format!("sqlite://{}?mode=rwc", dir.join("status-list.db").display());
+            (dir, url)
+        }
+
+        /// In transition publishes past the cap are accepted, so an issuer's
+        /// aggregation can outgrow one page.
+        #[tokio::test]
+        async fn in_quota_transition_with_an_issuer_over_the_cap() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let deployment = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                ("APP_SERVER__AGGREGATION_URI", AGGREGATION_URI),
+                ("APP_LIMITS__MAX_LISTS_PER_ISSUER", "2"),
+            ];
+            let config = startable.config(&deployment);
+            let fresh = build_state(&config).await.expect("first start");
+            assert!(fresh.aggregation_uri.is_some());
+
+            // As on a database a release without the quota has served.
+            run_list_quota_command(&config, "disable")
+                .await
+                .expect("disable the quota");
+            let mut transition = deployment.to_vec();
+            transition.push(("APP_LIMITS__LIST_QUOTA_TRANSITION", "true"));
+            let state = build_state(&startable.config(&transition))
+                .await
+                .expect("start in transition");
+            register_issuer(&state.service, "issuer1").await;
+            for _ in 0..3 {
+                let list_id = uuid::Uuid::new_v4().to_string();
+                publish_list_under_quota(&state.service, "issuer1", &list_id, 2)
+                    .await
+                    .expect("the cap is lifted in transition");
+            }
+
+            assert_eq!(state.aggregation_uri, None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The quota bounds new lists only, so an issuer keeps any it published
+        /// under an earlier, higher cap.
+        #[tokio::test]
+        async fn while_an_issuer_has_more_lists_than_one_page() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let config = startable.config(&[
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", &database),
+                ("APP_SERVER__AGGREGATION_URI", AGGREGATION_URI),
+            ]);
+            let state = build_state(&config).await.expect("first start");
+            assert!(state.aggregation_uri.is_some());
+
+            // An earlier build enforced a cap above one page.
+            run_list_quota_command(&config, "disable")
+                .await
+                .expect("disable the quota");
+            register_issuer(&state.service, "issuer1").await;
+            for _ in 0..=AGGREGATION_DEFAULT_LIMIT {
+                publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
+            }
+            let db = connect_database_pool(&config).await.expect("connect");
+            list_quota::enable(&db, 2 * AGGREGATION_DEFAULT_LIMIT as u64)
+                .await
+                .expect("enable under the earlier cap");
+
+            let restarted = build_state(&config).await.expect("restart");
+            assert_eq!(restarted.aggregation_uri, None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(all(feature = "redis", not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_with_redis_cache_starts_when_redis_is_unreachable() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "1"),
+            ("APP_CACHE__CONNECTION_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RESPONSE_TIMEOUT_MS", "50"),
+            ("APP_CACHE__RECONNECT_COOLDOWN_MS", "50"),
+        ])
+        .expect("load redis cache config");
+
+        build_state(&config)
+            .await
+            .expect("redis cache startup failures should install lazy reconnecting cache");
+    }
+
+    #[cfg(all(not(feature = "redis"), not(feature = "acme")))]
+    #[tokio::test]
+    async fn build_state_rejects_redis_cache_without_redis_feature() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "redis"),
+            ("APP_CACHE__HOST", "127.0.0.1"),
+            ("APP_CACHE__PORT", "6379"),
+        ])
+        .expect("load redis cache config");
+
+        let Err(error) = build_state(&config).await else {
+            panic!("Redis cache configuration must fail without the redis feature");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("cache.backend=redis is configured, but this binary was not built with the redis feature")
+        );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn build_state_uses_disabled_cache_when_ttl_is_zero() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate test cert and key");
+        let config = AppConfig::load_from_overrides(&[
+            ("APP_DATABASE__BACKEND", "memory"),
+            ("APP_DATABASE__URL", "memory:"),
+            (
+                "APP_SERVER__CERT__STORE__CERTIFICATE",
+                &certified_key.cert.pem(),
+            ),
+            (
+                "APP_SERVER__CERT__STORE__SIGNING_KEY",
+                &certified_key.signing_key.serialize_pem(),
+            ),
+            ("APP_CACHE__BACKEND", "memory"),
+            ("APP_CACHE__TTL", "0"),
+        ])
+        .expect("load ttl-zero cache config");
+
+        let state = build_state(&config).await.expect("build state");
+        assert_eq!(
+            state
+                .service
+                .status_list_cache()
+                .get("any")
+                .await
+                .expect("disabled cache get"),
+            None
+        );
     }
 
     #[cfg(not(feature = "acme"))]
@@ -1250,7 +1826,7 @@ mod general_tests {
         let inflight = {
             let db = handle.current();
             tokio::spawn(async move {
-                db.query_one(Statement::from_string(
+                db.query_one_raw(Statement::from_string(
                     DatabaseBackend::Postgres,
                     "SELECT pg_sleep(0.25), current_user".to_string(),
                 ))
@@ -1351,5 +1927,186 @@ mod general_tests {
         assert!(!rendered.contains(wrong_password));
 
         let _ = tokio::fs::remove_dir_all(temp_dir).await;
+    }
+
+    /// The local-address checks key off the resolved public base URL, not the
+    /// `server.domain` string. `localhost`/loopback can never be reached by a
+    /// relying party, while private/local addresses (`.local`, private IPv4,
+    /// link-local, ULA) may be valid internal setups — the two must be told
+    /// apart because production fails on the former but only warns on the
+    /// latter.
+    #[test]
+    fn resolved_base_url_local_host_detection() {
+        use super::{resolved_base_url_is_localhost, resolved_base_url_is_private_or_local};
+
+        for localhost in [
+            "https://localhost/api/v1",
+            "https://localhost.localdomain/api/v1",
+            "https://foo.localhost/api/v1",
+            "https://127.0.0.1/api/v1",
+            "https://[::1]/api/v1",
+        ] {
+            assert!(
+                resolved_base_url_is_localhost(localhost),
+                "{localhost} should be treated as localhost"
+            );
+            assert!(
+                !resolved_base_url_is_private_or_local(localhost),
+                "{localhost} must not also be classified as merely private/local"
+            );
+        }
+
+        for private_local in [
+            "https://10.0.0.5/api/v1",
+            "https://192.168.1.10/api/v1",
+            "https://169.254.169.254/api/v1",
+            "https://myhost.local/api/v1",
+            "https://[fd00::1]/api/v1",
+            "https://[fe80::1]/api/v1",
+        ] {
+            assert!(
+                !resolved_base_url_is_localhost(private_local),
+                "{private_local} should not be treated as localhost"
+            );
+            assert!(
+                resolved_base_url_is_private_or_local(private_local),
+                "{private_local} should be treated as private/local"
+            );
+        }
+
+        for public in [
+            "https://statuslist.example.com/api/v1",
+            "https://statuslist.example.org/api/v1",
+        ] {
+            assert!(
+                !resolved_base_url_is_localhost(public),
+                "{public} should not be treated as localhost"
+            );
+            assert!(
+                !resolved_base_url_is_private_or_local(public),
+                "{public} should not be treated as private/local"
+            );
+        }
+    }
+
+    /// A production profile with an explicit localhost `public_base_url` must
+    /// be classified as localhost, while a localhost `server.domain` overridden
+    /// by an explicit public URL must not. Config validation is independent of
+    /// the startup check, so these assert the resolved URL used for it.
+    #[test]
+    fn production_localhost_public_base_url_detection() {
+        use super::resolved_base_url_is_localhost;
+        use crate::config::ENV_PRODUCTION;
+
+        let explicit_localhost = AppConfig::load_from_overrides(&[
+            ("APP_ENV", ENV_PRODUCTION),
+            ("APP_SERVER__DOMAIN", "example.com"),
+            ("APP_SERVER__PUBLIC_BASE_URL", "https://localhost/api/v1"),
+        ])
+        .expect("config loads");
+        assert!(
+            resolved_base_url_is_localhost(&explicit_localhost.server.resolved_public_base_url()),
+            "an explicit localhost public_base_url in production must be flagged"
+        );
+
+        let overridden = AppConfig::load_from_overrides(&[
+            ("APP_ENV", ENV_PRODUCTION),
+            ("APP_SERVER__DOMAIN", "localhost"),
+            (
+                "APP_SERVER__PUBLIC_BASE_URL",
+                "https://statuslist.example.com/api/v1",
+            ),
+        ])
+        .expect("config loads");
+        assert!(
+            !resolved_base_url_is_localhost(&overridden.server.resolved_public_base_url()),
+            "a public explicit public_base_url must not be flagged even with a localhost domain"
+        );
+    }
+
+    /// The production base-URL guard: localhost/loopback is a hard startup
+    /// error, private/local is a warning, public is quiet, and non-production
+    /// profiles never fire. The decision is keyed off the explicit `app_env`
+    /// argument so it is testable without mutating the process environment.
+    #[test]
+    fn production_base_url_check() {
+        use super::check_production_base_url;
+        use crate::config::ENV_PRODUCTION;
+
+        // localhost/loopback -> hard startup error in production.
+        for url in [
+            "https://localhost/api/v1",
+            "https://localhost.localdomain/api/v1",
+            "https://foo.localhost/api/v1",
+            "https://127.0.0.1/api/v1",
+            "https://[::1]/api/v1",
+        ] {
+            let err = check_production_base_url(ENV_PRODUCTION, url)
+                .expect_err(&format!("{url} must fail in production"));
+            assert!(
+                err.contains("localhost/loopback"),
+                "unexpected error for {url}: {err}"
+            );
+        }
+
+        // private/local -> warning in production, not a failure.
+        for url in [
+            "https://10.0.0.5/api/v1",
+            "https://192.168.1.10/api/v1",
+            "https://169.254.169.254/api/v1",
+            "https://myhost.local/api/v1",
+            "https://[fd00::1]/api/v1",
+            "https://[fe80::1]/api/v1",
+        ] {
+            let warning = check_production_base_url(ENV_PRODUCTION, url)
+                .unwrap_or_else(|_| panic!("{url} must not fail in production"))
+                .unwrap_or_else(|| panic!("{url} must warn in production"));
+            assert!(
+                warning.contains("private/local"),
+                "unexpected warning for {url}: {warning}"
+            );
+        }
+
+        // public -> quiet.
+        for url in [
+            "https://statuslist.example.com/api/v1",
+            "https://statuslist.example.org/api/v1",
+        ] {
+            assert!(
+                check_production_base_url(ENV_PRODUCTION, url)
+                    .expect("public host must not fail")
+                    .is_none(),
+                "{url} must not warn"
+            );
+        }
+
+        // Non-production profiles never fire.
+        let dev = crate::config::ENV_DEVELOPMENT;
+        assert!(
+            check_production_base_url(dev, "https://localhost/api/v1")
+                .expect("development never fails")
+                .is_none(),
+            "development must be quiet even for localhost"
+        );
+    }
+
+    /// A production profile set via the `prod` alias (any casing, surrounding
+    /// whitespace) must still fire the localhost base-URL guard: the guard runs
+    /// the raw `APP_ENV` through `classify_app_env`, so it catches the same
+    /// profiles config treats as production. Regression for a guard that
+    /// compared the raw value to exactly `production`.
+    #[test]
+    fn prod_alias_fires_production_base_url_guard() {
+        use super::check_production_base_url;
+
+        for raw in ["prod", "PROD", " production ", "PrOd"] {
+            let result = check_production_base_url(raw, "https://localhost/api/v1");
+            assert!(
+                result
+                    .expect_err("localhost base URL in a prod profile must be a hard error")
+                    .contains("localhost/loopback"),
+                "APP_ENV={raw:?} must be treated as production for the base-URL guard"
+            );
+        }
     }
 }

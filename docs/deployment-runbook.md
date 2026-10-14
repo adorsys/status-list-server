@@ -6,17 +6,17 @@ This runbook describes how to deploy the Status List Server project on a Kuberne
 
 You have three broad ways to run the Status List Server:
 
-- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../helm/chart/values-local.yaml).
+- **Local / development** (Minikube, kind, Docker Desktop): manual testing and iteration, using [`chart/values-local.yaml`](../deploy/helm/chart/values-local.yaml).
 - **Self-managed deploy** (recommended; any cluster you own): a real, repeatable deployment using `chart/values.yaml` plus your own overrides.
 - **Bundled chart only**: bring your own containers or compose workflows (non-Helm).
 
-The project ships a Helm chart (`helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
+The project ships a Helm chart (`deploy/helm/chart`) that is the recommended, supported way to deploy. The chart bundles:
 
 - the **Status List Server** application Deployment, Service, and (optionally) Ingress;
 - a **PostgreSQL** subchart for the database;
 - an **OpenTelemetry Collector** subchart for traces/metrics/logs (optional).
 
-Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`helm/README.md`](../helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
+Everything below assumes you deploy with Helm. The chart is the source of truth for how the application is configured and run; see [`deploy/helm/README.md`](../deploy/helm/README.md) for the full value reference and the [Next steps](#next-steps) section for supporting topics (secrets, DNS providers, database backends, observability).
 
 ## Prerequisites
 
@@ -49,13 +49,13 @@ kubectl config use-context minikube
 kubectl create namespace local
 
 # 3. Pull chart dependencies and install
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # NOTE: only variant-suffixed tags are published. With an empty tag, the chart
 # uses its provider-neutral appVersion (-fscert). Override the tag only when
 # you want a specific cloud variant or a locally loaded image.
-helm install statuslist-local ./helm/chart \
-  -n local -f ./helm/chart/values-local.yaml
+helm install statuslist-local ./deploy/helm/chart \
+  -n local -f ./deploy/helm/chart/values-local.yaml
 
 # 4. Verify
 kubectl get pods -n local
@@ -85,7 +85,7 @@ This is the path to a real deployment on a cluster you own. It uses the producti
 
 ### Prepare the database password Secret
 
-The application reads the database password from a Kubernetes Secret named `statuslist-secret` (key `postgres-password`), and the bundled PostgreSQL subchart references the same Secret. The chart mounts that Secret as a file (default `mountPath: /var/run/status-list-server/database`, item `postgres-password` → `password`) and exposes it through `APP_DATABASE__PASSWORD_FILE`. It deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
+The application reads the database password from a Kubernetes Secret named `statuslist-secret`. The chart-managed fallback Secret renders both `database-password` and legacy `postgres-password` with the same value, and on upgrade it can reuse an existing legacy `postgres-password` value. For upgrade safety with customer-managed Secrets and custom ESO mappings, the default mount still uses `postgres-password` as `/var/run/status-list-server/database/password`. Switch `statuslist.secretMounts[0].items[0].key` or `statuslist.database.passwordSecretKey` to `database-password` only after that key is guaranteed to exist. The chart deliberately does **not** inject `APP_DATABASE__PASSWORD` as a literal environment variable, and rejects it if you try.
 
 How the Secret is created depends on your [secrets mode](#secrets-delivery): via an ExternalSecret (ESO) or a plain fallback Secret the chart renders for you.
 
@@ -93,29 +93,60 @@ How the Secret is created depends on your [secrets mode](#secrets-delivery): via
 
 The chart's `statuslist.env` holds the application configuration. Set the values your deployment needs:
 
-- **Database port**: `APP_DATABASE__PORT` (e.g. `5432`). This is **not** inferred from the PostgreSQL subchart: set it explicitly.
+- **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
+
+## Redis Status-List Cache
+
+Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, provide
+`APP_CACHE__HOST`, and configure `APP_CACHE__TLS=true` with a password in production.
+For Helm, source `APP_CACHE__PASSWORD` from `statuslist.secretEnv` and set
+`statuslist.networkPolicy.cacheEgress` when NetworkPolicy is enabled.
+
+Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
+write-capable Redis user with other applications. For the default prefix, create one with:
+
+```text
+ACL SETUSER status-list-server reset on >REPLACE_WITH_A_STRONG_PASSWORD ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load
+```
+
+`SET` maintains durable invalidation fences, `SELECT` is needed when
+`APP_CACHE__DATABASE` is non-zero, and `SCRIPT|LOAD` lets `redis::Script` recover
+after a Redis restart. Restrict the key pattern when you configure a custom prefix.
+
+Configure Redis with `maxmemory-policy volatile-lru` (or `volatile-lfu`). Cache record
+keys have a TTL and remain eligible for eviction, while durable marker keys have no TTL
+and stay resident to preserve stale-fill fencing. Do not use any `allkeys-*` policy: it
+can evict a marker and allow a delayed pre-PATCH fill to make a revoked credential look
+valid. Size Redis for one durable marker per distinct status-list ID that has been
+invalidated, in addition to the TTL-bound records; markers deliberately outlive records
+and are not bounded by `APP_CACHE__MAX_CAPACITY`.
+
+The cache supports private CA bundles (`APP_CACHE__CA_FILE`) and configurable
+response, connection, and reconnect-cooldown timeouts. See
+[`deploy/helm/chart/values.yaml`](../deploy/helm/chart/values.yaml) for the full
+Helm value reference.
 
 ### Install
 
 ```bash
 # Pull and package dependencies once
-helm dependency update ./helm/chart
+helm dependency update ./deploy/helm/chart
 
 # Install with your values file (or inline --set overrides)
-helm upgrade --install statuslist ./helm/chart \
+helm upgrade --install statuslist ./deploy/helm/chart \
   --namespace statuslist \
   --create-namespace \
   --rollback-on-failure \
   --wait \
   --timeout 10m \
-  -f ./helm/chart/values.yaml \
+  -f ./deploy/helm/chart/values.yaml \
   -f ./my-deployment-values.yaml
 ```
 
-Use `helm upgrade --install` rather than `helm install` so the same command both creates and later updates the release. `--rollback-on-failure --wait --timeout 10m` makes failed upgrades roll back automatically during the pipeline. (This is the Helm 4 name; Helm 3 also accepts the legacy `--atomic` flag.)
+Use `helm upgrade --install` rather than `helm install` so the same command both creates and later updates the release. `--rollback-on-failure --wait --timeout 10m` makes failed upgrades roll back automatically during the pipeline. (This is the Helm 4 name; Helm 3 also accepts the legacy `--atomic` flag.) If the failed upgrade had already migrated the database, the rolled-back pods cannot start; see [Rolling back across migrations](#rolling-back-across-migrations).
 
 ### Expose the service (Ingress)
 
@@ -126,6 +157,45 @@ Use `helm upgrade --install` rather than `helm install` so the same command both
 - Or set `statuslist.ingress.enabled=false` and expose the `ClusterIP` Service another way (NodePort, port-forward, or a LoadBalancer).
 
 The AWS overlay shows the Ingress + cert-manager path explicitly. Direct AWS NLB exposure lives in `values-aws-nlb.yaml` and disables Ingress so the two public paths are not active at the same time.
+
+**Certificate host vs. token `sub` host.** With ACME, the server obtains a
+certificate for `server.domain` (derived from `statuslist.ingress.externalDnsHostname`).
+The status list `sub` URI, however, is built from `server.public_base_url`
+(defaulting to `https://{server.domain}/api/v1`). If you set `APP_SERVER__PUBLIC_BASE_URL`
+to a different host than `server.domain`, the certificate will not cover the
+host in `sub`, and relying parties that pin the token signature to the host in
+`sub` will reject the tokens. Keep the two hosts the same unless you have a
+separate TLS-terminating layer covering the public URL. If the service is
+reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
+(e.g. `https://host:8443/api/v1`), since `server.domain` cannot carry a port.
+
+The subject URI is fixed when a status list is published. Changing
+`server.public_base_url` or `server.domain` affects only new lists; existing lists retain their original URI. Keep the old endpoint serving those lists because already-issued credentials still reference it. A hostname change does not migrate published lists or update those credentials.
+
+### Content negotiation at the edge
+
+The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
+(JWT vs CWT) from the client's `Accept` header per RFC 9110 §12.5.1 and serves
+`Vary: Accept, Accept-Encoding` on its `200`, `304` and `406` responses. Two
+operational consequences follow:
+
+- **Normalize `Accept` at the CDN/edge.** Most HTTP clients and CDNs send a
+  catch-all `Accept` (e.g. `*/*` or the legacy JDK default) that the server now
+  accepts and answers with the default JWT format instead of a `406`. If you
+  run a caching CDN in front of the service, make sure it keys its cache on
+  `Vary: Accept` and, if you can, normalize or collapse the `Accept` header at
+  the edge (for example strip wildcard-only values down to
+  `application/statuslist+jwt`) so downstream cache-hit ratios stay high and
+  one canonical variant is served per client class.
+- **Plan for signing load.** Because wildcard/absent `Accept` headers now return
+  `200 OK` (previously `406`), clients that were failing will suddenly start
+  receiving freshly signed tokens. Every `200` triggers a token re-sign on the
+  hot path (subject to the conditional-revalidation ETag window), so watch
+  signing throughput and CPU after rollout — a large fleet of previously-`406`
+  clients can add sustained signing work that was not there before. The Redis
+  status-list cache and the conditional-revalidation metrics
+  (`conditional_revalidation_total`) help you confirm the new traffic is being
+  served efficiently rather than re-signing every request.
 
 ### Pinning the image
 
@@ -143,7 +213,7 @@ When `digest` is set it takes precedence over `tag`, and Kubernetes runs `reposi
 
 ## Secrets Delivery
 
-The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`helm/README.md`](../helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
+The chart supports fallback Secret, ESO, and Workload Identity paths. Pick the one that matches your cluster. The trade-offs for ESO vs Workload Identity are covered in [`deploy/helm/README.md`](../deploy/helm/README.md) and the database/secret backend options in [secrets-backends.md](secrets-backends.md).
 
 ### Mode A: Fallback plain Secret (default)
 
@@ -158,10 +228,10 @@ statuslist:
   fallbackSecret:
     enabled: true
     stringData:
-      postgres-password: ""
+      database-password: ""
 ```
 
-Leave `postgres-password` empty to generate a password; Helm reuses the existing cluster Secret on upgrades when it can read it.
+Leave `database-password` empty to generate a password; Helm reuses an existing `database-password` or legacy `postgres-password` from the cluster Secret on upgrades when it can read it. If both existing keys are present with different values, the chart fails rather than overwriting one with the other.
 
 ### Mode B: External Secrets Operator (ESO)
 
@@ -169,7 +239,7 @@ Use ESO to synchronize secrets from a provider instead of storing them as Helm-r
 
 - `externalSecret.enabled=true`, `secretStore.enabled=true`, and `statuslist.fallbackSecret.enabled=false` render ESO CRs:
   - a provider-neutral `SecretStore` (`secretStore.provider` selects `aws`, `vault`, `gcp`, `azure`, or `raw`);
-  - an `ExternalSecret` that syncs `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
+  - an `ExternalSecret` that syncs `database-password` and `postgres-password` into a Kubernetes Secret named `statuslist-secret`;
   - when `statuslist.aws.mountCredentials=true`, a second `ExternalSecret` that provisions `aws-credentials-secret` (the AWS shared `credentials`/`config` files mounted under `/home/nobody/.aws`).
 
 **To use ESO** you must install External Secrets Operator in your cluster and configure:
@@ -191,10 +261,10 @@ A ready `ExternalSecret` shows a `SecretSynced` condition. A missing remote key 
 
 Instead of ESO-mounted static credentials, the application can use **ambient** cloud credentials via Workload Identity (EKS IRSA, GCP WI, Azure WIF):
 
-- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `helm/README.md`](../helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
+- attach the role annotation via `serviceAccount.annotations` (e.g. `eks.amazonaws.com/role-arn` on EKS; see the [Workload Identity section of `deploy/helm/README.md`](../deploy/helm/README.md#use-workload-identity-instead-of-mounted-credentials) for GCP/Azure, and note Azure also needs the pod label `azure.workload.identity/use: "true"`);
 - set `statuslist.aws.mountCredentials=false` so no credential files are mounted.
 
-Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`helm/README.md`](../helm/README.md) for Route53 / Secrets Manager / S3).
+Attach a least-privilege policy to the role (see the example in the Workload Identity section of [`deploy/helm/README.md`](../deploy/helm/README.md) for Route53 / Secrets Manager / S3).
 
 In fallback mode, `aws-credentials-secret` is not provisioned automatically: either create it yourself when `mountCredentials=true`, switch to ESO, or use Workload Identity.
 
@@ -225,6 +295,178 @@ podDisruptionBudget:
 
 `replicaCount` lives under `statuslist:` (the Deployment reads `statuslist.replicaCount`); `autoscaling` and `podDisruptionBudget` are top-level values. When `autoscaling.enabled=true` the Deployment omits `replicas` so the HPA controls the count. Keep `podDisruptionBudget.maxUnavailable` below the replica count (the safe default) so node drains do not get blocked.
 
+### Conditional GETs, ETags and the signed-token cache across replicas
+
+The live `GET /status-lists/{id}` endpoint serves a **strong** ETag (`"..."`) derived from a SHA-256 digest of the exact served representation bytes (RFC 9110 §8.8.3.1). Because ES256 signatures are randomized, the bytes differ across replicas, restarts, cold caches, capacity evictions and window roll-overs; the strong ETag therefore differs across replicas — this is a documented, accepted deviation from cross-replica ETag equality (ticket 564 acceptance criterion: "two replicas return matching ETags *or the issue documents why they don't*"). Within a single replica the ETag is stable for the whole token window, so a client revalidating against the same replica gets a `304` with no signing. The token window is exactly the token's full lifetime (`exp_secs`); the ETag changes on content update, key/certificate rotation, window roll-over, token-format/encoding change, aggregation URI or token lifetime change, or mid-window content revert.
+
+That cross-replica stability holds **only when replicas serve the same content with the same signing material and token configuration for the same representation and window**. During a rolling certificate or configuration change — or for different `token_ttl`/`token_exp` or aggregation-URI settings — ETags deliberately differ between replicas, so a revalidation against a replica on the other side of the change returns a freshly signed `200`. Coordinate certificate rotation and configuration rollout so the window during which replicas disagree is brief.
+
+The signed-token bytes cache (`token_bytes_cache`) is **per-replica and byte-budgeted**:
+
+- `token_bytes_cache.max_capacity` is a **byte** budget (entries are weighed by their size; a small list is a few hundred bytes, a large one can exceed 1 MiB), not an entry count. The default (64 MiB) is sized to hold several maximum-permitted lists (each near 1 MiB once wrapped in JWT/base64) plus many small ones. `0` disables the cache (every request re-signs).
+- Each entry expires at the **end of its own validity window** (window width is `exp_secs`), independent of any global TTL, so a closed window's bytes are reclaimed promptly. There is no `token_bytes_cache.ttl` setting.
+- The cache avoids re-signing *unchanged* tokens within a window on one replica, even under capacity pressure. A two-tier design (protected tier for latest-generation entries within their window, cold tier for superseded/expired entries) guarantees at most one signature per `(list, window, format)` per replica. A content change, a signer/certificate rotation, or a mid-window content revert to an earlier state always re-signs immediately (all are part of the cache key and the ETag). The monotonic `version` — not `iat` — guarantees a revert to earlier content produces a new key and ETag: a same-second A → B → A revert can leave `iat` unchanged, but `version` advances, so the new representation identity never collides with the pre-revert one.
+- Encoded variants (gzip for JWT, identity for both) and their strong ETags are pre-computed at cache insertion time and stored alongside the uncompressed bytes, so revalidation requests (including `304`) never need to re-compress.
+
+`status_list.token_ttl_secs` must be **strictly less than** `status_list.token_exp_secs` (validated at startup); a config with `ttl >= exp` or `exp == 0` is refused because it would let a `304` (whose `max-age = min(ttl, exp - now)`) vouch for a token that expires sooner.
+
+### Upgrade strategy for this release
+
+This release changes how status-list updates are fenced for concurrency: updates are now
+guarded on a dedicated `version` column (and the `meta:{id}:version` Redis marker) instead of
+the `updated_at` timestamp (and the `meta:{id}:updated` marker). The two guards are **not
+mutually compatible during a rolling deploy**: old pods guard only on `updated_at` and never
+touch `version`, while new pods guard only on `version` and can write a same-second
+`updated_at`. While both versions run they can overwrite each other's update without a
+conflict, and on the Redis path neither side's invalidation fences the other side's delayed
+fills — so a status change can be silently lost.
+
+Deploy this release with a **`Recreate` rollout strategy** so that no old and new pods ever
+run concurrently. The chart exposes the Deployment strategy through
+`statuslist.strategy`; set its type to `Recreate` for this upgrade:
+
+```bash
+helm upgrade --install statuslist ./deploy/helm/chart \
+  --set statuslist.strategy.type=Recreate \
+  ... # your other values
+```
+
+Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
+`maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
+two incompatible versions overlap. Scaling `statuslist.replicaCount`/HPA min/max down to `1`
+alone does **not** avoid that overlap either. If you cannot use `Recreate`, the only safe
+fallback is to scale the workload to **zero** before the upgrade and back up after (a short
+outage):
+
+```bash
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+# kubectl scale returns immediately, but old pods can take up to the 30s default
+# grace period to finish shutting down in-flight requests. Wait for them to be
+# gone before upgrading, otherwise the helm upgrade on the next line scales
+# replicas back up and new pods can start while old ones are still draining.
+kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
+kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+```
+
+Only scale back out after all pods are on the new version.
+
+## Status List Aggregation
+
+Set `APP_SERVER__AGGREGATION_URI` to the aggregation endpoint's public URL, for
+example `https://statuslist.example.com/api/v1/aggregation`, to advertise it in
+status list tokens. It must be an `https` URL (`http` is accepted outside
+production) with no credentials, its path must be `/aggregation` under
+`APP_SERVER__PUBLIC_BASE_URL`'s path (`/api/v1/aggregation` by default), and it
+must have no query or fragment: each token carries its issuer's URI, the
+configured one plus `/<aggregation_id>`. Pods refuse to start otherwise. Unset,
+tokens carry no `aggregation_uri`. The endpoints are served either way.
+
+Setting it lets anyone who holds one of an issuer's tokens list all of that
+issuer's status lists; see
+[architecture](architecture.md#status-list-aggregation) before enabling it on a
+server shared by several issuers.
+
+`APP_LIMITS__MAX_LISTS_PER_ISSUER` cannot exceed 1000, the default aggregation
+page size. That keeps every issuer's aggregation complete in one response, for
+relying parties that do not page; pods refuse to start above it (see
+[troubleshooting](troubleshooting.md#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
+It only holds while the list quota is enforced. With
+`APP_LIMITS__LIST_QUOTA_TRANSITION` set, publishes past the cap are accepted and
+an issuer can outgrow one page, so tokens carry no `aggregation_uri` until the
+quota is enforced. Nor do they while any one issuer still holds more than 1000
+lists from under an earlier, higher cap: pods decide this at startup, so that one
+issuer removes `aggregation_uri` from the tokens of **every** issuer until it is
+back under the cap and the pods restart. Pods name such issuers at startup.
+Per-issuer withholding is tracked in #623.
+
+### Upgrading to issuer-scoped aggregation
+
+Before the upgrade:
+
+- Make sure `APP_LIMITS__MAX_LISTS_PER_ISSUER` is at most `1000`.
+- Find issuers at or near 1000 lists. Those above it keep their lists, but on a
+  shared server **any one of them turns `aggregation_uri` off for every
+  issuer's tokens**, and its own aggregation requests without `limit` get
+  `409 paging_required` instead of a multi-page answer. While the quota is
+  enforced, **every further publish is refused** with `400 list_quota_exceeded`
+  until they are back under the cap, which only deleting lists does. Those near
+  it reach it sooner than under a higher cap:
+
+  ```sql
+  SELECT issuer, COUNT(*) AS lists FROM status_lists
+  GROUP BY issuer HAVING COUNT(*) >= 900 ORDER BY lists DESC;
+  ```
+
+- On PostgreSQL, build the new index beforehand. Left to the migration, a plain
+  `CREATE INDEX` blocks publishes and status updates, revocations included,
+  until it finishes, which takes longer the more status lists there are. The
+  migration skips an index that already exists:
+
+  ```sql
+  CREATE INDEX CONCURRENTLY idx_status_lists_issuer_list_id
+    ON status_lists (issuer, list_id);
+  SELECT indisvalid FROM pg_index
+  WHERE indexrelid = 'idx_status_lists_issuer_list_id'::regclass;
+  ```
+
+  A concurrent build that fails leaves an invalid index, which the migration
+  would skip too: if `indisvalid` is false, drop it and build it again. MySQL
+  builds the index online.
+
+During the upgrade:
+
+- The migrations add `credentials.aggregation_id` and an `(issuer, list_id)`
+  index on `status_lists`.
+- Pods of the previous release do not serve `/api/v1/aggregation/<id>`, so a
+  relying party following a token from a new pod may get a `404` from an old
+  one until the rollout completes. The claim is optional, and relying parties
+  still fetch each status list directly.
+- Issuers registered before the upgrade, or by an old pod during it, get an
+  aggregation ID the first time one of their tokens is served. They can read it
+  from `GET /api/v1/credentials`.
+- The signed-token cache is per pod and starts empty, so every token a new pod
+  serves carries the scoped URI. Tokens relying parties cached earlier carry
+  the unscoped one, which keeps working.
+
+### Rolling back
+
+The previous release refuses to start while the database records migrations it
+does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
+[Rolling back across migrations](#rolling-back-across-migrations). This upgrade
+adds the two versions below. Rolling back to a release older than the list
+quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
+schema changes stay, which the previous release ignores, and so do the
+aggregation IDs.
+
+- `m20260929_000001_credentials_aggregation_id`
+- `m20260929_000002_status_lists_issuer_list_id_index`
+
+Upgrading again re-runs both migrations, which find their changes already made.
+Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
+parties already hold return `404` until the upgrade.
+
+**Never undo `credentials.aggregation_id`** once tokens with scoped URIs have
+been served. The server refuses its down migration; do not drop the column by
+hand either. The IDs are lost, new ones are assigned, and every URI already in
+tokens or issuer metadata returns `404`. Restoring a backup taken before it
+does the same and loses status changes too; see
+[Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
+Deleting an issuer's credential in the database and registering it again does
+the same to that issuer.
+
+### Metrics
+
+- `aggregation_pages_total{scope="issuer",outcome="refused"}` should stay at
+  `0`. Anything else counts requests refused with `409 paging_required` because
+  an issuer's aggregation did not fit in one page: an issuer from the
+  pre-upgrade query above, or any issuer while the list quota is off.
+- `aggregation_pages_total{scope="all"}` counts requests to the deprecated
+  unscoped form. Remove that form once `token_exp_secs` has passed since the
+  rollout and this stays at zero.
+- `aggregation_uri_omitted_total` counts tokens served without
+  `aggregation_uri` because looking up the issuer's aggregation ID failed.
+
 ## Verification
 
 ```bash
@@ -246,7 +488,10 @@ curl http://<service>/health/ready
 
 ## Rollback
 
-- **Failed upgrade**: automatic. `--rollback-on-failure --wait --timeout 10m` rolls the release back during the upgrade when readiness fails or the timeout is hit.
+**If the release you are leaving ran a database migration, read [Rolling back across migrations](#rolling-back-across-migrations) before anything else.** The release you return to cannot start a new pod until the migration's record is deleted. That holds for every rollback below, including the automatic ones, and including one that reports success: its pods that are already running keep serving until a restart, scale-up or node drain replaces them.
+
+- **Failed upgrade**: automatic. `--rollback-on-failure --wait --timeout 10m` rolls the release back during the upgrade when readiness fails or the timeout is hit. If a pod of the new release started, it may have migrated the database first, so check `seaql_migrations` even when the rollback succeeded.
+- **ExternalSecrets that do not sync**: automatic. After a successful upgrade, the release workflow (`deploy.yml`) runs `helm rollback` when the release's ExternalSecrets do not sync. Every migration the release carries has run by then.
 - **Bad-but-successful deploy**: manual. List revisions and roll back:
 
 ```bash
@@ -256,6 +501,203 @@ kubectl rollout status deployment/statuslist-status-list-server-deployment -n <n
 ```
 
 Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest (not a mutable tag) determines the running image. When upgrading, pass both `tag` and `digest` explicitly (or clear the digest with `--set statuslist.image.digest=null`); `helm upgrade --reuse-values` with only a changed tag will not move the image because the stored digest still wins.
+
+### Rolling back across migrations
+
+A pod will not start while the database records a migration its release does
+not know. A release newer than v1.2.0 exits naming each of them:
+
+```text
+Failed to run database migrations
+...
+the database records migrations this release does not know: <version>, <version>. ...
+```
+
+v1.2.0 and earlier exit with sea-orm's message instead, one line per version:
+
+```text
+Migration file of version '<version>' is missing, this migration has been applied but its file is missing
+```
+
+So a rollback past a release that ran a migration leaves the previous release
+unable to start a pod. That includes the automatic rollbacks above: a failed
+upgrade whose first new pod had already migrated the database, and the release
+workflow's rollback after a successful upgrade, by which point every migration
+has run. Pods of the previous release that are still running keep serving, but
+a restart, scale-up or node drain replaces them with pods that crash-loop.
+
+When the rollback does have to start pods, it stalls, and `helm rollback --wait`
+times out: the pods it starts never become ready. Under a rolling update the
+newer release's pods keep serving meanwhile, except the ones
+[`maxUnavailable`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#max-unavailable)
+lets the stalled rollback replace with pods that crash-loop.
+
+**An upgrade deployed with `Recreate` is different.** `Recreate` stops every
+pod of the previous release before the first new pod starts. If that upgrade
+fails after migrating, the automatic rollback has no running pod to fall back
+on and cannot start one, so nothing serves until the records are deleted.
+Treat it as an outage and go straight to the steps below.
+
+The recovery is to delete the records of the migrations the previous release
+does not know, and keep the schema. Under a rolling update the newer release's
+pods keep serving throughout, alongside the previous release's pods as they
+come up. One migration does not allow that overlap; see
+[Rolling back past `add_status_list_version`](#rolling-back-past-add_status_list_version)
+before you start if the rollback crosses it.
+
+You need a SQL session on the server's database, as the account the server
+uses: the deployment's `APP_DATABASE__USERNAME`, on `APP_DATABASE__NAME`. With
+the chart's PostgreSQL, open `psql` in its pod:
+
+```bash
+kubectl get pods -n <namespace>   # the PostgreSQL pod
+kubectl exec -it <postgres-pod> -n <namespace> -- psql -U <username> -d <database>
+```
+
+For an external database, MySQL included, connect with its usual client.
+
+1. Find the versions. The log of a pod of the previous release names every one
+   (`kubectl logs <pod> -n <namespace> --previous`); use it. Without such a
+   pod, list the records newest first, and compare them with the migrations
+   the previous release knows. `applied_at` has one-second resolution, and a
+   rollback can cross several releases, so the newest records alone are not
+   the answer:
+
+   ```sql
+   SELECT version, applied_at FROM seaql_migrations ORDER BY applied_at DESC;
+   ```
+
+2. Look each version up in
+   [which migrations are safe to leave in place](#which-migrations-are-safe-to-leave-in-place),
+   and do what it says before going on. If one is not safe and you cannot
+   accept what that costs, do not delete the records: roll forward instead,
+   with `helm rollback` to the newer revision, whose pods are still serving.
+3. Delete the records inside a transaction, and check the count before
+   committing:
+
+   ```sql
+   BEGIN;
+   DELETE FROM seaql_migrations WHERE version IN ('<version>', '<version>');
+   ```
+
+   The client reports the rows deleted (`DELETE 2` in `psql`, `2 rows
+   affected` in `mysql`). If that is the number of versions you listed, run
+   `COMMIT;`. If it is anything else, run `ROLLBACK;` and check the versions.
+
+   Never delete the records of the four oldest migrations (the first four rows
+   of the table below). Every release knows them, and they cannot run twice:
+   the next pod to start would fail on them.
+4. Delete the crash-looping pods, so their replacements start without waiting
+   out the back-off. As they become ready, the rollout finishes and removes the
+   newer release's pods.
+5. Once the rollout has finished, run the query from step 1 again. A pod of the
+   newer release that restarted before then ran the migrations again and
+   recorded them; delete the records again and repeat step 4.
+
+Do not scale the newer release down first: until the previous release's pods
+are ready, its pods are the only ones serving. The exception is a rollback
+past `add_status_list_version`, below.
+
+Upgrading again re-runs the deleted migrations, which find their changes
+already made and skip them. Steps a particular release needs on top of this
+still apply; the table below lists them. Re-running
+`m20260923_000001_credentials_list_count` recounts every issuer, an `UPDATE`
+of every row of `credentials`. On PostgreSQL the migrations run in one
+transaction, so those rows stay locked until every pending migration has run,
+and registrations, credential updates and publishes that update the count
+wait for it. With many issuers, upgrade again in a quiet period.
+
+There is no other way back. The server refuses to run down migrations, and
+undoing a migration by hand can lose data nothing can recreate, such as the
+[aggregation IDs](#rolling-back).
+
+#### Rolling back past `add_status_list_version`
+
+Pods from before this migration and pods from after it must never serve at
+the same time: each guards updates on a column the other ignores, so they
+overwrite each other's status changes without a conflict, revocations
+included ([Upgrade strategy for this release](#upgrade-strategy-for-this-release)).
+The steps above let both serve while the rollout finishes, so a rollback that
+crosses this migration takes a short outage instead:
+
+1. Do steps 1 and 2 above.
+2. Stop every pod, and wait for them to be gone:
+
+   ```bash
+   kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=0
+   kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+   ```
+
+3. Delete the records, as in step 3 above.
+4. Scale back up. Only the previous release's pods start:
+
+   ```bash
+   kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
+   ```
+
+5. With the Redis cache, clear it before serving traffic again.
+
+If you cannot take the outage, roll forward instead: `helm rollback` to the
+newer revision, whose pods are still serving. Upgrading again later is the
+same `Recreate` upgrade as the first time.
+
+#### Which migrations are safe to leave in place
+
+A migration is safe to leave in place when the release that does not know it
+still runs correctly on the database it leaves. Every new migration adds a row
+here; a test fails until it does.
+
+| Migration | Safe to leave in place? | Before deleting its record | When upgrading again |
+|---|---|---|---|
+| `mod` | Never deleted: every release from v1.0.0 on knows it | None | None |
+| `add_updated_at` | Never deleted, as above | None | None |
+| `m20250101_000003_status_list_history` | Never deleted, as above | None | None |
+| `m20260727_000001_status_list_history_exp_index` | Never deleted, as above | None | None |
+| `m20260923_000001_credentials_list_count` | Yes: the column defaults to `0` | `list-quota disable`, or the quota undercounts the previous release's publishes | Pods refuse to start without `APP_LIMITS__LIST_QUOTA_TRANSITION`; follow [Upgrading to the list quota](troubleshooting.md#upgrading-to-the-list-quota) |
+| `m20260923_000002_list_quota` | Yes, once the quota is disabled | As above | As above |
+| `m20260925_000001_status_list_allocations` | **No, for fixed-size lists** (see below) | Decide whether to roll forward instead | Find the lists the previous release converted |
+| `add_status_list_version` | **Only if old and new pods never serve together**: the column defaults to `1`, but the two lose each other's status changes | Follow [Rolling back past `add_status_list_version`](#rolling-back-past-add_status_list_version) | Deploy with `Recreate` again. With the Redis cache, clear it: the previous release changes lists without advancing `version`, so cached tokens can be stale |
+| `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
+| `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
+| `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
+
+**`m20260925_000001_status_list_allocations`.** The schema change is additive,
+but a release before it, such as v1.2.0, rewrites a list without its `size`
+and `default_status` whenever it updates the list's statuses, and it allocates
+nothing. Each fixed-size list it updates becomes a grow-on-write list: after
+upgrading again, allocating on it is refused, and updates to it are no longer
+checked against allocations. Nothing restores `size`; issuers allocate from new
+lists instead. To find the lists it converted:
+
+```sql
+-- PostgreSQL
+SELECT DISTINCT a.list_id FROM status_list_allocations a
+JOIN status_lists l ON l.list_id = a.list_id
+WHERE l.status_list->>'size' IS NULL;
+
+-- MySQL
+SELECT DISTINCT a.list_id FROM status_list_allocations a
+JOIN status_lists l ON l.list_id = a.list_id
+WHERE JSON_EXTRACT(l.status_list, '$.size') IS NULL;
+```
+
+#### Restoring a backup taken before the upgrade
+
+**Do not restore one.** This runbook has no restore procedure yet, and
+restoring without one does damage that nothing done afterwards repairs:
+
+- **Status indices are handed out twice.** Allocation gives each credential the
+  lowest index no allocation record claims, and a restore removes every record
+  written after the backup. The next credentials issued then get the indices of
+  the last ones issued before the restore. A list published after the backup
+  and published again under the same ID hands out its indices from `0` again.
+  Two credentials then share one status bit for good: revoking either revokes
+  both, and each holder's status is the other's.
+- **Revoked credentials read as valid again.** Every status change made after
+  the backup is lost, revocations included.
+
+If the database is damaged and the recovery above cannot work, escalate rather
+than restore.
 
 ## Failure Triage
 
@@ -269,6 +711,12 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 - `/health/ready` reports a failing backing store.
 - Check database readiness (PostgreSQL pod/connection), the ExternalSecret/SecretStore status (if ESO), and application env values.
 
+### Pod crash-loops at startup in a production profile
+
+- The pod exits before it becomes ready, with a log line like `server.public_base_url (https://localhost/api/v1) resolves to localhost/loopback in a production profile`.
+- This is a deliberate startup guard: a `localhost`/loopback `sub` can never be reached by a relying party, so a production profile (`APP_ENV=production`) refuses to start rather than silently signing tokens every relying party rejects. The Helm chart falls back to `localhost` when no host is configured, which is why an unconfigured upgrade hits this.
+- Set `APP_SERVER__DOMAIN` (or `APP_SERVER__PUBLIC_BASE_URL`) to the public host and redeploy. The guard keys off `APP_ENV`, so it only blocks production profiles; private/local hosts (`.local`, private IPv4, link-local, ULA) warn instead of stopping.
+
 ### Secret not synced (ESO)
 
 - The pod is up but not ready and reports a missing/empty Secret, or `kubectl get externalsecret` shows a condition other than `SecretSynced`.
@@ -279,6 +727,85 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 - Certificates fail to provision or renew.
 - Check `APP_SERVER__CERT__ACME_DIRECTORY_URL` (staging vs production), the DNS provider settings and credentials in [dns-providers.md](dns-providers.md), and that the DNS-01 challenge can reach your DNS provider (network + IAM/cloud role).
 
+### Image Assertion Failure
+
+Symptoms:
+
+- `Scan Image for Vulnerabilities` fails at `Assert published SBOMs list Rust crates`, or at `Resolve the architecture manifest to scan`.
+- The image exists in GHCR under its `sha-<short_sha>` tag, but the release tags were never applied and `Deploy to Production` is skipped.
+
+Check:
+
+- The run artifacts and the job summary. Reports and SBOMs are uploaded before the assertion runs, so a failure here still leaves the full report attached to the run. They arrive as two artifacts per variant: `container-scan-reports-<variant>` and `container-sboms-<variant>` (e.g., `container-scan-reports-aws`, `container-sboms-aws`).
+- For an SBOM failure, whether the builder-stage audit assertion also changed behaviour recently. An empty published SBOM with a passing build assertion points at BuildKit's cataloguer, not at the binary.
+- For a resolution failure, the message names how many `linux/amd64` manifests were found in the index. Zero means the build stopped producing that platform; more than one means the index is not shaped the way this pipeline assumes. Neither is a scanner problem.
+
+### Vulnerability Gate Findings
+
+Symptoms:
+
+- `Vulnerability gate` fails, the summary lists the blocking advisories, and the release tags are never applied.
+
+Check:
+
+- `trivy-gate-findings-<arch>.json` in the `container-scan-reports` artifact is the exact blocking set for that architecture. The gate's table is rendered from those same files, so the summary count and the table cannot disagree.
+- The summary reports distinct advisories and package occurrences separately. One CVE affecting three crates is three rows in the table and one thing to triage.
+- Whether the advisory is already argued in `deny.toml`. The two ledgers are not connected, so a release can block on something `cargo-deny` has been ignoring deliberately.
+
+Triage steps and the exception format are in [Container Supply Chain](supply-chain.md). Fix it at the lockfile if a fix exists; add a dated ledger entry only if one does not.
+
+### Gate Self-Test Failure
+
+Symptoms:
+
+- `Prove the gate can fail` fails with "the vulnerability gate cannot fail and is not protecting this release".
+
+Check:
+
+- This is not a finding about the image. It means `scripts/vuln-gate.sh` returned success against a fixture that contains a CRITICAL, so the gate would have passed the real scan no matter what was in it.
+- Likely causes: `--exit-code` was changed or dropped in `scripts/vuln-gate.sh`, or a Trivy upgrade changed `convert`'s exit-code behaviour.
+- Do not work around it by skipping the step. A release cut while this is failing has an unverified gate.
+
+### Tag Promotion Failure
+
+Symptoms:
+
+- `Promote Scanned Digest to Release Tags` fails for one or more variants, and the release exists in GHCR only as `sha-<short_sha>-<variant>`.
+- `Deploy to Production` is skipped because it depends on promotion.
+
+Check:
+
+- Whether `Verify attestations survived promotion` is the failing step. That means the retag succeeded but the SBOM or provenance manifests did not carry through, which would publish a release whose metadata silently vanished.
+- The failing variant's matrix job logs to see which specific suffix (`-aws`, `-gcp`, etc.) failed.
+- Re-running the job is safe: `imagetools create` is idempotent for a given digest and tag set. **Re-run `promote-tags` alone** — `deploy` depends on it, so a successful re-run unblocks production without cutting a new release. A promotion failure is not a reason to re-tag the repository.
+
+### Builder Audit Assertion Failure
+
+Symptoms:
+
+- The image build fails in the builder stage at the `rust-audit-info` assertion, or at the `cargo install` layer above it, on a commit that changed nothing relevant.
+
+Check:
+
+- This means the binary no longer carries readable `.dep-v0` audit data, usually because the floating stable toolchain drifted away from the pinned `cargo-auditable` version. Bump `CARGO_AUDITABLE_VERSION` and `RUST_AUDIT_INFO_VERSION` in the `Dockerfile`.
+- The assertion is deliberate. Without it the build would succeed and publish an empty SBOM.
+
+### Attestation Verification Failure
+
+Symptoms:
+
+- `Verify Signed Provenance` fails for one or more variants, and `Promote Scanned Digest to Release Tags` is skipped because it depends on `verify-provenance`.
+- The image exists in GHCR under its `sha-<short_sha>-<variant>` tag, but no release tags are applied and `Deploy to Production` never runs.
+
+Check:
+
+- `gh` version floor: the verification wrapper (`scripts/verify-attestation.sh`) requires `gh >= 2.67.0`. Until 2.67.0, `gh attestation verify` exited 0 when no attestation was found at all ([cli/cli#10418](https://github.com/cli/cli/issues/10418)). The runner image must provide a new enough `gh`; if it does not, the step will pass incorrectly and the failure will surface later as a missing signature on the promoted tag.
+- Certificate identity mismatch: the wrapper pins the exact SubjectAlternativeName (workflow path **and** ref) via `--cert-identity` and `--source-ref`. A signature from a different ref, a different workflow, or a different repository will fail verification even if the digest is correct. The error message names the expected and actual identities.
+- Transient API errors vs genuine absence: the wrapper retries three times. A failure after retries means either GitHub's attestation API is unavailable, Sigstore's trust root cannot be fetched, or no signed provenance exists for the digest. Check the step logs for `gh`'s JSON output to distinguish.
+- `gh attestation verify` output: the wrapper parses `--format json` and requires a non-empty result array whose verified subject digest matches the one asked about. An empty result array means no attestation was found for that digest in this repository.
+
+Do not bypass this gate. It is the only check that establishes a signed statement from this workflow, from this ref, over the digest that will be promoted. A digest that passes the vulnerability gate but fails provenance verification is an artifact whose builder identity cannot be confirmed — promoting it would publish a release with no verifiable origin.
+
 ## External Dependencies
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
@@ -287,9 +814,9 @@ Note: pinning by `digest` keeps rollbacks reproducible, since the stored digest 
 
 ## Next Steps
 
-- [helm/README.md](../helm/README.md): full chart value reference and configuration guide.
+- [deploy/helm/README.md](../deploy/helm/README.md): full chart value reference and configuration guide.
 - [LOCAL_DEPLOYMENT.md](LOCAL_DEPLOYMENT.md): detailed local quickstart.
 - [dns-providers.md](dns-providers.md): ACME DNS-01 provider setup per provider.
-- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`helm/README.md`](../helm/README.md).
+- [secrets-backends.md](secrets-backends.md): database/secret backend options, and the Workload Identity opt-in in [`deploy/helm/README.md`](../deploy/helm/README.md).
 - [database-backends.md](database-backends.md): supported database backends.
 - [observability.md](observability.md): OpenTelemetry / metrics / logs.

@@ -59,9 +59,9 @@ Any HIGH or CRITICAL finding that survives the exception ledger fails `scan-imag
 
 `ignore-unfixed` is off. That flag exists to mute distro base-image noise, and there is no distro here — the runtime image is `FROM scratch`. The single justification for the flag does not apply, and leaving it on would suppress exactly the class most worth a human decision: a fresh CRITICAL in a crate before upstream ships a fix.
 
-These thresholds do not match the `trivy-config` job in `CI.yml`. That job keeps Trivy's default unfixed handling for Helm misconfigurations; this one deliberately surfaces unfixed crate advisories, for the reason above.
+These thresholds do not match the `trivy-config` job in `helm-checks.yml`. That job keeps Trivy's default unfixed handling for Helm misconfigurations; this one deliberately surfaces unfixed crate advisories, for the reason above.
 
-Turning the flag off was safe to do because the surface was measured first rather than assumed, and it was zero — no HIGH or CRITICAL anywhere in the tree at the pinned versions. `rsa` and `rkyv`, the two advisories `deny.toml` ignores, produce nothing under Trivy at these versions, which is why neither needs a `.trivyignore.yaml` entry; see [Two Ledgers](#two-ledgers).
+Turning the flag off was safe to do because the surface was measured first rather than assumed, and it was zero — no HIGH or CRITICAL anywhere in the tree at the pinned versions. `rkyv`, the one advisory still ignored by `cargo audit`, produces nothing under Trivy at this version, which is why it needs no `.trivyignore.yaml` entry; see [Two Ledgers](#two-ledgers).
 
 `Cargo.lock` is a sound upper bound on what the image can contain, which is what lets you reason about the image before one exists. The runtime image is `FROM scratch` holding one static binary, a CA bundle and passwd entries, so it has no OS package database — every package a scanner finds comes from the `.dep-v0` section, and that section records only the crates actually linked for the enabled feature set. The containment is strict: lockfile ⊇ linked crates ⊇ the set Trivy evaluates. That also means the build-time `.dep-v0` assertion and the scanner count different things by design; the assertion only proves the section is present and non-empty.
 
@@ -92,7 +92,7 @@ If you want SARIF from a particular release run, derive it from the artifact —
 trivy convert --format sarif --output image-amd64.sarif trivy-image-report-amd64.json
 ```
 
-Helm and workflow findings are unaffected — `kube-linter` and `zizmor` upload SARIF from `CI.yml`, which does run on branches and pull requests.
+Helm and workflow findings are unaffected — `kube-linter` (in `helm-checks.yml`) and `zizmor` upload SARIF, and both workflows run on branches and pull requests.
 
 ### The Scheduled Re-scan
 
@@ -104,7 +104,7 @@ It exists for three things the release path structurally cannot do:
 
 - **Advisories published after a release reach the gate.** This is the capability discussed under [Relationship to Source-Level Checks](#relationship-to-source-level-checks); a scan tied to releases cannot cover a time axis.
 - **`expired_at` gets advance notice.** `scripts/check-trivyignore.py --expiring-within 30` lists exceptions lapsing inside the window, days before they do, off the release path. A _finding_ never fails the run — a date three weeks out is notice, not a fault — but a _checker that could not run_ does, because it presents as "nothing is expiring" and this is the only warning an `expired_at` gets before it lands on a release. Notice is delivered on three surfaces so a green run cannot swallow it: a warning annotation on the run, the job summary, and a comment on the tracking issue when the set of lapsing entries changes.
-- **Findings get a durable home.** SARIF is uploaded once under `category: container-image` from a branch ref, so alerts deduplicate, keep history and can be dismissed.
+- **Findings get a durable home.** SARIF is uploaded once from a branch ref, one category per image, `container-image/<variant>/<arch>`, so alerts deduplicate, keep history and can be dismissed.
 
 Three structural details are load-bearing.
 
@@ -124,7 +124,9 @@ The digest resolver still distinguishes "the tag is unreachable" from "the tag i
 
 The SARIF is converted from `trivy-highcrit-all-<arch>.json` — the pre-ledger HIGH/CRITICAL set `derive-trivy-reports.sh` already wrote — not from the gate set. An accepted exception therefore still files an alert to be dismissed in the UI, so `.trivyignore.yaml` cannot quietly hide a finding from the Security tab. Converting that file rather than re-filtering the full report also keeps the severity floor in exactly one place: a `--severity` flag here would be a second copy of the gate configuration, and changing the floor in the script would leave the alerts silently on the old one.
 
-Each run's location URIs and messages are prefixed with `<variant>/<arch>` before the ten per-variant, per-architecture SARIF documents are merged into one upload. Trivy names every run's tool `Trivy`, sets no `automationDetails` and no `partialFingerprints`, and for a `FROM scratch` image holding one Rust binary the result location is that binary's path — identical across all five variants. Without the prefix, ten runs uploaded under one category would collapse into a single set of alerts and lose the only distinction that matters: which image a finding is actually in.
+Each run's location URIs and messages are prefixed with `<variant>/<arch>` before the ten per-variant, per-architecture SARIF documents are merged into one upload. Trivy names every run's tool `Trivy`, sets no `automationDetails` and no `partialFingerprints`, and for a `FROM scratch` image holding one Rust binary the result location is that binary's path — identical across all five variants. Code scanning merges alerts with the same rule and location even across categories, so the per-image categories below do not keep them apart; without the prefix, one advisory would be a single alert spanning all ten images, losing the only distinction that matters: which image a finding is actually in.
+
+Each run is also given its own `automationDetails.id`, `container-image/<variant>/<arch>/`, and the upload sets no `category` input. Since July 2025 code scanning rejects an upload holding two runs with the same tool and category, and every Trivy run has the same tool driver. The `category` input cannot fix that: the Action checks for duplicates before applying it, then writes the same id onto every run. The trailing `/` matters because GitHub takes the category as everything before the last `/`; without it `amd64` and `arm64` would share `container-image/<variant>` and be rejected server-side, which the Action does not catch. The merge step therefore asserts the categories are distinct before uploading.
 
 **One tracking issue, not one per run.** It is located by the `scheduled-image-scan` label, which the run creates with `gh label create --force` first. That ordering is the point: `gh issue create --label` fails outright when the label does not exist, and the notification path must not break on repository configuration — but `--force` is a no-op when it already does, so the objection costs one idempotent line rather than a body search. A label is also an _exact, unbounded_ key, where a search through open issue bodies has to be paged; paged at 100, it silently stops finding the tracking issue once the repository crosses that many open issues and opens a fresh one every night, which is the precise failure "one issue, not one per run" exists to prevent. If more than one open issue ever carries the label the run fails rather than picking one, because silently adopting one and orphaning the rest is the same guarantee breaking where nobody can see it. The body carries the previous advisory ID set **and the previous set of lapsing exceptions**, and is rewritten every run; a **comment** is posted only when one of those two sets changes, and names what was added and removed. A findings set that is stable across nights is therefore silent.
 
@@ -134,7 +136,7 @@ When findings clear, the issue is updated to say so and **left open** — closin
 
 ### The Scanned Artifact Is the Deployed Artifact
 
-The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `deploy/helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
@@ -165,6 +167,51 @@ That assertion checks two things, not one. It checks that the section **decodes*
 That assertion is permanent by design. The failure it guards against looks exactly like success, so a one-time check would only prove the property held on the day someone looked.
 
 The build assertion covers the binary. It says nothing about the SBOM BuildKit attaches, which is a different artifact produced by a different tool — if BuildKit's bundled Syft were older than v1.15.0, the assertion would pass and an empty SBOM would still ship. `scan-image` therefore closes the chain from the other end: it pulls the published SBOM **for both platforms** and fails unless each lists at least one `pkg:cargo/` purl. Both, because whether BuildKit's cataloguer ran is a per-platform property, and the binary assertion is not evidence about it in either direction. It asserts a cargo purl rather than a package count because SPDX output includes a synthetic package describing the image itself, which would satisfy a bare "not empty" check on nothing, and it deduplicates the purls because each appears in both `externalRefs` and `relationships`.
+
+## Which Provenance to Verify
+
+A released image carries **two** provenance documents, and they are not two renderings of one fact. Verifying the wrong one for your question gets a confident answer to something you did not ask. The decision to carry both, and the argument for it, is [ADR 0001](adr/0001-container-image-provenance.md).
+
+|                  | BuildKit provenance                     | GitHub attestation                       |
+| ---------------- | --------------------------------------- | ---------------------------------------- |
+| Predicate        | `https://slsa.dev/provenance/v0.2`      | `https://slsa.dev/provenance/v1`         |
+| Answers          | **How** it was built                    | **Who** built it                         |
+| Produced by      | `provenance: mode=max` on the build     | `actions/attest-build-provenance`        |
+| Signed           | No — `builder.id` is self-asserted      | Yes — Sigstore/Fulcio, logged in Rekor   |
+| Read with        | `docker buildx imagetools inspect`      | `gh attestation verify`                  |
+| Protects against | The image being altered after the build | Someone else publishing an image as ours |
+
+**Verify the GitHub attestation to decide whether to trust an image.** It is the only one of the two that a person with push access to the GHCR package cannot forge. BuildKit's is integrity-protected — the index digest chain covers it — but its `builder.id` is JSON BuildKit wrote, so an attacker who can push can publish an index whose provenance inspects identically.
+
+**Read the BuildKit provenance to answer questions about a build you already trust** — which base image, which build arguments, which Dockerfile produced this digest. The signed v1 statement does not carry that detail.
+
+### A signature is not the gate's verdict
+
+**A verified attestation establishes who built a digest, from which commit, in which workflow — and nothing else.** In particular it is **not** a statement that the image passed the vulnerability gate. The two are produced at different points and answer to different jobs: `build-and-push` attests immediately after the push, which is _before_ `scan-image` has run at all. So an image the gate goes on to **reject** still carries a fully valid, correctly signed attestation under its `sha-<commit>` tag, and the verification command below passes clean on it.
+
+That is the intended design rather than a hole in it — provenance answers "who built this", not "is this fit to deploy", and conflating them is the same error this whole section is about, one level up. But it means the two checks have to be read together: **consume by release tag, not by commit SHA tag.** The withheld tag is the gate's verdict; the signature is not. An image that is both attested _and_ named `v1.2.3` or `latest-<variant>` has passed both, because [`promote-tags`](#the-scanned-artifact-is-the-deployed-artifact) applies those names only after the scan and then verifies the signature against the digest they resolve to.
+
+### When they disagree
+
+Disagreement here means one specific thing: the registry content and the signed claim no longer describe the same artifact. That is a compromise signal, not a discrepancy to be reconciled. Concretely, any of these:
+
+- `gh attestation verify` fails on a digest whose BuildKit provenance looks correct.
+- A release tag resolves to a digest with no attestation from this repository.
+- The signed attestation names a workflow, repository or ref that is not the release you expect. This one is enforced rather than left to your eye: the wrapper pins the certificate identity to `deploy.yml` at a specific ref, so a signature from another workflow, another repository or another ref of `deploy.yml` fails the command rather than passing it with a surprising line in the output.
+
+On the release path the same disagreement surfaces at whichever of three points reaches it first — `verify-provenance` before any release tag is applied, `promote-tags` against the digest the tag resolves to, or `deploy` against the digest about to reach the cluster. Which one failed narrows the cause: the first is a signing or build fault, the second and third mean the tag moved after it was gated.
+
+**Do this, in order:**
+
+1. **Do not roll back yet, and do not delete the image.** The pushed artifact is the evidence. Deleting it destroys the only copy of what was published, and a rollback that races an attacker's next push tells you nothing.
+2. **Stop the bleeding at the pull, not the registry.** Pin the running deployment to the last digest that _does_ verify — `helm upgrade` with `statuslist.image.digest` set to it. The chart prefers a digest over any tag, so this is proof against the tag being repointed again.
+3. **Notify the repository owners and treat GHCR package push access as compromised** until shown otherwise. This is the access that makes the failure possible; the image is the symptom.
+
+   **Scope it by which way the check failed, because the two are different incidents.** An image whose signature is _absent or invalid_ needs only package push access. An image carrying a signature that _verifies against a ref or workflow you did not expect_ needs repository write access — the certificate identity is minted by Actions, so producing one means running a workflow here. The second is the larger blast radius and pulls in every other secret this repository can reach.
+4. **Record the digest, the tag, and the `gh attestation verify` output** before doing anything that changes registry state. Rekor is append-only, so a genuine build's entry is still there and is the reference point for what should have been published.
+5. Only then decide about the tag. Re-promoting over a suspect tag before step 3 is complete just publishes a second claim from the same compromised position.
+
+A verification that fails because your `gh` is too old is **not** this situation — see the version floor below. Rule that out first; it is by far the more common cause.
 
 ## Never Pass Secrets as Build Arguments
 
@@ -232,6 +279,59 @@ docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
   --format '{{ json (index .Provenance "linux/amd64") }}'
 ```
 
+Verify the signed provenance — the check that answers _who built this_, and the one to use when deciding whether to trust an image. Use the wrapper rather than `gh` directly; it is the same script the release path runs, so a local pass means what the pipeline means by it:
+
+```bash
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
+  adorsys/status-list-server
+```
+
+Pass the release's ref as an optional third argument when you know it, and the signing identity is pinned exactly rather than by shape:
+
+```bash
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
+  adorsys/status-list-server refs/tags/v1.2.3
+```
+
+**The identity checked.** With a ref, the wrapper runs `gh attestation verify` with
+
+```text
+--cert-identity https://github.com/adorsys/status-list-server/.github/workflows/deploy.yml@refs/tags/v1.2.3
+--source-ref    refs/tags/v1.2.3
+--deny-self-hosted-runners
+```
+
+Without one, it uses a `--cert-identity-regex` anchored at both ends that accepts only a release-tag ref. Do not substitute `--repo` or `--signer-workflow`: neither pins the ref, so a signature from any branch of this workflow would pass. [ADR 0001](adr/0001-container-image-provenance.md) has the reasoning.
+
+**Requirements.** `gh` 2.67.0 or newer (older releases exit 0 when no attestation exists; the wrapper refuses to run on them) and `jq`.
+
+**What a failure means.** The wrapper passes only when `gh` exits 0 _and_ its `--format json` result contains a verified subject matching the digest you passed. A failure means one of: the image could not be fetched, no attestation exists, it was signed by a different workflow or ref, or `gh`'s JSON output could not be read. `gh`'s own output is printed below the error and says which. Treat any failure as an unverified image. Transient API errors are retried three times before failing.
+
+`scripts/attestation-selftest.sh` proves the wrapper can both pass and reject, against a stubbed `gh`, on every pull request, in `local-ci.sh`, and once on the release path.
+
+Verifying by digest is deliberate. A tag is mutable, so verifying one establishes only that something carrying a valid attestation once answered to that name — and it may resolve to a different digest by the time you pull it. To check a tag, resolve it first and verify what it resolves to, which is what `promote-tags` does:
+
+```bash
+digest=$(docker buildx imagetools inspect ghcr.io/adorsys/status-list-server:<tag> \
+  --format '{{ .Manifest.Digest }}')
+
+bash scripts/verify-attestation.sh \
+  "ghcr.io/adorsys/status-list-server@${digest}" adorsys/status-list-server
+```
+
+The attestation is fetched from GitHub's attestation API, not from the registry, because the build sets `push-to-registry: false`. **What would have to be true to flip that to `true`:** GHCR would have to serve the OCI Referrers API for our packages, so that an attestation is discoverable from the image digest alone by someone who does not know it came from GitHub. Check it directly rather than trusting a release note — this asks the registry whether it will list referrers for a digest, and a `200` with a populated `manifests` array is the answer we need:
+
+```bash
+token=$(curl -s "https://ghcr.io/token?scope=repository:adorsys/status-list-server:pull" | jq -r .token)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer ${token}" \
+  "https://ghcr.io/v2/adorsys/status-list-server/referrers/sha256:<index-digest>"
+```
+
+A `404` or an empty list means an attestation pushed there would be undiscoverable, which is why it is `false` today. Until that returns referrers, pushing one buys nothing and looks like it buys something.
+
 Confirm the shipped binary carries audit data. An SBOM that lists no crates almost always means this section is missing:
 
 ```bash
@@ -250,7 +350,7 @@ cargo install --locked --version 0.5.4 rust-audit-info
 rustup target add x86_64-unknown-linux-musl
 cargo auditable build --locked --release \
   --target x86_64-unknown-linux-musl \
-  --features "postgres,aws"
+  --features "postgres,aws,redis"
 
 rust-audit-info target/x86_64-unknown-linux-musl/release/status-list-server \
   | jq '.packages | length'
@@ -274,7 +374,7 @@ done
 
 The steps are in the [Operator Guide](#operator-guide). Two things that section leaves out:
 
-Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
+Read the full report artifact, not just the gate output — the gate applies a severity floor and the exception ledger, and the artifact does not, so a finding can be real and simply below the threshold. And when judging whether an advisory applies, the relevant build is the image's feature set (`postgres,aws,redis`, the `ARG FEATURES` default in the `Dockerfile`), which is narrower than what `cargo build --all-features` compiles.
 
 Do not add an exception for a finding you could simply fix. An exception is for a fix that does not exist yet, cannot be taken yet, or a finding that does not apply — and the `statement` should record which of those three it is.
 
@@ -291,7 +391,7 @@ vulnerabilities:
 
 `expired_at` is what keeps the ledger honest. Without it, an exception taken once becomes permanent and nobody revisits it. When an entry expires the finding reappears and must be re-argued.
 
-These fields are enforced, not merely documented. `scripts/check-trivyignore.py` runs in the `trivy-config` job before Trivy reads the file, and in `local-ci.sh`. It rejects invalid YAML, unknown top-level sections (a section named `vulnerability` parses fine and suppresses nothing), entries with no `id`, entries with no `statement`, vulnerability entries with no `expired_at`, and malformed dates. An already-expired entry is reported as a warning rather than an error: it has stopped suppressing anything, so it is dead configuration rather than a broken gate.
+These fields are enforced, not merely documented. `scripts/check-trivyignore.py` runs in CI.yml's `config-guards` job on every pull request, and in `local-ci.sh`. It rejects invalid YAML, unknown top-level sections (a section named `vulnerability` parses fine and suppresses nothing), entries with no `id`, entries with no `statement`, vulnerability entries with no `expired_at`, and malformed dates. An already-expired entry is reported as a warning rather than an error: it has stopped suppressing anything, so it is dead configuration rather than a broken gate.
 
 The validator has its own tests in `scripts/tests/`, which CI runs before the validator itself. An untested validator guarding an ignore file has the same problem as an untested vulnerability gate: it looks identical whether it works or does nothing.
 
@@ -314,7 +414,7 @@ This repository now suppresses crate advisories in two places, and they are not 
 | Enforced             | no                                  | `scripts/check-trivyignore.py` (tested)    |
 | Suppressions visible | no                                  | counted in every gate summary              |
 
-Today `deny.toml` ignores `RUSTSEC-2023-0071` (rsa) and `RUSTSEC-2026-0235` (rkyv), and `.trivyignore.yaml` ignores neither, because Trivy's database does not flag either at the versions this project pins — verified, not assumed. So the two ledgers do not currently disagree.
+Today neither ledger suppresses an advisory: `deny.toml` dropped its `RUSTSEC-2023-0071` (rsa) entry once SQLx 0.9 removed `rsa` from the dependency graph. So the two ledgers do not currently disagree.
 
 They can, and the failure is asymmetric in an unhelpful direction. If Trivy's database later picks up one of those advisories at HIGH or above, a release blocks on something `cargo-deny` has been deliberately ignoring for months, and the person cutting the release has to rediscover an argument that already exists in `deny.toml`. In the other direction, someone who fixes `rsa` and removes the `deny.toml` entry has no prompt to check whether a `.trivyignore.yaml` entry also became stale.
 
@@ -326,15 +426,35 @@ When adding to either ledger, check the other. Consolidating them is not current
 
 The [scheduled re-scan](#the-scheduled-re-scan) is what keeps that from landing on the release path. It lists entries lapsing within 30 days, nightly, so an expiry is notice given days ahead rather than a blocked release discovered by whoever is trying to ship. Without it the first symptom of a lapsed exception is a red release, which is the worst moment to be re-arguing one.
 
-This file is read by two consumers on different cadences — the `trivy-config` job in `CI.yml` on every pull request, and the image scan on releases. A malformed entry added here under incident pressure breaks pull request CI for the whole repository, not just the release path.
+This file is read by two consumers on different cadences — CI.yml's `config-guards` job validates it on every pull request (and the `trivy-config` job in `helm-checks.yml` reads it when the Helm chart changes), and the image scan reads it on releases. A malformed entry added here under incident pressure breaks pull request CI for the whole repository, not just the release path.
 
 ## Tool Ownership
 
 `cargo-auditable` and `rust-audit-info` are pinned in the `Dockerfile` as build arguments, and nothing bumps them. Dependabot's `cargo` ecosystem reads `Cargo.toml` and `Cargo.lock`, its `docker` ecosystem reads `FROM` tags, and neither parses `RUN` arguments.
 
-That matters because `rust-toolchain.toml` is `channel = "stable"`, so the toolchain moves on its own and `cargo-auditable` wraps rustc — the coupling breaks without any commit touching it. The symptom is a builder-stage failure in the deploy path, at the `cargo install` layer or the `rust-audit-info` assertion, on a commit that changed nothing relevant. Bump both pins against crates.io when it happens.
+That matters because the compiler comes from the builder image, not from `rust-toolchain.toml` (Docker never mounts that file): `rust-toolchain.toml` is `channel = "stable"`, but it only affects the source-level cargo jobs, so the toolchain in the image moves only when the builder digest is bumped. `cargo-auditable` wraps that rustc — the coupling only breaks when the builder digest is bumped, so check the `cargo-auditable` and `rust-audit-info` pins in that same PR. The symptom is a builder-stage failure in the deploy path, at the `cargo install` layer or the `rust-audit-info` assertion, when the digest is bumped. Bump both pins against crates.io at the same time. Note the drift this sets up: CI's cargo jobs run on the latest stable toolchain, while Docker is on a fixed compiler from the pinned builder. If a dependency starts needing a newer rustc, cargo CI will pass and the Docker build will fail; the fix is bumping the builder digest.
 
 This is an accepted gap: a loud build failure is worse than a bump PR but better than a silently empty SBOM, and a scheduled crates.io poller would itself be unmonitored automation. Renovate's regex manager would close it properly.
+
+## Builder Image Digests
+
+The `builder-amd64` and `builder-arm64` stages of the `Dockerfile` pin their upstream bases — `blackdex/rust-musl:x86_64-musl` and `blackdex/rust-musl:aarch64-musl` — to immutable `@sha256:...` index digests. A mutable tag can change upstream without notice, which would produce non-reproducible builds, unexpected compiler differences, or supply-chain risk. Pinning by digest means every rebuild uses the same base image.
+
+Both tags are **multi-architecture index manifests** (each contains `linux/amd64` and `linux/arm64` children), and the `Dockerfile` selects the correct architecture with `--platform=$BUILDPLATFORM`. The pinned digest is therefore the **index** digest, not a per-platform child manifest digest: pinning the index keeps both architectures reproducible in a single immutable reference, and `--platform` still resolves the right child inside it. Do not pin a single child digest — that would not change the output architecture (the tag decides that), it would lock the builder to one machine type, so anyone building on the other kind would run it under emulation.
+
+Dependabot keeps both pins current. Its `docker` ecosystem reads the `tag@sha256:<digest>` on each `FROM` line and opens a digest-update PR whenever the tag moves to a different digest; because the tag (`x86_64-musl`, `aarch64-musl`) is not a version number, it watches the digest the tag resolves to rather than the tag text. The manual bump path below remains as a fallback:
+
+1. **Resolve the current index digest** of each tag. `{{ .Manifest.Digest }}` prints the index digest directly (the same format `deploy.yml` uses), so there is no need to pick a `Digest:` line out of the verbose output:
+
+    ```bash
+    docker buildx imagetools inspect blackdex/rust-musl:x86_64-musl --format '{{ .Manifest.Digest }}'     # builder-amd64
+    docker buildx imagetools inspect blackdex/rust-musl:aarch64-musl --format '{{ .Manifest.Digest }}'    # builder-arm64
+    ```
+
+2. **Update the two `FROM` lines** in the `Dockerfile`, replacing the `@sha256:<digest>` suffix. The tag stays, so the `--platform=$BUILDPLATFORM` child resolution is unchanged.
+3. **Build both architectures** to confirm the new builder still produces a working image on `linux/amd64` and `linux/arm64`, and that the auditable-binary assertion still holds.
+
+Bump both pins together: the two tags are released by the same upstream project and a compiler change that matters usually lands for both targets at once.
 
 ## Relationship to Source-Level Checks
 
@@ -356,7 +476,7 @@ Findings about crates belong to `cargo-audit` and are fixed at the lockfile. Fin
 
 ### The Release Feature Set
 
-Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws"` names a combination that was reachable from no CI job at all.
+Source-level CI compiles two feature sets: `--all-features`, and `--no-default-features --features memory`. The image is built with neither. Its `ARG FEATURES="postgres,aws,redis"` names a combination that was reachable from no CI job at all.
 
 Nothing validated that string. `ARG FEATURES` is a bare string handed to `cargo build` inside the image build, so a value naming no real feature is caught only when someone cuts a release.
 
@@ -366,6 +486,22 @@ This is the shape worth remembering: **enabling every feature is not a superset 
 
 `cargo-build` now runs a `Release image feature set` step that reads `ARG FEATURES` out of the `Dockerfile` and checks that combination, so the release build's feature set is verified on every pull request rather than at release time. Reading it from the `Dockerfile` rather than repeating it is deliberate: a duplicated feature list would drift, and the drift would restore the gap silently.
 
+## Trivy Vulnerability Database Cache and Staleness
+
+Both `deploy.yml` (the `scan-image` job) and `scheduled-image-scan.yml` (the `rescan` job) persist the Trivy vulnerability database across workflow runs, in `$RUNNER_TEMP/trivy`, with an `actions/cache/restore` step and a separate `actions/cache/save` step. The cache key is `trivy-db-<os>-<run_id>` with a `restore-keys: trivy-db-<os>-` fallback, so a run restores the most recent DB rather than starting empty. The path is absolute on purpose: `trivy-action` passes `cache-dir` to Trivy as `TRIVY_CACHE_DIR` verbatim, and neither expands `~`.
+
+Only the first matrix leg (`strategy.job-index == 0`) saves. All five legs share the run's key, so every other leg would upload the same DB and fail to reserve the key. Saving is not limited to `push`, so a dispatched run refreshes the cache as well. Caches are scoped by ref: an entry saved by a tag run is visible only to that tag's re-runs, so new release tags restore the entry the nightly saves on the default branch.
+
+Before each scan, `scripts/ensure-trivy-db.sh` runs `trivy image --download-db-only` to refresh the DB. Trivy skips the download while the cached DB is still current, and downloads into a temp directory, so a failed fetch leaves the cached DB intact. If the refresh fails (network blip, rate limit, upstream outage), the script falls back to the cached DB, aged by the modification time of `db/trivy.db` (the time it was downloaded):
+
+- If the cached DB was downloaded **within the last 24 hours**, the scan proceeds with a `::warning::` annotation and a step-summary entry reporting the DB age (e.g., "Using cached vulnerability database (5 hours old)"). This is the "degrade, don't fail" posture.
+- If it is **older than 24 hours**, the script fails the job with an error. Upstream publishes a new DB every 6 hours, so 24 hours is four missed updates; it is this repository's bound, not a Trivy default.
+- If **no cached DB exists** (`db/trivy.db` or `db/metadata.json` missing: first run ever, or the cache was evicted), a fetch failure is a hard error — there is nothing to degrade to.
+
+The first run after this change is a cold cache and still downloads ~108 MiB. The resilience benefit (degrade-on-failure, no fetch while the cached DB is current) is realized from the second run onward.
+
+The DB is global (variant- and architecture-independent), so a single cache entry serves all five variant matrix legs and both `amd64`/`arm64` scans. The `trivy-action` scans run with `cache: false`, `skip-setup-trivy: true`, and `TRIVY_SKIP_DB_UPDATE=true` in the step's `env`, so the scan never re-fetches and freshness is decided entirely by the pre-warm step. It is set per step rather than in a repository `trivy.yaml` so that local `trivy` runs keep their normal update behaviour; `trivy-action` v0.36.0 has no input for it.
+
 ## Known Gaps
 
 - **Crate advisories are suppressed in two unconnected ledgers**, `deny.toml` and `.trivyignore.yaml`. Nothing keeps them in agreement; see [Two Ledgers](#two-ledgers).
@@ -373,9 +509,12 @@ This is the shape worth remembering: **enabling every feature is not a superset 
 - **The nightly's reporting logic is only partly tested.** The gate it runs is proven on every run by `scripts/gate-selftest.sh`, the `expired_at` window has unit tests, and the variant lists are asserted by `scripts/check-variant-parity.py` — but the tracking-issue state machine, the aggregation and the SARIF merge are still exercised only by running them. That state machine is the notification path for a security control, and when it misbehaves the symptom is silence, which is indistinguishable from a clean scan. It is also unreachable before merge: `schedule:` and `workflow_dispatch:` only fire from the default branch, so the first live signal arrives on the first night after this lands. Extracting the issue decision into a testable script, the way the gate already is, is tracked in [#469](https://github.com/adorsys/status-list-server/issues/469).
 - **A scheduled workflow is disabled after 60 days without repository activity.** GitHub stops running the cron and does not fail anything; the Security tab keeps showing the last upload, and this document keeps claiming nightly coverage. For a workflow whose entire value is covering a time axis, the failure mode is that it silently stops covering it. Re-enable it from the Actions tab. Nothing here detects the condition, because the thing that would detect it is the workflow that is not running.
 - **Release-run scan results still never reach GitHub code scanning.** Alerts filed against a `refs/tags/*` ref are not surfaced in the Security tab's branch view, so `scan-image` deliberately emits no SARIF; the nightly is what files alerts, from a branch ref. See [Where Results Go](#where-results-go).
-- **BuildKit attestations are unsigned** and carry no Sigstore identity, so provenance has no verifiable issuer. It is a record of the build, not evidence about it: anyone with push access to the repository could produce an equivalent document. Adding `actions/attest-build-provenance` is tracked in [#402](https://github.com/adorsys/status-list-server/issues/402), and is not a one-line change — it emits a second provenance document alongside BuildKit's, which forces a decision about keeping both or setting `provenance: false` and giving up the `mode=max` build detail.
+- **The signed attestation is not discoverable from the registry alone.** [#402](https://github.com/adorsys/status-list-server/issues/402) is resolved: releases now carry a Sigstore-signed SLSA v1 statement alongside BuildKit's unsigned v0.2 provenance, so the image has a verifiable issuer and not merely a self-asserted one — see [Which Provenance to Verify](#which-provenance-to-verify) and [ADR 0001](adr/0001-container-image-provenance.md). What remains is retrieval: the build sets `push-to-registry: false`, so the attestation lives in GitHub's attestation API rather than beside the image, and a consumer who has only the digest cannot find it without knowing to ask GitHub. That is deliberate — GHCR's Referrers API support is unsettled, and an attestation pushed where nothing can discover it would be coverage-shaped and coverage-free — but it does mean verification is not self-service from the registry. [Verifying Locally](#verifying-locally) gives the exact check for whether this can be flipped.
+- **The signed attestation depends on this repository staying public.** GitHub artifact attestations are available on public repositories on all plans, but on private or internal repositories they require GitHub Enterprise Cloud. A visibility change would therefore stop the signing step working, where it would only _degrade_ BuildKit's provenance to `mode=min` — and that only if the explicit pin were also removed. This asymmetry is the reason both documents are kept rather than one; check it before changing repository visibility.
+- **The signing job holds `id-token: write`, and what that is worth depends on an AWS trust policy this repository cannot see.** `build-and-push` must be able to mint an OIDC token for Fulcio, which means any step in that job can mint one asserting this repository's identity. The role `deploy` assumes must therefore condition `sub` on `repo:<owner>/<repo>:environment:production`; under `repo:<owner>/<repo>:*` the build job could assume the production deploy role. Nothing in CI can verify this — the condition lives in IAM — so it is a standing precondition rather than a check. See [ADR 0001](adr/0001-container-image-provenance.md) and the deployment runbook.
+- **A `workflow_dispatch` build is attested and verified but never promoted, and its `sha-<commit>` tag stays.** `verify-provenance` runs on dispatch by design, so the real verification path is exercised outside a release. The consequence is that dispatch runs leave signed, verifiable images under commit-sha tags that never passed the vulnerability gate. That is the same point [A signature is not the gate's verdict](#a-signature-is-not-the-gates-verdict) makes, and the same mitigation applies: consume by release tag.
 - **Gate behaviour is reproducible against a fixed advisory database, not across time.** A finding can move from absent to blocking with no change in this repository. That is intentional — it is how post-merge advisories are meant to reach the gate — but it means "reproducible" holds for a given database snapshot.
-- **The Trivy vulnerability database is fetched unauthenticated from a third party.** `trivy-action` caches it across runs by default (`cache: true`, an `actions/cache` entry keyed by date), so this is not a fresh download per scan — but the cache is stale by construction on a nightly that runs once every 24 hours, so in practice each night's five jobs each re-fetch it. On the release path a network blip or a GHCR rate limit becomes a failed release, surfacing as the security gate failing, which reads as "a vulnerability was found". Tracked in [#405](https://github.com/adorsys/status-list-server/issues/405); a mirrored or authenticated `TRIVY_DB_REPOSITORY` is the actual fix, and enabling caching is not it because caching is already on. The nightly is defended against the _confusion_ rather than the fault, though only at the extreme: if the database failure takes out every variant, nothing aggregates, the run goes red and no issue is filed. A failure hitting one variant leaves the other four measuring, so the issue is still updated — with that variant listed as never reported, which is what partial coverage should look like.
+- **The Trivy vulnerability database is fetched unauthenticated from a third party.** Both `deploy.yml` (scan-image) and `scheduled-image-scan.yml` (rescan) now persist the Trivy cache directory across runs (see [Trivy Vulnerability Database Cache and Staleness](#trivy-vulnerability-database-cache-and-staleness)). On a fetch failure, the `scripts/ensure-trivy-db.sh` script degrades to the cached DB with a loud warning and step-summary entry showing the DB age, rather than failing the job — provided the cached DB is within the 24-hour staleness bound. Beyond that bound, a fetch failure is fatal. The first run after this change is a cold cache and still fetches ~108 MiB; resilience is realized from the second run onward. Tracked in [#405](https://github.com/adorsys/status-list-server/issues/405); a mirrored or authenticated `TRIVY_DB_REPOSITORY` remains the long-term fix for upstream availability.
 - **The builder-stage audit assertion runs only on the release path.** `deploy.yml` does not run on pull requests, so a change that breaks the auditable build is green on the PR and fails during a release. Tracked against [#316](https://github.com/adorsys/status-list-server/issues/316).
 - **An expired ignore entry is a warning, not a failure.** `scripts/check-trivyignore.py` enforces the required fields but only warns when a date has passed, because an expired entry has already stopped suppressing anything. The nightly now gives 30 days' notice before that happens, so the remaining question — whether a _lapsed_ entry should fail pull request CI — is a policy decision that has deliberately not been made here.
 - **There is no break-glass for the gate.** With `ignore-unfixed` off and any HIGH or CRITICAL blocking, a newly published unfixed advisory in a linked crate makes it impossible to cut _any_ release, including a security hotfix for something unrelated. The only path is landing a `.trivyignore.yaml` entry through pull request CI — which is the file this document warns hardest against editing under incident pressure. `workflow_dispatch` deliberately cannot release, so it is not an override. A dispatch input gated on the `production` environment's reviewers, recording the justification in the run summary, would close this; it is a policy decision rather than a mechanical one and has not been made.

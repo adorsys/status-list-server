@@ -1,0 +1,31 @@
+{
+  "name": "status-list-performance-tests",
+  "version": "1.0.0",
+  "description": "Performance tests for Status List Server using Artillery",
+  "scripts": {
+    "generate-tokens": "node ./scripts/token-generator.js",
+    "setup": "node ./scripts/setup.js",
+    "test:load": "npm run setup && artillery run ./tests/load-test.yml",
+    "test:stress": "npm run setup && artillery run ./tests/stress-test.yml",
+    "test:spike": "npm run setup && artillery run ./tests/spike-test.yml",
+    "test:auth": "npm run setup && artillery run ./tests/auth-test.yml",
+    "test:all": "npm run test:load && npm run test:stress && npm run test:spike && npm run test:auth",
+    "test:load:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/load-test.json ./tests/load-test.yml",
+    "test:stress:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/stress-test.json ./tests/stress-test.yml",
+    "test:spike:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/spike-test.json ./tests/spike-test.yml",
+    "test:auth:report": "npm run setup && node -e \"require('fs').mkdirSync('results',{recursive:true})\" && artillery run --output results/auth-test.json ./tests/auth-test.yml"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "devDependencies": {
+    "artillery": "^2.0.34"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3"
+  },
+  "overrides": {
+    "brace-expansion@1.1.12": "~1.1.21",
+    "minimatch@3.1.2": "~3.1.5"
+  }
+}

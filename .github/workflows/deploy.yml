@@ -22,6 +22,7 @@ env:
   AWS_REGION: eu-central-1
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
+  CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
@@ -64,11 +65,21 @@ jobs:
 
   ci:
     name: CI
-    uses: ./.github/workflows/CI.yml
     # A malformed tag fails in seconds; without this the whole suite runs first.
     needs: validate-tag
-    # A called workflow can only narrow the caller's token, so CI.yml's kube-linter
-    # job needs its SARIF upload scope granted here too.
+    uses: ./.github/workflows/CI.yml
+    # A called workflow can only narrow the caller's token. CI.yml needs nothing
+    # beyond read, so grant the minimum.
+    permissions:
+      contents: read
+
+  helm-checks:
+    name: Helm Checks
+    # A malformed tag fails in seconds; without this the whole suite runs first.
+    needs: validate-tag
+    uses: ./.github/workflows/helm-checks.yml
+    # A called workflow can only narrow the caller's token. helm-checks.yml's
+    # kube-linter job needs its SARIF upload scope granted here too.
     permissions:
       contents: read
       security-events: write
@@ -76,29 +87,47 @@ jobs:
   build-and-push:
     name: Build and Push Docker Image to GHCR (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
-    needs: [ci, validate-tag]
+    needs: [ci, helm-checks, validate-tag]
     timeout-minutes: 60
+    # zizmor: ignore[excessive-permissions]
+    # Required by actions/attest-build-provenance for Sigstore/Fulcio signing.
+    # Justification in docs/adr/0001-container-image-provenance.md §Permissions.
     permissions:
       contents: read
       packages: write
+      # `id-token: write` mints the OIDC token Fulcio exchanges for a signing certificate.
+      # `attestations: write` persists the signed bundle. `artifact-metadata: write` is
+      # deliberately not granted; see `create-storage-record` on the attest step.
+      #
+      # `id-token: write` is not free: it lets any step in this job mint an OIDC token
+      # asserting this repository's identity, and this job builds from the source tree.
+      # The blast radius is therefore whatever trusts that identity, which here is the
+      # AWS role `deploy` assumes. That role's trust policy must condition `sub` on
+      # `repo:<owner>/<repo>:environment:production`, not on `repo:<owner>/<repo>:*` --
+      # under the looser condition this grant would let the build job assume the
+      # production deploy role, which is the privilege `environment: production` exists
+      # to gate. Recorded in docs/adr/0001-container-image-provenance.md and checked in
+      # docs/deployment-runbook.md.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
         variant:
           - suffix: aws
-            features: "postgres,aws"
+            features: "postgres,aws,redis"
             description: "PostgreSQL database with AWS Secrets Manager and Route53 DNS support"
           - suffix: gcp
-            features: "postgres,gcp"
+            features: "postgres,gcp,redis"
             description: "PostgreSQL database with GCP Secret Manager and Cloud DNS support"
           - suffix: azure
-            features: "postgres,azure"
+            features: "postgres,azure,redis"
             description: "PostgreSQL database with Azure Key Vault and Azure DNS support"
           - suffix: vault
-            features: "postgres,vault"
+            features: "postgres,vault,redis"
             description: "PostgreSQL database with HashiCorp Vault / OpenBao token material storage"
           - suffix: fscert
-            features: "postgres"
+            features: "postgres,redis"
             description: "PostgreSQL database with filesystem-mounted token signing keys and certificates"
     steps:
       - name: Checkout source code
@@ -109,10 +138,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -132,7 +161,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -175,6 +204,35 @@ jobs:
           echo "IMAGE_REF=${IMAGE_BASE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$DIGEST" > "image-digest-${SUFFIX}.txt"
 
+      - name: Attest build provenance
+        # A second, independent provenance document over the same digest -- not a
+        # signature over the `provenance: mode=max` attestation BuildKit already
+        # attached. BuildKit's is integrity-protected but self-asserted: its `builder.id`
+        # is JSON it wrote, so anyone with push access to the package could publish an
+        # index that inspects identically. This one is signed via Sigstore/Fulcio and
+        # carries an issuer. Both are kept; docs/adr/0001-container-image-provenance.md
+        # is the decision and the argument for it.
+        #
+        # Placed after the digest assertion so the subject can never be an empty string.
+        # Bound to the index digest rather than a tag, which is what lets it survive
+        # `promote-tags`: `imagetools create` only adds names to an unchanged digest.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The repository the digest lives in, with no tag -- the action rejects one.
+          subject-name: ${{ env.IMAGE_BASE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          # GHCR's Referrers API support is unsettled, and an attestation pushed where
+          # nothing can discover it is coverage-shaped and coverage-free. `gh attestation
+          # verify` reads GitHub's attestation API by default, so this costs nothing
+          # today. docs/supply-chain.md records what would have to be true to flip it.
+          push-to-registry: false
+          # No storage record is written when nothing is pushed to a registry, so this is
+          # explicit rather than load-bearing: it keeps `artifact-metadata: write` -- a
+          # third write scope on the job that pushes the production image -- off this
+          # job, and makes flipping `push-to-registry` a deliberate change that surfaces
+          # the permission question rather than one that silently needs a new scope.
+          create-storage-record: false
+
       - name: Verify OCI description annotations
         env:
           DESCRIPTION: ${{ matrix.variant.description }}
@@ -204,7 +262,7 @@ jobs:
           done
 
       - name: Upload built digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-digest-${{ matrix.variant.suffix }}
           path: image-digest-${{ matrix.variant.suffix }}.txt
@@ -247,7 +305,7 @@ jobs:
           persist-credentials: false
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -283,10 +341,56 @@ jobs:
             echo "SCAN_REF_$(printf '%s' "$arch" | tr '[:lower:]' '[:upper:]')=${IMAGE_BASE}@${manifest}" >> "$GITHUB_ENV"
           done <<< "$resolved"
 
+      - name: Install Trivy
+        # Pinned to the same version trivy-action v0.36.0 uses internally.
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.70.0
+          cache: false
+
+      - name: Restore Trivy vulnerability database cache
+        # The DB is global (variant- and arch-independent), so a single cache key
+        # shared across all matrix legs is correct. `restore-keys` provides a
+        # fallback to the most recent cached DB on a miss.
+        #
+        # An absolute path under `runner.temp`, not `~/.cache/trivy`: trivy-action
+        # hands `cache-dir` to Trivy verbatim as TRIVY_CACHE_DIR, and neither expands
+        # `~`, so the scans would read an empty `./~/.cache/trivy` and fail.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Ensure Trivy vulnerability database
+        # Refreshes the DB; on fetch failure, falls back to the cached DB with a
+        # loud warning (and step-summary entry) if the cached DB is within the
+        # 24h staleness bound. Fails if the cached DB is older, or there is none.
+        run: bash scripts/ensure-trivy-db.sh "$RUNNER_TEMP/trivy" 24
+
+      - name: Save Trivy vulnerability database cache
+        # One leg saves: all five share this run's key, so the other four would only
+        # re-upload the same DB and fail to reserve it. Not gated on `push`, so a
+        # dispatched run refreshes the cache too. A tag run's cache is scoped to that
+        # tag and seen only by its own re-runs; the nightly on the default branch is
+        # what new tags restore from.
+        if: strategy.job-index == 0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.run_id }}
+
       - name: Scan image (amd64)
         # Unfiltered; every view below is `trivy convert`ed from these, so the table and
         # the gate read the same data and each image is pulled once.
+        #
+        # TRIVY_SKIP_DB_UPDATE: freshness was decided by the step above; the scan must
+        # not re-fetch. trivy-action has no input for it, and a step env keeps it out
+        # of local `trivy` runs, which a repository config file would not.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_AMD64 }}
@@ -295,9 +399,14 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-amd64.json
+          cache: false
+          cache-dir: ${{ runner.temp }}/trivy
+          skip-setup-trivy: true
 
       - name: Scan image (arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
         with:
           scan-type: image
           image-ref: ${{ env.SCAN_REF_ARM64 }}
@@ -306,6 +415,9 @@ jobs:
           exit-code: 0
           format: json
           output: trivy-image-report-arm64.json
+          cache: false
+          cache-dir: ${{ runner.temp }}/trivy
+          skip-setup-trivy: true
 
       - name: Derive reports
         # The severity floor and where the ledger is applied live in the script, so the
@@ -379,7 +491,7 @@ jobs:
         # `warn`, not `error`: the `[ -s ... ]` fallbacks above guarantee the files.
         # Failing here would only add a second red step.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-scan-reports-${{ matrix.variant.suffix }}
           path: |
@@ -393,7 +505,7 @@ jobs:
         # Separate artifact: a lost SBOM must not take down the upload carrying the
         # scan results. Absence is caught by the assertion below instead.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: container-sboms-${{ matrix.variant.suffix }}
           path: |
@@ -468,12 +580,94 @@ jobs:
           done
           exit "$status"
 
+  verify-provenance:
+    name: Verify Signed Provenance (${{ matrix.variant.suffix }})
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    timeout-minutes: 10
+    # Deliberately *not* gated on `push`. Two reasons, and the second is the important
+    # one.
+    #
+    # It gates promotion: `promote-tags` needs this job, so a digest whose signed
+    # provenance does not verify never receives a release tag. Checking after promotion
+    # would mean `latest-<variant>` is public and pullable before anything has asked who
+    # built it.
+    #
+    # And it is the only place the real `gh attestation verify` runs anywhere near a
+    # non-release path. `scripts/attestation-selftest.sh` proves the verifier's logic
+    # against a stub, but a stub accepts any flags -- it cannot show that this flag
+    # combination is one gh accepts, that the token carries the right scope, or that the
+    # certificate identity is the one we predicted. Without this job the first execution
+    # of the real command would be during a release, on the last step before a deploy.
+    # Running it on `workflow_dispatch` too means that first execution is a debug run.
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+      # Read-only, and only to fetch the bundle back: this job verifies the attestation
+      # `build-and-push` issued, it never mints one.
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - suffix: aws
+          - suffix: gcp
+          - suffix: azure
+          - suffix: vault
+          - suffix: fscert
+    env:
+      SUFFIX: ${{ matrix.variant.suffix }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Only the scripts and the workflow the self-test asserts against; the rest of
+          # the tree is not read here.
+          sparse-checkout: |
+            scripts
+            .github/workflows
+
+      - name: Prove the attestation check can fail
+        # Run hermetic self-test once on release path prior to verification.
+        if: matrix.variant.suffix == 'aws'
+        run: bash scripts/attestation-selftest.sh
+
+      - name: Download built digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+
+      - name: Verify signed provenance for the built digest
+        # `provenance: mode=max` gives BuildKit's own attestation, which is
+        # integrity-protected but self-asserted. This is the authenticity half: a
+        # Sigstore-signed statement, from this workflow, from this ref, over this digest.
+        # See docs/adr/0001-container-image-provenance.md.
+        #
+        # `$GITHUB_REF` is passed so the signing identity is pinned exactly rather than by
+        # prefix. Without it `gh` would accept a signature produced by this workflow from
+        # any ref -- and `build-and-push` runs on `workflow_dispatch`, so producing one
+        # needs only repository write access. ADR 0001 §Consequences has the full argument.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          index_digest=$(cat "image-digest-${SUFFIX}.txt")
+          [[ "$index_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::invalid built image digest for ${SUFFIX}: ${index_digest}"
+            exit 1
+          }
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${index_digest}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
+
   promote-tags:
     name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
     needs:
       - build-and-push
       - scan-image
+      - verify-provenance
     # Positively gated on `push`: workflow_dispatch accepts tag refs too, so a ref
     # test alone would not keep dispatch off the release path.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
@@ -482,6 +676,9 @@ jobs:
       contents: read
       packages: write
       actions: read
+      # Read-only, and only to fetch the bundle back: this job verifies the attestation
+      # `build-and-push` issued, it never mints one.
+      attestations: read
     strategy:
       fail-fast: false
       matrix:
@@ -500,12 +697,15 @@ jobs:
       SUFFIX: ${{ matrix.variant.suffix }}
     steps:
       - name: Fetch Repository
+        # Only for scripts/verify-attestation.sh below. The promotion itself needs no
+        # source, so nothing else in this job reads the working tree.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: scripts
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -585,6 +785,33 @@ jobs:
           done
           echo "SBOM and provenance present for both platforms on $release_ref"
 
+      - name: Verify signed provenance survived promotion
+        # Re-verify provenance against the promoted tag and assert the resolved digest matches the built artifact.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DEPLOY_TAG="${GITHUB_REF_NAME#v}"
+          release_ref="${IMAGE_BASE}:${DEPLOY_TAG}-${SUFFIX}"
+          promoted_digest=$(docker buildx imagetools inspect "$release_ref" \
+            --format '{{ .Manifest.Digest }}')
+          [[ "$promoted_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::${release_ref} did not resolve to a digest: '${promoted_digest}'"
+            exit 1
+          }
+
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${promoted_digest}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
+
+          built_digest=$(cat "image-digest-${SUFFIX}.txt")
+          if [ "$promoted_digest" != "$built_digest" ]; then
+            echo "::error::${release_ref} resolves to ${promoted_digest}, not the built and scanned ${built_digest}."
+            echo "The release tag was applied to something other than the artifact this run gated."
+            echo "Note that the digest it does resolve to carries valid provenance from this run, so this"
+            echo "is a promotion fault rather than a signing one."
+            exit 1
+          fi
+
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
@@ -606,6 +833,11 @@ jobs:
       contents: read
       id-token: write
       packages: read
+      # This job re-resolves the release tag to a digest of its own accord, so it is the
+      # last place the digest production will actually run is known. Verifying it here
+      # closes the window between `promote-tags` checking the tag and this job reading
+      # it; read-only, and it mints nothing.
+      attestations: read
     env:
       # Routed through env rather than interpolated into the helm command: deploy_tag
       # derives from GITHUB_REF_NAME, which the person pushing the tag controls.
@@ -624,7 +856,7 @@ jobs:
       - name: Install kubectl
         # v5.1.0, not v5.0.1: that SHA is the v5.1.0 tag upstream. Both sides of this
         # merge pinned the same commit and only disagreed about the comment.
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -632,14 +864,14 @@ jobs:
           version: v4.2.4
 
       - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: status-list-server-deploy
@@ -693,7 +925,7 @@ jobs:
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-          helm dependency build helm/chart
+          helm dependency build "$CHART_DIR"
 
       - name: Deploy chart
         # The digest is what pins production to the image the scan gate passed; an
@@ -703,6 +935,9 @@ jobs:
         # The tag and digest come from `env:` rather than `${{ }}` because they are
         # derived from the pushed ref. The release name and namespace are workflow
         # literals, so interpolating those is safe.
+        env:
+          # For scripts/verify-attestation.sh, which reads GitHub's attestation API.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # Derive deploy tag from the release tag
@@ -721,26 +956,168 @@ jobs:
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
 
+          # The digest this job resolved, not the one promote-tags checked. Those are the
+          # same value in every run that is not under attack, and the point is the run
+          # that is: the tag is mutable, promote-tags read it earlier, and this is the
+          # value that reaches the cluster. Verifying anything else would be verifying an
+          # artifact production is not about to run.
+          bash scripts/verify-attestation.sh \
+            "${IMAGE_BASE}@${IMAGE_DIGEST}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
+
           # `FULL_TAG`, not `DEPLOY_TAG`: the tag must carry the variant suffix, or
           # production gets whichever feature set happens to sit on the bare tag.
           #
           # `:?` on both -- helm reports an empty value as a YAML error pointing
           # nowhere near the cause, and an empty digest silently falls back to the
           # mutable tag, which is the failure this pipeline exists to prevent.
-          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} helm/chart \
+          #
+          # Record each release ExternalSecret's pre-deploy refreshTime so the post-deploy
+          # verification can prove reconciliation happened for THIS deployment, not just a
+          # stale Ready=True left over from the previous store. On a fresh install the ES
+          # does not exist yet, so the baseline is empty and verification skips the change
+          # check for that resource.
+          BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
+          : > "$BASELINES"
+          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+            rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
+              -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+            printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
+          done
+
+          # Record the last deployed Helm revision so the post-deploy ESO verification can
+          # explicitly roll back if the new release does not reconcile. --rollback-on-failure
+          # on the upgrade below only covers failures during the upgrade itself; a release that
+          # deploys but whose ExternalSecrets cannot sync from the cluster store needs an
+          # explicit rollback to keep production off stale credentials. Empty on a fresh install
+          # (no previous revision to roll back to), in which case the verify step uninstalls.
+          PREV_REVISION=""
+          if helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" --max 1 >/dev/null 2>&1; then
+            PREV_REVISION=$(helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" \
+              --output json | jq -r 'max_by(.revision) | .revision' 2>/dev/null || true)
+          fi
+          printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
+
+          # A clean-looking rollback can still leave migration records the old release cannot start on.
+          if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            -f helm/chart/values-aws.yaml \
-            -f helm/chart/values-production.yaml \
+            -f "$CHART_DIR"/values-aws.yaml \
+            -f "$CHART_DIR"/values-production.yaml \
+            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
+            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
+            --set "secretStore.enabled=false" \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
             --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
             --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
-            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"; then
+            if [ -n "$PREV_REVISION" ]; then
+              echo "::error title=Check for migrations the restored release does not know::The upgrade failed and Helm rolled back to revision $PREV_REVISION. If a pod of the new release started, it may have migrated the database, and then every pod of the restored release that starts from now on (restart, scale-up, node drain) crash-loops until the migration records are deleted, even though the rollback looks clean. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
+            fi
+            exit 1
+          fi
 
       - name: Verify application rollout
         run: |
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
+
+      - name: Verify ESO secret path reconciles
+        # On an upgrade the app secrets can remain from the old namespaced store even if the
+        # Helm and Deployment rollout succeeds, so gate the release on the ExternalSecrets
+        # actually syncing from the new cluster store.
+        #
+        # We don't read ClusterSecretStore here: the deploy role's EKS/RBAC is
+        # namespace-scoped, so a cluster-scoped get returns Forbidden on every deploy. We
+        # rely on the namespaced release ExternalSecrets instead, requiring each one's
+        # refreshTime to move past its pre-deploy baseline (recorded in the Deploy chart
+        # step) because Ready=True alone can be stale from before the upgrade; on a fresh
+        # install the baseline is empty and only Ready=True is required.
+        #
+        # The chart's refreshInterval is 30m, so an image-only release leaves the
+        # ExternalSecret spec unchanged and ESO could keep the old refreshTime for the whole
+        # wait window; we force-sync with a unique external-secrets.io/force-sync annotation
+        # to trigger an immediate reconcile.
+        #
+        # This runs after helm upgrade --install --rollback-on-failure has already
+        # succeeded, so a failure here alone would leave the broken revision live. We
+        # explicitly roll back to the pre-deploy revision (or uninstall on a fresh install)
+        # when either ExternalSecret fails, keeping the cluster on the last known-good state.
+        env:
+          PRIMARY_ES: statuslist-external-secret
+          CREDS_ES: statuslist-external-secret-aws-credentials
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          RELEASE="${{ env.HELM_RELEASE_NAME }}"
+          BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
+          PREV_REVISION_FILE="$RUNNER_TEMP/eso-prev-revision"
+          FORCE_SYNC="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          TIMEOUT=180
+          rollback_done=0
+
+          cleanup_on_failure() {
+            if [ "$rollback_done" -eq 1 ]; then
+              return 0
+            fi
+            rollback_done=1
+            local prev_rev=""
+            if [ -f "$PREV_REVISION_FILE" ]; then
+              prev_rev=$(cat "$PREV_REVISION_FILE")
+            fi
+            echo "::warning::ESO verification failed; restoring the previous release state"
+            if [ -n "$prev_rev" ]; then
+              if ! helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m; then
+                echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
+                echo "::error title=Check for migrations the restored release does not know::The rollback to revision $prev_rev did not finish. It followed a successful upgrade, so every migration the new release carries has already run. If it carries any, the restored release cannot start a pod until their records are deleted. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
+              fi
+            else
+              # Fresh install: nothing to roll back to, so remove the release entirely.
+              helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 5m || \
+                echo "::warning::helm uninstall of fresh release failed; manual intervention required"
+            fi
+          }
+          trap cleanup_on_failure EXIT
+
+          # Force ESO to reconcile both release ExternalSecrets immediately, regardless of
+          # the 30m refreshInterval, so an image-only release cannot leave a stale
+          # refreshTime for the whole wait window.
+          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+            kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
+              "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
+              echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
+          done
+
+          await_synced() {
+            local es="$1" label="$2"
+            local baseline=""
+            if [ -f "$BASELINES" ]; then
+              baseline=$(awk -v es="$es" '$1==es {print $2}' "$BASELINES")
+            fi
+            local i=0 ready="" rt=""
+            while [ "$i" -lt "$TIMEOUT" ]; do
+              ready=$(kubectl get externalsecret "$es" -n "$NAMESPACE" \
+                -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+              rt=$(kubectl get externalsecret "$es" -n "$NAMESPACE" \
+                -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+              if [ "$ready" = "True" ] && { [ -z "$baseline" ] || { [ -n "$rt" ] && [ "$rt" != "$baseline" ]; }; }; then
+                echo "OK: $label reports Ready=True and refreshed for this deployment"
+                return 0
+              fi
+              sleep 5
+              i=$((i + 5))
+            done
+            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the cluster store (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
+            return 1
+          }
+
+          # Primary ExternalSecret syncs from the cluster store.
+          await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
+
+          # The credentials ExternalSecret (aws-credentials-secret) must also sync from the
+          # cluster store so the app's mounted credential volume is fresh.
+          await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+
+          rollback_done=1

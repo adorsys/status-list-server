@@ -13,9 +13,83 @@ impl MigratorTrait for Migrator {
             Box::new(add_updated_at::Migration),
             Box::new(status_list_history::Migration),
             Box::new(status_list_history_exp_index::Migration),
+            Box::new(credentials_list_count::Migration),
+            Box::new(list_quota::Migration),
+            Box::new(status_list_allocations::Migration),
+            Box::new(add_status_list_version::Migration),
+            Box::new(add_status_list_history_version::Migration),
+            Box::new(credentials_aggregation_id::Migration),
+            Box::new(status_lists_issuer_list_id_index::Migration),
         ]
     }
+
+    /// Drops every table without running any `down`, so it is refused with them.
+    async fn fresh<'c, C>(_db: C) -> Result<(), DbErr>
+    where
+        C: IntoSchemaManagerConnection<'c>,
+    {
+        Err(forward_only("dropping every table is refused"))
+    }
 }
+
+/// Applies pending migrations; returns whether none had been applied before.
+pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, DbErr> {
+    apply_migrations::<Migrator>(db).await
+}
+
+/// [`run_migrations`] for any migrator, so tests can stand in for an earlier
+/// release with a migrator that knows only the first migrations.
+pub(crate) async fn apply_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<bool, DbErr> {
+    let applied = async {
+        let fresh = M::get_applied_migrations(db).await?.is_empty();
+        M::up(db, None).await?;
+        Ok(fresh)
+    }
+    .await;
+    match applied {
+        Ok(fresh) => Ok(fresh),
+        Err(err) => Err(name_unknown_migrations::<M>(db, err).await),
+    }
+}
+
+/// After migrating failed, names the migrations the database records that `M`
+/// does not know: what stops a rolled-back release from starting. Returns
+/// `err` unchanged when there are none or the records cannot be read, so it
+/// never stops a start that would otherwise have succeeded.
+async fn name_unknown_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+    err: DbErr,
+) -> DbErr {
+    let Ok(records) = M::get_migration_models(db).await else {
+        return err;
+    };
+    let known: Vec<String> = M::migrations()
+        .iter()
+        .map(|migration| migration.name().to_owned())
+        .collect();
+    let unknown: Vec<String> = records
+        .into_iter()
+        .map(|record| record.version)
+        .filter(|version| !known.contains(version))
+        .collect();
+    if unknown.is_empty() {
+        return err;
+    }
+    DbErr::Migration(format!(
+        "the database records migrations this release does not know: {}. A newer release \
+         migrated it, and this release cannot start until those records are deleted. Check \
+         that each is safe to leave in place, then follow \"{ROLLBACK_RUNBOOK_SECTION}\" in \
+         docs/deployment-runbook.md. ({err})",
+        unknown.join(", ")
+    ))
+}
+
+/// Recomputes every issuer's `credentials.list_count`. Used as the migration
+/// backfill and quoted verbatim in `docs/troubleshooting.md` as the operator repair.
+pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
 
 /// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
 /// unit rather than depending on the server's default engine. MySQL-only:
@@ -27,19 +101,46 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
     }
 }
 
+/// The `docs/deployment-runbook.md` section the refusals and the startup error
+/// point at.
+const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
+
+/// Every migration's `down`: the schema only moves forward. See "Migrations
+/// are forward-only" in `src/outbound/sql/README.md`.
+fn refuse_down(migration: &str) -> Result<(), DbErr> {
+    Err(forward_only(&format!(
+        "migration '{migration}' cannot be rolled back"
+    )))
+}
+
+/// The refusal every path back returns, naming what was refused.
+fn forward_only(refused: &str) -> DbErr {
+    DbErr::Migration(format!(
+        "{refused}: the schema only moves forward. To roll back a release, delete the \
+         seaql_migrations records of the migrations it does not know and keep the schema; \
+         see \"{ROLLBACK_RUNBOOK_SECTION}\" in docs/deployment-runbook.md"
+    ))
+}
+
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
-const INNODB_REQUIRED_TABLES: &[&str] = &["credentials", "status_lists", "status_list_history"];
+const INNODB_REQUIRED_TABLES: &[&str] = &[
+    "credentials",
+    "status_lists",
+    "status_list_history",
+    "status_list_allocations",
+    "list_quota",
+];
 
 /// Queries `information_schema.TABLES` after migrations and refuses to boot if
-/// any of the critical tables (`credentials`, `status_lists`, `status_list_history`) are not
+/// any of the tables in `INNODB_REQUIRED_TABLES` are not
 /// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
 /// the guarantees from issue #244 without any visible error.
 ///
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
 pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
+    use sea_orm::{FromQueryResult, Statement, Value};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -95,7 +196,7 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
 ///
 /// No-op on PostgreSQL and SQLite.
 pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+    use sea_orm::{FromQueryResult, Statement};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -288,57 +389,8 @@ pub(crate) mod tables {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Drop indexes first
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_list_id")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_sub")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_issuer")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            // Drop tables in reverse order to handle foreign key constraints
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(Credentials::Table)
-                        .to_owned(),
-                )
-                .await?;
-            Ok(())
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -404,22 +456,14 @@ pub(crate) mod add_updated_at {
                 .to_owned();
             manager
                 .get_connection()
-                .execute(manager.get_database_backend().build(&update_stmt))
+                .execute_raw(manager.get_database_backend().build(&update_stmt))
                 .await
                 .map(|_| ())
         }
 
-        /// Removes updated_at column from status_lists table
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusLists::Table)
-                        .drop_column(StatusLists::UpdatedAt)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -427,6 +471,119 @@ pub(crate) mod add_updated_at {
     enum StatusLists {
         Table,
         UpdatedAt,
+    }
+}
+
+/// Migration to add a monotonic optimistic-concurrency `version` column to
+/// `status_lists`, decoupled from the `updated_at` timestamp.
+///
+/// Before this change, `updated_at` doubled as both the real last-modification
+/// timestamp and the optimistic-concurrency guard (`next_updated_at` advanced it
+/// by at least one per write). That let a burst of writes to a single list push
+/// `updated_at` — and therefore the served token's `iat` — ahead of the wall
+/// clock, which relying parties that reject a future `iat` would refuse. This
+/// column splits the two concerns: the monotonic `version` becomes the
+/// concurrency guard and cache-fencing stamp, while `updated_at` stays a real
+/// timestamp.
+pub(crate) mod add_status_list_version {
+    use super::*;
+
+    /// Migration type for adding the version column
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "add_status_list_version"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        /// Adds the version column to the status_lists table.
+        #[allow(elided_lifetimes_in_paths)]
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // A re-run after a rollback finds the column already there.
+            if !manager.has_column("status_lists", "version").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusLists::Table)
+                            .add_column(
+                                ColumnDef::new(StatusLists::Version)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(1),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // No backfill: DEFAULT 1 fills existing rows, and a re-run must not reset versions.
+            Ok(())
+        }
+
+        #[allow(elided_lifetimes_in_paths)]
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        Version,
+    }
+}
+
+/// Adds the `version` tie-breaker to `status_list_history`.
+///
+/// Two updates to the same list within the same second share an `iat` (since
+/// `updated_at` is a real wall-clock timestamp), so `?time=` resolution could
+/// otherwise return the pre-change snapshot. The monotonic optimistic-concurrency
+/// `version` recorded on the snapshot breaks that tie: `find_valid_at` orders by
+/// `iat DESC, version DESC` so the post-change snapshot wins.
+pub(crate) mod add_status_list_history_version {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "add_status_list_history_version"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("status_list_history", "version").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(StatusListHistory::Table)
+                            .add_column(
+                                ColumnDef::new(StatusListHistory::Version)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusListHistory {
+        Table,
+        Version,
     }
 }
 
@@ -501,24 +658,8 @@ pub(crate) mod status_list_history {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_resolution")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -564,16 +705,8 @@ pub(crate) mod status_list_history_exp_index {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_exp")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -585,6 +718,321 @@ pub(crate) mod status_list_history_exp_index {
         Exp,
     }
 }
+
+/// Migration adding the per-issuer list counter behind `limits.max_lists_per_issuer`.
+pub(crate) mod credentials_list_count {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000001_credentials_list_count"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // MySQL commits the ALTER on its own, so a failed backfill leaves the
+            // column behind with the migration unrecorded; the re-run must skip it.
+            if !manager.has_column("credentials", "list_count").await? {
+                // DEFAULT 0 lets pods on the previous release keep inserting
+                // credentials during a rolling deploy.
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(
+                                ColumnDef::new(Credentials::ListCount)
+                                    .big_integer()
+                                    .not_null()
+                                    .default(0),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            // Old pods keep publishing uncounted; `list-quota recount` fixes that.
+            manager
+                .get_connection()
+                .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
+                .await
+                .map(|_| ())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        ListCount,
+    }
+}
+
+/// The switch for `limits.max_lists_per_issuer`, off until `list_quota::on_startup`
+/// or `list-quota enable` turns it on.
+pub(crate) mod list_quota {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260923_000002_list_quota"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // InnoDB for the row locks `list_quota` relies on.
+            let mut table = Table::create();
+            table
+                .table(ListQuota::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(ListQuota::Id)
+                        .integer()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(ListQuota::Enforced)
+                        .boolean()
+                        .not_null()
+                        .default(false),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await?;
+
+            // MySQL commits the CREATE on its own, so a re-run may find the row.
+            let db = manager.get_connection();
+            let backend = manager.get_database_backend();
+            let existing = db
+                .query_one_raw(
+                    backend.build(
+                        Query::select()
+                            .column(ListQuota::Id)
+                            .from(ListQuota::Table)
+                            .and_where(Expr::col(ListQuota::Id).eq(ROW_ID)),
+                    ),
+                )
+                .await?;
+            if existing.is_none() {
+                db.execute_raw(
+                    backend.build(
+                        Query::insert()
+                            .into_table(ListQuota::Table)
+                            .columns([ListQuota::Id, ListQuota::Enforced])
+                            .values_panic([ROW_ID.into(), false.into()]),
+                    ),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    const ROW_ID: i32 = crate::outbound::sql::list_quota::ROW_ID;
+
+    #[derive(Iden)]
+    enum ListQuota {
+        Table,
+        Id,
+        Enforced,
+    }
+}
+
+/// Allocated status-list indices. The composite primary key is the durable
+/// guard against double allocation of a `(list_id, idx)` pair.
+pub(crate) mod status_list_allocations {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260925_000001_status_list_allocations"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut table = Table::create();
+            table
+                .table(StatusListAllocations::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(StatusListAllocations::ListId)
+                        .string()
+                        .not_null(),
+                )
+                .col(
+                    ColumnDef::new(StatusListAllocations::Idx)
+                        .integer()
+                        .not_null(),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(StatusListAllocations::ListId)
+                        .col(StatusListAllocations::Idx),
+                )
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_status_list_allocations_list_id")
+                        .from(StatusListAllocations::Table, StatusListAllocations::ListId)
+                        .to(StatusLists::Table, StatusLists::ListId)
+                        .on_delete(ForeignKeyAction::Cascade)
+                        .on_update(ForeignKeyAction::Cascade),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusListAllocations {
+        Table,
+        ListId,
+        Idx,
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        ListId,
+    }
+}
+
+/// Migration adding the opaque per-issuer ID that aggregation URIs carry.
+pub(crate) mod credentials_aggregation_id {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260929_000001_credentials_aggregation_id"
+        }
+    }
+
+    const INDEX: &str = "idx_credentials_aggregation_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // Nullable so pods on the previous release keep registering during a
+            // rolling deploy; the first lookup of such a row fills it in. Each
+            // step is guarded because MySQL commits DDL on its own, so a failed
+            // run is re-run.
+            if !manager.has_column("credentials", "aggregation_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(
+                                ColumnDef::new(Credentials::AggregationId)
+                                    .string_len(36)
+                                    .null(),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("credentials", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .col(Credentials::AggregationId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        AggregationId,
+    }
+}
+
+/// Migration indexing `status_lists` by `(issuer, list_id)`, so an issuer-scoped
+/// aggregation page is a range scan. Postgres and SQLite indexes on `issuer`
+/// alone do not carry `list_id`, which would read and sort all of an issuer's
+/// lists for every page.
+pub(crate) mod status_lists_issuer_list_id_index {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20260929_000002_status_lists_issuer_list_id_index"
+        }
+    }
+
+    const INDEX: &str = "idx_status_lists_issuer_list_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_index("status_lists", INDEX).await? {
+                return Ok(());
+            }
+            manager
+                .create_index(
+                    Index::create()
+                        .name(INDEX)
+                        .table(StatusLists::Table)
+                        .col(StatusLists::Issuer)
+                        .col(StatusLists::ListId)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        Issuer,
+        ListId,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +1116,36 @@ mod tests {
             assert!(
                 evaluate_binlog_format(variant).is_ok(),
                 "binlog_format={variant} is compatible and must not block startup"
+            );
+        }
+    }
+
+    #[test]
+    fn recount_sql_is_quoted_verbatim_in_the_runbook() {
+        let runbook = include_str!("../../../docs/troubleshooting.md");
+        assert!(
+            runbook.contains(RECOUNT_LIST_COUNT_SQL),
+            "docs/troubleshooting.md must quote RECOUNT_LIST_COUNT_SQL verbatim"
+        );
+    }
+
+    #[test]
+    fn refuse_down_names_a_runbook_section_that_exists() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        assert!(
+            runbook.contains(&format!("### {ROLLBACK_RUNBOOK_SECTION}")),
+            "docs/deployment-runbook.md must have the section refuse_down names"
+        );
+    }
+
+    #[test]
+    fn every_migration_has_a_row_in_the_runbook_table() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        for migration in Migrator::migrations() {
+            let name = migration.name();
+            assert!(
+                runbook.contains(&format!("| `{name}` |")),
+                "docs/deployment-runbook.md must say whether {name} is safe to leave in place"
             );
         }
     }

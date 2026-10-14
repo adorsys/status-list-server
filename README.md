@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/CI.yml?query=branch%3Amain)
 [![CD](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/adorsys/status-list-server/actions/workflows/deploy.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/tag/adorsys/status-list-server?label=release&sort=semver)](https://github.com/adorsys/status-list-server/releases)
 [![Specification](https://img.shields.io/badge/IETF-OAuth_Status_List_Draft--21-orange.svg)](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE-APACHE)
+[![dependencies](https://deps.rs/repo/github/adorsys/status-list-server/status.svg)](https://deps.rs/repo/github/adorsys/status-list-server)
+[![License: MIT / Apache 2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
+[![Run in Postman](https://run.pstmn.io/button.svg)](https://www.postman.com/navigation-astronaut-81353131-s-team/adorsys/collection/hd6c89u/status-list-server)
 
 The Status List Server is an HTTP service that publishes and manages status lists for verifiable credential issuers and relying parties. It implements the [IETF OAuth Token Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/) specification.
 
@@ -13,6 +15,7 @@ The Status List Server is an HTTP service that publishes and manages status list
 - **Standard Compliance**: Implements OAuth Token Status List with JWT and CWT formats, gzip compression on JWT responses, and optional historical status resolution (`?time=`). See the [Compliance Matrix](docs/compliance_matrix.md) for detailed spec alignment.
 - **Zero-Infrastructure Local Mode**: Runs in-memory out of the box with zero external dependencies, allowing local development and testing in seconds.
 - **Pluggable Persistence**: Supports SQL databases (PostgreSQL, MySQL, SQLite) as well as an in-memory repository for development. See [Database Backends](docs/database-backends.md).
+- **Pluggable Status-List Cache**: Select an in-memory or Redis cache backend at runtime for local or multi-replica deployments.
 - **Cloud Secret Management**: Fetches server signing keys from AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault or loads them statically from local files. See [Secret Backends](docs/secrets-backends.md).
 - **Automated Token Signing Certificates**: Provisions and automatically renews X.509 token signing certificates via ACME DNS-01 challenges (Route53, Cloudflare, Google Cloud DNS, Azure DNS, ACME-DNS, Pebble), or loads certificates statically from local files. See [DNS Providers](docs/dns-providers.md).
 - **Cloud-Native Observability**: OpenTelemetry distributed tracing (OTLP gRPC), Prometheus metrics, structured JSON logging, and Kubernetes health probes. See [Observability](docs/observability.md).
@@ -38,15 +41,33 @@ Verify that the service is running:
 curl -i http://localhost:8000/health/live
 ```
 
-### Option 2: Docker Compose (Full Stack)
+### Option 2: Docker Compose
 
-To run the server alongside PostgreSQL, LocalStack (AWS Secrets Manager), Pebble ACME test server, OpenTelemetry collector, Jaeger, and Prometheus:
+Start the server with in-memory storage and the checked-in local test
+certificate. Profiles start optional services beside the server; using one from
+the application also requires its matching build feature and configuration:
 
 ```bash
-docker compose up --build
+docker compose up --build                       # Server only
+docker compose --profile postgres up -d         # Server + PostgreSQL
+docker compose --profile mysql up -d            # Server + MySQL
+docker compose --profile redis up -d            # Server + Redis
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d  # Server + telemetry stack
 ```
 
-Refer to the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for compose service details and testing configurations.
+Set `GRAFANA_ADMIN_PASSWORD` before starting the observability profile. To use PostgreSQL, ACME, AWS, and telemetry in the server, select those profiles and their matching application settings. The compiled database feature selects the default database backend:
+
+```bash
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
+```
+
+The `aws` feature includes ACME certificate provisioning, so local AWS builds need both the `aws` and `acme` profiles.
+
+See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles, including MySQL and filesystem certificates.
 
 ## API Overview
 
@@ -92,6 +113,7 @@ The server compiles with modular feature flags to gate database drivers and clou
 | `gcp`      | GCP Secret Manager and Google Cloud DNS provider                      | ❌ Opt-in  |
 | `azure`    | Azure Key Vault and Azure DNS provider                                | ❌ Opt-in  |
 | `vault`    | HashiCorp Vault / OpenBao secret backend                              | ❌ Opt-in  |
+| `redis`    | Redis status-list cache backend                                       | ❌ Opt-in  |
 
 Examples:
 
@@ -117,7 +139,7 @@ Refer to [`.env.template`](.env.template) for the complete configuration diction
 
 For production deployments:
 
-- **Kubernetes**: Refer to the [Helm Chart Guide](helm/README.md) for deploying with the official Helm chart, configuring Workload Identity (if you use AWS, GCP or Azure), and setting resource limits.
+- **Kubernetes**: Refer to the [Helm Chart Guide](deploy/helm/README.md) for deploying with the official Helm chart, configuring Workload Identity (if you use AWS, GCP or Azure), and setting resource limits.
 - **Operations and Runbooks**: Refer to the [Deployment Runbook](docs/deployment-runbook.md) for production checklists, database migrations, backup and restore procedures, and zero-downtime maintenance.
 - **Troubleshooting**: Refer to the [Troubleshooting Guide](docs/troubleshooting.md) for fail-fast error descriptions and common operator error codes.
 - **Container Supply Chain**: Official container images are published with SBOMs and SLSA provenance, and scanned for vulnerabilities by digest. See the [Supply Chain Guide](docs/supply-chain.md).
@@ -138,7 +160,7 @@ For production deployments:
 
 ### Operations and Security
 
-- [Helm Chart Guide](helm/README.md): Kubernetes packaging, pod autoscaling, ingress, and Workload Identity configuration.
+- [Helm Chart Guide](deploy/helm/README.md): Kubernetes packaging, pod autoscaling, ingress, and Workload Identity configuration.
 - [Deployment Runbook](docs/deployment-runbook.md): Production operational procedures, migrations, and disaster recovery.
 - [Troubleshooting Guide](docs/troubleshooting.md): Diagnosing runtime failures and common operator errors.
 - [Observability Guide](docs/observability.md): OpenTelemetry collector setup, Prometheus metrics, and distributed tracing.
@@ -146,24 +168,86 @@ For production deployments:
 
 ## Development and Quality Checks
 
-Run unit and integration tests:
+The repository provides a standard Cargo xtask entry point for common workflows:
+
+```bash
+cargo xtask check-profiles
+cargo xtask build                         # defaults to postgres
+cargo xtask build --profile sqlite --release
+cargo xtask test --profile minimal
+cargo xtask test --profile sqlite -- my_test --exact
+cargo xtask lint
+cargo xtask compose --profile redis
+cargo xtask ci
+```
+
+`build`, `test`, and `compose` accept `--profile <name>`. The supported profiles and their Cargo features are:
+
+| Profile    | Cargo feature selection                   | Compose services                       |
+| ---------- | ----------------------------------------- | -------------------------------------- |
+| `minimal`  | `--no-default-features --features memory` | app only                               |
+| `postgres` | `postgres`                                | app and PostgreSQL                     |
+| `mysql`    | `mysql`                                   | app and MySQL                          |
+| `sqlite`   | `sqlite`                                  | app and SQLite volume initialization   |
+| `aws`      | `postgres,aws`                            | app, PostgreSQL, and AWS               |
+| `vault`    | `postgres,vault`                          | app and PostgreSQL                     |
+| `gcp`      | `postgres,gcp`                            | app and PostgreSQL                     |
+| `azure`    | `postgres,azure`                          | app and PostgreSQL                     |
+| `redis`    | `postgres,redis`                          | app, PostgreSQL, and Redis             |
+
+Vault, GCP, and Azure use externally configured provider endpoints and credentials, so those profiles do not start provider emulators. Configure them in `.env` before starting the profile.
+
+`check-profiles` checks each library with `--no-default-features` and the listed features to detect dependence on other default features. It also checks all supported targets with the normal profile selection. Non-minimal builds and tests retain the default `memory` feature, which the binary and existing test helpers require. Every check runs, and failures are summarized at the end. The required CI profile-check job and the full local CI pipeline run these checks. Default local CI retains the quick memory-only check; run `./local-ci.sh --gate profiles` to check the full matrix separately.
+
+`test` adds `postgres-tests` to every PostgreSQL-backed profile and also adds
+`redis-tests` to the Redis profile. These profiles and MySQL require a running
+Docker daemon for their container tests. `minimal` and SQLite tests need no
+database containers. Cloud integration tests may require additional provider
+configuration; see the contributing guide.
+
+`test` uses installed `cargo-nextest` with the repository's test groups and timeouts, then runs doctests separately. If nextest is absent, it uses `cargo test`; that fallback has no nextest timeouts or process isolation.
+A failing nextest run does not trigger a fallback. Arguments after `--` are passed to the selected runner and doctests; use options supported by both. For the same nextest version as CI, run `cargo install --locked cargo-nextest --version 0.9.101`.
+
+`lint` runs formatting, Clippy for all targets and features, `cargo audit`, and
+`cargo machete`, then summarizes all failures. Install its tools first:
+
+```bash
+rustup component add rustfmt clippy
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-machete --version 0.9.2
+```
+
+`compose` selects the PostgreSQL, MySQL, SQLite, or Redis override file when needed. MySQL uses `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from the shell or `.env` for both the database service and application. SQLite stores its database in the `sqlitedata` named volume, preserving lists across container restarts; `down --volumes` deletes that data. Plain Compose reads runtime values from `.env`. The overrides can also be used directly:
+
+```bash
+docker compose -f docker-compose.yml -f compose/postgres.yml --profile postgres up -d --build
+docker compose -f docker-compose.yml -f compose/mysql.yml --profile mysql up -d --build
+docker compose -f docker-compose.yml -f compose/sqlite.yml up -d --build
+```
+
+These local overrides select their connection mode. Remove incompatible
+`APP_DATABASE__URL` or `APP_DATABASE__PASSWORD_FILE` entries from `.env` before using the PostgreSQL or MySQL override, and password-file entries before using SQLite.
+
+`ci` delegates to the full [`local-ci.sh`](docs/local-ci.md) pipeline.
+
+You can still invoke individual Cargo commands directly. For example, run unit and integration tests or verify the zero-infrastructure in-memory build with:
 
 ```bash
 cargo test
-```
-
-Verify zero-infrastructure in-memory compilation:
-
-```bash
 cargo check --no-default-features --features memory
 ```
 
-Run the complete local CI verification suite (formatting, clippy, tests, and dependency auditing):
+Run the daily local CI checks (formatting, builds, Clippy, tests, and documentation):
 
 ```bash
-# Requires cargo-nextest: cargo install cargo-nextest
 ./local-ci.sh
+
+# Add security, configuration, container, and coverage gates:
+./local-ci.sh --full
 ```
+
+Missing tools are bootstrapped locally. See [Local CI](docs/local-ci.md) for
+prerequisites, the complete command inventory, and verification instructions.
 
 Run markdown linting:
 
