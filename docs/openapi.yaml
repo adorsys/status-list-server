@@ -75,11 +75,15 @@ info:
 
 servers:
   - url: https://{host}
-    description: Status List Server
+    description: >-
+      Status List Server public listener (status-list reads, aggregation, liveness,
+      and the root service document). Management and admin are separate listeners:
+      management (authenticated issuer writes, /api/v1/credentials) on :8001 and
+      admin (/health/ready, /metrics) on :8002.
     variables:
       host:
         default: localhost:8000
-        description: Host name and port of the server.
+        description: Host name and port of the public server.
 
 security:
   - BearerAuth: []
@@ -87,18 +91,36 @@ security:
 paths:
   /:
     get:
-      operationId: welcome
-      summary: Welcome page
-      description: Returns a simple welcome message for the Status List Server.
+      operationId: serviceDocument
+      summary: Service document
+      description: >-
+        Returns a minimal application/json service document naming the service and
+        its documentation (and portal when configured). No version and no HTML.
       security: []
       responses:
         "200":
-          description: Welcome message
+          description: Service document
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-              example: "Status list Server"
+                type: object
+                required: [service, links]
+                properties:
+                  service:
+                    type: string
+                    example: "Status List Server"
+                  links:
+                    type: object
+                    required: [documentation]
+                    properties:
+                      documentation:
+                        type: string
+                        format: uri
+                        example: "https://github.com/adorsys/status-list-server"
+                      portal:
+                        type: string
+                        format: uri
+                        example: "https://statuslist.example.com"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

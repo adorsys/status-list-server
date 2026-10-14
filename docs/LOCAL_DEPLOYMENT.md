@@ -127,9 +127,11 @@ Expect these components to reach `Running`:
 ### 6. Access the API
 
 ```bash
-kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
+# Public listener (status-list reads, liveness) on service port 8081; admin
+# listener (readiness, metrics) on service port 8002.
+kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081 8002:8002
 curl http://localhost:8081/health/live
-curl http://localhost:8081/health/ready
+curl http://localhost:8002/health/ready
 ```
 
 ### 7. Tear Down

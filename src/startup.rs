@@ -8,7 +8,7 @@ use axum::{
     extract::{DefaultBodyLimit, MatchedPath},
     http::Request,
     middleware::{self, Next, from_fn_with_state},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, patch, post, put},
 };
 use color_eyre::eyre::{Context, eyre};
@@ -30,22 +30,23 @@ use tower_http::{
 
 use crate::config::{Config, PUBLIC_API_PATH_PREFIX};
 
-use crate::server::AppState;
-use crate::server::auth::auth;
 use crate::server::handlers::{
     allocate_indices_route, credential_handler, get_aggregation, get_credential,
     get_issuer_aggregation, get_status_list, publish_status_route, update_status_route,
 };
-use crate::server::health;
+use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
 
-async fn welcome() -> impl IntoResponse {
-    "Status list Server"
+/// A bound TCP listener paired with the router that owns its routes.
+struct ListenerServer {
+    listener: TcpListener,
+    router: Router,
 }
 
 pub struct HttpServer {
-    listener: TcpListener,
-    router: Router,
+    public: ListenerServer,
+    management: ListenerServer,
+    admin: ListenerServer,
 }
 
 impl HttpServer {
@@ -54,68 +55,114 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let cors = CorsLayer::new()
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::OPTIONS,
-            ])
-            .allow_origin(Any)
-            .allow_headers(Any);
-
-        let max_body_size = config.limits.max_body_size_bytes;
-
         let (strict_governor, issuer_governor, permissive_governor) =
             build_governor_configs(&config.rate_limit)?;
 
-        let mut router = Router::new()
-            .route("/", get(welcome))
-            .route("/health", get(health::live))
-            .route("/health/live", get(health::live))
-            .route("/health/ready", get(health::ready))
-            .nest(
-                PUBLIC_API_PATH_PREFIX,
-                api_v1_routes(
-                    state.clone(),
-                    strict_governor.clone(),
-                    issuer_governor.clone(),
-                    permissive_governor.clone(),
-                ),
-            )
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(crate::utils::telemetry::make_http_request_span),
-            )
-            .layer(CatchPanicLayer::new())
-            .layer(middleware::from_fn(track_http_metrics))
-            .layer(cors)
-            .layer(RequestBodyLimitLayer::new(max_body_size))
-            .layer(DefaultBodyLimit::disable())
-            .with_state(state);
+        let public_router = with_common_layers(public_routes(permissive_governor), config)
+            .with_state(state.clone());
 
-        router = attach_metrics(router, config, prometheus_registry);
+        let management_router = with_common_layers(
+            management_routes(state.clone(), issuer_governor, strict_governor),
+            config,
+        )
+        .with_state(state.clone());
 
-        let listener = TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
-            .await
-            .wrap_err_with(|| format!("Failed to bind to port {}", config.server.port))?;
+        let admin_router =
+            with_common_layers(admin_routes(config, prometheus_registry), config).with_state(state);
 
-        Ok(Self { router, listener })
+        let public_listener =
+            bind_listener(&config.server.host, config.server.port, "public").await?;
+        let management_listener = bind_listener(
+            &config.server.management.host,
+            config.server.management.port,
+            "management",
+        )
+        .await?;
+        let admin_listener =
+            bind_listener(&config.server.admin.host, config.server.admin.port, "admin").await?;
+
+        Ok(Self {
+            public: ListenerServer {
+                listener: public_listener,
+                router: public_router,
+            },
+            management: ListenerServer {
+                listener: management_listener,
+                router: management_router,
+            },
+            admin: ListenerServer {
+                listener: admin_listener,
+                router: admin_router,
+            },
+        })
     }
 
     pub async fn run(self) -> color_eyre::Result<()> {
-        tracing::info!("listening on {}", self.listener.local_addr()?);
-        axum::serve(
-            self.listener,
-            self.router
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .wrap_err("Failed to start HTTP server")?;
+        let public = serve(self.public.listener, self.public.router, "public");
+        let management = serve(
+            self.management.listener,
+            self.management.router,
+            "management",
+        );
+        let admin = serve(self.admin.listener, self.admin.router, "admin");
+
+        tokio::select! {
+            _ = public => {},
+            _ = management => {},
+            _ = admin => {},
+        }
         Ok(())
     }
+}
+
+async fn bind_listener(host: &str, port: u16, name: &str) -> color_eyre::Result<TcpListener> {
+    TcpListener::bind(format!("{host}:{port}"))
+        .await
+        .wrap_err_with(|| format!("Failed to bind {name} listener to {host}:{port}"))
+}
+
+async fn serve(listener: TcpListener, router: Router, name: &str) {
+    match listener.local_addr() {
+        Ok(addr) => tracing::info!(listener = name, %addr, "listening"),
+        Err(_) => tracing::info!(listener = name, "listening"),
+    }
+    if let Err(e) = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    {
+        tracing::error!(listener = name, error = %e, "HTTP server failed");
+    }
+}
+
+/// Applies the shared HTTP middleware stack (tracing, panic catch, SLI metrics,
+/// CORS, body limits) to every listener's router.
+fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppState> {
+    let cors = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_origin(Any)
+        .allow_headers(Any);
+
+    router
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::utils::telemetry::make_http_request_span),
+        )
+        .layer(CatchPanicLayer::new())
+        .layer(middleware::from_fn(track_http_metrics))
+        .layer(cors)
+        .layer(RequestBodyLimitLayer::new(
+            config.limits.max_body_size_bytes,
+        ))
+        .layer(DefaultBodyLimit::disable())
 }
 
 async fn shutdown_signal() {
@@ -176,11 +223,31 @@ fn build_governor_configs(
     Ok((strict, issuer, permissive))
 }
 
-fn api_v1_routes(
-    state: AppState,
-    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
+/// Routes owned by the public listener: status-list reads, aggregation reads,
+/// liveness, and the root service document. No management or admin route is
+/// registered here, so any such request gets a structural 404.
+fn public_routes(
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+) -> Router<AppState> {
+    let public_reads = Router::new()
+        .route("/aggregation", get(get_aggregation))
+        .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
+        .route("/status-lists/{list_id}", get(get_status_list))
+        .layer(GovernorLayer::new(permissive_governor));
+
+    Router::new()
+        .route("/", get(service_document))
+        .route("/health", get(health::live))
+        .route("/health/live", get(health::live))
+        .nest(PUBLIC_API_PATH_PREFIX, public_reads)
+}
+
+/// Routes owned by the management listener: authenticated issuer writes and
+/// credential registration. Nothing public or admin is registered here.
+fn management_routes(
+    state: AppState,
+    issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
+    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
     let protected = Router::new()
         .nest(
@@ -201,16 +268,18 @@ fn api_v1_routes(
         .route("/credentials", post(credential_handler))
         .layer(GovernorLayer::new(strict_governor));
 
-    let public_reads = Router::new()
-        .route("/aggregation", get(get_aggregation))
-        .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
-        .route("/status-lists/{list_id}", get(get_status_list))
-        .layer(GovernorLayer::new(permissive_governor));
+    Router::new().nest(
+        PUBLIC_API_PATH_PREFIX,
+        Router::new().merge(protected).merge(credentials),
+    )
+}
 
-    Router::new()
-        .merge(protected)
-        .merge(credentials)
-        .merge(public_reads)
+/// Routes owned by the admin listener: readiness and (optionally) metrics.
+/// Management and public routes are deliberately absent, so probing the admin
+/// port with anything else returns a structural 404.
+fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
+    let router = Router::new().route("/health/ready", get(health::ready));
+    attach_metrics(router, config, registry)
 }
 
 /// Axum middleware recording HTTP latency + request-count SLIs.
@@ -260,7 +329,11 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router {
+fn attach_metrics<S: Clone + Send + Sync + 'static>(
+    router: Router<S>,
+    config: &Config,
+    registry: Registry,
+) -> Router<S> {
     if config.server.enable_metrics {
         tracing::info!("StatusList Monitor: ENABLED (Metrics at /metrics)");
         return router.route("/metrics", get(move || metrics_handler(registry)));
@@ -275,18 +348,21 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
-    /// `/credentials` has a public POST and an authenticated GET, and each must
-    /// keep its own layers once the routers are merged.
+    /// Credential registration and retrieval live on the management listener,
+    /// while aggregation reads live on the public listener; each keeps its own
+    /// layers (auth, permissive governor) once built as separate routers.
     #[tokio::test]
-    async fn test_api_routes_register_issuers_and_serve_their_aggregation() {
+    async fn test_management_register_issuers_and_public_serve_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
         let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
-        let router = api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state);
-        let send = |method: Method, uri: String, body: String| {
+        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
+        let public = public_routes(permissive).with_state(state);
+        let send = |router: Router, method: Method, uri: String, body: String| {
             let request = Request::builder()
                 .method(method)
                 .uri(uri)
@@ -301,8 +377,9 @@ mod tests {
         };
 
         let registration = send(
+            management.clone(),
             Method::POST,
-            "/credentials".into(),
+            format!("{PUBLIC_API_PATH_PREFIX}/credentials"),
             format!(
                 r#"{{"issuer":"issuer1","public_key":{}}}"#,
                 crate::test_fixtures::TEST_EC_PUBLIC_JWK
@@ -319,19 +396,125 @@ mod tests {
         .unwrap();
         let aggregation_id = registration["aggregation_id"].as_str().unwrap();
 
-        let unauthenticated = send(Method::GET, "/credentials".into(), String::new())
-            .await
-            .unwrap();
+        let unauthenticated = send(
+            management,
+            Method::GET,
+            format!("{PUBLIC_API_PATH_PREFIX}/credentials"),
+            String::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
         let aggregation = send(
+            public,
             Method::GET,
-            format!("/aggregation/{aggregation_id}"),
+            format!("{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}"),
             String::new(),
         )
         .await
         .unwrap();
         assert_eq!(aggregation.status(), StatusCode::OK);
+    }
+
+    /// The network boundary is structural: a route belongs to exactly one
+    /// listener, so requesting it on any other listener returns 404.
+    #[tokio::test]
+    async fn test_routes_404_on_the_wrong_listener() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+
+        let public = public_routes(permissive).with_state(state.clone());
+        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
+        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
+
+        let status = |router: Router, method: Method, uri: &str| {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )))
+                .body(Body::empty())
+                .unwrap();
+            router.clone().oneshot(request)
+        };
+
+        // Management + admin routes must 404 on the public listener.
+        for (method, uri) in [
+            (Method::PUT, "/api/v1/status-lists/{id}/statuses"),
+            (Method::PATCH, "/api/v1/status-lists/{id}/statuses"),
+            (Method::POST, "/api/v1/status-lists/{id}/allocations"),
+            (Method::POST, "/api/v1/credentials"),
+            (Method::GET, "/api/v1/credentials"),
+            (Method::GET, "/health/ready"),
+            (Method::GET, "/metrics"),
+        ] {
+            let resp = status(public.clone(), method.clone(), uri).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must 404 on the public listener"
+            );
+        }
+
+        // Public + admin routes must 404 on the management listener.
+        for (method, uri) in [
+            (Method::GET, "/api/v1/status-lists/{id}"),
+            (Method::GET, "/api/v1/aggregation/{id}"),
+            (Method::GET, "/health/live"),
+            (Method::GET, "/health/ready"),
+            (Method::GET, "/metrics"),
+        ] {
+            let resp = status(management.clone(), method.clone(), uri)
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must 404 on the management listener"
+            );
+        }
+
+        // Public + management routes must 404 on the admin listener.
+        for (method, uri) in [
+            (Method::GET, "/api/v1/status-lists/{id}"),
+            (Method::GET, "/api/v1/aggregation/{id}"),
+            (Method::GET, "/health/live"),
+            (Method::GET, "/api/v1/credentials"),
+        ] {
+            let resp = status(admin.clone(), method.clone(), uri).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must 404 on the admin listener"
+            );
+        }
+    }
+
+    /// `GET /` returns the JSON service document with its links.
+    #[tokio::test]
+    async fn test_root_returns_json_service_document() {
+        use axum::body::to_bytes;
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        let public = public_routes(permissive).with_state(state);
+
+        let resp = public
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["service"], "Status List Server");
+        assert_eq!(doc["links"]["documentation"], crate::config::REPOSITORY_URL);
+        assert!(doc["links"]["portal"].as_str().is_none());
+        assert!(doc.get("version").is_none());
     }
 
     /// A pod that started with the quota enforced keeps advertising the
@@ -357,9 +540,8 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
-        let router =
-            api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state.clone());
+        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let router = public_routes(permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)
                 .extension(axum::extract::ConnectInfo(SocketAddr::new(
@@ -381,7 +563,9 @@ mod tests {
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
         let list_id = uuid::Uuid::new_v4().to_string();
         publish_list(&state.service, "issuer1", &list_id).await;
-        let token = get(format!("/status-lists/{list_id}")).await.unwrap();
+        let token = get(format!("{PUBLIC_API_PATH_PREFIX}/status-lists/{list_id}"))
+            .await
+            .unwrap();
         let token = to_bytes(token.into_body(), usize::MAX).await.unwrap();
         assert!(advertised(token.to_vec()));
 
@@ -389,20 +573,26 @@ mod tests {
         for _ in 0..AGGREGATION_DEFAULT_LIMIT {
             publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
         }
-        let cached = get(format!("/status-lists/{list_id}")).await.unwrap();
+        let cached = get(format!("{PUBLIC_API_PATH_PREFIX}/status-lists/{list_id}"))
+            .await
+            .unwrap();
         let cached = to_bytes(cached.into_body(), usize::MAX).await.unwrap();
         assert!(
             advertised(cached.to_vec()),
             "the warm token still points there"
         );
 
-        let unpaged = get(format!("/aggregation/{aggregation_id}")).await.unwrap();
+        let unpaged = get(format!(
+            "{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}"
+        ))
+        .await
+        .unwrap();
         assert_eq!(unpaged.status(), StatusCode::CONFLICT);
 
         let mut lists = 0;
         let mut next = Some(
             url::Url::parse(&format!(
-                "http://localhost/aggregation/{aggregation_id}?limit={AGGREGATION_DEFAULT_LIMIT}"
+                "http://localhost{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}?limit={AGGREGATION_DEFAULT_LIMIT}"
             ))
             .unwrap(),
         );

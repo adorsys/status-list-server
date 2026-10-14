@@ -108,6 +108,15 @@ statuslist:
     # Container port the Service forwards to (matches APP_SERVER__PORT and the pod's
     # http containerPort).
     targetPort: 8000
+    # Management listener port (matches APP_SERVER__MANAGEMENT__PORT). The
+    # Ingress for management routes to this port; it is never targeted by the
+    # public Ingress.
+    managementPort: 8001
+    managementTargetPort: 8001
+    # Admin listener port (matches APP_SERVER__ADMIN__PORT). Serves /health/ready
+    # and /metrics only; the Ingress never targets it.
+    adminPort: 8002
+    adminTargetPort: 8002
     # NodePort (30000-32767), required only when service.type=NodePort.
     nodePort: null
   ingress:
@@ -132,11 +141,39 @@ statuslist:
     # sets APP_SERVER__DOMAIN (the application's own public domain) when the operator does
     # not set it in statuslist.env, so changing it changes application config, not just DNS.
     externalDnsHostname: ""
+    # Management listener ingress. The management paths .../statuses and
+    # .../allocations share the /api/v1/status-lists/ prefix with public reads, so
+    # the edge must route by path (and the management paths need a regex or method
+    # match). Default OFF: management traffic is not exposed unless enabled.
+    management:
+      # When true, render a second Ingress routing management paths to the
+      # management service port. The public and management listeners may share a
+      # hostname (the edge then routes by path); set a separate hostname below to
+      # isolate them.
+      enabled: false
+      # Hostname for management traffic. Empty reuses the public ingress host.
+      hostname: ""
+      # NGINX regex path for the management-only paths. The public read and the
+      # management writes share /api/v1/status-lists/, so this matches the
+      # write/allocation/credential suffixes specifically.
+      path: "/api/v1/status-lists/.+/(statuses|allocations)|/api/v1/credentials"
+      # Extra NGINX annotations (e.g. auth, client-body-size) for the management Ingress.
+      annotations: {}
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # Management listener: authenticated issuer writes (statuses, allocations,
+    # credentials). Separate port keeps it off the public ingress.
+    APP_SERVER__MANAGEMENT__HOST: "0.0.0.0"
+    APP_SERVER__MANAGEMENT__PORT: "8001"
+    # Admin listener: /health/ready and /metrics. Never exposed via ingress.
+    APP_SERVER__ADMIN__HOST: "0.0.0.0"
+    APP_SERVER__ADMIN__PORT: "8002"
+    # Service document links (GET /). Defaults to the repository URL.
+    # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
+    # APP_SERVER__LINKS__PORTAL: "https://statuslist.example.com"
     # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).
     # APP_SERVER__PUBLIC_BASE_URL defaults to https://{DOMAIN}/api/v1; set it only when it differs.
     # APP_SERVER__PUBLIC_BASE_URL: "https://statuslist.example.com/api/v1"
@@ -357,10 +394,12 @@ statuslist:
     timeoutSeconds: 5
     failureThreshold: 3
   readinessProbe:
-    # HTTP GET on /health/ready (port http). Override the whole block to customize.
+    # HTTP GET on /health/ready (port admin). Readiness moved to the admin
+    # listener; the public listener never serves it. Override the whole block
+    # to customize.
     httpGet:
       path: /health/ready
-      port: http
+      port: admin
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 5
@@ -376,9 +415,17 @@ statuslist:
     #         matchLabels:
     #           kubernetes.io/metadata.name: ingress-nginx
     enabled: false
-    # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
-    # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
+    # When ingress is empty [] (and enabled=true), ANY source can reach the PUBLIC
+    # service port. Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
+    # Source selectors for the MANAGEMENT port. Unlike the public port, an EMPTY
+    # list here DENIES ALL management traffic (a port-only rule with no `from` is
+    # a deny), so management stays off the wire unless you explicitly allow it.
+    managementIngress: []
+    # Source selectors for the ADMIN port. An EMPTY list DENIES ALL admin traffic,
+    # so /metrics and /health/ready are only reachable when you allow sources here
+    # (e.g. the Prometheus Operator namespace / scrape pod selector).
+    adminIngress: []
     # Additional internal egress destinations. IMPORTANT: these entries are appended to the
     # DATABASE egress rule (the one scoped to the DB port), so each inherits the database
     # port and can only reach that port - a selector for e.g. a cache on 6379 will be

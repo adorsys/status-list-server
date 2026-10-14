@@ -135,6 +135,10 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
+      APP_SERVER__MANAGEMENT__HOST: ${APP_SERVER__MANAGEMENT__HOST:-0.0.0.0}
+      APP_SERVER__MANAGEMENT__PORT: ${APP_SERVER__MANAGEMENT__PORT:-8001}
+      APP_SERVER__ADMIN__HOST: ${APP_SERVER__ADMIN__HOST:-0.0.0.0}
+      APP_SERVER__ADMIN__PORT: ${APP_SERVER__ADMIN__PORT:-8002}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
       APP_TELEMETRY__ENVIRONMENT: ${APP_TELEMETRY__ENVIRONMENT:-development}
@@ -148,7 +152,12 @@ services:
       APP_CACHE__HOST: ${APP_CACHE__HOST:-redis}
       APP_CACHE__PORT: ${APP_CACHE__PORT:-6379}
     ports:
+      # Public listener (status-list reads, aggregation, health/live, GET /).
       - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+      # Management listener (authenticated issuer writes, credentials).
+      - "${BIND_ADDR:-127.0.0.1}:8001:8001"
+      # Admin listener (readiness, metrics).
+      - "${BIND_ADDR:-127.0.0.1}:8002:8002"
     volumes:
       - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
       - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro

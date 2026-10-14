@@ -14,7 +14,7 @@ spec:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: http
+    - port: admin
       path: /metrics
       {{- if .Values.serviceMonitor.interval }}
       interval: {{ .Values.serviceMonitor.interval }}

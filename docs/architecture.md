@@ -119,6 +119,15 @@ The project strictly follows **Hexagonal Architecture (Ports and Adapters)**:
 | **Inbound Server**    | `src/server/`           | Web server module (`AppState`, HTTP handlers, `auth` middleware, and `ApiError` mapping via `IntoApiError`).                                           |
 | **Composition Root**  | `src/setup.rs`          | Factory functions building outbound adapters and initializing `AppState` and `Service`.                                                                |
 
+#### HTTP listeners
+
+The HTTP surface is split into three structurally separate listeners (`src/startup.rs`), each built from its own route set so a route is only reachable on the listener that owns it (a request for it on any other listener returns `404`):
+
+- **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
+- **Management** (`server.management.host:server.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
+- **Admin** (`server.admin.host:server.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+
+
 ### Data Flow
 
 The data flow in the Status List Server is as follows:

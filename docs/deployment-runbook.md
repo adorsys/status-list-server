@@ -59,9 +59,11 @@ helm install statuslist-local ./deploy/helm/chart \
 
 # 4. Verify
 kubectl get pods -n local
-kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
+# Public listener (status-list reads, liveness) on service port 8081; admin
+# listener (readiness, metrics) on service port 8002.
+kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081 8002:8002
 curl http://localhost:8081/health/live
-curl http://localhost:8081/health/ready
+curl http://localhost:8002/health/ready
 ```
 
 > **Certificate caveat for local runs:** the provider-neutral `-fscert` image requires certificate
@@ -479,11 +481,12 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=
 Smoke-check the service:
 
 ```bash
+# Liveness is on the public listener; readiness is on the admin listener (:8002).
 curl http://<service>/health/live
-curl http://<service>/health/ready
+curl http://<service>:8002/health/ready
 ```
 
-`/health/ready` reflects backing-store readiness (database, and cloud/secret backends if configured), so it is the best signal that the instance is truly healthy.
+`/health/ready` (admin listener) reflects backing-store readiness (database, and cloud/secret backends if configured), so it is the best signal that the instance is truly healthy. Metrics are also served on the admin listener at `/metrics`.
 
 ## Rollback
 

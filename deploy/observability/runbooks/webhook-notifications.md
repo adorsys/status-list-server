@@ -69,8 +69,8 @@ The stack brings up (among others):
 
 | Service          | Port   | Purpose                                     |
 | ---------------- | ------ | ------------------------------------------- |
-| `app`            | 8000   | status-list-server (exposes `/metrics`)     |
-| `prometheus`     | 9092   | scrapes `app:8000`, evaluates alert rules   |
+| `app`            | 8002   | status-list-server admin listener (`/metrics`, `/health/ready`) |
+| `prometheus`     | 9092   | scrapes `app:8002`, evaluates alert rules   |
 | `alertmanager`   | 9093   | receives alerts, sends Discord webhooks     |
 | `grafana`        | 3000   | dashboards (login `admin` + password)       |
 | `otel-collector` | 4317   | metrics pipeline                            |

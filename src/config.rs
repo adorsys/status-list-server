@@ -289,17 +289,69 @@ where
     }
 }
 
+/// Repository URL advertised as the service document's `links.documentation`.
+pub const REPOSITORY_URL: &str = "https://github.com/adorsys/status-list-server";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
     pub domain: String,
     pub port: u16,
+    pub management: ListenerConfig,
+    pub admin: ListenerConfig,
+    pub links: LinksConfig,
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
     /// Defaults to `https://{domain}/api/v1` when unset.
     #[serde(default)]
     pub public_base_url: Option<String>,
+}
+
+/// A single TCP listener binding (host + port).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListenerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Links exposed in the service document returned by `GET /`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinksConfig {
+    pub documentation: String,
+    /// Optional portal link; omitted from the service document when unset.
+    #[serde(default)]
+    pub portal: Option<String>,
+}
+
+impl ServerConfig {
+    /// Whether the configured public, management, and admin listeners resolve to
+    /// the same host:port, which would make the network boundary meaningless.
+    pub fn has_duplicate_listener(&self) -> bool {
+        let listeners = [
+            ("server.host:server.port", &self.host, self.port),
+            (
+                "server.management",
+                &self.management.host,
+                self.management.port,
+            ),
+            ("server.admin", &self.admin.host, self.admin.port),
+        ];
+        for (i, (name_a, host_a, port_a)) in listeners.iter().enumerate() {
+            for (name_b, host_b, port_b) in listeners.iter().skip(i + 1) {
+                if port_a == port_b && hosts_resolve_equal(host_a, host_b) {
+                    tracing::warn!(
+                        "{name_a} and {name_b} both resolve to {}:{}; a listener collision would \
+                         make the public/management/admin boundary ambiguous",
+                        host_a,
+                        port_a
+                    );
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl ServerConfig {
@@ -341,6 +393,22 @@ fn url_authority_host(domain: &str) -> String {
         format!("[{domain}]")
     } else {
         domain.to_string()
+    }
+}
+
+/// Whether two listener host strings resolve to the same interface: equal
+/// hostnames (case-insensitive), equal IP literals, or one being a loopback
+/// alias of the other. Used to reject ambiguous public/management/admin
+/// bindings at startup.
+fn hosts_resolve_equal(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let ip_a = a.parse::<std::net::IpAddr>();
+    let ip_b = b.parse::<std::net::IpAddr>();
+    match (ip_a, ip_b) {
+        (Ok(ip_a), Ok(ip_b)) => ip_a == ip_b,
+        _ => false,
     }
 }
 
@@ -1550,6 +1618,15 @@ impl Config {
             validate_database_query(query)?;
         }
         validate_server_domain(&config.server.domain)?;
+        if config.server.has_duplicate_listener() {
+            return Err(ConfigError::Message(
+                "Duplicate listener: two of server.host/server.port, server.management, and \
+                 server.admin resolve to the same host:port, which would collapse the \
+                 public/management/admin network boundary. Give each listener a distinct port \
+                 (or host)."
+                    .to_string(),
+            ));
+        }
         // Validate the *resolved* base URL — whether explicitly set or derived
         // from `server.domain` — so a broken fallback is caught at startup too.
         // The raw (un-normalized) value is inspected so the trailing-slash rule
@@ -1591,6 +1668,12 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.host", "localhost")?
         .set_default("server.domain", "localhost")?
         .set_default("server.port", 8000)?
+        .set_default("server.management.host", "localhost")?
+        .set_default("server.management.port", 8001)?
+        .set_default("server.admin.host", "localhost")?
+        .set_default("server.admin.port", 8002)?
+        .set_default("server.links.documentation", REPOSITORY_URL)?
+        .set_default("server.links.portal", Option::<String>::None)?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
@@ -1725,6 +1808,13 @@ mod tests {
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.management.host, "localhost");
+        assert_eq!(config.server.management.port, 8001);
+        assert_eq!(config.server.admin.host, "localhost");
+        assert_eq!(config.server.admin.port, 8002);
+        assert_eq!(config.server.links.documentation, REPOSITORY_URL);
+        assert_eq!(config.server.links.portal, None);
+        assert!(!config.server.has_duplicate_listener());
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
@@ -2452,6 +2542,60 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_duplicate_listeners_are_rejected() {
+        // Defaults (8000/8001/8002) are distinct and load fine.
+        assert!(Config::load_from_overrides(&[]).is_ok());
+
+        // Management colliding with the public port must fail startup.
+        let mgmt_collides = Config::load_from_overrides(&[("server.management.port", "8000")]);
+        let err = mgmt_collides
+            .expect_err("management on the public port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // Admin colliding with management must fail startup.
+        let admin_collides = Config::load_from_overrides(&[("server.admin.port", "8001")]);
+        let err = admin_collides
+            .expect_err("admin on the management port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // Same port on different hosts is a valid, distinct listener.
+        assert!(
+            Config::load_from_overrides(&[
+                ("server.host", "0.0.0.0"),
+                ("server.management.host", "127.0.0.1"),
+                ("server.management.port", "8000"),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_links_config_loads_and_defaults() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(config.server.links.documentation, REPOSITORY_URL);
+        assert_eq!(config.server.links.portal, None);
+
+        let overridden = Config::load_from_overrides(&[
+            (
+                "server.links.documentation",
+                "https://docs.example.com/status-list",
+            ),
+            ("server.links.portal", "https://portal.example.com"),
+        ])
+        .unwrap();
+        assert_eq!(
+            overridden.server.links.documentation,
+            "https://docs.example.com/status-list"
+        );
+        assert_eq!(
+            overridden.server.links.portal.as_deref(),
+            Some("https://portal.example.com")
         );
     }
 

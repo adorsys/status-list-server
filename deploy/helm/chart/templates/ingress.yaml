@@ -52,4 +52,42 @@ spec:
     {{- end }}
     secretName: {{ .Values.statuslist.ingress.tls.secretName }}
   {{- end }}
+{{- if .Values.statuslist.ingress.management.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "status-list-server-chart.fullname" . }}-management-ingress
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # Route by path with a regex so the management writes that share the
+    # /api/v1/status-lists/ prefix with public reads resolve here.
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    {{- if .Values.statuslist.ingress.management.annotations }}
+    {{- toYaml .Values.statuslist.ingress.management.annotations | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: {{ .Values.statuslist.ingress.management.hostname | default $ingressHost | lower }}
+    http:
+      paths:
+      - path: {{ .Values.statuslist.ingress.management.path }}
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: {{ include "status-list-server-chart.fullname" . }}-service
+            port:
+              number: {{ .Values.statuslist.service.managementPort }}
+  {{- if and .Values.statuslist.ingress.tls.secretName (gt (len $tlsHosts) 0) }}
+  tls:
+  - hosts:
+    {{- range $tlsHosts }}
+    - {{ . | quote }}
+    {{- end }}
+    secretName: {{ .Values.statuslist.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}
 {{- end }}
