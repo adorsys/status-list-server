@@ -23,9 +23,10 @@ use crate::outbound::sql::test_containers::postgres_helpers;
 const MIGRATION: &str = "m20260929_000001_credentials_aggregation_id";
 
 /// The migrations a release before issuer-scoped aggregation does not know.
-const AGGREGATION_MIGRATIONS: [&str; 2] = [
+const AGGREGATION_MIGRATIONS: [&str; 3] = [
     MIGRATION,
     "m20260929_000002_status_lists_issuer_list_id_index",
+    "m20261014_000001_credentials_key_id",
 ];
 
 /// SQL a failed MySQL run may already have committed, in migration order.

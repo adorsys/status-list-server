@@ -20,6 +20,18 @@ pub(super) async fn assert_credentials_round_trip(db: Arc<DatabaseConnection>, i
     assert_eq!(found.issuer, issuer);
     assert_eq!(found.public_key, public_key);
 
+    let matches = store.find_credentials_by_kid("test-key").await.unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].issuer, issuer);
+    assert_eq!(matches[0].public_key, public_key);
+    assert!(
+        store
+            .find_credentials_by_kid("unknown-key")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     let deleted = store.delete_by(issuer).await.unwrap();
     assert!(deleted);
 

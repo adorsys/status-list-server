@@ -48,24 +48,28 @@ async fn test_seaorm_store() {
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    key_id: Some("test-key".to_string()),
                     list_count: 0,
                     aggregation_id: None,
                 }],
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    key_id: Some("test-key".to_string()),
                     list_count: 0,
                     aggregation_id: None,
                 }],
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
                     public_key: entity.public_key.clone().into(),
+                    key_id: Some("test-key".to_string()),
                     list_count: 0,
                     aggregation_id: None,
                 }],
                 vec![credentials::Model {
                     issuer: updated_entity.issuer.clone(),
                     public_key: updated_entity.public_key.clone().into(),
+                    key_id: Some("test-key".to_string()),
                     list_count: 0,
                     aggregation_id: None,
                 }],

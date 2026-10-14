@@ -115,6 +115,11 @@ impl PublicJwk {
                 "kid must not be empty".to_string(),
             ));
         }
+        if key_id.chars().count() > 255 {
+            return Err(CredentialError::InvalidPublicJwk(
+                "kid must not exceed 255 characters".to_string(),
+            ));
+        }
         let algorithm = jwk
             .common
             .key_algorithm

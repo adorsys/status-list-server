@@ -434,15 +434,16 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the two versions below. Rolling back to a release older than the list
+adds the three versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
 schema changes stay, which the previous release ignores, and so do the
 aggregation IDs.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
+- `m20261014_000001_credentials_key_id`
 
-Upgrading again re-runs both migrations, which find their changes already made.
+Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
@@ -660,6 +661,7 @@ here; a test fails until it does.
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
+| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the index is additive | None | JWKs with a `kid` of at most 255 characters are backfilled; credentials whose JWK lacks the new required `kid`/`alg` contract or has a longer `kid` must be updated before they can authenticate |
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

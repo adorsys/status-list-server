@@ -20,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(add_status_list_history_version::Migration),
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
+            Box::new(credentials_key_id::Migration),
         ]
     }
 
@@ -981,6 +982,83 @@ pub(crate) mod credentials_aggregation_id {
     enum Credentials {
         Table,
         AggregationId,
+    }
+}
+
+/// Stores and indexes the JWK `kid` used to resolve management tokens without
+/// scanning and deserializing the complete credential registry per request.
+pub(crate) mod credentials_key_id {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261014_000001_credentials_key_id"
+        }
+    }
+
+    const INDEX: &str = "idx_credentials_key_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("credentials", "key_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(ColumnDef::new(Credentials::KeyId).string_len(255).null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            let backfill = match manager.get_database_backend() {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "UPDATE credentials SET key_id = CASE WHEN length(public_key ->> 'kid') <= 255 THEN public_key ->> 'kid' ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::MySql => {
+                    "UPDATE credentials SET key_id = CASE WHEN CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid'))) <= 255 THEN JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::Sqlite => {
+                    "UPDATE credentials SET key_id = CASE WHEN length(json_extract(public_key, '$.kid')) <= 255 THEN json_extract(public_key, '$.kid') ELSE NULL END WHERE key_id IS NULL"
+                }
+                backend => {
+                    return Err(DbErr::Migration(format!(
+                        "unsupported database backend for credential kid migration: {backend:?}"
+                    )));
+                }
+            };
+            manager
+                .get_connection()
+                .execute_unprepared(backfill)
+                .await?;
+
+            if !manager.has_index("credentials", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .col(Credentials::KeyId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        KeyId,
     }
 }
 

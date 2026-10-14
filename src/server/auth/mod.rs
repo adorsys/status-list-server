@@ -301,6 +301,7 @@ mod tests {
         http::{StatusCode, header},
         routing::get,
     };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use tower::ServiceExt;
 
@@ -358,9 +359,21 @@ mod tests {
     }
 
     fn sign_claims(claims: serde_json::Value, secret: &EncodingKey) -> String {
+        sign_claims_with_header(claims, secret, management_header())
+    }
+
+    fn management_header() -> Header {
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some("statuslist-management+jwt".to_string());
         header.kid = Some("test-key".to_string());
+        header
+    }
+
+    fn sign_claims_with_header(
+        claims: serde_json::Value,
+        secret: &EncodingKey,
+        header: Header,
+    ) -> String {
         encode(&header, &claims, secret).unwrap()
     }
 
@@ -396,6 +409,7 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
     }
 
     #[tokio::test]
@@ -411,6 +425,7 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
     }
 
     #[tokio::test]
@@ -580,6 +595,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_issuer_claim_must_match_the_registered_kid_owner() {
+        let state = test_state_with_registered_issuer().await;
+        let app = create_test_router(state);
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        let token = sign_claims(
+            serde_json::json!({"iss":"another-issuer", "iat":now, "exp":now + 300}),
+            &secret,
+        );
+
+        assert_eq!(
+            call_with_token(app, token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
     async fn test_future_issued_at_claim_is_rejected() {
         let private_pem = test_ec_private_pem();
         let state = test_state_with_registered_issuer().await;
@@ -634,7 +666,7 @@ mod tests {
             serde_json::json!({
                 "iss": "test-issuer",
                 "iat": now,
-                "exp": now + 3601
+                "exp": now + 301
             }),
             &encoding_key,
         );
@@ -755,6 +787,143 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "invalid_token");
         assert_eq!(body["error_description"], "Invalid authentication token");
+    }
+
+    #[tokio::test]
+    async fn test_critical_header_is_rejected() {
+        let state = test_state_with_registered_issuer().await;
+        let app = create_test_router(state);
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        let mut jwt_header = management_header();
+        jwt_header.crit = Some(vec!["custom".to_string()]);
+        let token = sign_claims_with_header(
+            serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+            &secret,
+            jwt_header,
+        );
+
+        let response = call_with_token(app, token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            "Bearer error=\"invalid_token\""
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_jwk_header_is_ignored() {
+        let state = test_state_with_registered_issuer().await;
+        let app = create_test_router(state);
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        let mut jwt_header = management_header();
+        jwt_header.typ = Some("Application/Statuslist-management+jwt".to_string());
+        let attacker_key = EncodingKey::from_ec_pem(
+            "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUBIUj4mRpgdolCfi\najH0ju3KgSj8xQAlcvidrAkwOzChRANCAAQ4Wvc8XUs0zEqMKGtRYFnvYtDlzdH2\n7N3Eo65Js7drssgg7eKUSIlnJWMXHxqr8SfECuXi7sewuw2+mxs2adC5\n-----END PRIVATE KEY-----".as_bytes(),
+        )
+        .unwrap();
+        jwt_header.jwk = Some(
+            jsonwebtoken::jwk::Jwk::from_encoding_key(&attacker_key, Algorithm::ES256).unwrap(),
+        );
+        let token = sign_claims_with_header(
+            serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+            &secret,
+            jwt_header,
+        );
+
+        assert_eq!(call_with_token(app, token).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_missing_kid_and_wrong_type_are_rejected() {
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        for (kid, typ) in [
+            (None, Some("statuslist-management+jwt")),
+            (Some("test-key"), Some("JWT")),
+            (Some("test-key"), None),
+        ] {
+            let state = test_state_with_registered_issuer().await;
+            let app = create_test_router(state);
+            let mut jwt_header = management_header();
+            jwt_header.kid = kid.map(str::to_owned);
+            jwt_header.typ = typ.map(str::to_owned);
+            let token = sign_claims_with_header(
+                serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+                &secret,
+                jwt_header,
+            );
+            assert_eq!(
+                call_with_token(app, token).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_algorithm_must_be_allowed_and_match_registered_key() {
+        let now = now();
+        let claims = serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300});
+        let mut hs_header = management_header();
+        hs_header.alg = Algorithm::HS256;
+        let hs_token = sign_claims_with_header(
+            claims.clone(),
+            &EncodingKey::from_secret(b"test-secret"),
+            hs_header,
+        );
+
+        let ec_secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let valid_es256 = sign_claims(claims, &ec_secret);
+        let mut parts = valid_es256.split('.');
+        let _original_header = parts.next().unwrap();
+        let payload = parts.next().unwrap();
+        let signature = parts.next().unwrap();
+        let es384_header = URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"ES384","kid":"test-key","typ":"statuslist-management+jwt"}"#);
+        let mismatched_token = format!("{es384_header}.{payload}.{signature}");
+
+        for token in [hs_token, mismatched_token] {
+            let state = test_state_with_registered_issuer().await;
+            let app = create_test_router(state);
+            assert_eq!(
+                call_with_token(app, token).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_key_and_bad_signature_have_identical_auth_responses() {
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        let claims = serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300});
+        let state = test_app_state(None).await;
+        let mut unknown_header = management_header();
+        unknown_header.kid = Some("unknown-key".to_string());
+        let unknown = sign_claims_with_header(claims.clone(), &secret, unknown_header);
+        let unknown_response = call_with_token(create_test_router(state), unknown).await;
+
+        let state = test_state_with_registered_issuer().await;
+        let wrong_secret = EncodingKey::from_ec_pem(
+            "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUBIUj4mRpgdolCfi\najH0ju3KgSj8xQAlcvidrAkwOzChRANCAAQ4Wvc8XUs0zEqMKGtRYFnvYtDlzdH2\n7N3Eo65Js7drssgg7eKUSIlnJWMXHxqr8SfECuXi7sewuw2+mxs2adC5\n-----END PRIVATE KEY-----".as_bytes(),
+        ).unwrap();
+        let bad_signature = sign_claims(claims, &wrong_secret);
+        let bad_signature_response =
+            call_with_token(create_test_router(state), bad_signature).await;
+
+        assert_eq!(unknown_response.status(), bad_signature_response.status());
+        assert_eq!(
+            unknown_response.headers()[header::WWW_AUTHENTICATE],
+            bad_signature_response.headers()[header::WWW_AUTHENTICATE]
+        );
+        let unknown_body = to_bytes(unknown_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bad_signature_body = to_bytes(bad_signature_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(unknown_body, bad_signature_body);
     }
 
     #[tokio::test]

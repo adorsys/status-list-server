@@ -1053,6 +1053,25 @@ impl SeaOrmStore<Credentials> {
         .await
     }
 
+    /// Resolve a management key by its indexed `kid` copy. Return up to two
+    /// matches so callers can fail closed on duplicate kids.
+    pub async fn find_credentials_by_kid(
+        &self,
+        kid: &str,
+    ) -> Result<Vec<Credentials>, RepositoryError> {
+        time_query("find_by_kid", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find()
+                .filter(credentials::Column::KeyId.eq(kid))
+                .limit(2)
+                .all(&*db)
+                .await
+                .map(|rows| rows.into_iter().map(Credentials::from).collect())
+                .map_err(find_err)
+        })
+        .await
+    }
+
     /// `None` for an unknown issuer, `Some(None)` for one registered by a
     /// release that predates aggregation IDs.
     pub async fn find_aggregation_id(
