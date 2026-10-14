@@ -1,17 +1,10 @@
 openapi: 3.1.0
 info:
   title: Status List Server Admin API
-  version: 1.0.0-draft.1
+  version: 1.0.0
   description: |
-    **Status: planned contract, not served yet.** This document is the
-    agreed interface for the admin listener defined in
-    [ADR-0002](adr/0002-issuer-trust-onboarding-and-access-control.md).
-    Implementation is tracked by #625 (list and query), #626 (create and
-    manage portal issuers), #373 (lifecycle enforcement) and #627 (quota
-    usage). When an operation ships, its issue removes it from this banner.
-    The rules this API shares with the management API (token validation,
-    listeners, configuration) are in
-    [issuer-trust-contract.md](issuer-trust-contract.md).
+    Operators and onboarding services use this API to list, query and
+    manage issuers.
 
     ## Where it is served
 
@@ -455,8 +448,7 @@ components:
       bearerFormat: JWT
       description: |
         A JWT signed with an admin key listed under `admins` in the issuer
-        registry file. Normative rules: issuer-trust-contract.md, "Admin
-        token". In short:
+        registry file:
 
         - header `typ` = `statuslist-admin+jwt` (RFC 8725 §3.11), `kid`
           required, `alg` one of `ES256`, `ES384`, `EdDSA`, `PS256` and equal
