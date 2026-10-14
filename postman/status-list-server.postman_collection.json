@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests.",
+    "description": "Ready-to-run requests for exploring the status-list-server API. Select the included environment, set `baseUrl`, `list_id`, and `issuer_id`, then send `Register issuer credentials` once. Its pre-request script generates or reuses an ES256 issuer key pair, registers the public key, and creates a one-hour JWT in `token` for protected status-list write requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,
@@ -172,7 +172,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\"\n  }\n}"
+              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {{issuer_public_key}}\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/credentials",
@@ -189,16 +189,73 @@
           "response": [],
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "exec": [
+                  "const issuer = pm.variables.get('issuer_id') || 'issuer1';",
+                  "const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
+                  "const storedKeyOwner = pm.environment.get('issuer_key_owner');",
+                  "const storedToken = pm.environment.get('token');",
+                  "let publicJwk;",
+                  "const base64url = value => Buffer.from(value).toString('base64').replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+                  "const textBytes = value => new TextEncoder().encode(value);",
+                  "(async function () {",
+                  "  if (storedPrivateJwk && storedKeyOwner === issuer) {",
+                  "    const privateJwk = JSON.parse(storedPrivateJwk);",
+                  "    publicJwk = { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y };",
+                  "  } else if (!storedPrivateJwk && storedToken) {",
+                  "    console.log('Using the preconfigured issuer token and public key.');",
+                  "    return;",
+                  "  } else {",
+                  "    const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);",
+                  "    publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);",
+                  "    const privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);",
+                  "    pm.environment.set('issuer_private_jwk', JSON.stringify(privateJwk));",
+                  "    pm.environment.set('issuer_key_owner', issuer);",
+                  "  }",
+                  "  pm.environment.set('issuer_public_key', JSON.stringify({ kty: publicJwk.kty, crv: publicJwk.crv, x: publicJwk.x, y: publicJwk.y }));",
+                  "})().catch(error => { console.error('Issuer JWT generation failed:', error); throw error; });"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('credentials are accepted', function () { pm.response.to.have.status(202); });",
+                  "pm.test('credentials are accepted or already registered', function () { pm.expect([202, 409]).to.include(pm.response.code); });",
                   "pm.test('response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
                   "pm.test('response body matches expected shape', function () {",
                   "  var body = pm.response.json();",
-                  "  pm.expect(body).to.have.property('status');",
-                  "});"
+                  "  if (pm.response.code === 202) {",
+                  "    pm.expect(body).to.have.property('status');",
+                  "  } else {",
+                  "    pm.expect(body).to.have.property('error');",
+                  "  }",
+                  "});",
+                  "(async function () {",
+                  "  const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
+                  "  if (!storedPrivateJwk) { throw new Error('issuer_private_jwk was not generated'); }",
+                  "  const privateJwk = JSON.parse(storedPrivateJwk);",
+                  "  const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);",
+                  "  const base64url = value => {",
+                  "    const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);",
+                  "    let binary = '';",
+                  "    bytes.forEach(byte => { binary += String.fromCharCode(byte); });",
+                  "    return btoa(binary).replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+                  "  };",
+                  "  const now = Math.floor(Date.now() / 1000);",
+                  "  const header = base64url(JSON.stringify({ alg: 'ES256', typ: 'JWT' }));",
+                  "  const payload = base64url(JSON.stringify({ iss: pm.variables.get('issuer_id'), iat: now, exp: now + 3600 }));",
+                  "  const signingInput = `${header}.${payload}`;",
+                  "  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(signingInput));",
+                  "  const token = `${signingInput}.${base64url(signature)}`;",
+                  "  pm.environment.set('token', token);",
+                  "  pm.collectionVariables.set('token', token);",
+                  "  console.log('Issuer JWT generated and stored in token.');",
+                  "})().catch(error => { console.error('Issuer JWT generation failed after registration:', error); });"
                 ]
               }
             }
@@ -210,8 +267,58 @@
       "name": "Status Lists",
       "item": [
         {
+          "name": "Start new test run",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/live",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const listId = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.environment.set('list_id', listId);",
+                  "pm.collectionVariables.set('list_id', listId);",
+                  "pm.environment.unset('historical_time');",
+                  "pm.collectionVariables.unset('historical_time');",
+                  "console.log('Generated new list_id:', listId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('new test run is ready', function () { pm.response.to.have.status(200); });",
+                  "pm.test('list_id was generated', function () { pm.expect(pm.environment.get('list_id') || pm.collectionVariables.get('list_id')).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Publish status list",
           "request": {
+            "auth": {
+              "type": "noauth"
+            },
             "method": "PUT",
             "header": [
               {
@@ -243,6 +350,17 @@
           },
           "response": [],
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const token = pm.environment.get('token') || pm.collectionVariables.get('token');",
+                  "if (!token) { throw new Error('No issuer JWT found. Send Register issuer credentials first.'); }",
+                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -466,6 +584,9 @@
         {
           "name": "Update status list",
           "request": {
+            "auth": {
+              "type": "noauth"
+            },
             "method": "PATCH",
             "header": [
               {
@@ -502,7 +623,10 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "setTimeout(function () {}, 1200);"
+                  "setTimeout(function () {}, 1200);",
+                  "const token = pm.environment.get('token') || pm.collectionVariables.get('token');",
+                  "if (!token) { throw new Error('No issuer JWT found. Send Register issuer credentials first.'); }",
+                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });"
                 ]
               }
             },

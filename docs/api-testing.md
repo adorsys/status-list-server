@@ -18,7 +18,9 @@ The environment exposes these variables:
 | `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
 | `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
 | `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
-| `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
+| `token`           | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
+| `issuer_private_jwk` | empty                               | Local secret used to reuse the generated issuer key pair.             |
+| `issuer_public_key`  | empty                               | Public JWK generated for issuer registration.                         |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
 The collection is organized into Health & Metrics, Issuer Management, Status
