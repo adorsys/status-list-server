@@ -3,20 +3,6 @@
 All notable changes to this project will be documented in this file.
 <!-- markdownlint-disable line-length no-bare-urls ul-style emphasis-style -->
 
-## [Unreleased]
-
-### Upgrade notes
-
-- Fixed-size status-list metadata is stored inside the status-list document. Do not run this release side by side with older pods: an older pod that updates a fixed-size list can write the document back without `size` and `default_status`, turning that list into a caller-managed list. Complete the rollout before sending fixed-size publish or allocation traffic.
-- `limits.max_lists_per_issuer` is new and enforced. Fresh installs enforce it from the first start. When upgrading an existing SQL database, pods refuse to start until it is enabled: deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`, then, once no pod of the previous release is left, run `status-list-server list-quota recount` and `status-list-server list-quota enable`, and remove the setting. See `docs/troubleshooting.md`, "Upgrading to the list quota".
-
-### Changed
-
-- Bump the Helm chart to `0.5.0` for render-time validation changes.
-- Helm MySQL deployments are external-only and now require `statuslist.env.APP_DATABASE__HOST` plus an explicit `statuslist.image.tag` or `statuslist.image.digest`; when NetworkPolicy is enabled they also require `statuslist.networkPolicy.databaseEgress`.
-- The Helm chart intentionally accepts only `postgres` and `mysql` backends. Use non-Helm local/custom deployment paths for `sqlite` or `memory`.
-- `mysql.enabled=true` remains unsupported, while `mysql.enabled=false` is accepted for overlays that explicitly disable unused components.
-
 ## [1.2.0] - 2026-09-14
 
 ### Features
