@@ -34,6 +34,8 @@ The server binds three listeners. A route MUST be registered only on the listene
 | `GET /health/ready` | admin | none | Moves listener |
 | `GET /metrics` (when `server.enable_metrics`) | admin | none | Moves listener |
 
+The public and management listeners may share a hostname. The edge then routes by path, and MUST NOT route any path to the admin listener. The management paths are `/api/v1/status-lists/{list_id}/statuses`, `/api/v1/status-lists/{list_id}/allocations` and `/api/v1/credentials`. The first two share the `/api/v1/status-lists/` prefix with the public read, so the edge needs patterns more specific than that prefix, such as a regular expression or a method match. A misrouted request fails safely: it reaches a listener where the route does not exist and gets `404`.
+
 `GET /` service document, served as `application/json`:
 
 ```json
@@ -180,7 +182,7 @@ These changes are breaking for issuers or operators. They SHOULD be released tog
 | B2 | Management tokens MUST carry `typ`, `kid` and `aud` | Issuer integrations | Set `typ: statuslist-management+jwt` and `kid` (from the registry or `cargo xtask issuer export`) in the header, and `aud` in the claims | [#240](https://github.com/adorsys/status-list-server/issues/240) |
 | B3 | Default maximum token lifetime drops from 3600 s to 300 s | Issuers minting long-lived tokens | Mint a token per request or batch, valid at most 5 minutes | [#240](https://github.com/adorsys/status-list-server/issues/240) |
 | B4 | `401` codes `invalid_auth_header`, `jwt_error`, `unsupported_algorithm` and `issuer_not_found` are replaced by `missing_token` and `invalid_token`. The `404 issuer_not_found` of `GET /api/v1/credentials` is removed | Clients that branch on those codes | Branch on `401` plus `missing_token` or `invalid_token` | [#240](https://github.com/adorsys/status-list-server/issues/240) |
-| B5 | Management routes move to the management listener (port 8001). `/health/ready` and `/metrics` move to the admin listener (port 8002) | Operators: ingress, probes, Prometheus scrape configs, `NetworkPolicy`. In `hosted`, issuers use the `api.<domain>` host | Update the Helm values; the chart ships the new ports | [#624](https://github.com/adorsys/status-list-server/issues/624) |
+| B5 | Management routes move to the management listener (port 8001). `/health/ready` and `/metrics` move to the admin listener (port 8002) | Operators: ingress, probes, Prometheus scrape configs, `NetworkPolicy`. Issuers send management requests to wherever the operator publishes the management listener, on the public hostname or a separate one | Update the Helm values; the chart ships the new ports. On a shared hostname, route the management paths to the management listener (§1) | [#624](https://github.com/adorsys/status-list-server/issues/624) |
 | B6 | `GET /` returns a JSON service document instead of `text/plain` | Anything that reads `/` | Read `application/json`, or stop reading `/` | [#624](https://github.com/adorsys/status-list-server/issues/624) |
 | B7 | A registry file is required in production. Symmetric JWKs and JWKs with private members are rejected | Operators | Provide `management_auth.issuers_file`; replace rejected keys | [#371](https://github.com/adorsys/status-list-server/issues/371) |
 | B8 | `management_auth.audiences` is required in production | Operators and issuers | Configure one audience value and have issuers send it | [#240](https://github.com/adorsys/status-list-server/issues/240) |
