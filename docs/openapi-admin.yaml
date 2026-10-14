@@ -38,11 +38,12 @@ info:
       `error`; `error_description` wording is not part of the contract.
     - Every response, success or error, carries `Cache-Control: no-store`.
     - Instants are Unix timestamps in seconds (UTC).
-    - Each issuer has an `ETag`. Changing an issuer or one of its keys
-      requires `If-Match` (RFC 9110 §13.1.1): a stale value returns
-      `412 precondition_failed` (RFC 9110 §15.5.13), a missing one
-      `428 precondition_required` (RFC 6585 §3). Adding a key changes the
-      issuer's `ETag` too.
+    - Each issuer has an `ETag`. Every change to an existing issuer,
+      including adding or revoking one of its keys, requires `If-Match`
+      (RFC 9110 §13.1.1): a stale value returns `412 precondition_failed`
+      (RFC 9110 §15.5.13), a missing one `428 precondition_required`
+      (RFC 6585 §3). Only `createIssuer` is exempt, because a new issuer
+      has no `ETag` yet.
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
@@ -314,8 +315,10 @@ paths:
       description: |
         Adds an `active` key, for example to start a rotation overlap. The
         server assigns `kid` (RFC 7638 thumbprint). The number of non-revoked
-        keys may not exceed the tier's `max_keys`. Requires `issuers:write`.
-        The issuer's `ETag` changes.
+        keys may not exceed the tier's `max_keys`. Requires `issuers:write`
+        and `If-Match` (the issuer's `ETag`), which changes.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -362,10 +365,14 @@ paths:
               example:
                 error: "key_limit_reached"
                 error_description: "the sandbox tier allows 2 keys; revoke one first"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/UnprocessableKey"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
