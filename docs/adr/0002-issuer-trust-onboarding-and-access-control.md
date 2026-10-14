@@ -43,10 +43,10 @@ The server exposes three listeners, and no route is shared between them:
 | Listener | Serves | Reachability |
 |---|---|---|
 | Public | Anonymous reads defined by the Token Status List specification, and liveness | Internet |
-| Management | Operations authenticated as an issuer | Private network. In the hosted profile it is also published, on its own hostname |
+| Management | Operations authenticated as an issuer | Private network by default. It may be published in either profile, on the public hostname or a separate one, because every operation on it is authenticated |
 | Admin | Issuer listing and lifecycle, readiness, metrics | Private network only, in every profile |
 
-A route is served only on the listener of its class; on every other listener it does not exist. The admin listener must never be reachable from outside the operator's private network. Only the public reads are anonymous: no anonymous operation creates, changes or discloses issuer trust state.
+A route is served only on the listener of its class; on every other listener it does not exist. The admin listener must never be reachable from outside the operator's private network. Operators who need it from elsewhere reach it only through a path that authenticates them at the network level, such as a VPN or a mutually authenticated gateway, never directly from the internet. Only the public reads are anonymous: no anonymous operation creates, changes or discloses issuer trust state.
 
 Exposure is therefore decided by which listener is reachable, which network policy can enforce. It no longer depends on path rules in a proxy, which are easy to get wrong.
 
@@ -142,7 +142,7 @@ Keeping a single listener and controlling exposure with path-based proxy rules w
 - Registry changes are not instantaneous everywhere. How fast a change reaches the server depends on how the document is delivered; configuration mounted into a container, for example, can take on the order of a minute. Operators who must revoke immediately need to account for that delay.
 - The hosted profile needs durable storage shared by all replicas, for onboarding-registered issuers and their audit trail.
 - Clocks must be synchronised, because token lifetimes are short.
-- No external route may reach the admin listener, and edge routing for the public and management surfaces must be separate.
+- No external route may reach the admin listener. When the public and management listeners share a hostname, the edge must route each path to the listener that serves it.
 
 ## Reconsider if
 
