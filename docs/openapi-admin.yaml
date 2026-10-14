@@ -540,8 +540,7 @@ components:
 
     Issuer:
       type: object
-      required:
-        [id, aggregation_id, source, tier, state, owner, created_at, expires_at, keys, usage]
+      required: [id, aggregation_id, source, tier, state, owner, created_at, expires_at, keys, usage]
       properties:
         id:
           type: string
