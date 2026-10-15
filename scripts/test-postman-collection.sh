@@ -93,6 +93,12 @@ const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl] 
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
 
+function siblingUrl(baseUrl, port) {
+  const url = new URL(baseUrl);
+  url.port = port;
+  return url.toString().replace(/\/$/, '');
+}
+
 const now = Math.floor(Date.now() / 1000);
 const issuerId = `newman-issuer-${Date.now()}`;
 const listId = crypto.randomUUID();
@@ -139,6 +145,8 @@ visitItems(collection.item, (item) => {
 
 const values = new Map([
   ['baseUrl', baseUrl],
+  ['managementUrl', siblingUrl(baseUrl, 8001)],
+  ['adminUrl', siblingUrl(baseUrl, 8002)],
   ['list_id', listId],
   ['issuer_id', issuerId],
   ['token', token],
