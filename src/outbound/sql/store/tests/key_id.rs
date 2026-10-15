@@ -91,7 +91,7 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
         .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
         .unwrap();
     insert_legacy_key(&db, "ed25519", &serde_json::to_value(ed_jwk).unwrap()).await;
-    insert_legacy_key(&db, "unparseable", &serde_json::json!({})).await;
+    insert_legacy_key(&db, "unparsable", &serde_json::json!({})).await;
     insert_legacy_key(&db, "private", &{
         let mut key = template.clone();
         key.as_object_mut().unwrap().remove("kid");

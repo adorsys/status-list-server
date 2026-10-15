@@ -685,7 +685,7 @@ the read-only queries below. Run them before the new migration: they use only
 the existing `issuer` and `public_key` columns. `duplicate_kid_count > 1` blocks
 the unique index. Absent/null IDs on parseable public JWKs are generated during
 migration; issuers must use those generated IDs in subsequent JWTs. Empty,
-overlong, or malformed IDs, missing/unsupported algorithms, and unparseable keys
+overlong, or malformed IDs, missing/unsupported algorithms, and unparsable keys
 need operator repair before they can authenticate after upgrade.
 
 ```sql
