@@ -65,7 +65,7 @@ response = requests.put(
 )
 
 tc.assertEqual(response.status_code, 401, "Unregistered clients should be unable to publish lists")
-tc.assertEqual("issuer_not_found", response.json().get("error"))
+tc.assertEqual("invalid_token", response.json().get("error"))
 print(f"Unregistered Issuer B was prevented from publishing status list {status_list_id}")
 
 # An unauthenticated client is refused when publishing a list
@@ -77,5 +77,5 @@ response = requests.put(
 )
 
 tc.assertEqual(response.status_code, 401, "Authentication should be required on the publish endpoint")
-tc.assertEqual("invalid_auth_header", response.json().get("error"))
+tc.assertEqual("missing_token", response.json().get("error"))
 print("The unauthenticated client was prevented from publishing a status list")

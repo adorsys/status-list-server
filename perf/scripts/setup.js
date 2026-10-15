@@ -3,7 +3,8 @@
 // Runs once before an Artillery test and does two things against the live
 // server:
 //   1. Registers the test issuer (from scripts/test-tokens.json) so the
-//      authenticated flows never hit `issuer_not_found` — this used to be done
+//      token's `kid` resolves to its registered public key. Otherwise authenticated
+//      requests return `401 invalid_token`. This used to be done
 //      with an Artillery `before:` hook, but that hook does not execute
 //      processor `function:` steps, so the registration silently never ran and
 //      every authenticated request returned 401.
@@ -15,6 +16,7 @@
 // success, and re-publishing seed lists simply replaces the previous set.
 
 const http = require('http');
+const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -82,7 +84,13 @@ function registerIssuer(data) {
 }
 
 async function seedStatusLists(data) {
-  const token = data.tokens[0];
+  let token = data.tokens[0];
+  const now = Math.floor(Date.now() / 1000);
+  if (data.privateKey) {
+    token = jwt.sign({ iss: data.issuerId, aud: data.audience, iat: now, exp: now + 300 }, data.privateKey, {
+      algorithm: 'ES256', header: { kid: data.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
+    });
+  }
   const created = [];
   for (let i = 0; i < SEED_LISTS; i++) {
     const listId = crypto.randomUUID();

@@ -66,7 +66,7 @@ fn fixture_config() -> Config {
         "cache": {"backend": "memory", "ttl": 300, "max_capacity": 100},
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
-        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 3600, "audiences": []},
+        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": []},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
@@ -119,6 +119,7 @@ fn fixture_state(config: &Config) -> AppState {
     }
 }
 const ISSUER: &str = "conformance-issuer";
+const KEY_ID: &str = "conformance-key";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
@@ -187,7 +188,7 @@ impl TestServer {
             .client
             .post(app.url("/api/v1/credentials"))
             .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256",
+                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
                 "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
                 "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
             }}))
@@ -203,8 +204,11 @@ impl TestServer {
 
     pub(super) fn bearer_token(&self) -> String {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(KEY_ID.to_owned());
+        header.typ = Some("statuslist-management+jwt".to_owned());
         jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
+            &header,
             &json!({"iss": ISSUER, "iat": now, "exp": now + 300}),
             &jsonwebtoken::EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap(),
         )

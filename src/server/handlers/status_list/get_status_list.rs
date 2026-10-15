@@ -1270,6 +1270,12 @@ mod tests {
             ))
         }
 
+        async fn find_by_kid(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
         async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
             Err(CredentialError::Backend(
                 "credential store unavailable".into(),

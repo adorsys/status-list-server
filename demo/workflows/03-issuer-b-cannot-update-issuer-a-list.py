@@ -81,5 +81,5 @@ response = requests.patch(
 )
 
 tc.assertEqual(response.status_code, 401, "Authentication should be required on the update endpoint")
-tc.assertEqual("invalid_auth_header", response.json().get("error"))
+tc.assertEqual("missing_token", response.json().get("error"))
 print(f"The unauthenticated client was prevented from updating status list {status_list_id}")

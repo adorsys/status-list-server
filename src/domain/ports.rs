@@ -102,6 +102,9 @@ pub trait CredentialRepo: Send + Sync + 'static {
     /// Find issuer credential details by issuer identifier.
     async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError>;
 
+    /// Find the credential owning a registered management-token key ID.
+    async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError>;
+
     /// Insert new issuer credential details into storage.
     async fn insert(
         &self,

@@ -135,6 +135,9 @@ statuslist:
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
+    # Required in production. Set a deployment-specific audience, for example
+    # https://statuslist.prod.example.com/api/v1; staging must use another value.
+    APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
     # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).
