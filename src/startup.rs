@@ -115,6 +115,30 @@ impl HttpServer {
             result = admin => result,
         }
     }
+
+    /// The bound address of the public listener (the status-list read surface).
+    pub fn public_addr(&self) -> SocketAddr {
+        self.public
+            .listener
+            .local_addr()
+            .expect("public listener bound")
+    }
+
+    /// The bound address of the management listener (authenticated issuer writes).
+    pub fn management_addr(&self) -> SocketAddr {
+        self.management
+            .listener
+            .local_addr()
+            .expect("management listener bound")
+    }
+
+    /// The bound address of the admin listener (readiness and metrics).
+    pub fn admin_addr(&self) -> SocketAddr {
+        self.admin
+            .listener
+            .local_addr()
+            .expect("admin listener bound")
+    }
 }
 
 async fn bind_listener(host: &str, port: u16, name: &str) -> color_eyre::Result<TcpListener> {

@@ -51,6 +51,9 @@ impl CertificateProvider for FixtureCertificate {
 fn fixture_config() -> Config {
     serde_json::from_value(json!({
         "server": {"host": "127.0.0.1", "port": 0, "domain": "localhost",
+            "management": {"host": "127.0.0.1", "port": 0},
+            "admin": {"host": "127.0.0.1", "port": 0},
+            "links": {"documentation": "https://github.com/adorsys/status-list-server"},
             "enable_metrics": false, "cert": {"email": "test@example.com",
                 "acme_directory_url": "https://acme.invalid/directory",
                 "signing_key_cache_ttl": 0, "renewal_cron_schedule": "0 0 0 * * *", "store": {}}},
@@ -125,6 +128,7 @@ const ISSUER: &str = "conformance-issuer";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
+    pub(super) management_url: String,
     pub(super) client: reqwest::Client,
     pub(super) aggregation_id: String,
 }
@@ -136,7 +140,7 @@ impl TestServer {
         config.server.aggregation_uri = aggregation_uri;
         // HttpServer::new owns binding. Retry if another parallel test/process
         // acquires the OS-selected port between releasing it and server startup.
-        let (base_url, server) = {
+        let (base_url, management_url, server) = {
             let mut started = None;
             for attempt in 0..10 {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -149,7 +153,8 @@ impl TestServer {
                     .await
                 {
                     Ok(server) => {
-                        started = Some((base_url, server));
+                        let management_url = format!("http://{}", server.management_addr());
+                        started = Some((base_url, management_url, server));
                         break;
                     }
                     Err(error)
@@ -181,6 +186,7 @@ impl TestServer {
             .unwrap();
         let mut app = Self {
             base_url,
+            management_url,
             client,
             aggregation_id: String::new(),
         };
@@ -188,7 +194,7 @@ impl TestServer {
         let public = key.public_key_bytes();
         let response = app
             .client
-            .post(app.url("/api/v1/credentials"))
+            .post(format!("{}/api/v1/credentials", app.management_url))
             .json(&json!({"issuer": ISSUER, "public_key": {
                 "kty": "EC", "crv": "P-256", "alg": "ES256",
                 "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
