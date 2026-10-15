@@ -921,7 +921,10 @@ components:
           type: string
           minLength: 1
           maxLength: 255
-          description: Management key identifier, unique across registered issuers.
+          description: |
+            Management key identifier, unique across all registered issuers.
+            Registering a key ID already used by another issuer returns
+            409 Conflict (`credentials_already_exist`).
           example: "issuer-key-1"
         alg:
           type: string

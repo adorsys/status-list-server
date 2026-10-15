@@ -661,7 +661,7 @@ here; a test fails until it does.
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
-| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate kids before upgrade | Only existing `kid` values are backfilled. Repair both the JWK and indexed `key_id` after migration; changing JSON alone is insufficient |
+| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 
 ### Preparing existing management credentials
 
@@ -672,11 +672,21 @@ staging a different value, even if both environments register the same issuer
 key. Production chart rendering fails if the audience is empty. Issuers must
 include that configured value in their management tokens' `aud` claim.
 
+The release-tag deployment uses `values-aws.yaml` followed by
+`values-production.yaml`. Its management audience is
+`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
+deployment must put this exact value in `aud` (as a string or an array member).
+Deployments reusing the production overlay for another environment or hostname
+must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
+the production value.
+
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
 the existing `issuer` and `public_key` columns. `duplicate_kid_count > 1` blocks
-the unique index. Missing/empty/overlong IDs and missing or unsupported algorithms
-block authentication after upgrade.
+the unique index. Absent/null IDs on parseable public JWKs are generated during
+migration; issuers must use those generated IDs in subsequent JWTs. Empty,
+overlong, or malformed IDs, missing/unsupported algorithms, and unparseable keys
+need operator repair before they can authenticate after upgrade.
 
 ```sql
 -- PostgreSQL
@@ -702,8 +712,16 @@ WHERE kid IS NULL OR kid = '' OR length(kid) > 255
 
 ```sql
 -- MySQL 8+
+SET @management_saved_collation = @@session.collation_connection;
+SET @management_kid_collation = COALESCE(
+  (SELECT COLLATION_NAME FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'credentials' AND COLUMN_NAME = 'key_id'),
+  (SELECT TABLE_COLLATION FROM information_schema.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'credentials')
+);
+SET SESSION collation_connection = @management_kid_collation;
 WITH key_values AS (
-  SELECT issuer, JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) AS kid,
+  SELECT issuer, CAST(JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) AS CHAR) AS kid,
          JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.alg')) AS alg,
          JSON_TYPE(JSON_EXTRACT(public_key, '$.kid')) AS kid_type,
          JSON_TYPE(JSON_EXTRACT(public_key, '$.alg')) AS alg_type,
@@ -721,6 +739,7 @@ WHERE kid IS NULL OR kid = '' OR CHAR_LENGTH(kid) > 255
         OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
         OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
         OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+SET SESSION collation_connection = @management_saved_collation;
 ```
 
 ```sql
@@ -746,22 +765,37 @@ WHERE kid IS NULL OR kid = '' OR length(kid) > 255
         OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
 ```
 
+Run the entire MySQL block in one session. It temporarily uses the `key_id`
+column's collation, or the table's default before that column exists, for the
+`kid` cast and comparisons. This catches IDs such as `Key-1` and `key-1` that
+would collide under a case-insensitive unique index. The final statement
+restores the session's original collation; no stored data is changed.
+
 These queries flag metadata incompatibilities; also inspect the complete public
 JWK for private members, invalid key material, an encryption-only `use`, and RSA
 moduli below 2048 bits. Do not copy private key material into the database.
 
 Coordinate repairs with each issuer before enabling the new verifier:
 
-1. Agree on an unused key ID and the exact supported signing algorithm. A
-   missing ID can be generated from an RFC 7638 SHA-256 public JWK thumbprint,
-   but check for duplicates: the same public key has the same thumbprint.
+1. Agree on the exact supported signing algorithm. The migration preserves
+   every supplied ID. For an absent/null `kid`, it computes the base64url-encoded
+   RFC 7638 SHA-256 public JWK thumbprint, without padding, and writes it into
+   both `public_key.kid` and `key_id` in one statement. Inspect generated IDs
+   after migration with `SELECT issuer, key_id FROM credentials` and communicate
+   them to issuers. Check for collisions beforehand: identical public keys
+   produce identical thumbprints, which can also clash with a supplied ID.
+   The unique constraint rejects a collision; the migration never silently
+   assigns a different ID. Repair colliding registrations before retrying.
 2. Add the agreed `kid` and `alg` to the stored public JWK. Do not infer an RSA
    signing algorithm from key type alone or silently relabel an existing RS256
    key as PS256. The issuer must explicitly switch its signer to PS256 or supply
    another supported public key. Preserve the credential's issuer, aggregation
    ID, list count, and associated lists.
 3. Before migration, update `public_key`; the migration copies its `kid` into
-   `key_id`. If the migration has already run, stop management writes and update
+   `key_id`, generating a thumbprint only when the ID is absent/null. It does not
+   infer or replace `alg`, and does not generate IDs for symmetric keys, keys
+   containing private members, or keys it cannot parse. If the migration has
+   already run, stop management writes and update
    **both columns in one transaction**. Use bound parameters with the database
    client: `UPDATE credentials SET public_key = :public_jwk, key_id = :kid
    WHERE issuer = :issuer`. Cast the JSON parameter as required by the driver.
@@ -775,6 +809,13 @@ There is no public credential-update endpoint in this release. An operator must
 perform these repairs; re-registering an existing issuer returns 409. Plan a
 coordinated cutover if old and new servers overlap, because their accepted token
 contracts differ.
+
+This release does not change the format of IDs already supplied by issuers.
+The onboarding design in [#369](https://github.com/adorsys/status-list-server/issues/369)
+and [#373](https://github.com/adorsys/status-list-server/issues/373) must support
+several independently managed keys per issuer while preserving existing `kid`
+values. Whether newly onboarded keys receive assigned IDs or thumbprint IDs is
+a decision for that work, not a reason to rename existing keys again.
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

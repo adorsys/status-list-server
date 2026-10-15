@@ -3,7 +3,8 @@
 // Runs once before an Artillery test and does two things against the live
 // server:
 //   1. Registers the test issuer (from scripts/test-tokens.json) so the
-//      authenticated flows never hit `issuer_not_found` — this used to be done
+//      token's `kid` resolves to its registered public key. Otherwise authenticated
+//      requests return `401 invalid_token`. This used to be done
 //      with an Artillery `before:` hook, but that hook does not execute
 //      processor `function:` steps, so the registration silently never ran and
 //      every authenticated request returned 401.

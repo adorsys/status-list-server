@@ -51,10 +51,9 @@ matches the signed JWTs it was generated with.
 Before each test, `scripts/setup.js` runs automatically (via the `npm run
 test:*` scripts). It registers the test issuer from `test-tokens.json` and
 publishes a set of seed status lists, writing their IDs to
-`scripts/seed-lists.json` (git-ignored). This is what makes the authenticated
-flows work on a fresh server — without registration the token's `iss` is
-unknown and every authenticated request returns `401 issuer_not_found` — and it
-gives the read scenarios real list IDs to query.
+`scripts/seed-lists.json` (git-ignored). Registration lets the server resolve the
+token's `kid` to its public key; without it, authenticated requests return
+`401 invalid_token`. The seed lists give the read scenarios real list IDs to query.
 
 Setup runs as a separate Node script rather than an Artillery `before:` hook,
 which does not execute processor `function:` steps.

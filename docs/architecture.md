@@ -144,7 +144,7 @@ The data flow in the Status List Server is as follows:
 - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
 - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
 - **CORS**: The Status List Server supports Cross-Origin Resource Sharing (CORS) for browser-based clients.
-- **Bearer Authentication**: Management endpoints (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`) are protected by a JWT Bearer middleware (`auth`) that validates the signature against the JWK registered for the issuer and checks that the `iss` claim matches the registered issuer.
+- **Bearer Authentication**: Management endpoints (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`) are protected by a JWT Bearer middleware (`auth`). It resolves the registered public JWK by the token's `kid`, verifies the signature using the key's registered algorithm, and checks that the verified `iss` matches the key's owning issuer. It also validates the management token type, configured audience, and time claims. Missing credentials return `401 missing_token`; invalid credentials, including an unknown `kid`, return uniform `401 invalid_token` responses.
 - **Rate Limiting & Request Bounds**: The server applies layered defense-in-depth controls to prevent abuse. See [Rate Limiting & Request Bounds](#rate-limiting--request-bounds) below.
 
 ## Rate Limiting & Request Bounds
