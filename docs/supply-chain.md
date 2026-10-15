@@ -61,7 +61,7 @@ Any HIGH or CRITICAL finding that survives the exception ledger fails `scan-imag
 
 These thresholds do not match the `trivy-config` job in `helm-checks.yml`. That job keeps Trivy's default unfixed handling for Helm misconfigurations; this one deliberately surfaces unfixed crate advisories, for the reason above.
 
-Turning the flag off was safe to do because the surface was measured first rather than assumed, and it was zero — no HIGH or CRITICAL anywhere in the tree at the pinned versions. `rsa` and `rkyv`, the two advisories `deny.toml` ignores, produce nothing under Trivy at these versions, which is why neither needs a `.trivyignore.yaml` entry; see [Two Ledgers](#two-ledgers).
+Turning the flag off was safe to do because the surface was measured first rather than assumed, and it was zero — no HIGH or CRITICAL anywhere in the tree at the pinned versions. `rkyv`, the one advisory still ignored by `cargo audit`, produces nothing under Trivy at this version, which is why it needs no `.trivyignore.yaml` entry; see [Two Ledgers](#two-ledgers).
 
 `Cargo.lock` is a sound upper bound on what the image can contain, which is what lets you reason about the image before one exists. The runtime image is `FROM scratch` holding one static binary, a CA bundle and passwd entries, so it has no OS package database — every package a scanner finds comes from the `.dep-v0` section, and that section records only the crates actually linked for the enabled feature set. The containment is strict: lockfile ⊇ linked crates ⊇ the set Trivy evaluates. That also means the build-time `.dep-v0` assertion and the scanner count different things by design; the assertion only proves the section is present and non-empty.
 
@@ -414,7 +414,7 @@ This repository now suppresses crate advisories in two places, and they are not 
 | Enforced             | no                                  | `scripts/check-trivyignore.py` (tested)    |
 | Suppressions visible | no                                  | counted in every gate summary              |
 
-Today `deny.toml` ignores `RUSTSEC-2023-0071` (rsa), and `.trivyignore.yaml` does not, because Trivy's database does not flag it at the version this project pins — verified, not assumed. So the two ledgers do not currently disagree.
+Today neither ledger suppresses an advisory: `deny.toml` dropped its `RUSTSEC-2023-0071` (rsa) entry once SQLx 0.9 removed `rsa` from the dependency graph. So the two ledgers do not currently disagree.
 
 They can, and the failure is asymmetric in an unhelpful direction. If Trivy's database later picks up one of those advisories at HIGH or above, a release blocks on something `cargo-deny` has been deliberately ignoring for months, and the person cutting the release has to rediscover an argument that already exists in `deny.toml`. In the other direction, someone who fixes `rsa` and removes the `deny.toml` entry has no prompt to check whether a `.trivyignore.yaml` entry also became stale.
 

@@ -695,18 +695,6 @@ pub(in super::super) fn list_count_migration_index() -> usize {
         .expect("the list_count migration must be registered")
 }
 
-#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
-pub(super) async fn roll_back_to_before_list_count(db: &DatabaseConnection) {
-    use sea_orm_migration::MigratorTrait;
-
-    use crate::outbound::sql::Migrator;
-
-    let steps = Migrator::migrations().len() - list_count_migration_index();
-    Migrator::down(db, Some(steps as u32))
-        .await
-        .expect("rolling back to before list_count must succeed");
-}
-
 /// The backfill counts existing lists, and old-pod credential inserts still
 /// work. `column_already_added` recreates a failed MySQL backfill: column
 /// present, migration unrecorded.

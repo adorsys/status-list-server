@@ -1,5 +1,16 @@
 # Local Testing Quickstart
 
+## Environment Configuration
+
+To initialize your local environment configuration:
+
+```bash
+cp .env.template .env
+```
+
+Compose reads `.env` only; `.env.template` is a reference to copy from and is never loaded.
+For variables listed under `environment:` in `docker-compose.yml`, Compose uses the shell first, then `.env`, then the Compose default. Other variables in `.env` reach the container through `env_file`; Compose does not pass unrelated shell variables through automatically. `APP_TELEMETRY__OTLP_ENDPOINT` is fixed in the Compose file, so setting it in `.env` has no effect. Quote values containing `$` with single quotes, for example `APP_X='a$b'`.
+
 ## Docker Compose profiles
 
 `docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
@@ -14,6 +25,8 @@
 - `redis`: Redis.
 
 > **NOTE**: The `postgres` and `mysql` profiles are alternatives. Do not activate both for the same application instance.
+
+Database connection fields come from the backend override files; the `postgres` and `mysql` profiles only start their database services. Use `compose/postgres.yml` with `--profile postgres` or `compose/mysql.yml` with `--profile mysql` to map the matching database service settings into the app. The template's `APP_DATABASE__*` values match the PostgreSQL defaults; for MySQL, use the MySQL values commented in the template. For an external database URL, remove the split fields from `.env` and do not select a local database profile or override file.
 
 Start one optional subsystem beside the default in-memory server:
 
@@ -44,7 +57,8 @@ Profiles can be combined. To configure the server to use PostgreSQL and ACME, an
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 

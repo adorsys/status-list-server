@@ -103,7 +103,8 @@ To add PostgreSQL, ACME, and AWS services and enable their matching app features
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 

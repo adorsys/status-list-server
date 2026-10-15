@@ -66,6 +66,7 @@ info:
     `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
     configuration; operators who lower a bound via configuration should treat
     the documented schema maximums as defaults, not guarantees.
+
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -249,10 +250,14 @@ paths:
     post:
       operationId: registerIssuer
       summary: Register issuer credentials
+      deprecated: true
       description: |
         Registers an issuer by storing its unique identifier and public key
         (JWK). The registered public key is used later to validate signed JWT
         Bearer tokens for the protected management endpoints.
+
+        **Deprecated.** Issuers are provisioned by the server operator. Do not
+        build new integrations on self-registration.
       security: []
       requestBody:
         required: true

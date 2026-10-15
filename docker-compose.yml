@@ -128,12 +128,11 @@ services:
         FEATURES: ${FEATURES:-memory}
     container_name: status-list-server
     env_file:
-      - path: .env.template
-        required: false
       - path: .env
         required: false
     environment:
       APP_ENV: ${APP_ENV:-development}
+      APP_SERVER__HOST: "0.0.0.0"
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
       APP_SERVER__MANAGEMENT__HOST: ${APP_SERVER__MANAGEMENT__HOST:-0.0.0.0}
       APP_SERVER__MANAGEMENT__PORT: ${APP_SERVER__MANAGEMENT__PORT:-8001}

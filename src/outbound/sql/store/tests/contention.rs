@@ -770,7 +770,7 @@ mod database_implementation {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let blocked = db
-                .query_one(Statement::from_string(
+                .query_one_raw(Statement::from_string(
                     DatabaseBackend::Postgres,
                     "SELECT count(*) AS blocked FROM pg_stat_activity \
                  WHERE datname = current_database() \
@@ -835,7 +835,7 @@ mod database_implementation {
         // A takes an exclusive row lock and holds it, uncommitted.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::MySql,
                 "UPDATE status_lists SET sub = 'locked-by-a' WHERE list_id = ?",
                 vec![Value::from(list_id)],
@@ -894,7 +894,7 @@ mod database_implementation {
         // issuer blocks on it rather than failing fast as a duplicate.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::MySql,
                 "INSERT INTO credentials (issuer, public_key) VALUES (?, ?)",
                 vec![
@@ -966,7 +966,7 @@ mod database_implementation {
         // history insert will block on it.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 "INSERT INTO status_list_history \
              (snapshot_id, list_id, issuer, status_list, sub, iat, exp) \
@@ -1027,7 +1027,7 @@ mod database_implementation {
         // A closes the cycle. Blocks until B is rolled back as the victim, whose
         // rollback releases the row lock A is waiting on.
         txn_a
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 "UPDATE status_lists SET sub = 'a' WHERE list_id = $1",
                 vec![Value::from(list_id)],
@@ -1088,7 +1088,7 @@ mod database_implementation {
 
             let txn_a = conn_a.begin().await.expect("failed to begin A");
             txn_a
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
                     "UPDATE status_lists SET sub = 'a', updated_at = $1, version = $2 \
                      WHERE list_id = $3",

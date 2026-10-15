@@ -125,6 +125,7 @@ fn classify_db_connect_error(err: &DbErr) -> &'static str {
         DbErr::Migration(_) => "migration",
         DbErr::RecordNotInserted => "record_not_inserted",
         DbErr::RecordNotUpdated => "record_not_updated",
+        _ => "other",
     }
 }
 
@@ -1829,7 +1830,7 @@ mod general_tests {
         let inflight = {
             let db = handle.current();
             tokio::spawn(async move {
-                db.query_one(Statement::from_string(
+                db.query_one_raw(Statement::from_string(
                     DatabaseBackend::Postgres,
                     "SELECT pg_sleep(0.25), current_user".to_string(),
                 ))

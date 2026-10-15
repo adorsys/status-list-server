@@ -1,0 +1,387 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/adorsys/status-list-server/blob/develop/docs/schemas/issuers.v1.schema.json",
+  "title": "Status List Server issuer trust registry, version 1",
+  "description": "Shape of the file named by `management_auth.issuers_file`: the issuers and admin principals the server trusts, with their PUBLIC keys only. Rules that span several entries cannot be expressed in a schema, and the loader enforces them in addition: issuer and admin ids are unique across the file, aggregation ids are unique, kids are unique across every key, the same key material appears at most once, EC points lie on their curve, and RSA moduli are at least 2048 bits.",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "Registry format version. Only 1 is defined. A loader that does not know the version refuses the file.",
+      "const": 1
+    },
+    "issuers": {
+      "description": "Issuers allowed to call the management API.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issuer"
+      },
+      "default": []
+    },
+    "admins": {
+      "description": "Principals allowed to call the admin API.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/admin"
+      },
+      "default": []
+    }
+  },
+  "$defs": {
+    "issuer": {
+      "type": "object",
+      "required": [
+        "id",
+        "aggregation_id",
+        "keys"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Issuer identifier: the `iss` of its management tokens and the owner of its status lists. Assigned by the operator, never by the issuer; a UUIDv4 is recommended. Never reused for another issuer.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        },
+        "aggregation_id": {
+          "description": "Public, server-assigned id used in `aggregation_uri` (/api/v1/aggregation/{aggregation_id}). Generated once and immutable, because issued Status List Tokens embed it.",
+          "$ref": "#/$defs/uuid"
+        },
+        "display_name": {
+          "description": "Human label for operators. Carries no authority.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "tier": {
+          "description": "Limits tier from `tiers.*` in the server configuration.",
+          "enum": [
+            "standard",
+            "sandbox"
+          ],
+          "default": "standard"
+        },
+        "disabled": {
+          "description": "Kill switch: when true, every token of this issuer is rejected. Its lists stay publicly readable.",
+          "type": "boolean",
+          "default": false
+        },
+        "keys": {
+          "description": "Keys this issuer may sign management tokens with. Two entries during a rotation overlap.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/key"
+          }
+        }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "required": [
+        "id",
+        "scopes",
+        "keys"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Admin principal id: the `iss` of its admin tokens, and the actor recorded in audit events.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "scopes": {
+          "description": "Admin API scopes granted to this principal. Tokens cannot widen them.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "issuers:read",
+              "issuers:write"
+            ]
+          }
+        },
+        "disabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/key"
+          }
+        }
+      }
+    },
+    "key": {
+      "type": "object",
+      "required": [
+        "kid",
+        "alg",
+        "jwk"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kid": {
+          "description": "Key id sent in the JWT header. Unique across every issuer and admin in the file. Default: the RFC 7638 thumbprint of `jwk`.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[\\x21-\\x7E]+$"
+        },
+        "alg": {
+          "description": "The only JWS algorithm accepted for this key. The JWT header `alg` must equal it.",
+          "enum": [
+            "ES256",
+            "ES384",
+            "EdDSA",
+            "PS256"
+          ]
+        },
+        "jwk": {
+          "$ref": "#/$defs/publicJwk"
+        },
+        "not_before": {
+          "description": "Tokens signed with this key are rejected before this instant.",
+          "$ref": "#/$defs/timestamp"
+        },
+        "not_after": {
+          "description": "Tokens signed with this key are rejected after this instant.",
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "alg": {
+                "const": "ES256"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "jwk": {
+                "properties": {
+                  "kty": {
+                    "const": "EC"
+                  },
+                  "crv": {
+                    "const": "P-256"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "alg": {
+                "const": "ES384"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "jwk": {
+                "properties": {
+                  "kty": {
+                    "const": "EC"
+                  },
+                  "crv": {
+                    "const": "P-384"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "alg": {
+                "const": "EdDSA"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "jwk": {
+                "properties": {
+                  "kty": {
+                    "const": "OKP"
+                  },
+                  "crv": {
+                    "const": "Ed25519"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "alg": {
+                "const": "PS256"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "jwk": {
+                "properties": {
+                  "kty": {
+                    "const": "RSA"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "publicJwk": {
+      "description": "A PUBLIC JSON Web Key (RFC 7517). Symmetric keys (`kty: oct`) and any private member are rejected, so a pasted private JWK can never be loaded.",
+      "type": "object",
+      "required": [
+        "kty"
+      ],
+      "properties": {
+        "kty": {
+          "enum": [
+            "EC",
+            "OKP",
+            "RSA"
+          ]
+        },
+        "crv": {
+          "type": "string"
+        },
+        "x": {
+          "$ref": "#/$defs/base64url"
+        },
+        "y": {
+          "$ref": "#/$defs/base64url"
+        },
+        "n": {
+          "$ref": "#/$defs/base64url"
+        },
+        "e": {
+          "$ref": "#/$defs/base64url"
+        },
+        "use": {
+          "const": "sig"
+        },
+        "d": false,
+        "p": false,
+        "q": false,
+        "dp": false,
+        "dq": false,
+        "qi": false,
+        "oth": false,
+        "k": false
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kty": {
+                "const": "EC"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "crv",
+              "x",
+              "y"
+            ],
+            "properties": {
+              "crv": {
+                "enum": [
+                  "P-256",
+                  "P-384"
+                ]
+              },
+              "x": {
+                "$ref": "#/$defs/base64url"
+              },
+              "y": {
+                "$ref": "#/$defs/base64url"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kty": {
+                "const": "OKP"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "crv",
+              "x"
+            ],
+            "properties": {
+              "crv": {
+                "const": "Ed25519"
+              },
+              "x": {
+                "$ref": "#/$defs/base64url"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kty": {
+                "const": "RSA"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "n",
+              "e"
+            ],
+            "properties": {
+              "n": {
+                "$ref": "#/$defs/base64url"
+              },
+              "e": {
+                "$ref": "#/$defs/base64url"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "base64url": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "description": "RFC 3339 date-time in UTC, e.g. 2027-04-01T00:00:00Z.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    }
+  }
+}
