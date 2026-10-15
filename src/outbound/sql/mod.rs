@@ -212,6 +212,13 @@ impl StatusListRepo for SqlStatusListRepo {
         Ok(StatusListUriPage::from_rows(rows, limit))
     }
 
+    async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        self.store
+            .find_status_list_issuers()
+            .await
+            .map_err(Into::into)
+    }
+
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,

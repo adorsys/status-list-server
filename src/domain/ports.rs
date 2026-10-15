@@ -81,6 +81,9 @@ pub trait StatusListRepo: Send + Sync + 'static {
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
 
+    /// Issuer identifiers that currently own at least one status list.
+    async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
+
     /// Reserve `count` unused indices for `list_id`, returning the newly
     /// allocated indices in ascending order.
     async fn allocate_indices(

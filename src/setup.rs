@@ -819,6 +819,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
     }
 
+    let issuer_registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::load(
+        &config.management_auth.issuers_file,
+    )?);
+    crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
+    warn_missing_registry_issuers(&service, &issuer_registry.snapshot()).await;
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -831,11 +836,45 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
+        issuer_registry,
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(
             config.token_bytes_cache.max_capacity,
         ),
         readiness,
     };
+
+    let registry_handle = state.issuer_registry.clone();
+    let registry_service = state.service.clone();
+    crate::utils::file_watcher::FileWatcher::new(
+        vec![config.management_auth.issuers_file.clone().into()],
+        Duration::from_secs(config.watcher.poll_interval_secs),
+    )
+    .spawn("issuer_registry", move || {
+        let registry_handle = registry_handle.clone();
+        let registry_service = registry_service.clone();
+        async move {
+            if let Err(error) = registry_handle.reload() {
+                crate::utils::metrics::record_rotation("issuer_registry", false);
+                crate::utils::metrics::record_issuer_registry_reload_failure();
+                tracing::error!(
+                    event = "issuer_registry_reload_failed",
+                    path = %registry_handle.path().display(),
+                    error = %error,
+                    "keeping last-known-good issuer registry"
+                );
+            } else {
+                crate::utils::metrics::record_rotation("issuer_registry", true);
+                crate::utils::metrics::set_issuer_registry_keys(
+                    registry_handle.snapshot().key_count(),
+                );
+                warn_missing_registry_issuers(&registry_service, &registry_handle.snapshot()).await;
+                tracing::info!(
+                    event = "issuer_registry_reloaded",
+                    "issuer registry reloaded"
+                );
+            }
+        }
+    });
 
     #[cfg(feature = "acme")]
     {
@@ -844,6 +883,24 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     #[cfg(not(feature = "acme"))]
     {
         Ok((state,))
+    }
+}
+
+async fn warn_missing_registry_issuers(
+    service: &crate::domain::service::Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+) {
+    match service.issuers_with_status_lists().await {
+        Ok(owners) => {
+            for issuer in owners {
+                if registry.issuer(&issuer).is_none() {
+                    tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not check status-list owners against issuer registry")
+        }
     }
 }
 

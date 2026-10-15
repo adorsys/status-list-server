@@ -194,6 +194,8 @@ impl LimitsConfig {
 /// JWT validation policy for protected management endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagementAuthConfig {
+    /// Path to the mandatory operator-managed YAML issuer registry.
+    pub issuers_file: String,
     /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
     pub leeway_secs: u64,
     /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
@@ -1681,6 +1683,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.leeway_secs", 60)?
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
+        .set_default("management_auth.issuers_file", "issuers.yaml")?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
