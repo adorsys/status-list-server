@@ -775,11 +775,13 @@ fn rendered_chart_rejects_integer_env_values() {
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("got number, want string"),
+        stderr.contains("got number, want string")
+            || stderr.contains("Expected: string, given: integer"),
         "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
     );
     assert!(
-        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
+        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY")
+            || stderr.contains("statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
         "the schema error must name the offending env key APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: {stderr}"
     );
 }

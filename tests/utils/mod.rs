@@ -118,6 +118,7 @@ fn fixture_state(config: &Config) -> AppState {
     }
 }
 const ISSUER: &str = "conformance-issuer";
+const KEY_ID: &str = "conformance-key";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
@@ -186,7 +187,7 @@ impl TestServer {
             .client
             .post(app.url("/api/v1/credentials"))
             .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256",
+                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
                 "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
                 "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
             }}))
@@ -202,8 +203,11 @@ impl TestServer {
 
     pub(super) fn bearer_token(&self) -> String {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(KEY_ID.to_owned());
+        header.typ = Some("statuslist-management+jwt".to_owned());
         jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
+            &header,
             &json!({"iss": ISSUER, "iat": now, "exp": now + 300}),
             &jsonwebtoken::EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap(),
         )
