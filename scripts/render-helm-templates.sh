@@ -644,7 +644,7 @@ for SVC_PORT in http management admin; do
 done
 # The admin listener serves readiness and metrics: ServiceMonitor must scrape
 # the admin port, and the readiness probe must target it.
-if ! helm template status-list-server "$CHART_DIR" --set serviceMonitor.enabled=true 2>/dev/null | grep -E '^\s+- port: admin\s*$' | grep -A1 -q 'path: /metrics'; then
+if ! helm template status-list-server "$CHART_DIR" --set serviceMonitor.enabled=true 2>/dev/null | grep -A1 -E '^\s+- port: admin\s*$' | grep -q 'path: /metrics'; then
   echo "ERROR: ServiceMonitor must scrape the admin port at /metrics"; exit 1
 fi
 if ! helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -B3 -A2 'path: /health/ready' | grep -q 'port: admin'; then
