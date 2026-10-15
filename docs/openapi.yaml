@@ -166,6 +166,10 @@ paths:
         Returns 200 only when all critical dependencies are reachable;
         otherwise 503. The public response is intentionally generic; detailed
         dependency failures are logged internally.
+
+        ADMIN LISTENER: this endpoint is served on the admin listener
+        (`server.admin`, default :8002), not on the public server above. It is
+        NOT reachable on the public listener.
       security: []
       responses:
         "200":
@@ -191,6 +195,10 @@ paths:
         Returns Prometheus exposition format metrics when the server is started
         with `APP_SERVER__ENABLE_METRICS=true`. Returns a 404 response when
         metrics are disabled.
+
+        ADMIN LISTENER: this endpoint is served on the admin listener
+        (`server.admin`, default :8002), not on the public server above. It is
+        NOT reachable on the public listener.
       security: []
       responses:
         "200":

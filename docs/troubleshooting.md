@@ -600,9 +600,10 @@ material storage reachability, or configured certificate-file availability.
 ```bash
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
-# Replicate the probe against a running pod (or a local instance):
-curl -s -o /dev/null -w '%{http_code}\n' http://<pod-ip>:<port>/health/ready
-curl -s http://<pod-ip>:<port>/health/ready
+# Replicate the probe against a running pod (or a local instance).
+# Readiness is served on the ADMIN listener (default :8002), not the public one.
+curl -s -o /dev/null -w '%{http_code}\n' http://<pod-ip>:8002/health/ready
+curl -s http://<pod-ip>:8002/health/ready
 ```
 
 The detailed failure reasons are logged at `WARN` (`readiness check failed`) rather than

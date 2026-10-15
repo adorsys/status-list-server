@@ -667,6 +667,22 @@ if ! helm template status-list-server "$CHART_DIR" --set statuslist.ingress.mana
     | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' | grep -q 'host: mgmt.example.com'; then
   echo "ERROR: management Ingress must honor a separate hostname"; exit 1
 fi
+# A separate management hostname must issue TLS for ITS OWN hostname (not the
+# public host) and carry an external-dns annotation for DNS.
+MGMT_TLS=$(helm template status-list-server "$CHART_DIR" \
+  --set statuslist.ingress.management.enabled=true \
+  --set statuslist.ingress.management.hostname=mgmt.example.com \
+  --set statuslist.ingress.tls.secretName=my-tls 2>/dev/null \
+  | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}')
+if ! echo "$MGMT_TLS" | grep -q -- '- "mgmt.example.com"'; then
+  echo "ERROR: management Ingress TLS hosts must target the management hostname"; exit 1
+fi
+if echo "$MGMT_TLS" | grep -q -- '- "localhost"'; then
+  echo "ERROR: management Ingress must not reuse the public TLS host"; exit 1
+fi
+if ! echo "$MGMT_TLS" | grep -q 'external-dns.alpha.kubernetes.io/hostname: mgmt.example.com'; then
+  echo "ERROR: management Ingress must emit an external-dns annotation for its separate hostname"; exit 1
+fi
 
 
 # --- Cluster-wide kube-prometheus-stack alignment (issue 460) ---

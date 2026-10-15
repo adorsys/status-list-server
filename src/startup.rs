@@ -106,12 +106,17 @@ impl HttpServer {
         );
         let admin = serve(self.admin.listener, self.admin.router, "admin");
 
+        // Serve all three listeners concurrently. Each `serve` future resolves
+        // after its graceful-shutdown signal (SIGTERM/SIGINT), so on a normal
+        // shutdown all three complete and any one's Ok is returned. If a listener
+        // fails to serve (e.g. an accept error), its Err is propagated so the
+        // process exits non-zero and the orchestrator can restart it, rather than
+        // silently exiting 0 with a dead surface.
         tokio::select! {
-            _ = public => {},
-            _ = management => {},
-            _ = admin => {},
+            result = public => result,
+            result = management => result,
+            result = admin => result,
         }
-        Ok(())
     }
 }
 
@@ -121,20 +126,18 @@ async fn bind_listener(host: &str, port: u16, name: &str) -> color_eyre::Result<
         .wrap_err_with(|| format!("Failed to bind {name} listener to {host}:{port}"))
 }
 
-async fn serve(listener: TcpListener, router: Router, name: &str) {
+async fn serve(listener: TcpListener, router: Router, name: &str) -> color_eyre::Result<()> {
     match listener.local_addr() {
         Ok(addr) => tracing::info!(listener = name, %addr, "listening"),
         Err(_) => tracing::info!(listener = name, "listening"),
     }
-    if let Err(e) = axum::serve(
+    axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    {
-        tracing::error!(listener = name, error = %e, "HTTP server failed");
-    }
+    .map_err(|e| eyre!("HTTP server ({name}) failed: {e}"))
 }
 
 /// Applies the shared HTTP middleware stack (tracing, panic catch, SLI metrics,
@@ -442,17 +445,31 @@ mod tests {
             router.clone().oneshot(request)
         };
 
+        // A realistic status-list id, so the assertions exercise the true
+        // path-parameter namespace rather than a literal placeholder.
+        let list_id = "477121aa-b598-419e-916f-1e74654ff38b";
+        let aggregation_id = "d6c9b1f2-3a4b-4c5d-8e6f-7a8b9c0d1e2f";
+
         // Management + admin routes must 404 on the public listener.
         for (method, uri) in [
-            (Method::PUT, "/api/v1/status-lists/{id}/statuses"),
-            (Method::PATCH, "/api/v1/status-lists/{id}/statuses"),
-            (Method::POST, "/api/v1/status-lists/{id}/allocations"),
-            (Method::POST, "/api/v1/credentials"),
-            (Method::GET, "/api/v1/credentials"),
-            (Method::GET, "/health/ready"),
-            (Method::GET, "/metrics"),
+            (
+                Method::PUT,
+                format!("/api/v1/status-lists/{list_id}/statuses"),
+            ),
+            (
+                Method::PATCH,
+                format!("/api/v1/status-lists/{list_id}/statuses"),
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/status-lists/{list_id}/allocations"),
+            ),
+            (Method::POST, "/api/v1/credentials".to_string()),
+            (Method::GET, "/api/v1/credentials".to_string()),
+            (Method::GET, "/health/ready".to_string()),
+            (Method::GET, "/metrics".to_string()),
         ] {
-            let resp = status(public.clone(), method.clone(), uri).await.unwrap();
+            let resp = status(public.clone(), method.clone(), &uri).await.unwrap();
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
@@ -462,13 +479,19 @@ mod tests {
 
         // Public + admin routes must 404 on the management listener.
         for (method, uri) in [
-            (Method::GET, "/api/v1/status-lists/{id}"),
-            (Method::GET, "/api/v1/aggregation/{id}"),
-            (Method::GET, "/health/live"),
-            (Method::GET, "/health/ready"),
-            (Method::GET, "/metrics"),
+            (
+                Method::GET,
+                format!("/api/v1/status-lists/{list_id}"),
+            ),
+            (
+                Method::GET,
+                format!("/api/v1/aggregation/{aggregation_id}"),
+            ),
+            (Method::GET, "/health/live".to_string()),
+            (Method::GET, "/health/ready".to_string()),
+            (Method::GET, "/metrics".to_string()),
         ] {
-            let resp = status(management.clone(), method.clone(), uri)
+            let resp = status(management.clone(), method.clone(), &uri)
                 .await
                 .unwrap();
             assert_eq!(
@@ -480,12 +503,15 @@ mod tests {
 
         // Public + management routes must 404 on the admin listener.
         for (method, uri) in [
-            (Method::GET, "/api/v1/status-lists/{id}"),
-            (Method::GET, "/api/v1/aggregation/{id}"),
-            (Method::GET, "/health/live"),
-            (Method::GET, "/api/v1/credentials"),
+            (Method::GET, format!("/api/v1/status-lists/{list_id}")),
+            (
+                Method::GET,
+                format!("/api/v1/aggregation/{aggregation_id}"),
+            ),
+            (Method::GET, "/health/live".to_string()),
+            (Method::GET, "/api/v1/credentials".to_string()),
         ] {
-            let resp = status(admin.clone(), method.clone(), uri).await.unwrap();
+            let resp = status(admin.clone(), method.clone(), &uri).await.unwrap();
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,

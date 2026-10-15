@@ -63,7 +63,7 @@ docker compose up --build
 [source,bash]
 ----
 curl -s http://localhost:8000/health/live
-curl -s http://localhost:8000/health/ready
+curl -s http://localhost:8002/health/ready
 curl -s http://localhost:8000/
 ----
 

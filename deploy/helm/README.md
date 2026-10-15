@@ -363,10 +363,13 @@ kubectl rollout status deployment/statuslist-status-list-server-deployment -n st
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 
 curl -s https://<your-host>/health/live
-curl -s https://<your-host>/health/ready
+# Readiness lives on the admin listener and is never exposed via the public
+# Ingress; reach it through the Service's admin port.
+kubectl port-forward svc/<release>-status-list-server-service -n statuslist 8002:8002
+curl -s http://localhost:8002/health/ready
 ```
 
-`/health/ready` reflects dependency health (database reachable, certificate material loadable) and is the readiness gate for a release.
+`/health/ready` (admin listener, port 8002) reflects dependency health (database reachable, certificate material loadable) and is the readiness gate for a release.
 
 For local development with a local cluster, use [`chart/values-local.yaml`](chart/values-local.yaml) and follow the same `helm upgrade --install` flow.
 

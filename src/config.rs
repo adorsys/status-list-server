@@ -397,19 +397,44 @@ fn url_authority_host(domain: &str) -> String {
 }
 
 /// Whether two listener host strings resolve to the same interface: equal
-/// hostnames (case-insensitive), equal IP literals, or one being a loopback
-/// alias of the other. Used to reject ambiguous public/management/admin
+/// hostnames (case-insensitive), equal IP literals, a hostname that resolves
+/// to the same IP, or a wildcard bind (`0.0.0.0` / `::`) covering the other
+/// host's address family. Used to reject ambiguous public/management/admin
 /// bindings at startup.
 fn hosts_resolve_equal(a: &str, b: &str) -> bool {
     if a.eq_ignore_ascii_case(b) {
         return true;
     }
-    let ip_a = a.parse::<std::net::IpAddr>();
-    let ip_b = b.parse::<std::net::IpAddr>();
-    match (ip_a, ip_b) {
-        (Ok(ip_a), Ok(ip_b)) => ip_a == ip_b,
-        _ => false,
+    let ips_a = host_bind_ips(a);
+    let ips_b = host_bind_ips(b);
+    if ips_a.is_empty() || ips_b.is_empty() {
+        return false;
     }
+    let wildcard_a = ips_a.iter().any(|ip| ip.is_unspecified());
+    let wildcard_b = ips_b.iter().any(|ip| ip.is_unspecified());
+    if wildcard_a || wildcard_b {
+        // A wildcard bind (0.0.0.0 / ::) covers every interface of its address
+        // family, so it collides with any other host in the same family.
+        return ips_a.iter().any(|a| {
+            ips_b.iter().any(|b| a.is_ipv4() == b.is_ipv4())
+        });
+    }
+    ips_a.iter().any(|ip_a| ips_b.contains(ip_a))
+}
+
+/// Resolve a listener host string to the set of IP addresses it can bind: an
+/// IP literal yields itself, a hostname is resolved via the system resolver
+/// (e.g. `localhost` -> `127.0.0.1` / `::1`). Unresolvable strings yield no
+/// addresses.
+fn host_bind_ips(host: &str) -> Vec<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    (host, 0u16)
+        .to_socket_addrs()
+        .map(|addrs| addrs.map(|a| a.ip()).collect())
+        .unwrap_or_default()
 }
 
 /// Validates `server.domain`: a bare host name or IP address with no scheme,
@@ -2564,15 +2589,41 @@ mod tests {
             .to_string();
         assert!(err.contains("Duplicate listener"), "{err}");
 
-        // Same port on different hosts is a valid, distinct listener.
+        // Same port on different hosts is a valid, distinct listener (the
+        // wildcard and loopback are in different address families, so binding
+        // 0.0.0.0 and [::1] on the same port does not collide).
         assert!(
             Config::load_from_overrides(&[
                 ("server.host", "0.0.0.0"),
-                ("server.management.host", "127.0.0.1"),
+                ("server.management.host", "::1"),
                 ("server.management.port", "8000"),
             ])
             .is_ok()
         );
+
+        // A wildcard bind (0.0.0.0) covers the loopback of its own family, so
+        // 0.0.0.0 and 127.0.0.1 on the same port must be rejected.
+        let wildcard_loopback = Config::load_from_overrides(&[
+            ("server.host", "0.0.0.0"),
+            ("server.management.host", "127.0.0.1"),
+            ("server.management.port", "8000"),
+        ]);
+        let err = wildcard_loopback
+            .expect_err("a wildcard bind and a loopback bind on the same port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // `localhost` and the loopback literal resolve to the same address, so
+        // they must be rejected on the same port.
+        let localhost_loopback = Config::load_from_overrides(&[
+            ("server.host", "localhost"),
+            ("server.management.host", "127.0.0.1"),
+            ("server.management.port", "8000"),
+        ]);
+        let err = localhost_loopback
+            .expect_err("localhost and 127.0.0.1 on the same port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
     }
 
     #[test]
