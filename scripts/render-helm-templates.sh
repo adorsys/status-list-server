@@ -716,10 +716,10 @@ fi
 # controlled path prefix cannot sneak a write to the management listener.
 MGMT_PATH=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' \
   | grep 'path:')
-if ! echo "$MGMT_PATH" | grep -qE '^\^'; then
+if ! echo "$MGMT_PATH" | grep -qE 'path:.*\^'; then
   echo "ERROR: management Ingress path must start with ^ (anchored)"; exit 1
 fi
-if ! echo "$MGMT_PATH" | grep -qE '\$"$|\$$'; then
+if ! echo "$MGMT_PATH" | grep -qE '\$"?[[:space:]]*$'; then
   echo "ERROR: management Ingress path must end with $ (anchored)"; exit 1
 fi
 
