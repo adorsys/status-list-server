@@ -135,9 +135,9 @@ mod tests {
         .unwrap()
     }
 
-    async fn register(app_state: AppState) -> CredentialsResponse {
+    async fn register(app_state: AppState, issuer: &str) -> CredentialsResponse {
         let credentials = CredentialsRequest {
-            issuer: "test_issuer".into(),
+            issuer: issuer.into(),
             public_key: test_jwk(),
         };
         let response = create_test_router(app_state)
@@ -161,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_credentials_success() {
         let app_state = test_app_state(None).await;
-        let response = register(app_state.clone()).await;
+        let response = register(app_state.clone(), "test_issuer").await;
 
         assert_eq!(
             app_state
@@ -182,7 +182,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        let response = register(app_state).await;
+        let response = register(app_state, "test_issuer").await;
 
         assert_eq!(
             response.aggregation_uri.unwrap(),
@@ -201,7 +201,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        let registered = register(app_state.clone()).await;
+        let registered = register(app_state.clone(), "test_issuer").await;
 
         let Json(registration) =
             get_credential(State(app_state), authenticated_issuer("test_issuer"))
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_credentials_omit_a_withheld_aggregation_uri() {
+    async fn test_credentials_withhold_the_aggregation_uri_per_issuer() {
         let mut app_state = test_app_state(None).await;
         app_state.aggregation_uri = Some(
             "https://statuslist.example.com/api/v1/aggregation"
@@ -221,15 +221,23 @@ mod tests {
                 .unwrap(),
         );
         app_state.aggregation_withheld_from =
-            Arc::new(HashSet::from([Issuer::from("test_issuer")]));
-        let registered = register(app_state.clone()).await;
-        assert_eq!(registered.aggregation_uri, None);
+            Arc::new(HashSet::from([Issuer::from("withheld_issuer")]));
+        let withheld = register(app_state.clone(), "withheld_issuer").await;
+        let other = register(app_state.clone(), "other_issuer").await;
+        assert_eq!(withheld.aggregation_uri, None);
+        assert_eq!(
+            other.aggregation_uri,
+            Some(format!(
+                "https://statuslist.example.com/api/v1/aggregation/{}",
+                other.aggregation_id
+            ))
+        );
 
         let Json(registration) =
-            get_credential(State(app_state), authenticated_issuer("test_issuer"))
+            get_credential(State(app_state), authenticated_issuer("withheld_issuer"))
                 .await
                 .unwrap();
-        assert_eq!(registration.aggregation_id, registered.aggregation_id);
+        assert_eq!(registration.aggregation_id, withheld.aggregation_id);
         assert_eq!(registration.aggregation_uri, None);
     }
 

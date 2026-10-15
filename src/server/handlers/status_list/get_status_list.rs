@@ -628,6 +628,7 @@ mod tests {
     };
     use axum::extract::Json;
     use axum::http::HeaderMap;
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
@@ -1320,6 +1321,33 @@ mod tests {
             .find(|line| line.starts_with("aggregation_uri_omitted_total"))
             .unwrap_or_else(|| panic!("aggregation_uri_omitted not exported:\n{metrics}"));
         assert!(omitted.ends_with(" 1"), "{omitted}");
+    }
+
+    #[test]
+    fn test_token_skips_the_aggregation_id_lookup_for_a_withheld_issuer() {
+        let metrics = metrics_after(async {
+            let mut app_state = test_app_state(None).await;
+            app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+            app_state.aggregation_withheld_from =
+                Arc::new(HashSet::from([Issuer::from("issuer1")]));
+            let service = &app_state.service;
+            app_state.service = Arc::new(crate::domain::service::Service::from_arcs(
+                service.status_list_repo.clone(),
+                Arc::new(UnavailableCredentials),
+                service.status_list_cache.clone(),
+                service.snapshot_repo.clone(),
+                service.cert_provider.clone(),
+            ));
+
+            assert_eq!(
+                served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+                None
+            );
+        });
+        let omitted = metrics
+            .lines()
+            .find(|line| line.starts_with("aggregation_uri_omitted_total"));
+        assert!(omitted.is_none_or(|line| line.ends_with(" 0")), "{metrics}");
     }
 
     #[tokio::test]

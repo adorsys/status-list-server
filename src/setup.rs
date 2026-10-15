@@ -404,9 +404,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
-    // Why tokens must leave out `aggregation_uri`, when they must.
-    let aggregation_withheld: Option<AggregationWithheld>;
     let aggregation_withheld_from: HashSet<Issuer>;
+    // Why all tokens must leave out `aggregation_uri`, when they must.
+    let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -483,27 +483,31 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     false
                 }
             };
-            if list_quota_enforced {
+            aggregation_withheld =
+                (!list_quota_enforced).then(|| "the list quota is not enforced".to_string());
+            aggregation_withheld_from = if list_quota_enforced {
                 let over = list_quota::issuers_over(&db, AGGREGATION_DEFAULT_LIMIT as u64)
                     .await
                     .wrap_err("Failed to count each issuer's status lists")?;
-                aggregation_withheld = (!over.is_empty()).then(|| {
-                    AggregationWithheld::FromIssuers(format!(
-                        "{} issuer(s) that have more status lists than one aggregation page \
+                if !over.is_empty()
+                    && config
+                        .server
+                        .aggregation_uri(config.telemetry.environment)?
+                        .is_some()
+                {
+                    tracing::warn!(
+                        "server.aggregation_uri is not advertised in the tokens of {} issuer(s) \
+                         that have more status lists than one aggregation page \
                          ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
                          restart:{}",
                         over.len(),
                         list_quota::name_issuers(&over)
-                    ))
-                });
-                aggregation_withheld_from =
-                    over.into_iter().map(|count| Issuer(count.issuer)).collect();
+                    );
+                }
+                over.into_iter().map(|count| Issuer(count.issuer)).collect()
             } else {
-                aggregation_withheld = Some(AggregationWithheld::FromAll(
-                    "the list quota is not enforced".to_string(),
-                ));
-                aggregation_withheld_from = HashSet::new();
-            }
+                HashSet::new()
+            };
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
@@ -830,7 +834,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
-        aggregation_uri: advertised_aggregation_uri(config, aggregation_withheld)?,
+        aggregation_uri: advertised_aggregation_uri(config, aggregation_withheld.as_deref())?,
         aggregation_withheld_from: Arc::new(aggregation_withheld_from),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
@@ -856,37 +860,21 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
-/// Why tokens leave out `aggregation_uri`.
-enum AggregationWithheld {
-    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-    FromAll(String),
-    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-    FromIssuers(String),
-}
-
 /// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
 /// page of an issuer's aggregation as complete, so tokens leave the claim out,
 /// for the reason in `withheld`, while one might not fit in it.
 fn advertised_aggregation_uri(
     config: &AppConfig,
-    withheld: Option<AggregationWithheld>,
+    withheld: Option<&str>,
 ) -> EyeResult<Option<url::Url>> {
     let uri = config
         .server
         .aggregation_uri(config.telemetry.environment)?;
-    match (uri, withheld) {
-        #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-        (Some(_), Some(AggregationWithheld::FromAll(reason))) => {
-            tracing::warn!("server.aggregation_uri is not advertised in tokens: {reason}");
-            Ok(None)
-        }
-        #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-        (Some(uri), Some(AggregationWithheld::FromIssuers(issuers))) => {
-            tracing::warn!("server.aggregation_uri is not advertised in the tokens of {issuers}");
-            Ok(Some(uri))
-        }
-        (uri, _) => Ok(uri),
+    if let (Some(_), Some(reason)) = (&uri, withheld) {
+        tracing::warn!("server.aggregation_uri is not advertised in tokens: {reason}");
+        return Ok(None);
     }
+    Ok(uri)
 }
 
 pub async fn setup_snapshot_cleanup_scheduler(
@@ -1300,7 +1288,6 @@ mod tests {
 mod general_tests {
     use super::*;
 
-    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     #[test]
     fn aggregation_uri_is_withheld_for_a_reason() {
         let config = AppConfig::load_from_overrides(&[(
@@ -1310,22 +1297,8 @@ mod general_tests {
         .unwrap();
         assert!(advertised_aggregation_uri(&config, None).unwrap().is_some());
         assert_eq!(
-            advertised_aggregation_uri(
-                &config,
-                Some(AggregationWithheld::FromAll(
-                    "the list quota is not enforced".to_string()
-                ))
-            )
-            .unwrap(),
+            advertised_aggregation_uri(&config, Some("the list quota is not enforced")).unwrap(),
             None
-        );
-        assert!(
-            advertised_aggregation_uri(
-                &config,
-                Some(AggregationWithheld::FromIssuers("1 issuer(s)".to_string()))
-            )
-            .unwrap()
-            .is_some()
         );
     }
 
@@ -1503,7 +1476,9 @@ mod general_tests {
                 publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
             }
             let issuer2 = register_issuer(&state.service, "issuer2").await;
-            publish_list(&state.service, "issuer2", &uuid::Uuid::new_v4().to_string()).await;
+            for _ in 0..AGGREGATION_DEFAULT_LIMIT {
+                publish_list(&state.service, "issuer2", &uuid::Uuid::new_v4().to_string()).await;
+            }
             let db = connect_database_pool(&config).await.expect("connect");
             list_quota::enable(&db, 2 * AGGREGATION_DEFAULT_LIMIT as u64)
                 .await
