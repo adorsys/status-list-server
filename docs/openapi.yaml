@@ -1135,9 +1135,9 @@ components:
           description: |
             The issuing issuer's Status List Aggregation URI (draft-21 §4.2,
             §4.3). Present when the server has `server.aggregation_uri`
-            configured, the list quota is enforced and no issuer has more
-            status lists than one aggregation page, unless looking up the
-            issuer's aggregation ID failed.
+            configured, the list quota is enforced and the issuer had no more
+            status lists than one aggregation page when the server started,
+            unless looking up the issuer's aggregation ID failed.
             Tokens served before issuer scoping carried the unscoped URI, which
             still resolves.
           example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"

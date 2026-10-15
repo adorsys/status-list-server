@@ -62,8 +62,9 @@ pub async fn credential_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let public_key_bytes = serde_json::to_vec(&payload.public_key)
         .map_err(|e| ApiError::bad_request("invalid_public_jwk", e.to_string()))?;
+    let issuer = Issuer(payload.issuer);
     let credential = Credential {
-        issuer: Issuer(payload.issuer),
+        issuer: issuer.clone(),
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
     let aggregation_id = state.service.publish_credential(credential).await?;
@@ -72,7 +73,7 @@ pub async fn credential_handler(
         Json(CredentialsResponse {
             status: "Credentials stored successfully".to_string(),
             aggregation_id,
-            aggregation_uri: state.aggregation_uri_for(aggregation_id),
+            aggregation_uri: state.aggregation_uri_for(&issuer, aggregation_id),
         }),
     )
         .into_response())
@@ -92,10 +93,11 @@ pub async fn get_credential(
         .find_aggregation_id(&issuer)
         .await?
         .ok_or_else(|| ApiError::not_found("issuer_not_found", "Issuer is not registered"))?;
+    let aggregation_uri = state.aggregation_uri_for(&issuer, aggregation_id);
     Ok(Json(RegistrationResponse {
         issuer: issuer.0,
         aggregation_id,
-        aggregation_uri: state.aggregation_uri_for(aggregation_id),
+        aggregation_uri,
     }))
 }
 
@@ -111,6 +113,7 @@ mod tests {
         routing::post,
     };
     use jsonwebtoken::jwk::Jwk;
+    use std::{collections::HashSet, sync::Arc};
     use tower::ServiceExt;
 
     fn create_test_router(app_state: AppState) -> Router {
@@ -207,6 +210,27 @@ mod tests {
         assert_eq!(registration.issuer, "test_issuer");
         assert_eq!(registration.aggregation_id, registered.aggregation_id);
         assert_eq!(registration.aggregation_uri, registered.aggregation_uri);
+    }
+
+    #[tokio::test]
+    async fn test_credentials_omit_a_withheld_aggregation_uri() {
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = Some(
+            "https://statuslist.example.com/api/v1/aggregation"
+                .parse()
+                .unwrap(),
+        );
+        app_state.aggregation_withheld_from =
+            Arc::new(HashSet::from([Issuer::from("test_issuer")]));
+        let registered = register(app_state.clone()).await;
+        assert_eq!(registered.aggregation_uri, None);
+
+        let Json(registration) =
+            get_credential(State(app_state), authenticated_issuer("test_issuer"))
+                .await
+                .unwrap();
+        assert_eq!(registration.aggregation_id, registered.aggregation_id);
+        assert_eq!(registration.aggregation_uri, None);
     }
 
     #[tokio::test]

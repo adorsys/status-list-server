@@ -73,7 +73,7 @@ pub(crate) async fn issuer_aggregation_uri(
 ) -> Option<String> {
     state.aggregation_uri.as_ref()?;
     match state.service.find_aggregation_id(issuer).await {
-        Ok(aggregation_id) => state.aggregation_uri_for(aggregation_id?),
+        Ok(aggregation_id) => state.aggregation_uri_for(issuer, aggregation_id?),
         Err(error) => {
             tracing::debug!(
                 ?error,
