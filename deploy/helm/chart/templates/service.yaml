@@ -17,6 +17,9 @@ spec:
     port: {{ .Values.statuslist.service.port }}
     targetPort: {{ .Values.statuslist.service.targetPort }}
     protocol: TCP
+    {{- if and (eq .Values.statuslist.service.type "NodePort") .Values.statuslist.service.nodePort }}
+    nodePort: {{ .Values.statuslist.service.nodePort }}
+    {{- end }}
   - name: management
     port: {{ .Values.statuslist.service.managementPort }}
     targetPort: {{ .Values.statuslist.service.managementTargetPort }}
@@ -25,9 +28,6 @@ spec:
     port: {{ .Values.statuslist.service.adminPort }}
     targetPort: {{ .Values.statuslist.service.adminTargetPort }}
     protocol: TCP
-    {{- if and (eq .Values.statuslist.service.type "NodePort") .Values.statuslist.service.nodePort }}
-    nodePort: {{ .Values.statuslist.service.nodePort }}
-    {{- end }}
   selector:
     {{- include "status-list-server-chart.selectorLabels" . | nindent 4 }}
 {{- end }}

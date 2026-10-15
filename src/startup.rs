@@ -106,14 +106,9 @@ impl HttpServer {
         );
         let admin = serve(self.admin.listener, self.admin.router, "admin");
 
-        // Serve all three listeners concurrently. Each `serve` future resolves
-        // after its graceful-shutdown signal (SIGTERM/SIGINT), so on a normal
-        // shutdown all three complete and any one's Ok is returned.
-        tokio::select! {
-            result = public => result,
-            result = management => result,
-            result = admin => result,
-        }
+        // Serve all three listeners concurrently and wait for *all* of them to
+        // finish draining before returning.
+        tokio::try_join!(public, management, admin).map(|_| ())
     }
 
     /// The bound address of the public listener (the status-list read surface).

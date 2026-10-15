@@ -82,6 +82,26 @@ servers:
       host:
         default: localhost:8000
         description: Host name and port of the public server.
+  - url: https://{management_host}
+    description: >-
+      Management listener (authenticated issuer writes): PUT/PATCH
+      /api/v1/status-lists/{list_id}/statuses,
+      POST /api/v1/status-lists/{list_id}/allocations,
+      GET /api/v1/credentials (authenticated), and
+      POST /api/v1/credentials (self-registration, deprecated).
+      Default port 8001. Never exposed via the public Ingress.
+    variables:
+      management_host:
+        default: localhost:8001
+        description: Host name and port of the management listener.
+  - url: https://{admin_host}
+    description: >-
+      Admin listener: /health/ready and /metrics.
+      Default port 8002. Never exposed via the public Ingress.
+    variables:
+      admin_host:
+        default: localhost:8002
+        description: Host name and port of the admin listener.
 
 security:
   - BearerAuth: []
@@ -168,6 +188,13 @@ paths:
         (`server.admin`, default :8002), not on the public server above. It is
         NOT reachable on the public listener.
       security: []
+      servers:
+        - url: https://{admin_host}
+          description: Admin listener (/health/ready and /metrics, default :8002).
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       responses:
         "200":
           description: All critical dependencies are reachable
@@ -197,6 +224,13 @@ paths:
         (`server.admin`, default :8002), not on the public server above. It is
         NOT reachable on the public listener.
       security: []
+      servers:
+        - url: https://{admin_host}
+          description: Admin listener (/health/ready and /metrics, default :8002).
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       responses:
         "200":
           description: Prometheus metrics
@@ -222,6 +256,15 @@ paths:
         Returns the aggregation ID and URI of the issuer the Bearer token
         belongs to. Issuers registered before aggregation IDs existed never got
         theirs in the registration response, and get them here.
+
+        MANAGEMENT LISTENER: served on the management listener (default :8001).
+      servers:
+        - url: https://{management_host}
+          description: Management listener (authenticated issuer writes, default :8001).
+          variables:
+            management_host:
+              default: localhost:8001
+              description: Host name and port of the management listener.
       responses:
         "200":
           description: The issuer's registration.
@@ -247,7 +290,16 @@ paths:
 
         **Deprecated.** Issuers are provisioned by the server operator. Do not
         build new integrations on self-registration.
+
+        MANAGEMENT LISTENER: served on the management listener (default :8001).
       security: []
+      servers:
+        - url: https://{management_host}
+          description: Management listener (authenticated issuer writes, default :8001).
+          variables:
+            management_host:
+              default: localhost:8001
+              description: Host name and port of the management listener.
       requestBody:
         required: true
         content:
@@ -428,6 +480,13 @@ paths:
     put:
       operationId: publishStatusList
       summary: Publish a new status list
+      servers:
+        - url: https://{management_host}
+          description: Management listener (authenticated issuer writes, default :8001).
+          variables:
+            management_host:
+              default: localhost:8001
+              description: Host name and port of the management listener.
       parameters:
         - name: list_id
           in: path
@@ -519,6 +578,13 @@ paths:
     patch:
       operationId: updateStatusList
       summary: Update an existing status list
+      servers:
+        - url: https://{management_host}
+          description: Management listener (authenticated issuer writes, default :8001).
+          variables:
+            management_host:
+              default: localhost:8001
+              description: Host name and port of the management listener.
       description: |
         Updates the status entries of an existing status list. The JWT Bearer
         token must belong to the issuer that originally published the list.
@@ -573,6 +639,13 @@ paths:
     post:
       operationId: allocateStatusListIndices
       summary: Allocate unused status-list indices
+      servers:
+        - url: https://{management_host}
+          description: Management listener (authenticated issuer writes, default :8001).
+          variables:
+            management_host:
+              default: localhost:8001
+              description: Host name and port of the management listener.
       description: |
         Reserves unused indices for the authenticated issuer's fixed-size
         status list and returns them in ascending order. Each reserved

@@ -167,13 +167,6 @@ statuslist:
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # Management listener: authenticated issuer writes (statuses, allocations,
-    # credentials). Separate port keeps it off the public ingress.
-    APP_SERVER__MANAGEMENT__HOST: "0.0.0.0"
-    APP_SERVER__MANAGEMENT__PORT: "8001"
-    # Admin listener: /health/ready and /metrics. Never exposed via ingress.
-    APP_SERVER__ADMIN__HOST: "0.0.0.0"
-    APP_SERVER__ADMIN__PORT: "8002"
     # Service document links (GET /). Defaults to the repository URL.
     # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
     # APP_SERVER__LINKS__PORTAL: "https://statuslist.example.com"
