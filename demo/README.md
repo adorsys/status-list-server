@@ -6,6 +6,11 @@ and a live server. The setup works on macOS, Linux, and Windows.
 
 ## Catalog of workflow scripts
 
+Set `MANAGEMENT_AUDIENCE` to an audience accepted by the target server; the
+local default is `status-list-server-management`. Tokens use the required
+management type, registered key ID, and a five-minute lifetime. The RSA example
+uses PS256.
+
 You'll find the following scenarios in the `./workflows` directory:
 
 - [A Token Issuer maintains a Token Status List at the Status List Server](./workflows/01-an-issuer-maintains-a-status-list.py)

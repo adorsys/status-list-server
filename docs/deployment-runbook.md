@@ -436,15 +436,16 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the two versions below. Rolling back to a release older than the list
+adds the three versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
 schema changes stay, which the previous release ignores, and so do the
 aggregation IDs.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
+- `m20261014_000001_credentials_key_id`
 
-Upgrading again re-runs both migrations, which find their changes already made.
+Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
@@ -663,6 +664,164 @@ here; a test fails until it does.
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
+| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
+
+### Preparing existing management credentials
+
+Helm deployments must explicitly set
+`statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES` to an audience unique to that
+deployment (for example, `https://statuslist.prod.example.com/api/v1`). Give
+staging a different value, even if both environments register the same issuer
+key. Production chart rendering fails if the audience is empty. Issuers must
+include that configured value in their management tokens' `aud` claim.
+
+The release-tag deployment uses `values-aws.yaml` followed by
+`values-production.yaml`. Its management audience is
+`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
+deployment must put this exact value in `aud` (as a string or an array member).
+Deployments reusing the production overlay for another environment or hostname
+must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
+the production value.
+
+Before upgrading, back up the database and inventory existing credentials with
+the read-only queries below. Run them before the new migration: they use only
+the existing `issuer` and `public_key` columns. `duplicate_kid_count > 1` blocks
+the unique index. Absent/null IDs on parseable public JWKs are generated during
+migration; issuers must use those generated IDs in subsequent JWTs. Empty,
+overlong, or malformed IDs, missing/unsupported algorithms, and unparsable keys
+need operator repair before they can authenticate after upgrade.
+
+```sql
+-- PostgreSQL
+WITH keys AS (
+  SELECT issuer, public_key ->> 'kid' AS kid,
+         public_key ->> 'alg' AS alg,
+         jsonb_typeof(public_key::jsonb -> 'kid') AS kid_type,
+         jsonb_typeof(public_key::jsonb -> 'alg') AS alg_type,
+         public_key ->> 'kty' AS kty, public_key ->> 'crv' AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM keys
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR length(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'string' OR alg_type <> 'string'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+```
+
+```sql
+-- MySQL 8+
+SET @management_saved_collation = @@session.collation_connection;
+SET @management_kid_collation = COALESCE(
+  (SELECT COLLATION_NAME FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'credentials' AND COLUMN_NAME = 'key_id'),
+  (SELECT TABLE_COLLATION FROM information_schema.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'credentials')
+);
+SET SESSION collation_connection = @management_kid_collation;
+WITH key_values AS (
+  SELECT issuer, CAST(JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) AS CHAR) AS kid,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.alg')) AS alg,
+         JSON_TYPE(JSON_EXTRACT(public_key, '$.kid')) AS kid_type,
+         JSON_TYPE(JSON_EXTRACT(public_key, '$.alg')) AS alg_type,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kty')) AS kty,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.crv')) AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM key_values
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR CHAR_LENGTH(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'STRING' OR alg_type <> 'STRING'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+SET SESSION collation_connection = @management_saved_collation;
+```
+
+```sql
+-- SQLite
+WITH keys AS (
+  SELECT issuer, json_extract(public_key, '$.kid') AS kid,
+         json_extract(public_key, '$.alg') AS alg,
+         json_type(public_key, '$.kid') AS kid_type,
+         json_type(public_key, '$.alg') AS alg_type,
+         json_extract(public_key, '$.kty') AS kty,
+         json_extract(public_key, '$.crv') AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM keys
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR length(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'text' OR alg_type <> 'text'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+```
+
+Run the entire MySQL block in one session. It temporarily uses the `key_id`
+column's collation, or the table's default before that column exists, for the
+`kid` cast and comparisons. This catches IDs such as `Key-1` and `key-1` that
+would collide under a case-insensitive unique index. The final statement
+restores the session's original collation; no stored data is changed.
+
+These queries flag metadata incompatibilities; also inspect the complete public
+JWK for private members, invalid key material, an encryption-only `use`, and RSA
+moduli below 2048 bits. Do not copy private key material into the database.
+
+Coordinate repairs with each issuer before enabling the new verifier:
+
+1. Agree on the exact supported signing algorithm. The migration preserves
+   every supplied ID. For an absent/null `kid`, it computes the base64url-encoded
+   RFC 7638 SHA-256 public JWK thumbprint, without padding, and writes it into
+   both `public_key.kid` and `key_id` in one statement. Inspect generated IDs
+   after migration with `SELECT issuer, key_id FROM credentials` and communicate
+   them to issuers. Check for collisions beforehand: identical public keys
+   produce identical thumbprints, which can also clash with a supplied ID.
+   Before writing generated IDs, the migration checks for collisions between
+   generated thumbprints and against existing IDs. It stops with an error naming
+   the affected issuers, so operators can repair those registrations before
+   retrying. The unique constraint remains the final safeguard; the migration
+   never silently assigns a different ID.
+2. Add the agreed `kid` and `alg` to the stored public JWK. Do not infer an RSA
+   signing algorithm from key type alone or silently relabel an existing RS256
+   key as PS256. The issuer must explicitly switch its signer to PS256 or supply
+   another supported public key. Preserve the credential's issuer, aggregation
+   ID, list count, and associated lists.
+3. Before migration, update `public_key`; the migration copies its `kid` into
+   `key_id`, generating a thumbprint only when the ID is absent/null. It does not
+   infer or replace `alg`, and does not generate IDs for symmetric keys, keys
+   containing private members, or keys it cannot parse. If the migration has
+   already run, stop management writes and update
+   **both columns in one transaction**. Use bound parameters with the database
+   client: `UPDATE credentials SET public_key = :public_jwk, key_id = :kid
+   WHERE issuer = :issuer`. Cast the JSON parameter as required by the driver.
+   Do not delete and re-register the issuer to work around a 409.
+4. Rerun the inventory query. After migration, verify `key_id` equals the
+   JWK's `kid`, then have each issuer authenticate using its agreed algorithm,
+   `typ: statuslist-management+jwt`, matching `kid`, configured audience, and
+   a lifetime within the configured maximum (300 seconds by default).
+
+There is no public credential-update endpoint in this release. An operator must
+perform these repairs; re-registering an existing issuer returns 409. Plan a
+coordinated cutover if old and new servers overlap, because their accepted token
+contracts differ.
+
+This release does not change the format of IDs already supplied by issuers.
+The onboarding design in [#369](https://github.com/adorsys/status-list-server/issues/369)
+and [#373](https://github.com/adorsys/status-list-server/issues/373) must support
+several independently managed keys per issuer while preserving existing `kid`
+values. Whether newly onboarded keys receive assigned IDs or thumbprint IDs is
+a decision for that work, not a reason to rename existing keys again.
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

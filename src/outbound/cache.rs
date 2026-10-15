@@ -229,6 +229,10 @@ impl CredentialRepo for CachingCredentialRepo {
         self.inner.find(issuer).await
     }
 
+    async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError> {
+        self.inner.find_by_kid(kid).await
+    }
+
     async fn insert(
         &self,
         credential: Credential,
@@ -613,6 +617,10 @@ mod tests {
     #[async_trait]
     impl CredentialRepo for OneIssuer {
         async fn find(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            Ok(None)
+        }
+
+        async fn find_by_kid(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
             Ok(None)
         }
 

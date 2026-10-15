@@ -231,17 +231,6 @@ paths:
                 $ref: "#/components/schemas/RegistrationResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "404":
-          description: |
-            The issuer's credential was removed after the token was checked
-            (`issuer_not_found`).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error: "issuer_not_found"
-                error_description: "Issuer is not registered"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -870,26 +859,17 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        Signed JWT Bearer token. The token must be signed with the private key
-        corresponding to the public key registered for the issuer. The payload
-        must contain:
+        Signed JWT for management requests. Require `typ:
+        statuslist-management+jwt`, a registered `kid`, and `alg` in
+        `{ES256, ES384, EdDSA, PS256}`, matching the registered public JWK.
+        Claims `iss`, `iat`, and `exp` are required; `nbf` is checked when
+        present. Production requires `aud` to match `management_auth.audiences`.
+        Keys supplied in JWT headers are never trusted, and `crit` is rejected.
+        Tokens exceeding the configured lifetime are rejected.
 
-        - `iss`: the registered issuer identifier
-        - `iat`: issued-at timestamp
-        - `exp`: expiration timestamp
-
-        The optional `nbf` claim is honored when present. When
-        `management_auth.audiences` is configured, the token must contain an
-        `aud` claim matching one of the configured values. When
-        `management_auth.audiences` is empty, `aud` is not validated.
-
-        The server validates the signature using the registered JWK, verifies
-        that the `iss` claim matches the registered issuer, rejects future
-        `iat`/`nbf` values outside the configured leeway, and rejects tokens
-        whose lifetime (`exp - iat`) exceeds the configured maximum.
-
-        Mutual TLS (mTLS) for issuer authentication is not implemented in the
-        current release; this security scheme may be added in a future version.
+        Missing credentials return `401 missing_token` with `WWW-Authenticate:
+        Bearer`; invalid credentials return identical `401 invalid_token`
+        responses with `WWW-Authenticate: Bearer error="invalid_token"`.
 
   schemas:
     CredentialsRequest:
@@ -955,9 +935,28 @@ components:
       description: |
         JSON Web Key representing the issuer's public key. The exact fields
         depend on the key type (e.g., `kty`, `crv`, `x`, `y` for EC keys).
+        Only public signing keys are accepted; symmetric keys and private key
+        members are rejected. `alg` must match the key type and curve.
+        RSA moduli must have 2048 to 8192 bits. If `use` is present it must be `sig`.
       required:
         - kty
+        - kid
+        - alg
       properties:
+        kid:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: |
+            Management key identifier, unique across all registered issuers.
+            Registering a key ID already used by another issuer returns
+            409 Conflict (`credentials_already_exist`).
+          example: "issuer-key-1"
+        alg:
+          type: string
+          enum: [ES256, ES384, EdDSA, PS256]
+          description: Signing algorithm; EdDSA requires Ed25519.
+          example: "ES256"
         kty:
           type: string
           description: Key type.
@@ -977,6 +976,8 @@ components:
       example:
         kty: "EC"
         crv: "P-256"
+        kid: "issuer-key-1"
+        alg: "ES256"
         x: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
         y: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
 
@@ -1277,11 +1278,8 @@ components:
             - list_quota_exceeded
             - invalid_aggregation_id
             # 401 — emitted by the authentication middleware
-            - invalid_auth_header
+            - missing_token
             - invalid_token
-            - jwt_error
-            - unsupported_algorithm
-            - issuer_not_found
             # 403
             - issuer_mismatch
             # 404
@@ -1419,13 +1417,18 @@ components:
 
     Unauthorized:
       description: Missing or invalid authentication token
+      headers:
+        WWW-Authenticate:
+          description: '`Bearer` for a missing token, or `Bearer error="invalid_token"` for an invalid token.'
+          schema:
+            type: string
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: "invalid_auth_header"
-            error_description: "Missing or invalid Authorization header"
+            error: "invalid_token"
+            error_description: "Invalid authentication token"
 
     Forbidden:
       description: Insufficient permissions to access the resource
@@ -1524,8 +1527,8 @@ components:
       description: |
         The credential registration was rejected. Read the `error` field.
 
-        `credentials_already_exist` — this issuer already has credentials
-        registered. **Retrying will never succeed.**
+        `credentials_already_exist` — this issuer or key ID is already
+        registered. **Retrying the identical registration will never succeed.**
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -1546,10 +1549,10 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           examples:
             alreadyExists:
-              summary: This issuer is already registered (do not retry)
+              summary: This issuer or key ID is already registered (do not retry)
               value:
                 error: "credentials_already_exist"
-                error_description: "Credentials already exist for this issuer"
+                error_description: "Credentials already exist for this issuer or key ID"
             writeContention:
               summary: Rolled back by a storage lock race (retry unchanged)
               value:
