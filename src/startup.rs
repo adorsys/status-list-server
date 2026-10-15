@@ -479,14 +479,8 @@ mod tests {
 
         // Public + admin routes must 404 on the management listener.
         for (method, uri) in [
-            (
-                Method::GET,
-                format!("/api/v1/status-lists/{list_id}"),
-            ),
-            (
-                Method::GET,
-                format!("/api/v1/aggregation/{aggregation_id}"),
-            ),
+            (Method::GET, format!("/api/v1/status-lists/{list_id}")),
+            (Method::GET, format!("/api/v1/aggregation/{aggregation_id}")),
             (Method::GET, "/health/live".to_string()),
             (Method::GET, "/health/ready".to_string()),
             (Method::GET, "/metrics".to_string()),
@@ -504,10 +498,7 @@ mod tests {
         // Public + management routes must 404 on the admin listener.
         for (method, uri) in [
             (Method::GET, format!("/api/v1/status-lists/{list_id}")),
-            (
-                Method::GET,
-                format!("/api/v1/aggregation/{aggregation_id}"),
-            ),
+            (Method::GET, format!("/api/v1/aggregation/{aggregation_id}")),
             (Method::GET, "/health/live".to_string()),
             (Method::GET, "/api/v1/credentials".to_string()),
         ] {

@@ -127,7 +127,6 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 - **Management** (`server.management.host:server.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
 - **Admin** (`server.admin.host:server.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
-
 ### Data Flow
 
 The data flow in the Status List Server is as follows:

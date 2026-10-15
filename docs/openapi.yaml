@@ -76,10 +76,7 @@ info:
 servers:
   - url: https://{host}
     description: >-
-      Status List Server public listener (status-list reads, aggregation, liveness,
-      and the root service document). Management and admin are separate listeners:
-      management (authenticated issuer writes, /api/v1/credentials) on :8001 and
-      admin (/health/ready, /metrics) on :8002.
+      Status List Server public listener (status-list reads, aggregation, liveness, and the root service document). Management and admin are separate listeners: management (authenticated issuer writes, /api/v1/credentials) on :8001 and admin (/health/ready, /metrics) on :8002.
     variables:
       host:
         default: localhost:8000
@@ -94,8 +91,7 @@ paths:
       operationId: serviceDocument
       summary: Service document
       description: >-
-        Returns a minimal application/json service document naming the service and
-        its documentation (and portal when configured). No version and no HTML.
+        Returns a minimal application/json service document naming the service and its documentation (and portal when configured). No version and no HTML.
       security: []
       responses:
         "200":

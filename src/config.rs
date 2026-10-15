@@ -415,9 +415,9 @@ fn hosts_resolve_equal(a: &str, b: &str) -> bool {
     if wildcard_a || wildcard_b {
         // A wildcard bind (0.0.0.0 / ::) covers every interface of its address
         // family, so it collides with any other host in the same family.
-        return ips_a.iter().any(|a| {
-            ips_b.iter().any(|b| a.is_ipv4() == b.is_ipv4())
-        });
+        return ips_a
+            .iter()
+            .any(|a| ips_b.iter().any(|b| a.is_ipv4() == b.is_ipv4()));
     }
     ips_a.iter().any(|ip_a| ips_b.contains(ip_a))
 }
