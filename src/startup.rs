@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
+    Extension, Router,
     body::Body,
     extract::{DefaultBodyLimit, MatchedPath},
     http::Request,
@@ -28,7 +28,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::config::{Config, PUBLIC_API_PATH_PREFIX};
+use crate::config::{API_V1_PREFIX, Config};
 
 use crate::server::handlers::{
     allocate_indices_route, credential_handler, get_aggregation, get_credential,
@@ -37,9 +37,17 @@ use crate::server::handlers::{
 use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
 
+/// A typed request extension carrying the name of the TCP listener that
+/// accepted the connection.
+#[derive(Clone)]
+struct ListenerName(&'static str);
+
 /// A bound TCP listener paired with the router that owns its routes.
 struct ListenerServer {
     listener: TcpListener,
+    /// The address the listener is bound to, captured at bind time to avoid
+    /// `expect`-ing on `local_addr()` after the listener may have been moved.
+    local_addr: SocketAddr,
     router: Router,
 }
 
@@ -58,17 +66,38 @@ impl HttpServer {
         let (strict_governor, issuer_governor, permissive_governor) =
             build_governor_configs(&config.rate_limit)?;
 
-        let public_router = with_common_layers(public_routes(permissive_governor), config)
-            .with_state(state.clone());
-
-        let management_router = with_common_layers(
-            management_routes(state.clone(), issuer_governor, strict_governor),
+        let public_router = with_common_layers(
+            with_listener_name(
+                public_routes(permissive_governor)
+                    // CORS is applied only to the public router: admin and management
+                    // have no browser clients, and a dev machine should not let any
+                    // web page read localhost:8002/metrics.
+                    .layer(
+                        CorsLayer::new()
+                            .allow_methods([Method::GET, Method::OPTIONS])
+                            .allow_origin(Any)
+                            .allow_headers(Any),
+                    ),
+                "public",
+            ),
             config,
         )
         .with_state(state.clone());
 
-        let admin_router =
-            with_common_layers(admin_routes(config, prometheus_registry), config).with_state(state);
+        let management_router = with_common_layers(
+            with_listener_name(
+                management_routes(state.clone(), issuer_governor, strict_governor),
+                "management",
+            ),
+            config,
+        )
+        .with_state(state.clone());
+
+        let admin_router = with_common_layers(
+            with_listener_name(admin_routes(config, prometheus_registry), "admin"),
+            config,
+        )
+        .with_state(state);
 
         let public_listener =
             bind_listener(&config.server.host, config.server.port, "public").await?;
@@ -81,17 +110,30 @@ impl HttpServer {
         let admin_listener =
             bind_listener(&config.server.admin.host, config.server.admin.port, "admin").await?;
 
+        let public_addr = public_listener
+            .local_addr()
+            .wrap_err("failed to read public listener address")?;
+        let management_addr = management_listener
+            .local_addr()
+            .wrap_err("failed to read management listener address")?;
+        let admin_addr = admin_listener
+            .local_addr()
+            .wrap_err("failed to read admin listener address")?;
+
         Ok(Self {
             public: ListenerServer {
                 listener: public_listener,
+                local_addr: public_addr,
                 router: public_router,
             },
             management: ListenerServer {
                 listener: management_listener,
+                local_addr: management_addr,
                 router: management_router,
             },
             admin: ListenerServer {
                 listener: admin_listener,
+                local_addr: admin_addr,
                 router: admin_router,
             },
         })
@@ -111,28 +153,9 @@ impl HttpServer {
         tokio::try_join!(public, management, admin).map(|_| ())
     }
 
-    /// The bound address of the public listener (the status-list read surface).
-    pub fn public_addr(&self) -> SocketAddr {
-        self.public
-            .listener
-            .local_addr()
-            .expect("public listener bound")
-    }
-
     /// The bound address of the management listener (authenticated issuer writes).
     pub fn management_addr(&self) -> SocketAddr {
-        self.management
-            .listener
-            .local_addr()
-            .expect("management listener bound")
-    }
-
-    /// The bound address of the admin listener (readiness and metrics).
-    pub fn admin_addr(&self) -> SocketAddr {
-        self.admin
-            .listener
-            .local_addr()
-            .expect("admin listener bound")
+        self.management.local_addr
     }
 }
 
@@ -157,19 +180,10 @@ async fn serve(listener: TcpListener, router: Router, name: &str) -> color_eyre:
 }
 
 /// Applies the shared HTTP middleware stack (tracing, panic catch, SLI metrics,
-/// CORS, body limits) to every listener's router.
+/// body limits) to every listener's router. CORS is intentionally NOT included
+/// here: it is applied only to the public router (see `HttpServer::new`), since
+/// admin and management listeners have no browser clients.
 fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppState> {
-    let cors = CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_origin(Any)
-        .allow_headers(Any);
-
     router
         .layer(
             TraceLayer::new_for_http()
@@ -177,7 +191,6 @@ fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppSt
         )
         .layer(CatchPanicLayer::new())
         .layer(middleware::from_fn(track_http_metrics))
-        .layer(cors)
         .layer(RequestBodyLimitLayer::new(
             config.limits.max_body_size_bytes,
         ))
@@ -258,7 +271,7 @@ fn public_routes(
         .route("/", get(service_document))
         .route("/health", get(health::live))
         .route("/health/live", get(health::live))
-        .nest(PUBLIC_API_PATH_PREFIX, public_reads)
+        .nest(API_V1_PREFIX, public_reads)
 }
 
 /// Routes owned by the management listener: authenticated issuer writes and
@@ -288,7 +301,7 @@ fn management_routes(
         .layer(GovernorLayer::new(strict_governor));
 
     Router::new().nest(
-        PUBLIC_API_PATH_PREFIX,
+        API_V1_PREFIX,
         Router::new().merge(protected).merge(credentials),
     )
 }
@@ -320,6 +333,14 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
+    // Read the listener name injected by `with_listener_name`; fall back to
+    // "unknown" so the metric is never silently dropped if the extension is
+    // missing (e.g. in unit tests that build routers directly).
+    let listener_name: &'static str = request
+        .extensions()
+        .get::<ListenerName>()
+        .map(|l| l.0)
+        .unwrap_or("unknown");
 
     if matches!(
         route,
@@ -342,10 +363,21 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
         method.as_str(),
         route,
         status_class,
+        listener_name,
         start.elapsed().as_secs_f64(),
     );
 
     response
+}
+
+/// Wraps a `Router<S>` with an [`Extension`] layer that injects a
+/// [`ListenerName`] into every request. The name is consumed by
+/// [`track_http_metrics`] to record which listener accepted the connection.
+fn with_listener_name<S: Clone + Send + Sync + 'static>(
+    router: Router<S>,
+    name: &'static str,
+) -> Router<S> {
+    router.layer(Extension(ListenerName(name)))
 }
 
 fn attach_metrics<S: Clone + Send + Sync + 'static>(
@@ -398,7 +430,7 @@ mod tests {
         let registration = send(
             management.clone(),
             Method::POST,
-            format!("{PUBLIC_API_PATH_PREFIX}/credentials"),
+            format!("{API_V1_PREFIX}/credentials"),
             format!(
                 r#"{{"issuer":"issuer1","public_key":{}}}"#,
                 crate::test_fixtures::TEST_EC_PUBLIC_JWK
@@ -418,7 +450,7 @@ mod tests {
         let unauthenticated = send(
             management,
             Method::GET,
-            format!("{PUBLIC_API_PATH_PREFIX}/credentials"),
+            format!("{API_V1_PREFIX}/credentials"),
             String::new(),
         )
         .await
@@ -428,7 +460,7 @@ mod tests {
         let aggregation = send(
             public,
             Method::GET,
-            format!("{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}"),
+            format!("{API_V1_PREFIX}/aggregation/{aggregation_id}"),
             String::new(),
         )
         .await
@@ -437,10 +469,22 @@ mod tests {
     }
 
     /// The network boundary is structural: a route belongs to exactly one
-    /// listener, so requesting it on any other listener returns 404.
+    /// listener, so requesting it on any other listener returns 404. This test
+    /// uses a complete table of (method, path, owning listener) and asserts:
+    ///   - the owner returns a non-404 status (route is present)
+    ///   - every other listener returns 404 (route is absent)
+    ///
+    /// Metrics are explicitly enabled so /metrics checks pass because the route
+    /// actually exists on the admin listener, not because the path is simply
+    /// unknown.
     #[tokio::test]
     async fn test_routes_404_on_the_wrong_listener() {
-        let config = Config::load_from_overrides(&[]).unwrap();
+        let config = Config::load_from_overrides(&[
+            // Enable metrics so /metrics is a real route on admin, not a
+            // universal 404 from a missing route.
+            ("APP_SERVER__ENABLE_METRICS", "true"),
+        ])
+        .unwrap();
         let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
 
@@ -461,73 +505,83 @@ mod tests {
             router.clone().oneshot(request)
         };
 
-        // A realistic status-list id, so the assertions exercise the true
-        // path-parameter namespace rather than a literal placeholder.
+        const PUBLIC: &str = "public";
+        const MANAGEMENT: &str = "management";
+        const ADMIN: &str = "admin";
+
         let list_id = "477121aa-b598-419e-916f-1e74654ff38b";
         let aggregation_id = "d6c9b1f2-3a4b-4c5d-8e6f-7a8b9c0d1e2f";
 
-        // Management + admin routes must 404 on the public listener.
-        for (method, uri) in [
+        // Table: (method, path, owning_listener).
+        // Every route must be reachable (non-404) on exactly its owner, and
+        // must return 404 on the other two listeners.
+        let routes: &[(Method, &str, &str)] = &[
+            // Public routes
+            (Method::GET, "/", PUBLIC),
+            (Method::GET, "/health", PUBLIC),
+            (Method::GET, "/health/live", PUBLIC),
+            (
+                Method::GET,
+                &format!("/api/v1/status-lists/{list_id}"),
+                PUBLIC,
+            ),
+            (
+                Method::GET,
+                &format!("/api/v1/aggregation/{aggregation_id}"),
+                PUBLIC,
+            ),
+            // Management routes
             (
                 Method::PUT,
-                format!("/api/v1/status-lists/{list_id}/statuses"),
+                &format!("/api/v1/status-lists/{list_id}/statuses"),
+                MANAGEMENT,
             ),
             (
                 Method::PATCH,
-                format!("/api/v1/status-lists/{list_id}/statuses"),
+                &format!("/api/v1/status-lists/{list_id}/statuses"),
+                MANAGEMENT,
             ),
             (
                 Method::POST,
-                format!("/api/v1/status-lists/{list_id}/allocations"),
+                &format!("/api/v1/status-lists/{list_id}/allocations"),
+                MANAGEMENT,
             ),
-            (Method::POST, "/api/v1/credentials".to_string()),
-            (Method::GET, "/api/v1/credentials".to_string()),
-            (Method::GET, "/health/ready".to_string()),
-            (Method::GET, "/metrics".to_string()),
-        ] {
-            let resp = status(public.clone(), method.clone(), &uri).await.unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::NOT_FOUND,
-                "{method} {uri} must 404 on the public listener"
-            );
-        }
+            (Method::POST, "/api/v1/credentials", MANAGEMENT),
+            // Admin routes
+            (Method::GET, "/health/ready", ADMIN),
+            (Method::GET, "/metrics", ADMIN),
+        ];
 
-        // Public + admin routes must 404 on the management listener.
-        for (method, uri) in [
-            (Method::GET, format!("/api/v1/status-lists/{list_id}")),
-            (Method::GET, format!("/api/v1/aggregation/{aggregation_id}")),
-            (Method::GET, "/health/live".to_string()),
-            (Method::GET, "/health/ready".to_string()),
-            (Method::GET, "/metrics".to_string()),
-        ] {
-            let resp = status(management.clone(), method.clone(), &uri)
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::NOT_FOUND,
-                "{method} {uri} must 404 on the management listener"
-            );
-        }
-
-        // Public + management routes must 404 on the admin listener.
-        for (method, uri) in [
-            (Method::GET, format!("/api/v1/status-lists/{list_id}")),
-            (Method::GET, format!("/api/v1/aggregation/{aggregation_id}")),
-            (Method::GET, "/health/live".to_string()),
-            (Method::GET, "/api/v1/credentials".to_string()),
-        ] {
-            let resp = status(admin.clone(), method.clone(), &uri).await.unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::NOT_FOUND,
-                "{method} {uri} must 404 on the admin listener"
-            );
+        for (method, path, owner) in routes {
+            let routers = [
+                (PUBLIC, public.clone()),
+                (MANAGEMENT, management.clone()),
+                (ADMIN, admin.clone()),
+            ];
+            for (listener_name, router) in &routers {
+                let resp = status(router.clone(), method.clone(), path).await.unwrap();
+                if listener_name == owner {
+                    assert_ne!(
+                        resp.status(),
+                        StatusCode::NOT_FOUND,
+                        "{method} {path} must NOT return 404 on its owner ({owner}), got {}",
+                        resp.status()
+                    );
+                } else {
+                    assert_eq!(
+                        resp.status(),
+                        StatusCode::NOT_FOUND,
+                        "{method} {path} must return 404 on {listener_name} (owned by {owner})"
+                    );
+                }
+            }
         }
     }
 
     /// `GET /` returns the JSON service document with its links.
+    /// The Content-Type must be `application/json` (the change that affected
+    /// clients), and an empty portal env var must be absent from the document
+    /// rather than emitted as `"portal": ""`.
     #[tokio::test]
     async fn test_root_returns_json_service_document() {
         use axum::body::to_bytes;
@@ -542,10 +596,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        // The Content-Type is what changed for clients; assert it explicitly.
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.starts_with("application/json"),
+            "expected application/json Content-Type, got {content_type:?}"
+        );
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(doc["service"], "Status List Server");
         assert_eq!(doc["links"]["documentation"], crate::config::REPOSITORY_URL);
+        // An unset portal must be absent, never emitted as `"portal": ""`.
         assert!(doc["links"]["portal"].as_str().is_none());
         assert!(doc.get("version").is_none());
     }
@@ -596,7 +661,7 @@ mod tests {
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
         let list_id = uuid::Uuid::new_v4().to_string();
         publish_list(&state.service, "issuer1", &list_id).await;
-        let token = get(format!("{PUBLIC_API_PATH_PREFIX}/status-lists/{list_id}"))
+        let token = get(format!("{API_V1_PREFIX}/status-lists/{list_id}"))
             .await
             .unwrap();
         let token = to_bytes(token.into_body(), usize::MAX).await.unwrap();
@@ -606,7 +671,7 @@ mod tests {
         for _ in 0..AGGREGATION_DEFAULT_LIMIT {
             publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
         }
-        let cached = get(format!("{PUBLIC_API_PATH_PREFIX}/status-lists/{list_id}"))
+        let cached = get(format!("{API_V1_PREFIX}/status-lists/{list_id}"))
             .await
             .unwrap();
         let cached = to_bytes(cached.into_body(), usize::MAX).await.unwrap();
@@ -615,17 +680,15 @@ mod tests {
             "the warm token still points there"
         );
 
-        let unpaged = get(format!(
-            "{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}"
-        ))
-        .await
-        .unwrap();
+        let unpaged = get(format!("{API_V1_PREFIX}/aggregation/{aggregation_id}"))
+            .await
+            .unwrap();
         assert_eq!(unpaged.status(), StatusCode::CONFLICT);
 
         let mut lists = 0;
         let mut next = Some(
             url::Url::parse(&format!(
-                "http://localhost{PUBLIC_API_PATH_PREFIX}/aggregation/{aggregation_id}?limit={AGGREGATION_DEFAULT_LIMIT}"
+                "http://localhost{API_V1_PREFIX}/aggregation/{aggregation_id}?limit={AGGREGATION_DEFAULT_LIMIT}"
             ))
             .unwrap(),
         );

@@ -665,10 +665,27 @@ fi
 # The Ingress must NEVER reference the admin port, even when management routing
 # is enabled. The public Ingress targets the public port; the management Ingress
 # targets the management port.
-INGRESSES=$(helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null | awk '/kind: Ingress/{f=1} f{print} /^---$/{if(f)exit}')
+# Collect ALL Ingress documents from the render so both public and management
+# Ingress backends are inspected. The previous single-awk exited at the first
+# --- separator and therefore never read the management Ingress.
+INGRESSES=$(helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null \
+  | awk '
+    /^apiVersion: networking.k8s.io\/v1$/ { maybe=1; doc="" }
+    maybe { doc = doc $0 "\n" }
+    /^kind: Ingress$/ && maybe { capture=1 }
+    /^---$/ { if (capture) { print doc; capture=0; maybe=0; doc="" } }
+    END { if (capture) print doc }
+  ')
 if echo "$INGRESSES" | grep -E '^\s+number: 8002\s*$' >/dev/null; then
   echo "ERROR: Ingress must never reference the admin port (8002)"; exit 1
 fi
+# The management Ingress must route to the management port (8001), not the
+# public port (8081). Assert by extracting the management-ingress document.
+MGMT_INGRESS=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}')
+if ! echo "$MGMT_INGRESS" | grep -qE '^\s+number: 8001\s*$'; then
+  echo "ERROR: management Ingress backend must target the management port (8001)"; exit 1
+fi
+
 # Management routing on a SHARED hostname: management reuses the public host.
 if ! helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null \
     | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' | grep -q 'host: localhost'; then
@@ -694,6 +711,16 @@ if echo "$MGMT_TLS" | grep -q -- '- "localhost"'; then
 fi
 if ! echo "$MGMT_TLS" | grep -q 'external-dns.alpha.kubernetes.io/hostname: mgmt.example.com'; then
   echo "ERROR: management Ingress must emit an external-dns annotation for its separate hostname"; exit 1
+fi
+# The management Ingress regex path must be fully anchored so an attacker-
+# controlled path prefix cannot sneak a write to the management listener.
+MGMT_PATH=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' \
+  | grep 'path:')
+if ! echo "$MGMT_PATH" | grep -qE '^\^'; then
+  echo "ERROR: management Ingress path must start with ^ (anchored)"; exit 1
+fi
+if ! echo "$MGMT_PATH" | grep -qE '\$"$|\$$'; then
+  echo "ERROR: management Ingress path must end with $ (anchored)"; exit 1
 fi
 
 

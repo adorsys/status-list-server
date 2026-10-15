@@ -89,7 +89,7 @@ servers:
       management_host:
         default: localhost:8001
         description: Host name and port of the management listener.
-  - url: https://{admin_host}
+  - url: http://{admin_host}
     description: >-
       Admin listener: /health/ready and /metrics. Default port 8002. Never exposed via the public Ingress.
     variables:
@@ -175,15 +175,15 @@ paths:
       summary: Readiness check
       description: |
         Returns 200 only when all critical dependencies are reachable;
-        otherwise 503. The public response is intentionally generic; detailed
-        dependency failures are logged internally.
+        otherwise 503. Detailed dependency failures are logged internally but
+        NOT included in the response body.
 
         ADMIN LISTENER: this endpoint is served on the admin listener
         (`server.admin`, default :8002), not on the public server above. It is
         NOT reachable on the public listener.
       security: []
       servers:
-        - url: https://{admin_host}
+        - url: http://{admin_host}
           description: Admin listener (/health/ready and /metrics, default :8002).
           variables:
             admin_host:
@@ -219,7 +219,7 @@ paths:
         NOT reachable on the public listener.
       security: []
       servers:
-        - url: https://{admin_host}
+        - url: http://{admin_host}
           description: Admin listener (/health/ready and /metrics, default :8002).
           variables:
             admin_host:

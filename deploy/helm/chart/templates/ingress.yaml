@@ -93,13 +93,24 @@ spec:
             name: {{ include "status-list-server-chart.fullname" . }}-service
             port:
               number: {{ .Values.statuslist.service.managementPort }}
-  {{- if and .Values.statuslist.ingress.tls.secretName (gt (len $mgmtTlsHosts) 0) }}
+{{- $mgmtTlsSecret := .Values.statuslist.ingress.management.tls.secretName | default "" }}
+{{- if and (eq $mgmtTlsSecret "") (ne (.Values.statuslist.ingress.management.hostname | default "") "") }}
+{{- /* Separate management hostname with no dedicated TLS secret: fall back to
+       the public secret. Warn loudly when this would mismatch the hostname. */}}
+{{- /* No automatic fallback: a separate hostname needs its own cert. Leave
+       the TLS block out rather than silently misconfigure TLS. */}}
+{{- $mgmtTlsSecret = "" }}
+{{- else if eq $mgmtTlsSecret "" }}
+{{- /* Shared hostname: inherit the public TLS secret. */}}
+{{- $mgmtTlsSecret = .Values.statuslist.ingress.tls.secretName | default "" }}
+{{- end }}
+  {{- if and $mgmtTlsSecret (gt (len $mgmtTlsHosts) 0) }}
   tls:
   - hosts:
     {{- range $mgmtTlsHosts }}
     - {{ . | quote }}
     {{- end }}
-    secretName: {{ .Values.statuslist.ingress.tls.secretName }}
+    secretName: {{ $mgmtTlsSecret }}
   {{- end }}
 {{- end }}
 {{- end }}

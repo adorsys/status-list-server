@@ -76,4 +76,6 @@ COPY --from=builder --chown=65534:65534 /app/${APP_NAME} /app/${APP_NAME}
 
 USER 65534
 EXPOSE 8000
+EXPOSE 8001
+EXPOSE 8002
 ENTRYPOINT ["/app/status-list-server"]

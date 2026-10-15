@@ -58,12 +58,21 @@ impl HttpMetrics {
     ///
     /// `route` must be the bounded route pattern (e.g. `/status-lists/{list_id}`),
     /// never a URI with path parameters substituted, to keep label cardinality
-    /// bounded.
-    pub(crate) fn record(&self, method: &str, route: &str, status_class: &str, seconds: f64) {
+    /// bounded. `listener` identifies which TCP listener accepted the connection
+    /// ("public", "management", or "admin").
+    pub(crate) fn record(
+        &self,
+        method: &str,
+        route: &str,
+        status_class: &str,
+        listener: &str,
+        seconds: f64,
+    ) {
         let duration_attrs = [
             KeyValue::new("method", method.to_string()),
             KeyValue::new("route", route.to_string()),
             KeyValue::new("status_class", status_class.to_string()),
+            KeyValue::new("listener", listener.to_string()),
         ];
         self.duration.record(seconds, &duration_attrs);
 
@@ -71,6 +80,7 @@ impl HttpMetrics {
             KeyValue::new("method", method.to_string()),
             KeyValue::new("route", route.to_string()),
             KeyValue::new("status_class", status_class.to_string()),
+            KeyValue::new("listener", listener.to_string()),
         ];
         self.requests.add(1, &count_attrs);
     }
@@ -84,8 +94,14 @@ fn shared() -> HttpMetrics {
 }
 
 /// Record an HTTP request/response pair emitted from the axum metrics layer.
-pub(crate) fn record_request(method: &str, route: &str, status_class: &str, seconds: f64) {
-    shared().record(method, route, status_class, seconds);
+pub(crate) fn record_request(
+    method: &str,
+    route: &str,
+    status_class: &str,
+    listener: &str,
+    seconds: f64,
+) {
+    shared().record(method, route, status_class, listener, seconds);
 }
 
 #[cfg(test)]
@@ -117,8 +133,8 @@ mod tests {
         )
         .expect("metrics setup");
 
-        record_request("GET", "/status-lists/{list_id}", "2xx", 0.012);
-        record_request("GET", "/status-lists/{list_id}", "5xx", 0.300);
+        record_request("GET", "/status-lists/{list_id}", "2xx", "public", 0.012);
+        record_request("GET", "/status-lists/{list_id}", "5xx", "public", 0.300);
 
         let mut buffer = Vec::new();
         TextEncoder::new()
@@ -128,15 +144,19 @@ mod tests {
 
         assert!(
             body.contains(
-                "http_server_requests_total{method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"2xx\",otel_scope_name=\"status-list-server\"} 1"
+                "http_server_requests_total{method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"2xx\",listener=\"public\",otel_scope_name=\"status-list-server\"} 1"
+            ) || body.contains(
+                "http_server_requests_total{listener=\"public\",method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"2xx\",otel_scope_name=\"status-list-server\"} 1"
             ),
-            "expected 2xx request counter; body:\n{body}"
+            "expected 2xx request counter with listener label; body:\n{body}"
         );
         assert!(
             body.contains(
-                "http_server_requests_total{method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"5xx\",otel_scope_name=\"status-list-server\"} 1"
+                "http_server_requests_total{method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"5xx\",listener=\"public\",otel_scope_name=\"status-list-server\"} 1"
+            ) || body.contains(
+                "http_server_requests_total{listener=\"public\",method=\"GET\",route=\"/status-lists/{list_id}\",status_class=\"5xx\",otel_scope_name=\"status-list-server\"} 1"
             ),
-            "expected 5xx request counter; body:\n{body}"
+            "expected 5xx request counter with listener label; body:\n{body}"
         );
         assert!(
             body.contains("http_server_duration_seconds_bucket"),

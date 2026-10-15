@@ -330,38 +330,55 @@ pub struct ListenerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinksConfig {
     pub documentation: String,
-    /// Optional portal link; omitted from the service document when unset.
-    #[serde(default)]
+    /// Optional portal link; omitted from the service document when unset or
+    /// empty. An empty `APP_SERVER__LINKS__PORTAL` is treated as absent so
+    /// that the service document never emits `"portal": ""` (which would
+    /// violate the OpenAPI `format: uri` contract).
+    #[serde(default, deserialize_with = "deserialize_optional_uri_string")]
     pub portal: Option<String>,
 }
 
 impl ServerConfig {
     /// Whether the configured public, management, and admin listeners resolve to
     /// the same host:port, which would make the network boundary meaningless.
-    pub fn has_duplicate_listener(&self) -> bool {
-        let listeners = [
+    ///
+    /// Returns `Some((name_a, name_b))` identifying the two clashing listeners,
+    /// or `None` when all three are distinct.
+    ///
+    /// Two listeners both on port 0 are NOT treated as a conflict: the OS
+    /// assigns each its own ephemeral port at bind time.
+    pub fn duplicate_listener_pair(&self) -> Option<(&'static str, &'static str)> {
+        let listeners: &[(&'static str, &str, u16)] = &[
             ("server.host:server.port", &self.host, self.port),
             (
-                "server.management",
+                "server.management.host:server.management.port",
                 &self.management.host,
                 self.management.port,
             ),
-            ("server.admin", &self.admin.host, self.admin.port),
+            (
+                "server.admin.host:server.admin.port",
+                &self.admin.host,
+                self.admin.port,
+            ),
         ];
         for (i, (name_a, host_a, port_a)) in listeners.iter().enumerate() {
             for (name_b, host_b, port_b) in listeners.iter().skip(i + 1) {
+                // Port 0 means "let the OS pick an ephemeral port"; two listeners
+                // both on 0 get distinct ports and must not be flagged.
+                if *port_a == 0 && *port_b == 0 {
+                    continue;
+                }
                 if port_a == port_b && hosts_resolve_equal(host_a, host_b) {
-                    tracing::warn!(
-                        "{name_a} and {name_b} both resolve to {}:{}; a listener collision would \
-                         make the public/management/admin boundary ambiguous",
-                        host_a,
-                        port_a
-                    );
-                    return true;
+                    return Some((name_a, name_b));
                 }
             }
         }
-        false
+        None
+    }
+
+    /// Backwards-compatible helper used by the startup path.
+    pub fn has_duplicate_listener(&self) -> bool {
+        self.duplicate_listener_pair().is_some()
     }
 }
 
@@ -390,7 +407,7 @@ impl ServerConfig {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
             None => format!(
-                "https://{}{PUBLIC_API_PATH_PREFIX}",
+                "https://{}{API_V1_PREFIX}",
                 url_authority_host(&self.domain)
             ),
         }
@@ -475,13 +492,21 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// API path prefix under which the status-list routes are mounted. The published
-/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so by default
-/// `public_base_url` carries this prefix for it to resolve. Operators running
-/// behind a proxy with a different path prefix may set a custom
-/// `server.public_base_url` whose path differs; the router mounts the same
-/// prefix so the two cannot drift.
-pub const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
+/// API path prefix shared by all versioned routes (`/api/v1`). Both the public
+/// and management listeners mount their routes under this prefix; the name
+/// reflects the version rather than the listener so it is not confused with the
+/// "public" listener specifically.
+///
+/// The published `sub` URI is built as `{public_base_url}/status-lists/{list_id}`,
+/// so by default `public_base_url` carries this prefix for it to resolve.
+/// Operators running behind a proxy with a different path prefix may set a
+/// custom `server.public_base_url` whose path differs; the router mounts the
+/// same prefix so the two cannot drift.
+pub const API_V1_PREFIX: &str = "/api/v1";
+
+/// Deprecated alias kept for any external code that imported the old name.
+#[deprecated(since = "0.0.0", note = "use API_V1_PREFIX instead")]
+pub const PUBLIC_API_PATH_PREFIX: &str = API_V1_PREFIX;
 
 /// Validates `server.public_base_url`: an absolute `https` URL with a host, no
 /// userinfo, query, or fragment, and no trailing slash. The path is not
@@ -993,6 +1018,25 @@ pub struct DatabaseConfig {
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Serde deserializer for `Option<String>` URI fields that treats an empty (or
+/// whitespace-only) string the same as `None`. This prevents an unset env var
+/// (which the config crate maps to `""`) from producing `"portal": ""`  in the
+/// service document, violating the OpenAPI `format: uri` contract.
+fn deserialize_optional_uri_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    Ok(raw.and_then(|s| {
+        let trimmed = s.trim().to_owned();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }))
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -1654,20 +1698,27 @@ impl Config {
             validate_database_query(query)?;
         }
         validate_server_domain(&config.server.domain)?;
-        if config.server.has_duplicate_listener() {
-            return Err(ConfigError::Message(
-                "Duplicate listener: two of server.host/server.port, server.management, and \
-                 server.admin resolve to the same host:port, which would collapse the \
-                 public/management/admin network boundary. Give each listener a distinct port \
-                 (or host)."
-                    .to_string(),
-            ));
+        if let Some((name_a, name_b)) = config.server.duplicate_listener_pair() {
+            return Err(ConfigError::Message(format!(
+                "Duplicate listener: {name_a} and {name_b} resolve to the same host:port, which \
+                 would collapse the public/management/admin network boundary. Give each listener \
+                 a distinct port (or host)."
+            )));
         }
+
         // Validate the *resolved* base URL — whether explicitly set or derived
         // from `server.domain` — so a broken fallback is caught at startup too.
         // The raw (un-normalized) value is inspected so the trailing-slash rule
         // sees the operator's actual input.
         validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
+        // Validate the optional portal link: it must be an absolute URI when set.
+        if let Some(portal) = trim_non_empty(config.server.links.portal.as_deref()) {
+            url::Url::parse(portal).map_err(|err| {
+                ConfigError::Message(format!(
+                    "Invalid server.links.portal: not a valid URI ({err})"
+                ))
+            })?;
+        }
         config.cache.validate(config.telemetry.environment)?;
         config
             .management_auth

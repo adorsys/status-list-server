@@ -171,10 +171,11 @@
               "maximum": 65535
             },
             "managementTargetPort": {
-              "type": ["integer", "string"],
+              "type": "integer",
               "title": "Management target container port",
-              "description": "Container port the management Service forwards to; must match APP_SERVER__MANAGEMENT__PORT and the management containerPort.",
-              "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$"
+              "description": "Container port the management Service forwards to; must match APP_SERVER__MANAGEMENT__PORT and the management containerPort. Named ports are not supported because the deployment template processes this value as an integer.",
+              "minimum": 1,
+              "maximum": 65535
             },
             "adminPort": {
               "type": "integer",
@@ -184,10 +185,11 @@
               "maximum": 65535
             },
             "adminTargetPort": {
-              "type": ["integer", "string"],
+              "type": "integer",
               "title": "Admin target container port",
-              "description": "Container port the admin Service forwards to; must match APP_SERVER__ADMIN__PORT and the admin containerPort.",
-              "pattern": "^[A-Za-z0-9-]+$|^[0-9]+$"
+              "description": "Container port the admin Service forwards to; must match APP_SERVER__ADMIN__PORT and the admin containerPort. Named ports are not supported because the deployment template processes this value as an integer.",
+              "minimum": 1,
+              "maximum": 65535
             },
             "nodePort": {
               "type": ["integer", "null"],
