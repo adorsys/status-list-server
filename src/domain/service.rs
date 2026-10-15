@@ -410,6 +410,14 @@ impl Service {
     ) -> Result<Option<Credential>, CredentialError> {
         self.credential_repo.find(issuer).await
     }
+
+    /// Retrieve credentials by the registered management-token key ID.
+    pub async fn find_credential_by_kid(
+        &self,
+        kid: &str,
+    ) -> Result<Option<Credential>, CredentialError> {
+        self.credential_repo.find_by_kid(kid).await
+    }
 }
 
 impl std::fmt::Debug for Service {

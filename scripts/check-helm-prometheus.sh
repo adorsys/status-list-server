@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# These checks render production profiles with an explicit test-only audience.
+# Keep the actual chart default unset so deployments must choose their own.
+helm() {
+  local action="$1"
+  shift
+  if [[ "$action" == template || "$action" == lint ]]; then
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 "$@"
+  else
+    command helm "$action" "$@"
+  fi
+}
 CHART_DIR="${CHART_DIR:-deploy/helm/chart}"
 export CHECK_TEMP
 CHECK_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/helm-prometheus.XXXXXX")

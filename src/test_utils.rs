@@ -65,13 +65,13 @@ pub(crate) fn metrics_after(test: impl std::future::Future<Output = ()>) -> Stri
 
 /// Registers `issuer` and returns the aggregation ID it was given.
 pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> AggregationId {
+    let mut public_key: serde_json::Value =
+        serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+    public_key["kid"] = serde_json::json!(format!("test-key-{issuer}"));
     service
         .publish_credential(Credential {
             issuer: Issuer(issuer.into()),
-            public_key: PublicJwk::try_new(
-                crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
-            )
-            .unwrap(),
+            public_key: PublicJwk::try_new(serde_json::to_vec(&public_key).unwrap()).unwrap(),
         })
         .await
         .unwrap()

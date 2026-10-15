@@ -325,7 +325,7 @@ impl IntoApiError for CredentialError {
             }
             CredentialError::AlreadyExists => ApiError::conflict(
                 "credentials_already_exist",
-                "Credentials already exist for this issuer",
+                "Credentials already exist for this issuer or key ID",
             ),
             CredentialError::Contention { code } => {
                 record_write_contention("credential", code);

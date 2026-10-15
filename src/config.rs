@@ -204,11 +204,22 @@ pub struct ManagementAuthConfig {
 }
 
 impl ManagementAuthConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
         if self.max_token_lifetime_secs == 0 {
             return Err(ConfigError::Message(
                 "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
             ));
+        }
+
+        if self.audiences.is_empty() {
+            if environment.is_production() {
+                return Err(ConfigError::Message(
+                    "management_auth.audiences must not be empty in production".to_string(),
+                ));
+            }
+            tracing::warn!(
+                "management_auth.audiences is empty; audience validation is disabled in development"
+            );
         }
 
         Ok(())
@@ -1556,7 +1567,9 @@ impl Config {
         // sees the operator's actual input.
         validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
         config.cache.validate(config.telemetry.environment)?;
-        config.management_auth.validate()?;
+        config
+            .management_auth
+            .validate(config.telemetry.environment)?;
         config.status_list.validate()?;
         config.limits.validate()?;
         config
@@ -1666,7 +1679,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
         .set_default("management_auth.leeway_secs", 60)?
-        .set_default("management_auth.max_token_lifetime_secs", 3600)?
+        .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
@@ -1739,7 +1752,7 @@ mod tests {
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.management_auth.leeway_secs, 60);
-        assert_eq!(config.management_auth.max_token_lifetime_secs, 3600);
+        assert_eq!(config.management_auth.max_token_lifetime_secs, 300);
         assert!(config.management_auth.audiences.is_empty());
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
@@ -2441,6 +2454,12 @@ mod tests {
                 .expect("empty audience env value should load");
         assert!(empty_audiences.management_auth.audiences.is_empty());
 
+        let production_empty_audiences = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("APP_MANAGEMENT_AUTH__AUDIENCES", ""),
+        ]);
+        assert!(production_empty_audiences.is_err());
+
         let trimmed_audiences = Config::load_from_overrides(&[(
             "APP_MANAGEMENT_AUTH__AUDIENCES",
             "status-list-server-management, internal-management, ",
@@ -2567,11 +2586,14 @@ mod tests {
     }
 
     fn aggregation_uri_in(environment: &str, uri: &str) -> Result<Option<Url>, ConfigError> {
-        Config::load_from_overrides(&[
+        let mut overrides = vec![
             ("telemetry.environment", environment),
             ("server.aggregation_uri", uri),
-        ])
-        .map(|config| {
+        ];
+        if classify_app_env(environment).is_production() {
+            overrides.push(("management_auth.audiences", "status-list-server-management"));
+        }
+        Config::load_from_overrides(&overrides).map(|config| {
             config
                 .server
                 .aggregation_uri(config.telemetry.environment)

@@ -1,5 +1,4 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use jsonwebtoken::jwk::Jwk;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,7 +6,7 @@ use crate::{
     server::{
         AppState,
         auth::{AuthenticatedIssuer, errors::AuthenticationError},
-        error::ApiError,
+        error::{ApiError, IntoApiError},
     },
 };
 
@@ -15,7 +14,7 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialsRequest {
     pub issuer: String,
-    pub public_key: Jwk,
+    pub public_key: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Response body for a registration. The issuer cannot derive its aggregation
@@ -91,7 +90,10 @@ pub async fn get_credential(
         .service
         .find_aggregation_id(&issuer)
         .await?
-        .ok_or_else(|| ApiError::not_found("issuer_not_found", "Issuer is not registered"))?;
+        .ok_or_else(|| {
+            tracing::warn!(iss = %issuer.0, "Credential disappeared after authentication");
+            AuthenticationError::InvalidToken.into_api_error()
+        })?;
     Ok(Json(RegistrationResponse {
         issuer: issuer.0,
         aggregation_id,
@@ -110,7 +112,6 @@ mod tests {
         http::{Method, header},
         routing::post,
     };
-    use jsonwebtoken::jwk::Jwk;
     use tower::ServiceExt;
 
     fn create_test_router(app_state: AppState) -> Router {
@@ -119,11 +120,13 @@ mod tests {
             .with_state(app_state)
     }
 
-    fn test_jwk() -> Jwk {
+    fn test_jwk() -> serde_json::Map<String, serde_json::Value> {
         serde_json::from_str(
             r#"{
                 "kty": "EC",
                 "crv": "P-256",
+                "kid": "test-key",
+                "alg": "ES256",
                 "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
                 "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
             }
@@ -210,13 +213,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_credential_for_an_unknown_issuer_is_not_found() {
+    async fn test_get_credential_for_an_unknown_issuer_is_invalid_token() {
         let app_state = test_app_state(None).await;
         let err = get_credential(State(app_state), authenticated_issuer("nobody"))
             .await
             .unwrap_err();
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
-        assert_eq!(err.error, "issuer_not_found");
+        let response = err.into_response();
+        let expected = AuthenticationError::InvalidToken.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), expected.status());
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            expected.headers()[header::WWW_AUTHENTICATE]
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            axum::body::to_bytes(expected.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -238,5 +255,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_registration_rejects_private_jwk_member() {
+        let app_state = test_app_state(None).await;
+        let mut public_key = test_jwk();
+        public_key.insert("d".to_string(), serde_json::json!("private-material"));
+        let response = create_test_router(app_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"issuer": "private-key-issuer", "public_key": public_key})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            app_state
+                .service
+                .find_credential("private-key-issuer")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registration_rejects_duplicate_kid_across_issuers() {
+        let app_state = test_app_state(None).await;
+        register(app_state.clone()).await;
+        let response = create_test_router(app_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"issuer": "other-issuer", "public_key": test_jwk()})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            app_state
+                .service
+                .find_credential_by_kid("test-key")
+                .await
+                .unwrap()
+                .unwrap()
+                .issuer,
+            Issuer("test_issuer".into())
+        );
     }
 }
