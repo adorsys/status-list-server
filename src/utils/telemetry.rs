@@ -105,7 +105,7 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
             let tracer = tracer_provider.tracer("status-list-server");
             let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
             let otel_log_filter = Targets::new()
-                .with_default(LevelFilter::INFO)
+                .with_default(LevelFilter::DEBUG)
                 .with_target("opentelemetry", LevelFilter::OFF)
                 .with_target("tonic", LevelFilter::OFF)
                 .with_target("h2", LevelFilter::OFF)
