@@ -1034,6 +1034,7 @@ Existing issuers write to the URL they were registered with (the `sub` in their 
 
 1. **Enable the management Ingress** (see above) before upgrading.
 2. **Verify** after upgrade:
+
    ```bash
    # Writes to the public listener must now 404:
    curl -X PUT https://<host>/api/v1/status-lists/<id>/statuses
@@ -1043,6 +1044,7 @@ Existing issuers write to the URL they were registered with (the `sub` in their 
      -H "Authorization: Bearer <token>"
    # → 401 (no valid token) or 200/204 (valid token)
    ```
+
 3. **Update issuer configuration** to target the management hostname/port if it differs from the public hostname.
 
 ### Readiness probe
