@@ -135,9 +135,9 @@ statuslist:
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
-    # Required in production. Issuers must use this audience in management JWTs;
-    # override it when deploying with a different audience contract.
-    APP_MANAGEMENT_AUTH__AUDIENCES: "status-list-server-management"
+    # Required in production. Set a deployment-specific audience, for example
+    # https://statuslist.prod.example.com/api/v1; staging must use another value.
+    APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
     # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).

@@ -21,6 +21,12 @@ TOP-LEVEL .Values.podAnnotations (a documented empty-by-default map - note it is
 from statuslist.podLabels, which are merged into the pod template LABELS).
 */}}
 {{- if .Values.statuslist.enabled }}
+{{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
+{{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
+{{- $audiences := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES | default "")) "" }}
+{{- if and (has $telemetryEnv (list "production" "prod")) (empty $audiences) }}
+{{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
+{{- end }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
 {{- end }}

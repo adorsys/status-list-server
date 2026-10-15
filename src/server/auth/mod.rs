@@ -11,12 +11,12 @@ use axum::{
 };
 use errors::AuthenticationError;
 use hyper::{StatusCode, header};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::models::credential::Issuer;
+use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
 use crate::server::{AppState, error::ApiError};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
@@ -49,16 +49,8 @@ impl ManagementClaims {
             return Err("iat is in the future beyond configured leeway");
         }
 
-        if let Some(nbf) = self.nbf
-            && nbf > now.saturating_add(leeway_secs)
-        {
-            return Err("nbf is in the future beyond configured leeway");
-        }
-
-        let lifetime = self
-            .exp
-            .checked_sub(self.iat)
-            .ok_or("exp must be later than iat")?;
+        // exp > iat was established above, so unsigned subtraction is safe.
+        let lifetime = self.exp - self.iat;
         if lifetime > max_token_lifetime_secs {
             return Err("token lifetime exceeds configured maximum");
         }
@@ -165,14 +157,17 @@ pub async fn auth(
     let Some(auth_header) = auth_header else {
         return Err(AuthenticationError::MissingToken);
     };
-    let Some((scheme, token)) = auth_header.split_once(' ') else {
+    let Some((scheme, token)) = auth_header.split_once(char::is_whitespace) else {
+        if auth_header.eq_ignore_ascii_case("Bearer") {
+            return Err(invalid_auth(None, None, "empty Bearer token"));
+        }
         return Err(AuthenticationError::MissingToken);
     };
     if !scheme.eq_ignore_ascii_case("Bearer") {
         return Err(AuthenticationError::MissingToken);
     }
-    if token.is_empty() {
-        return Err(AuthenticationError::InvalidToken);
+    if token.trim().is_empty() {
+        return Err(invalid_auth(None, None, "empty Bearer token"));
     }
 
     let header = jsonwebtoken::decode_header(token)
@@ -189,6 +184,9 @@ pub async fn auth(
     let Some(kid) = header.kid.clone() else {
         return Err(invalid_auth(None, None, "missing kid"));
     };
+    if kid.is_empty() || kid.chars().count() > 255 {
+        return Err(invalid_auth(Some(&kid), None, "invalid kid length"));
+    }
     if !typ_ok {
         return Err(invalid_auth(Some(&kid), None, "missing or invalid typ"));
     }
@@ -199,10 +197,7 @@ pub async fn auth(
             "crit header is not permitted",
         ));
     }
-    let allowed_algorithm = matches!(
-        header.alg,
-        Algorithm::ES256 | Algorithm::ES384 | Algorithm::EdDSA | Algorithm::PS256
-    );
+    let allowed_algorithm = MANAGEMENT_SIGNING_ALGORITHMS.contains(&header.alg);
     if !allowed_algorithm {
         return Err(invalid_auth(Some(&kid), None, "algorithm is not allowed"));
     }
@@ -223,25 +218,24 @@ pub async fn auth(
             }
         })?
         .ok_or_else(|| invalid_auth(Some(&kid), None, "unknown kid"))?;
-    let (registered_kid, registered_alg) =
-        credential.public_key.key_id_and_algorithm().map_err(|e| {
-            tracing::error!(kid = %kid, error = ?e, "Registered management key is invalid");
-            AuthenticationError::InternalServer
-        })?;
+    let registered_issuer = credential.issuer.0.as_str();
+    let registered_kid = credential.public_key.key_id();
+    let registered_alg = credential.public_key.algorithm();
     if registered_kid != kid || registered_alg != header.alg {
         return Err(invalid_auth(
             Some(&kid),
-            None,
+            Some(registered_issuer),
             "algorithm or key id mismatch",
         ));
     }
 
-    let public_key = serde_json::from_slice(credential.public_key.as_bytes()).map_err(|e| {
-        tracing::error!(kid = %kid, error = ?e, "Registered management key could not be parsed");
-        AuthenticationError::InternalServer
+    let decoding_key = DecodingKey::from_jwk(credential.public_key.jwk()).map_err(|e| {
+        invalid_auth(
+            Some(&kid),
+            Some(registered_issuer),
+            format!("invalid verification key: {e}"),
+        )
     })?;
-    let decoding_key = DecodingKey::from_jwk(&public_key)
-        .map_err(|e| invalid_auth(Some(&kid), None, format!("invalid verification key: {e}")))?;
 
     let mut validation = Validation::new(registered_alg);
     validation.leeway = state.management_auth.leeway_secs;
@@ -261,7 +255,7 @@ pub async fn auth(
         .map_err(|e| {
             invalid_auth(
                 Some(&kid),
-                None,
+                Some(registered_issuer),
                 format!("claim or signature validation failed: {e}"),
             )
         })?;
@@ -273,7 +267,7 @@ pub async fn auth(
             state.management_auth.leeway_secs,
             state.management_auth.max_token_lifetime_secs,
         )
-        .map_err(|reason| invalid_auth(Some(&kid), Some(&token_data.claims.iss), reason))?;
+        .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
     request
         .extensions_mut()
@@ -286,8 +280,12 @@ fn invalid_auth(
     iss: Option<&str>,
     reason: impl std::fmt::Display,
 ) -> AuthenticationError {
-    tracing::warn!(kid = kid.unwrap_or("-"), iss = iss.unwrap_or("-"), reason = %reason, "Management JWT rejected");
+    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason = %reason, "Management JWT rejected");
     AuthenticationError::InvalidToken
+}
+
+fn bounded_identifier(value: Option<&str>) -> String {
+    value.unwrap_or("-").chars().take(255).collect()
 }
 
 fn current_unix_timestamp() -> Result<u64, AuthenticationError> {
@@ -347,6 +345,38 @@ mod tests {
 
     fn now() -> u64 {
         current_unix_timestamp().unwrap()
+    }
+
+    #[test]
+    fn rejection_logs_bound_identifiers_and_include_registered_owner() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(sink.clone()))
+            .finish();
+        let long = "é".repeat(1000);
+        tracing::subscriber::with_default(subscriber, || {
+            invalid_auth(Some(&long), Some("registered-owner"), "bad signature");
+        });
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("registered-owner"));
+        assert!(text.contains(&"é".repeat(255)));
+        assert!(!text.contains(&"é".repeat(256)));
+        assert_eq!(bounded_identifier(Some(&long)).chars().count(), 255);
     }
 
     fn create_test_token(issuer: &str, secret: &EncodingKey, alg: Algorithm) -> String {
@@ -604,6 +634,20 @@ mod tests {
     #[tokio::test]
     async fn test_issuer_claim_must_match_the_registered_kid_owner() {
         let state = test_state_with_registered_issuer().await;
+        let mut other_key: serde_json::Value =
+            serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+        other_key["kid"] = serde_json::json!("other-key");
+        state
+            .service
+            .publish_credential(crate::domain::models::credential::Credential {
+                issuer: Issuer("another-issuer".into()),
+                public_key: crate::domain::models::credential::PublicJwk::try_new(
+                    serde_json::to_vec(&other_key).unwrap(),
+                )
+                .unwrap(),
+            })
+            .await
+            .unwrap();
         let app = create_test_router(state);
         let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
         let now = now();
@@ -613,8 +657,19 @@ mod tests {
         );
 
         assert_eq!(
-            call_with_token(app, token).await.status(),
+            call_with_token(app.clone(), token).await.status(),
             StatusCode::UNAUTHORIZED
+        );
+        let mut own_header = management_header();
+        own_header.kid = Some("other-key".into());
+        let own_token = sign_claims_with_header(
+            serde_json::json!({"iss":"another-issuer", "iat":now, "exp":now + 300}),
+            &secret,
+            own_header,
+        );
+        assert_eq!(
+            call_with_token(app, own_token).await.status(),
+            StatusCode::OK
         );
     }
 
@@ -736,18 +791,21 @@ mod tests {
         let now = now();
 
         let encoding_key = EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
-        let token = sign_claims(
-            serde_json::json!({
-                "iss": "test-issuer",
-                "iat": now,
-                "aud": ["other-service", "status-list-server-management"],
-                "exp": now + 300
-            }),
-            &encoding_key,
-        );
-
-        let response = call_with_token(app, token).await;
-        assert_eq!(response.status(), StatusCode::OK);
+        for audience in [
+            serde_json::json!("status-list-server-management"),
+            serde_json::json!(["other-service", "status-list-server-management"]),
+        ] {
+            let token = sign_claims(
+                serde_json::json!({
+                    "iss": "test-issuer", "iat": now, "aud": audience, "exp": now + 300
+                }),
+                &encoding_key,
+            );
+            assert_eq!(
+                call_with_token(app.clone(), token).await.status(),
+                StatusCode::OK
+            );
+        }
     }
 
     #[tokio::test]
@@ -836,10 +894,31 @@ mod tests {
         let token = sign_claims_with_header(
             serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
             &secret,
-            jwt_header,
+            jwt_header.clone(),
         );
 
-        assert_eq!(call_with_token(app, token).await.status(), StatusCode::OK);
+        assert_eq!(
+            call_with_token(app.clone(), token).await.status(),
+            StatusCode::OK
+        );
+
+        // An attacker cannot substitute the embedded key for the registered one.
+        let attack = sign_claims_with_header(
+            serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+            &attacker_key,
+            jwt_header,
+        );
+        let response = call_with_token(app, attack).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            "Bearer error=\"invalid_token\""
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+            "invalid_token"
+        );
     }
 
     #[tokio::test]
@@ -931,6 +1010,279 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown_body, bad_signature_body);
+    }
+
+    #[tokio::test]
+    async fn all_supported_management_algorithms_authenticate() {
+        use crate::domain::models::credential::{Credential, PublicJwk};
+        for algorithm in [
+            Algorithm::ES256,
+            Algorithm::ES384,
+            Algorithm::EdDSA,
+            Algorithm::PS256,
+        ] {
+            let secret = match algorithm {
+                Algorithm::ES256 => {
+                    EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap()
+                }
+                Algorithm::ES384 => {
+                    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+                    EncodingKey::from_ec_pem(key.serialize_pem().as_bytes()).unwrap()
+                }
+                Algorithm::EdDSA => {
+                    let key =
+                        crate::crypto::SigningKey::generate(crate::crypto::SigningAlgorithm::EdDsa)
+                            .unwrap();
+                    EncodingKey::from_ed_pem(key.to_pkcs8_pem().unwrap().as_bytes()).unwrap()
+                }
+                Algorithm::PS256 => EncodingKey::from_rsa_pem(include_bytes!(
+                    "../../../test_data/gcloud_test_key.dummy.pem"
+                ))
+                .unwrap(),
+                _ => unreachable!(),
+            };
+            let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&secret, algorithm).unwrap();
+            jwk.common.key_id = Some("algorithm-key".into());
+            let state = test_app_state(None).await;
+            state
+                .service
+                .publish_credential(Credential {
+                    issuer: Issuer("algorithm-issuer".into()),
+                    public_key: PublicJwk::try_new(serde_json::to_vec(&jwk).unwrap()).unwrap(),
+                })
+                .await
+                .unwrap();
+            let mut header = Header::new(algorithm);
+            header.kid = Some("algorithm-key".into());
+            header.typ = Some(MANAGEMENT_TOKEN_TYPE.into());
+            let now = now();
+            let token = sign_claims_with_header(
+                serde_json::json!({"iss":"algorithm-issuer", "iat":now, "exp":now+300}),
+                &secret,
+                header,
+            );
+            assert_eq!(
+                call_with_token(create_test_router(state), token)
+                    .await
+                    .status(),
+                StatusCode::OK,
+                "{algorithm:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_token_failures_have_identical_responses() {
+        let mut state = test_state_with_registered_issuer().await;
+        state.management_auth.audiences = vec!["management-tests".into()];
+        let app = create_test_router(state);
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let now = now();
+        let valid = serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now+300, "aud":"management-tests"});
+        let mut cases = vec![("malformed JWT", "malformed".to_owned())];
+        for (name, claims) in [
+            ("missing iss", {
+                let mut v = valid.clone();
+                v.as_object_mut().unwrap().remove("iss");
+                v
+            }),
+            ("missing iat", {
+                let mut v = valid.clone();
+                v.as_object_mut().unwrap().remove("iat");
+                v
+            }),
+            ("missing exp", {
+                let mut v = valid.clone();
+                v.as_object_mut().unwrap().remove("exp");
+                v
+            }),
+            ("missing aud", {
+                let mut v = valid.clone();
+                v.as_object_mut().unwrap().remove("aud");
+                v
+            }),
+            ("wrong iss", {
+                let mut v = valid.clone();
+                v["iss"] = "other-issuer".into();
+                v
+            }),
+            ("wrong aud", {
+                let mut v = valid.clone();
+                v["aud"] = "other-audience".into();
+                v
+            }),
+            ("expired", {
+                let mut v = valid.clone();
+                v["iat"] = (now - 1000).into();
+                v["exp"] = (now - 700).into();
+                v
+            }),
+            ("future iat", {
+                let mut v = valid.clone();
+                v["iat"] = (now + 1000).into();
+                v["exp"] = (now + 1300).into();
+                v
+            }),
+            ("future nbf", {
+                let mut v = valid.clone();
+                v["nbf"] = (now + 1000).into();
+                v
+            }),
+            ("zero lifetime", {
+                let mut v = valid.clone();
+                v["exp"] = now.into();
+                v
+            }),
+            ("negative lifetime", {
+                let mut v = valid.clone();
+                v["exp"] = (now - 1).into();
+                v
+            }),
+            ("excess lifetime", {
+                let mut v = valid.clone();
+                v["exp"] = (now + 301).into();
+                v
+            }),
+        ] {
+            cases.push((name, sign_claims(claims, &secret)));
+        }
+        for (name, header) in [
+            ("missing kid", {
+                let mut h = management_header();
+                h.kid = None;
+                h
+            }),
+            ("empty kid", {
+                let mut h = management_header();
+                h.kid = Some(String::new());
+                h
+            }),
+            ("unknown kid", {
+                let mut h = management_header();
+                h.kid = Some("unknown-key".into());
+                h
+            }),
+            ("missing typ", {
+                let mut h = management_header();
+                h.typ = None;
+                h
+            }),
+            ("wrong typ", {
+                let mut h = management_header();
+                h.typ = Some("JWT".into());
+                h
+            }),
+            ("crit", {
+                let mut h = management_header();
+                h.crit = Some(vec!["custom".into()]);
+                h
+            }),
+        ] {
+            cases.push((
+                name,
+                sign_claims_with_header(valid.clone(), &secret, header),
+            ));
+        }
+        let mut hs_header = management_header();
+        hs_header.alg = Algorithm::HS256;
+        cases.push((
+            "disallowed alg",
+            sign_claims_with_header(
+                valid.clone(),
+                &EncodingKey::from_secret(b"attacker"),
+                hs_header,
+            ),
+        ));
+        let original = sign_claims(valid.clone(), &secret);
+        let (_, tail) = original.split_once('.').unwrap();
+        let mut mismatch = management_header();
+        mismatch.alg = Algorithm::ES384;
+        cases.push((
+            "algorithm mismatch",
+            format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&mismatch).unwrap()),
+                tail
+            ),
+        ));
+        let wrong_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let wrong_secret = EncodingKey::from_ec_pem(wrong_key.serialize_pem().as_bytes()).unwrap();
+        cases.push(("bad signature", sign_claims(valid.clone(), &wrong_secret)));
+        let mut injected = management_header();
+        injected.jwk = Some(
+            jsonwebtoken::jwk::Jwk::from_encoding_key(&wrong_secret, Algorithm::ES256).unwrap(),
+        );
+        cases.push((
+            "embedded attacker key",
+            sign_claims_with_header(valid, &wrong_secret, injected),
+        ));
+
+        let expected = AuthenticationError::InvalidToken.into_response();
+        let challenge = expected.headers()[header::WWW_AUTHENTICATE].clone();
+        let content_type = expected.headers()[header::CONTENT_TYPE].clone();
+        let body = to_bytes(expected.into_body(), usize::MAX).await.unwrap();
+        for (name, token) in cases {
+            let response = call_with_token(app.clone(), token).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{name}");
+            assert_eq!(
+                response.headers()[header::WWW_AUTHENTICATE],
+                challenge,
+                "{name}"
+            );
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                content_type,
+                "{name}"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                body,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_headers_are_uniform_invalid_tokens() {
+        let app = create_test_router(test_app_state(None).await);
+        let expected = AuthenticationError::InvalidToken.into_response();
+        let body = to_bytes(expected.into_body(), usize::MAX).await.unwrap();
+        for value in ["Bearer", "Bearer ", "bEaReR", "Bearer   ", "Bearer\t"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/test")
+                        .header(header::AUTHORIZATION, value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{value:?}");
+            assert_eq!(
+                response.headers()[header::WWW_AUTHENTICATE],
+                "Bearer error=\"invalid_token\"",
+                "{value:?}"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                body,
+                "{value:?}"
+            );
+        }
+        for value in [None, Some("Basic credentials")] {
+            let mut request = Request::builder().uri("/test");
+            if let Some(value) = value {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+        }
     }
 
     #[tokio::test]

@@ -909,9 +909,25 @@ components:
       description: |
         JSON Web Key representing the issuer's public key. The exact fields
         depend on the key type (e.g., `kty`, `crv`, `x`, `y` for EC keys).
+        Only public signing keys are accepted; symmetric keys and private key
+        members are rejected. `alg` must match the key type and curve.
+        RSA moduli must have 2048 to 8192 bits. If `use` is present it must be `sig`.
       required:
         - kty
+        - kid
+        - alg
       properties:
+        kid:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Management key identifier, unique across registered issuers.
+          example: "issuer-key-1"
+        alg:
+          type: string
+          enum: [ES256, ES384, EdDSA, PS256]
+          description: Signing algorithm; EdDSA requires Ed25519.
+          example: "ES256"
         kty:
           type: string
           description: Key type.
@@ -931,6 +947,8 @@ components:
       example:
         kty: "EC"
         crv: "P-256"
+        kid: "issuer-key-1"
+        alg: "ES256"
         x: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
         y: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
 
@@ -1480,8 +1498,8 @@ components:
       description: |
         The credential registration was rejected. Read the `error` field.
 
-        `credentials_already_exist` — this issuer already has credentials
-        registered. **Retrying will never succeed.**
+        `credentials_already_exist` — this issuer or key ID is already
+        registered. **Retrying the identical registration will never succeed.**
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -1502,10 +1520,10 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           examples:
             alreadyExists:
-              summary: This issuer is already registered (do not retry)
+              summary: This issuer or key ID is already registered (do not retry)
               value:
                 error: "credentials_already_exist"
-                error_description: "Credentials already exist for this issuer"
+                error_description: "Credentials already exist for this issuer or key ID"
             writeContention:
               summary: Rolled back by a storage lock race (retry unchanged)
               value:

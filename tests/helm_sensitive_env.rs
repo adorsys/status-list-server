@@ -85,6 +85,10 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
         .arg("-f")
         .arg(chart_dir.join("values.yaml"))
         .args(["--namespace", "statuslist"])
+        .args([
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
+        ])
         .args(["--set", "opentelemetry-collector.enabled=false"]);
     if disable_postgres {
         command.args(["--set", "postgres.enabled=false"]);
@@ -190,6 +194,43 @@ fn rendered_chart_default_env_loads_application_config() {
         .collect::<Vec<_>>();
 
     Config::load_from_overrides(&overrides).expect("chart default env should load as app config");
+}
+
+#[test]
+fn production_chart_requires_an_explicit_management_audience() {
+    for profile in ["production", "prod", " PRODUCTION "] {
+        let Some(output) = render_helm_failure(&[
+            "--set-string",
+            &format!("statuslist.env.APP_ENV={profile}"),
+            "--set-string",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=",
+        ]) else {
+            return;
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("APP_MANAGEMENT_AUTH__AUDIENCES is required in production")
+        );
+    }
+}
+
+#[test]
+fn development_chart_can_omit_management_audiences() {
+    let Some(output) = helm_template(&[
+        "--set-string",
+        "statuslist.env.APP_ENV=development",
+        "--set-string",
+        "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+        "--set-string",
+        "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=",
+    ]) else {
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

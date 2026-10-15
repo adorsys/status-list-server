@@ -35,6 +35,12 @@ npm install
 npm run generate-tokens
 ```
 
+Set `MANAGEMENT_AUDIENCE` to an audience accepted by the target deployment
+before generating tokens (local default: `status-list-server-management`).
+Management tokens expire after 300 seconds; workers refresh them during longer
+runs. The ignored `scripts/test-tokens.json` contains the ephemeral private key
+and is written with owner-only permissions. Regenerate it for each run.
+
 `generate-tokens` writes a single, git-ignored `scripts/test-tokens.json`
 containing the issuer ID, the public JWK and a set of signed JWTs. The run and
 setup scripts read everything they need from this file, so the key always

@@ -661,7 +661,120 @@ here; a test fails until it does.
 | `add_status_list_history_version` | Yes: the column defaults to `0` | None | None |
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
-| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Existing credentials with duplicate `kid` values must be reconciled before upgrade | JWKs with a `kid` of at most 255 characters are backfilled; credentials whose JWK lacks the new required `kid`/`alg` contract or has a longer `kid` must be updated before they can authenticate |
+| `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate kids before upgrade | Only existing `kid` values are backfilled. Repair both the JWK and indexed `key_id` after migration; changing JSON alone is insufficient |
+
+### Preparing existing management credentials
+
+Helm deployments must explicitly set
+`statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES` to an audience unique to that
+deployment (for example, `https://statuslist.prod.example.com/api/v1`). Give
+staging a different value, even if both environments register the same issuer
+key. Production chart rendering fails if the audience is empty. Issuers must
+include that configured value in their management tokens' `aud` claim.
+
+Before upgrading, back up the database and inventory existing credentials with
+the read-only queries below. Run them before the new migration: they use only
+the existing `issuer` and `public_key` columns. `duplicate_kid_count > 1` blocks
+the unique index. Missing/empty/overlong IDs and missing or unsupported algorithms
+block authentication after upgrade.
+
+```sql
+-- PostgreSQL
+WITH keys AS (
+  SELECT issuer, public_key ->> 'kid' AS kid,
+         public_key ->> 'alg' AS alg,
+         jsonb_typeof(public_key::jsonb -> 'kid') AS kid_type,
+         jsonb_typeof(public_key::jsonb -> 'alg') AS alg_type,
+         public_key ->> 'kty' AS kty, public_key ->> 'crv' AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM keys
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR length(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'string' OR alg_type <> 'string'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+```
+
+```sql
+-- MySQL 8+
+WITH key_values AS (
+  SELECT issuer, JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) AS kid,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.alg')) AS alg,
+         JSON_TYPE(JSON_EXTRACT(public_key, '$.kid')) AS kid_type,
+         JSON_TYPE(JSON_EXTRACT(public_key, '$.alg')) AS alg_type,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kty')) AS kty,
+         JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.crv')) AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM key_values
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR CHAR_LENGTH(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'STRING' OR alg_type <> 'STRING'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+```
+
+```sql
+-- SQLite
+WITH keys AS (
+  SELECT issuer, json_extract(public_key, '$.kid') AS kid,
+         json_extract(public_key, '$.alg') AS alg,
+         json_type(public_key, '$.kid') AS kid_type,
+         json_type(public_key, '$.alg') AS alg_type,
+         json_extract(public_key, '$.kty') AS kty,
+         json_extract(public_key, '$.crv') AS crv
+  FROM credentials
+), inventory AS (
+  SELECT *, COUNT(*) OVER (PARTITION BY kid) AS duplicate_kid_count FROM keys
+)
+SELECT * FROM inventory
+WHERE kid IS NULL OR kid = '' OR length(kid) > 255
+   OR duplicate_kid_count > 1 OR alg IS NULL
+   OR kid_type <> 'text' OR alg_type <> 'text'
+   OR NOT COALESCE(((kty = 'EC' AND crv = 'P-256' AND alg = 'ES256')
+        OR (kty = 'EC' AND crv = 'P-384' AND alg = 'ES384')
+        OR (kty = 'OKP' AND crv = 'Ed25519' AND alg = 'EdDSA')
+        OR (kty = 'RSA' AND alg = 'PS256')), FALSE);
+```
+
+These queries flag metadata incompatibilities; also inspect the complete public
+JWK for private members, invalid key material, an encryption-only `use`, and RSA
+moduli below 2048 bits. Do not copy private key material into the database.
+
+Coordinate repairs with each issuer before enabling the new verifier:
+
+1. Agree on an unused key ID and the exact supported signing algorithm. A
+   missing ID can be generated from an RFC 7638 SHA-256 public JWK thumbprint,
+   but check for duplicates: the same public key has the same thumbprint.
+2. Add the agreed `kid` and `alg` to the stored public JWK. Do not infer an RSA
+   signing algorithm from key type alone or silently relabel an existing RS256
+   key as PS256. The issuer must explicitly switch its signer to PS256 or supply
+   another supported public key. Preserve the credential's issuer, aggregation
+   ID, list count, and associated lists.
+3. Before migration, update `public_key`; the migration copies its `kid` into
+   `key_id`. If the migration has already run, stop management writes and update
+   **both columns in one transaction**. Use bound parameters with the database
+   client: `UPDATE credentials SET public_key = :public_jwk, key_id = :kid
+   WHERE issuer = :issuer`. Cast the JSON parameter as required by the driver.
+   Do not delete and re-register the issuer to work around a 409.
+4. Rerun the inventory query. After migration, verify `key_id` equals the
+   JWK's `kid`, then have each issuer authenticate using its agreed algorithm,
+   `typ: statuslist-management+jwt`, matching `kid`, configured audience, and
+   a lifetime within the configured maximum (300 seconds by default).
+
+There is no public credential-update endpoint in this release. An operator must
+perform these repairs; re-registering an existing issuer returns 409. Plan a
+coordinated cutover if old and new servers overlap, because their accepted token
+contracts differ.
 
 **`m20260925_000001_status_list_allocations`.** The schema change is additive,
 but a release before it, such as v1.2.0, rewrites a list without its `size`

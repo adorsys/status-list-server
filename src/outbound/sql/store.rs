@@ -1041,18 +1041,6 @@ impl SeaOrmStore<Credentials> {
         .await
     }
 
-    pub async fn find_all_credentials(&self) -> Result<Vec<Credentials>, RepositoryError> {
-        time_query("find_all", "credential", async {
-            let db = self.db.current();
-            credentials::Entity::find()
-                .all(&*db)
-                .await
-                .map(|rows| rows.into_iter().map(Credentials::from).collect())
-                .map_err(find_err)
-        })
-        .await
-    }
-
     /// Resolve a management key by its indexed `kid` copy. Return up to two
     /// matches so callers can fail closed on duplicate kids.
     pub async fn find_credentials_by_kid(

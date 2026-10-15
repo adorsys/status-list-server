@@ -88,9 +88,10 @@ impl CredentialRepo for SqlCredentialRepo {
             return Ok(None);
         };
         if records.next().is_some() {
-            return Err(CredentialError::InvalidPublicJwk(format!(
-                "kid {kid:?} is registered for multiple credentials"
-            )));
+            return Err(CredentialError::Backend(
+                std::io::Error::other("management key ID resolves to multiple stored credentials")
+                    .into(),
+            ));
         }
         let bytes = serde_json::to_vec(&record.public_key)
             .map_err(|e| CredentialError::InvalidPublicJwk(format!("serialization failed: {e}")))?;
@@ -370,6 +371,30 @@ mod tests {
     use super::*;
     use crate::server::error::{ApiError, IntoApiError};
     use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn duplicate_stored_key_ids_are_backend_errors() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        let public_key: jsonwebtoken::jwk::Jwk =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let records = ["one", "two"].map(|issuer| models::credentials::Model {
+            issuer: issuer.into(),
+            public_key: public_key.clone().into(),
+            key_id: Some("test-key".into()),
+            list_count: 0,
+            aggregation_id: None,
+        });
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([records])
+            .into_connection();
+        let repo = SqlCredentialRepo::new(SeaOrmStore::new(std::sync::Arc::new(db)));
+        let error = repo.find_by_kid("test-key").await.unwrap_err();
+        assert!(matches!(error, CredentialError::Backend(_)));
+        assert_eq!(
+            error.into_api_error().status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     /// Spans the chain the other tests only cover in halves: adapter error →
     /// domain conversion → status and code the client receives. A broken `From`

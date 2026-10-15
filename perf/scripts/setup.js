@@ -15,6 +15,7 @@
 // success, and re-publishing seed lists simply replaces the previous set.
 
 const http = require('http');
+const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -82,7 +83,13 @@ function registerIssuer(data) {
 }
 
 async function seedStatusLists(data) {
-  const token = data.tokens[0];
+  let token = data.tokens[0];
+  const now = Math.floor(Date.now() / 1000);
+  if (data.privateKey) {
+    token = jwt.sign({ iss: data.issuerId, aud: data.audience, iat: now, exp: now + 300 }, data.privateKey, {
+      algorithm: 'ES256', header: { kid: data.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
+    });
+  }
   const created = [];
   for (let i = 0; i < SEED_LISTS; i++) {
     const listId = crypto.randomUUID();

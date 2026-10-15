@@ -330,16 +330,14 @@ impl CredentialRepo for MemoryCredentials {
         let values = self.values.read().await;
         let mut matching_credential = None;
         for (credential, _) in values.by_issuer.values() {
-            if credential
-                .public_key
-                .key_id_and_algorithm()
-                .map(|(id, _)| id == kid)
-                .unwrap_or(false)
-            {
+            if credential.public_key.key_id() == kid {
                 if matching_credential.is_some() {
-                    return Err(CredentialError::InvalidPublicJwk(format!(
-                        "kid {kid:?} is registered for multiple credentials"
-                    )));
+                    return Err(CredentialError::Backend(
+                        std::io::Error::other(
+                            "management key ID resolves to multiple stored credentials",
+                        )
+                        .into(),
+                    ));
                 }
                 matching_credential = Some(credential.clone());
             }
@@ -356,13 +354,12 @@ impl CredentialRepo for MemoryCredentials {
         if values.by_issuer.contains_key(&credential.issuer.0) {
             return Err(CredentialError::AlreadyExists);
         }
-        let (kid, _) = credential.public_key.key_id_and_algorithm()?;
-        if values.by_issuer.values().any(|(existing, _)| {
-            existing
-                .public_key
-                .key_id_and_algorithm()
-                .is_ok_and(|(existing_kid, _)| existing_kid == kid)
-        }) {
+        let kid = credential.public_key.key_id();
+        if values
+            .by_issuer
+            .values()
+            .any(|(existing, _)| existing.public_key.key_id() == kid)
+        {
             return Err(CredentialError::AlreadyExists);
         }
         let issuer = credential.issuer.clone();
@@ -474,6 +471,32 @@ impl crate::utils::cert_manager::storage::Storage for MemoryStorage {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn duplicate_stored_key_ids_are_backend_errors() {
+        use super::*;
+        let repo = MemoryCredentials::default();
+        let key = crate::domain::models::credential::PublicJwk::try_new(
+            crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
+        )
+        .unwrap();
+        // Simulate corrupted storage, bypassing the normal insert constraint.
+        for issuer in ["one", "two"] {
+            repo.values.write().await.by_issuer.insert(
+                issuer.into(),
+                (
+                    Credential {
+                        issuer: Issuer(issuer.into()),
+                        public_key: key.clone(),
+                    },
+                    AggregationId::generate(),
+                ),
+            );
+        }
+        assert!(matches!(
+            repo.find_by_kid("test-key").await,
+            Err(CredentialError::Backend(_))
+        ));
+    }
     use super::*;
     use crate::domain::models::credential::Issuer;
     use crate::domain::models::status_list::{Status, StatusEntry, StatusListError};
