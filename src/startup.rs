@@ -108,10 +108,7 @@ impl HttpServer {
 
         // Serve all three listeners concurrently. Each `serve` future resolves
         // after its graceful-shutdown signal (SIGTERM/SIGINT), so on a normal
-        // shutdown all three complete and any one's Ok is returned. If a listener
-        // fails to serve (e.g. an accept error), its Err is propagated so the
-        // process exits non-zero and the orchestrator can restart it, rather than
-        // silently exiting 0 with a dead surface.
+        // shutdown all three complete and any one's Ok is returned.
         tokio::select! {
             result = public => result,
             result = management => result,
