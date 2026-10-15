@@ -1049,6 +1049,8 @@ pub(crate) mod credentials_key_id {
                     "SELECT issuer, public_key FROM credentials WHERE key_id IS NULL",
                 ))
                 .await?;
+            let mut pending = Vec::new();
+            let mut owners = std::collections::BTreeMap::<String, Vec<String>>::new();
             for row in rows {
                 let issuer: String = row.try_get("", "issuer")?;
                 let mut public_key: serde_json::Value = row.try_get("", "public_key")?;
@@ -1056,6 +1058,43 @@ pub(crate) mod credentials_key_id {
                     continue;
                 };
                 public_key["kid"] = kid.clone().into();
+                owners.entry(kid.clone()).or_default().push(issuer.clone());
+                pending.push((issuer, public_key, kid));
+            }
+
+            // Check the complete plan before writing any generated IDs. Let the
+            // database compare existing IDs so MySQL's column collation applies.
+            let lookup = match backend {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "SELECT issuer FROM credentials WHERE key_id = $1 ORDER BY issuer"
+                }
+                _ => "SELECT issuer FROM credentials WHERE key_id = ? ORDER BY issuer",
+            };
+            let mut collisions = Vec::new();
+            for (kid, issuers) in &mut owners {
+                for row in connection
+                    .query_all_raw(Statement::from_sql_and_values(
+                        backend,
+                        lookup,
+                        [kid.clone().into()],
+                    ))
+                    .await?
+                {
+                    issuers.push(row.try_get("", "issuer")?);
+                }
+                if issuers.len() > 1 {
+                    issuers.sort();
+                    collisions.push(format!("kid {kid:?}: issuers {issuers:?}"));
+                }
+            }
+            if !collisions.is_empty() {
+                return Err(DbErr::Migration(format!(
+                    "credential key ID backfill collisions; repair these registrations before retrying: {}",
+                    collisions.join("; ")
+                )));
+            }
+
+            for (issuer, public_key, kid) in pending {
                 let update = match backend {
                     sea_orm::DatabaseBackend::Postgres => {
                         "UPDATE credentials SET public_key = CAST($1 AS JSONB), key_id = $2 WHERE issuer = $3 AND key_id IS NULL"

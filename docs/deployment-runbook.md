@@ -784,8 +784,11 @@ Coordinate repairs with each issuer before enabling the new verifier:
    after migration with `SELECT issuer, key_id FROM credentials` and communicate
    them to issuers. Check for collisions beforehand: identical public keys
    produce identical thumbprints, which can also clash with a supplied ID.
-   The unique constraint rejects a collision; the migration never silently
-   assigns a different ID. Repair colliding registrations before retrying.
+   Before writing generated IDs, the migration checks for collisions between
+   generated thumbprints and against existing IDs. It stops with an error naming
+   the affected issuers, so operators can repair those registrations before
+   retrying. The unique constraint remains the final safeguard; the migration
+   never silently assigns a different ID.
 2. Add the agreed `kid` and `alg` to the stored public JWK. Do not infer an RSA
    signing algorithm from key type alone or silently relabel an existing RS256
    key as PS256. The issuer must explicitly switch its signer to PS256 or supply

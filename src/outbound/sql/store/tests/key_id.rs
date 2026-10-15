@@ -99,6 +99,47 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
         key
     })
     .await;
+
+    // Preflight must report both kinds of collision before writing even an
+    // unrelated generated ID, including on MySQL where DDL is not transactional.
+    let mut twin = template.clone();
+    twin.as_object_mut().unwrap().remove("kid");
+    insert_legacy_key(&db, "missing-twin", &twin).await;
+    let mut reserved = template.clone();
+    reserved["kid"] = null_thumbprint.clone().into();
+    insert_legacy_key(&db, "reserved", &reserved).await;
+    let error = Migrator::migrations()[migration_index()]
+        .up(&SchemaManager::new(db.as_ref()))
+        .await
+        .expect_err("collisions must be reported before generated IDs are written");
+    assert!(matches!(error, sea_orm::DbErr::Migration(_)), "{error}");
+    let message = error.to_string();
+    for detail in [
+        FIXTURE_THUMBPRINT,
+        null_thumbprint.as_str(),
+        "\"missing\"",
+        "\"missing-twin\"",
+        "\"null-id\"",
+        "\"reserved\"",
+        "repair these registrations before retrying",
+    ] {
+        assert!(message.contains(detail), "missing {detail:?} in {message}");
+    }
+    for row in db
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT public_key, key_id FROM credentials WHERE issuer IN ('missing', 'null-id', 'ed25519')",
+        ))
+        .await
+        .unwrap()
+    {
+        let key: serde_json::Value = row.try_get("", "public_key").unwrap();
+        assert!(key.get("kid").is_none_or(serde_json::Value::is_null));
+        assert_eq!(row.try_get::<Option<String>>("", "key_id").unwrap(), None);
+    }
+    db.execute_unprepared("DELETE FROM credentials WHERE issuer IN ('missing-twin', 'reserved')")
+        .await
+        .unwrap();
     Migrator::up(db.as_ref(), None).await.unwrap();
     let store = SeaOrmStore::<Credentials>::new(db.clone());
     let found = store.find_credentials_by_kid("existing-key").await.unwrap();
@@ -192,13 +233,10 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
         .up(&SchemaManager::new(db.as_ref()))
         .await
         .expect_err("duplicate thumbprints must fail closed");
-    assert!(
-        matches!(
-            error.sql_err(),
-            Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
-        ),
-        "{error}"
-    );
+    assert!(matches!(error, sea_orm::DbErr::Migration(_)), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("\"collision\""), "{message}");
+    assert!(message.contains("\"missing\""), "{message}");
     assert_eq!(
         store.find_credentials_by_kid("existing-key").await.unwrap()[0].issuer,
         "existing"
