@@ -113,6 +113,10 @@ fn fixture_state(config: &Config) -> AppState {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        links: status_list_server::server::ServiceLinks {
+            documentation: status_list_server::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: TokenBytesCache::new(config.token_bytes_cache.max_capacity),
         readiness: Readiness::default(),
     }
