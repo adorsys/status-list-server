@@ -84,20 +84,14 @@ servers:
         description: Host name and port of the public server.
   - url: https://{management_host}
     description: >-
-      Management listener (authenticated issuer writes): PUT/PATCH
-      /api/v1/status-lists/{list_id}/statuses,
-      POST /api/v1/status-lists/{list_id}/allocations,
-      GET /api/v1/credentials (authenticated), and
-      POST /api/v1/credentials (self-registration, deprecated).
-      Default port 8001. Never exposed via the public Ingress.
+      Management listener (authenticated issuer writes): PUT/PATCH /api/v1/status-lists/{list_id}/statuses, POST /api/v1/status-lists/{list_id}/allocations, GET /api/v1/credentials (authenticated), and POST /api/v1/credentials (self-registration, deprecated). Default port 8001. Never exposed via the public Ingress.
     variables:
       management_host:
         default: localhost:8001
         description: Host name and port of the management listener.
   - url: https://{admin_host}
     description: >-
-      Admin listener: /health/ready and /metrics.
-      Default port 8002. Never exposed via the public Ingress.
+      Admin listener: /health/ready and /metrics. Default port 8002. Never exposed via the public Ingress.
     variables:
       admin_host:
         default: localhost:8002
