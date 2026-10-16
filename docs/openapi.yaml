@@ -7,7 +7,7 @@ info:
 
     This service implements the
     [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
-    and allows credential issuers to register, publish, and update status lists.
+    and allows provisioned credential issuers to publish and update status lists.
     Relying parties can retrieve status list tokens in JWT or CWT format.
 
     Error responses are JSON objects of the form
@@ -30,9 +30,6 @@ info:
     operator-configurable through the `APP_RATE_LIMIT__*` environment
     variables (see `RateLimitConfig`):
 
-      * **strict** (per source IP) — `POST /api/v1/credentials`.
-        Tunables: `strict_burst_size`, `strict_period_secs`
-        (defaults: 10 / 60s).
       * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
         `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
         the peer IP) — `PUT`/`PATCH`
@@ -190,63 +187,21 @@ paths:
 
   /api/v1/credentials:
     get:
-      operationId: getIssuerRegistration
+      operationId: getIssuerMetadata
       summary: Get the calling issuer's aggregation ID and URI
       description: |
         Returns the aggregation ID and URI of the issuer the Bearer token
-        belongs to. Issuers registered before aggregation IDs existed never got
-        theirs in the registration response, and get them here.
+        belongs to. The response lets an issuer confirm its provisioned
+        aggregation ID and URI.
       responses:
         "200":
-          description: The issuer's registration.
+          description: The calling issuer's aggregation metadata.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RegistrationResponse"
+                $ref: "#/components/schemas/IssuerMetadata"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-
-    post:
-      operationId: registerIssuer
-      summary: Register issuer credentials
-      deprecated: true
-      description: |
-        Registers an issuer by storing its unique identifier and public key
-        (JWK). The registered public key is used later to validate signed JWT
-        Bearer tokens for the protected management endpoints.
-
-        **Deprecated.** Issuers are provisioned by the server operator. Do not
-        build new integrations on self-registration.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CredentialsRequest"
-      responses:
-        "202":
-          description: |
-            Credentials accepted and stored. The body tells the issuer its
-            aggregation ID, which it cannot derive itself, and the aggregation
-            URI to publish in its metadata (draft-21 §9.1).
-            `GET /api/v1/credentials` returns them again later.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CredentialsResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/CredentialConflict"
-        "413":
-          $ref: "#/components/responses/PayloadTooLarge"
-        "422":
-          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -274,7 +229,7 @@ paths:
           in: path
           required: true
           description: |
-            The issuer's aggregation ID, as returned at registration and by
+            The issuer's aggregation ID, as returned by
             `GET /api/v1/credentials`.
           schema:
             type: string
@@ -846,44 +801,7 @@ components:
         responses with `WWW-Authenticate: Bearer error="invalid_token"`.
 
   schemas:
-    CredentialsRequest:
-      type: object
-      required:
-        - issuer
-        - public_key
-      properties:
-        issuer:
-          type: string
-          description: Unique identifier of the issuer.
-          example: "my-issuer"
-        public_key:
-          $ref: "#/components/schemas/JWK"
-
-    CredentialsResponse:
-      type: object
-      required:
-        - status
-        - aggregation_id
-      properties:
-        status:
-          type: string
-          example: "Credentials stored successfully"
-        aggregation_id:
-          type: string
-          format: uuid
-          description: |
-            Opaque ID that names this issuer in public aggregation URIs, in
-            place of the issuer identifier.
-          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
-        aggregation_uri:
-          type: string
-          format: uri
-          description: |
-            The issuer's Status List Aggregation URI. Absent when status list
-            tokens do not carry one (see `StatusList.aggregation_uri`).
-          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
-
-    RegistrationResponse:
+    IssuerMetadata:
       type: object
       required:
         - issuer
@@ -922,9 +840,7 @@ components:
           minLength: 1
           maxLength: 255
           description: |
-            Management key identifier, unique across all registered issuers.
-            Registering a key ID already used by another issuer returns
-            409 Conflict (`credentials_already_exist`).
+            Management key identifier, unique across all provisioned issuers.
           example: "issuer-key-1"
         alg:
           type: string
@@ -1264,7 +1180,6 @@ components:
             - invalid_accept_header
             # 409
             - status_list_already_exists
-            - credentials_already_exist
             - update_conflict
             - index_not_allocated
             - list_not_fixed_size
@@ -1497,42 +1412,6 @@ components:
                 error: "write_contention"
                 error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
 
-    CredentialConflict:
-      description: |
-        The credential registration was rejected. Read the `error` field.
-
-        `credentials_already_exist` — this issuer or key ID is already
-        registered. **Retrying the identical registration will never succeed.**
-
-        `write_contention` — the write lost a lock race inside the database
-        (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
-        so **retry the identical request** after the `Retry-After` interval plus
-        jitter.
-      headers:
-        Retry-After:
-          description: |
-            Present only for `write_contention`. Seconds to wait before
-            retrying — a minimum, not a schedule.
-          required: false
-          schema:
-            type: integer
-            example: 1
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
-          examples:
-            alreadyExists:
-              summary: This issuer or key ID is already registered (do not retry)
-              value:
-                error: "credentials_already_exist"
-                error_description: "Credentials already exist for this issuer or key ID"
-            writeContention:
-              summary: Rolled back by a storage lock race (retry unchanged)
-              value:
-                error: "write_contention"
-                error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
-
     PayloadTooLarge:
       description: |
         The request body exceeds the operator-configurable
@@ -1550,8 +1429,7 @@ components:
       description: |
         The request was well-formed but the resulting serialized status list
         exceeds the operator-configurable `limits.max_serialized_list_size`
-        (default 1 MiB), or (for `POST /api/v1/credentials`) the supplied
-        public key could not be parsed into a JWK.
+        (default 1 MiB).
       content:
         application/json:
           schema:
