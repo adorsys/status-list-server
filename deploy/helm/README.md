@@ -230,7 +230,7 @@ statuslist:
 
 `fileEnv` values are relative to `mountPath`, and they work with or without `items`. For upgrade safety, the default mount keeps the legacy `postgres-password` key from `statuslist-secret` at `/var/run/status-list-server/database/password` and exposes that path through `APP_DATABASE__PASSWORD_FILE`. This avoids breaking customer-managed Secrets or custom ESO mappings that have not yet added `database-password`, because Kubernetes refuses to mount a listed Secret key that does not exist. After your secret-delivery path guarantees `database-password` exists, switch `statuslist.secretMounts[0].items[0].key` or `statuslist.database.passwordSecretKey` to `database-password`. Existing fallback Secrets that only contain `postgres-password` are read during Helm upgrade and rendered back with both keys.
 
-This chart support is preparatory for application images that implement the file-watcher and reload behavior from issue #456. Current images that only read `APP_DATABASE__PASSWORD` at startup still need a rollout after secret changes. The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret.
+Since v1.1.1 the server watches mounted secret files and reloads them without a restart: it reconnects the database pool when the file behind `APP_DATABASE__PASSWORD_FILE` changes, and reloads the token signing certificate and key when the files behind `APP_SERVER__CERT__STORE__CERTIFICATE_PATH` and `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH` change. It polls every `statuslist.watcher.pollIntervalSecs` seconds (30 by default). The `checksum/secret` annotation only reacts to Helm-rendered ExternalSecret template or value changes; it does not change when External Secrets Operator later syncs new data from Vault, AWS, GCP, or Azure into a Kubernetes Secret, so picking up those changes is the watcher's job.
 
 For mounted Secrets that should be created by ESO, define them under `externalSecret.spec.extraExternalSecrets` and set each `target.name` to the `secretMounts[].secretName` value. If customer-side provisioning is used instead, the prerequisite Kubernetes Secret names and keys must exist before Helm deploys, otherwise Kubernetes cannot mount the volumes.
 
@@ -266,6 +266,45 @@ statuslist:
 Provider selection is fail-closed through `values.schema.json` and render-time checks. Unsupported providers, empty `raw: {}`, ESO without a SecretStore, and custom `externalSecret.spec.target.name` values fail before Kubernetes receives manifests.
 
 Common non-secret values under `statuslist.env` are the split database fields (`APP_DATABASE__BACKEND`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__NAME`) and server values (`APP_SERVER__HOST`, `APP_SERVER__PORT`, `APP_SERVER__DOMAIN`). Do not set `APP_DATABASE__PASSWORD` in Helm values; the chart wires the password from the Secret as `APP_DATABASE__PASSWORD_FILE`.
+
+### Rotation runbook
+
+These steps assume the mounts from `values-rotation-example.yaml`.
+
+#### Database credentials
+
+1. Create the new credential in PostgreSQL while the old one is still valid. Keep both valid for at least the ESO `refreshInterval`, plus the watcher's poll interval, plus your validation time.
+2. Test the new credential directly against PostgreSQL.
+3. Update the external secret store (for example Vault). ESO syncs it into `statuslist-db-credentials`.
+4. On its next poll the server reconnects with the new password, without a restart.
+5. Check that new connections succeed and that the logs show the reload.
+6. Revoke the old credential only after every replica is healthy on the new pool. To roll back, restore the old value in the secret store while the old credential is still valid.
+
+#### Signing certificate and key
+
+1. Create the new key and certificate, for example `openssl req -x509 -newkey rsa:4096 -keyout new.key -out new.crt`.
+2. Replace them in the external secret store. ESO syncs them to `statuslist-token-keys` and Kubernetes updates the mounted files; data-only syncs don't trigger a rollout.
+3. On its next poll the server reloads both files.
+4. Check the mounted files: `kubectl exec <pod> -- ls -la /etc/secrets/token-keys/`.
+
+#### Compromised credentials
+
+1. Create or revoke credentials according to your incident plan. If the old credentials must be revoked right away, existing connections fail until each replica reloads.
+2. Update the external secret store immediately.
+3. If the incident calls for replacing all in-memory state, restart: `kubectl rollout restart deployment/statuslist-status-list-server-deployment`.
+4. Check that every pod uses the new credentials.
+
+#### Useful checks
+
+```sh
+kubectl exec <pod> -- ls -la /etc/secrets/
+kubectl get externalsecret statuslist-external-secret
+kubectl describe externalsecret statuslist-external-secret
+kubectl get clustersecretstore vault-cluster-store
+kubectl describe clustersecretstore vault-cluster-store
+kubectl rollout status deployment/statuslist-status-list-server-deployment
+kubectl logs -l app.kubernetes.io/name=status-list-server | grep -i "credential\|secret\|reload"
+```
 
 ## Use Workload Identity Instead of Mounted Credentials
 
