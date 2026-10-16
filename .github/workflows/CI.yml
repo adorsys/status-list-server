@@ -10,8 +10,7 @@ on:
       - develop
       - main
 
-# A scope added here must also be granted by deploy.yml's `ci` job, which calls this
-# workflow: a called workflow can only narrow the caller's token.
+# deploy.yml's ci job must grant any scope added here.
 permissions:
   contents: read
 
@@ -24,22 +23,11 @@ jobs:
     name: Zizmor Security Check
     runs-on: ubuntu-latest
     env:
-      # The action's `version` defaults to `latest`, so without this an upstream zizmor
-      # release turns every PR red. The action's SHA pins the action, not the scanner.
+      # The action's SHA pins the action, not the scanner, which defaults to latest.
       ZIZMOR_VERSION: "1.28.0"
 
-      # zizmor's exit codes are severity-encoded: 0 no findings, 1 audit error, 2
-      # argument error, 3 no inputs collected, then 11/12/13/14 for "findings
-      # reported, highest severity is informational/low/medium/high".
-      #
-      # The self-test accepts the whole 11-14 band rather than one value. This gate is
-      # fail-closed at every severity, so any code in the band proves what the
-      # self-test claims -- that the gate evaluated the fixture and reported. Pinning
-      # a single code would instead pin the fixture's current severity classification:
-      # an upstream reclassification, or adding a finding of a different severity to
-      # the fixture, would red every PR with nothing actually wrong.
-      #
-      # Revisit alongside ZIZMOR_VERSION if the exit-code contract changes.
+      # zizmor exits 11-14 for findings (by top severity); 0, 1, 2 and 3 mean clean or broken.
+      # Accept the whole band so an upstream severity change doesn't red every PR.
       ZIZMOR_FINDINGS_EXIT_MIN: "11"
       ZIZMOR_FINDINGS_EXIT_MAX: "14"
 
@@ -49,20 +37,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Fail-closed at every severity. To accept a finding use `# zizmor: ignore[rule]`
-      # on the line it anchors to; `ignore-start`/`ignore-end` suppress nothing.
-      #
-      # `online-audits: true` is deliberate and stays on the merge gate. The four
-      # online audits -- known-vulnerable-actions, impostor-commit, ref-confusion and
-      # typosquat-uses -- are the ones that catch a supply-chain attack on the actions
-      # this repository pins by SHA. Offline, a newly disclosed advisory against a
-      # pinned action is invisible until someone happens to bump it. That an advisory
-      # published upstream reds a PR that changed nothing here is the alarm working,
-      # not noise: the workflow really did become vulnerable between the two runs.
-      #
-      # The cost is that zizmor is `fatal` when an online audit's request fails (see
-      # its Troubleshooting docs), so a transient GitHub API error is indistinguishable
-      # from a finding at the job level. The retry below covers exactly that case.
+      # Fail-closed. Accept a finding with # zizmor: ignore[rule] on its line; ignore-start/end do nothing.
+      # Online audits stay on to catch advisories against pinned actions;
+      # a transient API failure is fatal, hence the retry below.
       - name: Run Zizmor
         id: zizmor
         # Failure is deferred to the retry, which is the step that gates the job.
@@ -74,14 +51,11 @@ jobs:
           inputs: .
           persona: regular
           online-audits: true
-          # `annotations` and `advanced-security` are mutually exclusive in this action.
-          # A fail-closed gate wants findings on the diff, not in a tab that stays empty.
+          # Mutually exclusive with annotations, which put findings on the diff.
           advanced-security: false
           annotations: true
 
-      # Only a transient failure is rescued: a real finding is deterministic and fails
-      # this run too, so the retry cannot turn a red gate green. Not `continue-on-error`,
-      # so this step is the one that fails the job.
+      # A real finding fails again here, so the retry can't turn a red gate green.
       - name: Run Zizmor (retry)
         if: ${{ steps.zizmor.outcome == 'failure' }}
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
@@ -115,10 +89,7 @@ jobs:
             -- "$FIXTURE" 2>&1) || rc=$?
           printf '%s\n' "$out"
 
-          # 11-14 is "findings reported", encoded by highest severity -- see the
-          # exit-code note on ZIZMOR_FINDINGS_EXIT_MIN above. The band matters rather
-          # than the exact value: 0 is a clean fixture, 3 is "no inputs collected" and
-          # 1 is any other error, and all three would pass a bare non-zero check.
+          # 0, 1 and 3 would all pass a bare non-zero check, hence the band.
           if [ "$rc" -lt "$ZIZMOR_FINDINGS_EXIT_MIN" ] || [ "$rc" -gt "$ZIZMOR_FINDINGS_EXIT_MAX" ]; then
             echo "::error::expected a findings exit code (${ZIZMOR_FINDINGS_EXIT_MIN}-${ZIZMOR_FINDINGS_EXIT_MAX}) from the fixture, got ${rc}."
             echo "Do not trust what this job reports above: the gate did not evaluate"
@@ -126,8 +97,7 @@ jobs:
             exit 1
           fi
 
-          # Every rule the fixture asserts, not just the first: a run that reports one
-          # finding and silently stopped raising the other would still exit in-band.
+          # Check every rule: one finding alone would still exit in-band.
           missing=""
           for rule in artipacked excessive-permissions; do
             [[ "$out" == *"$rule"* ]] || missing="${missing} ${rule}"
@@ -145,14 +115,8 @@ jobs:
           echo "self-test passed: the gate fails, and names every expected finding, on a known-bad workflow."
 
       - name: Assert every job is gated by ci-success
-        # `ci-success.needs` is hand-maintained, so a job missing from it fails without
-        # blocking the merge. `docker-build` already did.
+        # ci-success.needs is hand-maintained; a job left out of it can fail without blocking merges.
         if: ${{ !cancelled() }}
-        # `yq` (mikefarah v4) is part of the documented ubuntu-latest image contract,
-        # alongside `jq`, so it is not an unstated dependency:
-        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
-        # It is preferred over `jq` here because it reads CI.yml directly; converting
-        # YAML to JSON first would need a tool from that same contract anyway.
         run: |
           set -euo pipefail
 
@@ -315,13 +279,7 @@ jobs:
           persist-credentials: false
 
       - name: Docker build (production features)
-        # No FEATURES build-arg: the Dockerfile default is already the release set, and
-        # a second copy would drift.
-        #
-        # No gha cache: Docker layer caching is intentionally disabled to avoid cache
-        # bloat. The cargo build cache is shared across jobs; Docker layer caching
-        # would add ~2GB per run without significant benefit for this smoke build,
-        # evicting the cargo caches the other jobs rely on.
+        # No gha cache: ~2GB per run would evict the cargo caches other jobs use.
         run: docker build .
 
   cargo-clippy:
@@ -537,15 +495,7 @@ jobs:
   attestation-selftest:
     name: Attestation Verifier Self-Test
     runs-on: ubuntu-latest
-    # Its own job rather than a step on helm-checks.yml's trivy-config: that job is a
-    # Trivy config scan and this has nothing to do with Trivy, so a failure there would
-    # name the wrong thing in the checks list.
-    #
-    # Runs on every pull request, unlike scripts/gate-selftest.sh, because this needs
-    # nothing installed: no network, no registry, no image, and not even a real gh --
-    # every case is a stubbed gh on PATH. So drift is caught by whoever changes the
-    # verifier, while they are looking at it, rather than on the last step before a
-    # production deploy.
+    # Needs nothing installed (gh is stubbed), so it runs on every PR.
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -589,25 +539,15 @@ jobs:
           persist-credentials: false
 
       - name: Validate .trivyignore.yaml
-        # Before the scan that consumes the file, so a malformed entry fails in seconds
-        # as itself rather than later as a scanner error on an unrelated change.
         run: |
           set -eu
-          # apt rather than pip: the runner's PyYAML comes from the distribution, so
-          # this pulls no unpinned dependency into every pull request.
+          # apt, not pip, so no unpinned dependency enters every PR.
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           python3 scripts/check-trivyignore.py .trivyignore.yaml
 
       - name: Assert the image variant lists agree across workflows
-        # GitHub does not expose `env` to `strategy.matrix`, so the variant list is
-        # restated in deploy.yml's three fan-out matrices and again in the scheduled
-        # re-scan. The drift is asymmetric and one half is invisible: a variant added
-        # to deploy.yml but not to the re-scan is built, promoted, deployed and never
-        # re-scanned, with nothing going red.
-        #
-        # Checked here rather than only in the nightly so it fails for whoever adds the
-        # variant, while they are looking at it, rather than at 03:37 the next night.
+        # strategy.matrix can't read env, so the variant list is copied; this catches drift in the PR.
         run: python3 scripts/check-variant-parity.py
 
   compose-validation:
@@ -746,8 +686,7 @@ jobs:
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          # Both pinned: cargo-llvm-cov and nextest have to agree on the test-runner
-          # interface, so they are bumped together rather than floating independently.
+          # Bump these together: llvm-cov and nextest share a test-runner interface.
           tool: cargo-llvm-cov@0.6.16,nextest@0.9.101
 
       - name: Generate code coverage
@@ -780,9 +719,7 @@ jobs:
       - name: Test local CI runner
         run: python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
 
-  # The single required status check. The jobs above form several independent chains
-  # rather than one, so no individual job represents the suite. Rollout order:
-  # CONTRIBUTING.md, "Branch Protection".
+  # The single required check (CONTRIBUTING.md, "Branch Protection").
   ci-success:
     name: CI Success
     if: always()
@@ -813,20 +750,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      # Printed so a failure shows which job caused it without expanding the UI.
       - name: Summarise job results
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: printf '%s\n' "$NEEDS"
 
-      # `if: always()` makes a *skipped* job report neither failure nor cancellation,
-      # so the check below would pass it. cargo-test-doc is the one job allowed to
-      # skip -- it is gated on check-crate-type's `is_lib` output.
-      #
-      # This closes the transitive case as well: if check-crate-type were ever itself
-      # skipped, its `is_lib` output would be empty, cargo-test-doc's `'' == 'true'`
-      # would skip too, and both would have reported a pass. The in-job non-empty
-      # assert in crate_type.yml only covers the case where that job runs.
+      # With if: always(), a skipped job counts as neither failure nor cancellation.
+      # Only cargo-test-doc may skip (non-lib crates); anything else skipping fails here.
       - name: Fail if a required job was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
