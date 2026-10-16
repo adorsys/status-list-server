@@ -59,9 +59,12 @@ helm install statuslist-local ./deploy/helm/chart \
 
 # 4. Verify
 kubectl get pods -n local
+# Public listener (status-list reads, liveness) on service port 8081.
 kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
 curl http://localhost:8081/health/live
-curl http://localhost:8081/health/ready
+# Admin listener (readiness, metrics) lives on the internal ClusterIP service.
+kubectl port-forward -n local svc/statuslist-local-status-list-server-internal-service 8002:8002
+curl http://localhost:8002/health/ready
 ```
 
 > **Certificate caveat for local runs:** the provider-neutral `-fscert` image requires certificate
@@ -481,11 +484,12 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=
 Smoke-check the service:
 
 ```bash
+# Liveness is on the public listener; readiness is on the admin listener (:8002).
 curl http://<service>/health/live
-curl http://<service>/health/ready
+curl http://<service>:8002/health/ready
 ```
 
-`/health/ready` reflects backing-store readiness (database, and cloud/secret backends if configured), so it is the best signal that the instance is truly healthy.
+`/health/ready` (admin listener) reflects backing-store readiness (database, and cloud/secret backends if configured), so it is the best signal that the instance is truly healthy. Metrics are also served on the admin listener at `/metrics`.
 
 ## Rollback
 
@@ -970,6 +974,93 @@ Do not bypass this gate. It is the only check that establishes a signed statemen
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
 - **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
 - **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
+
+## Upgrading to the Three-Listener Architecture
+
+If you deployed before the three-listener split (public :8000 / management :8001 / admin :8002), this section guides you through the breaking changes and the issuer migration.
+
+### What changed
+
+| Listener | Old (single port) | New |
+|---|---|---|
+| Public reads (`GET /api/v1/status-lists/…`) | `:8000` | `:8000` (unchanged) |
+| Management writes (`PUT`/`PATCH`/`POST` writes) | `:8000` | `:8001` |
+| Readiness (`/health/ready`) | `:8000` | `:8002` |
+| Metrics (`/metrics`) | `:8000` | `:8002` |
+
+### Required Helm value changes
+
+```yaml
+statuslist:
+  ingress:
+    management:
+      # Enable the management listener Ingress so issuer writes reach :8001.
+      # Without this every write returns 404 even though the pod starts fine.
+      enabled: true
+      annotations:
+        # Match the public Ingress body-size limit (default 10m).
+        nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+  networkPolicy:
+    # If networkPolicy.enabled=true, you must now explicitly allow the
+    # Ingress controller to reach the management port, and Prometheus to
+    # reach the admin port. Previously both went through the public port.
+    managementIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+    adminIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+```
+
+### ServiceMonitor
+
+The ServiceMonitor must scrape the **admin** port (`:8002`) now that `/metrics` has moved. If you use the chart-bundled `serviceMonitor`, this is automatic. If you have a custom ServiceMonitor CRD, update its `port` field:
+
+```yaml
+# Old:
+port: http      # targeted the public port 8000
+# New:
+port: admin     # targets the admin port 8002
+```
+
+### Issuer migration
+
+Existing issuers send writes to the management listener. If they were registered before the split, point them at the management hostname/port (`:8001`) via the management Ingress — the `sub` in their credential is the status-list URI, not their write destination. After the upgrade, **issuer write traffic must reach port 8001** via the management Ingress.
+
+1. **Enable the management Ingress** (see above) before upgrading.
+2. **Verify** after upgrade:
+
+   ```bash
+   # On a shared hostname (what production uses) the PUT routes through the
+   # management Ingress and reaches the handler, so you get 401 (no/invalid
+   # token) — not 404:
+   curl -X PUT https://<host>/api/v1/status-lists/<id>/statuses
+   # → 401 (management Ingress routed it; a valid token gives 200/204)
+   # A 404 only appears when you hit the public port directly, since public
+   # serves reads only:
+   curl -X PUT http://<public-host>:8000/api/v1/status-lists/<id>/statuses
+   # → 404
+   # Writes to the management listener must reach the handler:
+   curl -X PUT https://<mgmt-host>/api/v1/status-lists/<id>/statuses \
+     -H "Authorization: Bearer <token>"
+   # → 401 (no valid token) or 200/204 (valid token)
+   ```
+
+3. **Update issuer configuration** to target the management hostname/port if it differs from the public hostname.
+
+### Readiness probe
+
+If you use an external readiness check (load balancer health check, external monitoring), update the endpoint from `:8000/health/ready` to `:8002/health/ready`. The pod's own readiness probe in the chart already targets `:8002`.
+
+### Rollback note
+
+Rolling back across this upgrade reverts the three-listener split. Any issuer that was already updated to target `:8001` will fail writes until it is reverted too. Coordinate the rollback with issuer teams or stage the migration with a canary deployment.
 
 ## Next Steps
 

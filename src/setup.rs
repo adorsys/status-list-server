@@ -844,6 +844,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
+        links: crate::server::ServiceLinks {
+            documentation: config.server.links.documentation.clone(),
+            portal: config.server.links.portal.clone(),
+        },
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(
             config.token_bytes_cache.max_capacity,
         ),

@@ -71,7 +71,7 @@ scenarios:
     flow:
       - function: "generateIssuerPayload"
       - post:
-          url: "/api/v1/credentials"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
           json:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
@@ -89,7 +89,7 @@ scenarios:
       - function: "generateUUID"
       # First publish
       - put:
-          url: "/api/v1/status-lists/{{ listId }}/statuses"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
@@ -102,7 +102,7 @@ scenarios:
       # Then update
       - think: 0.5
       - patch:
-          url: "/api/v1/status-lists/{{ listId }}/statuses"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:

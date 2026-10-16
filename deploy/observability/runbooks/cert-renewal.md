@@ -51,7 +51,7 @@ sum(increase(cert_renewal_failures_total{otel_scope_name="status-list-server"}[3
 # Renewal activity via logs
 docker compose logs app | grep -i -E "renew|acme|challenge"
 # Manual renewal attempt triggers the scheduler
-curl -f http://localhost:8000/health/ready
+curl -f http://localhost:8002/health/ready
 ```
 
 ## Mitigation

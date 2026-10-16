@@ -108,6 +108,15 @@ statuslist:
     # Container port the Service forwards to (matches APP_SERVER__PORT and the pod's
     # http containerPort).
     targetPort: 8000
+    # Management listener port (matches APP_SERVER__MANAGEMENT__PORT). The
+    # Ingress for management routes to this port; it is never targeted by the
+    # public Ingress.
+    managementPort: 8001
+    managementTargetPort: 8001
+    # Admin listener port (matches APP_SERVER__ADMIN__PORT). Serves /health/ready
+    # and /metrics only; the Ingress never targets it.
+    adminPort: 8002
+    adminTargetPort: 8002
     # NodePort (30000-32767), required only when service.type=NodePort.
     nodePort: null
   ingress:
@@ -132,6 +141,29 @@ statuslist:
     # sets APP_SERVER__DOMAIN (the application's own public domain) when the operator does
     # not set it in statuslist.env, so changing it changes application config, not just DNS.
     externalDnsHostname: ""
+    # Management listener ingress. The management paths share /api/v1/status-lists/
+    # with public reads, so the edge routes them by regex path. Default OFF.
+    management:
+      # When true, render a second Ingress routing management paths to the
+      # management port. May share the public hostname (edge routes by path) or
+      # use a separate hostname below to isolate them.
+      enabled: false
+      # Hostname for management traffic. Empty reuses the public ingress host.
+      hostname: ""
+      # Regex path for the management-only suffixes. `use-regex: "true"` on this
+      # Ingress treats every path as a POSIX regex; the list id stays one segment
+      # and the path is end-anchored so a longer prefix cannot match.
+      path: "/api/v1/(status-lists/[^/]+/(statuses|allocations)|credentials)$"
+      # Extra NGINX annotations (e.g. auth, client-body-size) for the management Ingress.
+      annotations: {}
+      tls:
+        # TLS Secret for the management Ingress when it uses a separate hostname.
+        # When left empty and a separate management hostname is configured, the
+        # management Ingress inherits the public TLS secret name, which can cause
+        # a cert name mismatch if the cert only covers the public hostname.
+        # Set this to a separate Secret (e.g. managed by cert-manager) that covers
+        # the management hostname.
+        secretName: ""
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
@@ -140,6 +172,9 @@ statuslist:
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # Service document links (GET /). Defaults to the repository URL.
+    # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
+    # APP_SERVER__LINKS__PORTAL: "https://statuslist.example.com"
     # APP_SERVER__DOMAIN comes from statuslist.ingress.externalDnsHostname (or global.domain).
     # APP_SERVER__PUBLIC_BASE_URL defaults to https://{DOMAIN}/api/v1; set it only when it differs.
     # APP_SERVER__PUBLIC_BASE_URL: "https://statuslist.example.com/api/v1"
@@ -360,10 +395,12 @@ statuslist:
     timeoutSeconds: 5
     failureThreshold: 3
   readinessProbe:
-    # HTTP GET on /health/ready (port http). Override the whole block to customize.
+    # HTTP GET on /health/ready (port admin). Readiness moved to the admin
+    # listener; the public listener never serves it. Override the whole block
+    # to customize.
     httpGet:
       path: /health/ready
-      port: http
+      port: admin
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 5
@@ -379,9 +416,28 @@ statuslist:
     #         matchLabels:
     #           kubernetes.io/metadata.name: ingress-nginx
     enabled: false
-    # When ingress is empty [] (and enabled=true), ANY source can reach the service port.
-    # Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
+    # When ingress is empty [] (and enabled=true), ANY source can reach the PUBLIC
+    # service port. Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
+    # Source selectors for the MANAGEMENT port. When this list is EMPTY the
+    # template omits the management port rule entirely, so NO source can reach
+    # the management listener — it is effectively denied. Populate it to open
+    # management traffic only to specific sources (e.g. your Ingress controller
+    # namespace). Do NOT leave it empty if you expose management via Ingress.
+    managementIngress: []
+    # Source selectors for the ADMIN port (/metrics, /health/ready). When this
+    # list is EMPTY the template omits the admin port rule, so NO source can
+    # reach the admin listener. This means Prometheus scraping is silently
+    # broken whenever serviceMonitor.enabled=true and adminIngress is empty.
+    # At minimum add a selector for the Prometheus Operator scrape pods:
+    #   adminIngress:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: monitoring
+    #       podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/name: prometheus
+    adminIngress: []
     # Additional internal egress destinations. IMPORTANT: these entries are appended to the
     # DATABASE egress rule (the one scoped to the DB port), so each inherits the database
     # port and can only reach that port - a selector for e.g. a cache on 6379 will be
