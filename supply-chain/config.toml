@@ -13,64 +13,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [policy.xtask]
 criteria = "safe-to-run"
 
-# These crates are newly introduced dependency-graph entries. The exemptions
-# record the repository's current safe-to-run policy for cargo-vet.
-[[exemptions.bit-set]]
-version = "0.8.0"
-criteria = "safe-to-run"
-
-[[exemptions.borrow-or-share]]
-version = "0.2.4"
-criteria = "safe-to-run"
-
-[[exemptions.bytecount]]
-version = "0.6.9"
-criteria = "safe-to-run"
-
-[[exemptions.email_address]]
-version = "0.2.9"
-criteria = "safe-to-run"
-
-[[exemptions.fancy-regex]]
-version = "0.14.0"
-criteria = "safe-to-run"
-
-[[exemptions.fluent-uri]]
-version = "0.3.2"
-criteria = "safe-to-run"
-
-[[exemptions.fraction]]
-version = "0.15.4"
-criteria = "safe-to-run"
-
-[[exemptions.jsonschema]]
-version = "0.30.0"
-criteria = "safe-to-run"
-
-[[exemptions.noyalib]]
-version = "0.0.58"
-criteria = "safe-to-run"
-
-[[exemptions.num-cmp]]
-version = "0.1.0"
-criteria = "safe-to-run"
-
-[[exemptions.referencing]]
-version = "0.30.0"
-criteria = "safe-to-run"
-
-[[exemptions.reqwest]]
-version = "0.12.28"
-criteria = "safe-to-run"
-
-[[exemptions.serde_ignored]]
-version = "0.1.14"
-criteria = "safe-to-run"
-
-[[exemptions.uuid-simd]]
-version = "0.8.0"
-criteria = "safe-to-run"
-
 [[exemptions.addr2line]]
 version = "0.25.1"
 criteria = "safe-to-deploy"
@@ -315,6 +257,10 @@ criteria = "safe-to-deploy"
 version = "0.72.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.bit-set]]
+version = "0.8.0"
+criteria = "safe-to-run"
+
 [[exemptions.bitflags]]
 version = "2.13.1"
 criteria = "safe-to-deploy"
@@ -343,6 +289,10 @@ criteria = "safe-to-run"
 version = "1.52.1-rc.29.1.3"
 criteria = "safe-to-run"
 
+[[exemptions.borrow-or-share]]
+version = "0.2.4"
+criteria = "safe-to-run"
+
 [[exemptions.borsh]]
 version = "1.8.0"
 criteria = "safe-to-deploy"
@@ -366,6 +316,10 @@ criteria = "safe-to-deploy"
 [[exemptions.bytecheck_derive]]
 version = "0.6.12"
 criteria = "safe-to-deploy"
+
+[[exemptions.bytecount]]
+version = "0.6.9"
+criteria = "safe-to-run"
 
 [[exemptions.bytes]]
 version = "1.12.1"
@@ -667,6 +621,10 @@ criteria = "safe-to-deploy"
 version = "1.17.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.email_address]]
+version = "0.2.9"
+criteria = "safe-to-run"
+
 [[exemptions.erased-serde]]
 version = "0.4.10"
 criteria = "safe-to-deploy"
@@ -691,6 +649,10 @@ criteria = "safe-to-deploy"
 version = "0.6.14"
 criteria = "safe-to-deploy"
 
+[[exemptions.fancy-regex]]
+version = "0.14.0"
+criteria = "safe-to-run"
+
 [[exemptions.fastrand]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
@@ -707,6 +669,10 @@ criteria = "safe-to-deploy"
 version = "1.1.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.fluent-uri]]
+version = "0.3.2"
+criteria = "safe-to-run"
+
 [[exemptions.flume]]
 version = "0.12.0"
 criteria = "safe-to-deploy"
@@ -714,6 +680,10 @@ criteria = "safe-to-deploy"
 [[exemptions.forwarded-header-value]]
 version = "0.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.fraction]]
+version = "0.15.4"
+criteria = "safe-to-run"
 
 [[exemptions.fs_extra]]
 version = "1.3.0"
@@ -1067,6 +1037,10 @@ criteria = "safe-to-deploy"
 version = "0.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.jsonschema]]
+version = "0.30.0"
+criteria = "safe-to-run"
+
 [[exemptions.jsonwebtoken]]
 version = "10.4.0"
 criteria = "safe-to-deploy"
@@ -1219,6 +1193,10 @@ criteria = "safe-to-deploy"
 version = "2.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.noyalib]]
+version = "0.0.58"
+criteria = "safe-to-run"
+
 [[exemptions.nu-ansi-term]]
 version = "0.50.3"
 criteria = "safe-to-deploy"
@@ -1234,6 +1212,10 @@ criteria = "safe-to-deploy"
 [[exemptions.num-bigint]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.num-cmp]]
+version = "0.1.0"
+criteria = "safe-to-run"
 
 [[exemptions.num-complex]]
 version = "0.4.6"
@@ -1583,6 +1565,10 @@ criteria = "safe-to-deploy"
 version = "1.0.26"
 criteria = "safe-to-deploy"
 
+[[exemptions.referencing]]
+version = "0.30.0"
+criteria = "safe-to-run"
+
 [[exemptions.regex-automata]]
 version = "0.4.18"
 criteria = "safe-to-deploy"
@@ -1598,6 +1584,10 @@ criteria = "safe-to-deploy"
 [[exemptions.rend]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.reqwest]]
+version = "0.12.28"
+criteria = "safe-to-run"
 
 [[exemptions.reqwest]]
 version = "0.13.4"
@@ -1787,6 +1777,10 @@ criteria = "safe-to-deploy"
 [[exemptions.serde_derive]]
 version = "1.0.229"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_ignored]]
+version = "0.1.14"
+criteria = "safe-to-run"
 
 [[exemptions.serde_json]]
 version = "1.0.151"
@@ -2203,6 +2197,10 @@ criteria = "safe-to-run"
 [[exemptions.uuid]]
 version = "1.28.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.uuid-simd]]
+version = "0.8.0"
+criteria = "safe-to-run"
 
 [[exemptions.valuable]]
 version = "0.1.1"
