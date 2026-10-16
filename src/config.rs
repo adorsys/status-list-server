@@ -376,7 +376,8 @@ impl ServerConfig {
         None
     }
 
-    /// Backwards-compatible helper used by the startup path.
+    /// True when two listeners resolve to the same host and port, which would
+    /// collapse the public/management/admin boundary. Used by tests.
     pub fn has_duplicate_listener(&self) -> bool {
         self.duplicate_listener_pair().is_some()
     }
@@ -503,10 +504,6 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
 /// custom `server.public_base_url` whose path differs; the router mounts the
 /// same prefix so the two cannot drift.
 pub const API_V1_PREFIX: &str = "/api/v1";
-
-/// Deprecated alias kept for any external code that imported the old name.
-#[deprecated(since = "0.0.0", note = "use API_V1_PREFIX instead")]
-pub const PUBLIC_API_PATH_PREFIX: &str = API_V1_PREFIX;
 
 /// Validates `server.public_base_url`: an absolute `https` URL with a host, no
 /// userinfo, query, or fragment, and no trailing slash. The path is not

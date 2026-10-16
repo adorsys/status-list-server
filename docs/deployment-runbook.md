@@ -1030,14 +1030,20 @@ port: admin     # targets the admin port 8002
 
 ### Issuer migration
 
-Existing issuers write to the URL they were registered with (the `sub` in their credential). After the upgrade, **issuer write traffic must reach port 8001** via the management Ingress.
+Existing issuers send writes to the management listener. If they were registered before the split, point them at the management hostname/port (`:8001`) via the management Ingress — the `sub` in their credential is the status-list URI, not their write destination. After the upgrade, **issuer write traffic must reach port 8001** via the management Ingress.
 
 1. **Enable the management Ingress** (see above) before upgrading.
 2. **Verify** after upgrade:
 
    ```bash
-   # Writes to the public listener must now 404:
+   # On a shared hostname (what production uses) the PUT routes through the
+   # management Ingress and reaches the handler, so you get 401 (no/invalid
+   # token) — not 404:
    curl -X PUT https://<host>/api/v1/status-lists/<id>/statuses
+   # → 401 (management Ingress routed it; a valid token gives 200/204)
+   # A 404 only appears when you hit the public port directly, since public
+   # serves reads only:
+   curl -X PUT http://<public-host>:8000/api/v1/status-lists/<id>/statuses
    # → 404
    # Writes to the management listener must reach the handler:
    curl -X PUT https://<mgmt-host>/api/v1/status-lists/<id>/statuses \

@@ -733,12 +733,14 @@ fi
 if ! echo "$MGMT_TLS" | grep -q 'external-dns.alpha.kubernetes.io/hostname: mgmt.example.com'; then
   echo "ERROR: management Ingress must emit an external-dns annotation for its separate hostname"; exit 1
 fi
-# The management Ingress regex path must be fully anchored so an attacker-
-# controlled path prefix cannot sneak a write to the management listener.
+# The management Ingress regex path must start with "/" (ImplementationSpecific
+# paths cannot begin with a regex anchor like "^" — ingress-nginx adds the
+# leading ^ itself) and must be end-anchored so an attacker-controlled path
+# prefix cannot sneak a write to the management listener.
 MGMT_PATH=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' \
   | grep 'path:')
-if ! echo "$MGMT_PATH" | grep -qE 'path:.*\^'; then
-  echo "ERROR: management Ingress path must start with ^ (anchored)"; exit 1
+if ! echo "$MGMT_PATH" | grep -qE 'path:.*/api/v1/'; then
+  echo "ERROR: management Ingress path must start with /api/v1/ (not ^)"; exit 1
 fi
 if ! echo "$MGMT_PATH" | grep -qE '\$"?[[:space:]]*$'; then
   echo "ERROR: management Ingress path must end with $ (anchored)"; exit 1

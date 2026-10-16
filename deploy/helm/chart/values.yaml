@@ -141,30 +141,19 @@ statuslist:
     # sets APP_SERVER__DOMAIN (the application's own public domain) when the operator does
     # not set it in statuslist.env, so changing it changes application config, not just DNS.
     externalDnsHostname: ""
-    # Management listener ingress. The management paths .../statuses and
-    # .../allocations share the /api/v1/status-lists/ prefix with public reads, so
-    # the edge must route by path (and the management paths need a regex or method
-    # match). Default OFF: management traffic is not exposed unless enabled.
+    # Management listener ingress. The management paths share /api/v1/status-lists/
+    # with public reads, so the edge routes them by regex path. Default OFF.
     management:
       # When true, render a second Ingress routing management paths to the
-      # management service port. The public and management listeners may share a
-      # hostname (the edge then routes by path); set a separate hostname below to
-      # isolate them.
+      # management port. May share the public hostname (edge routes by path) or
+      # use a separate hostname below to isolate them.
       enabled: false
       # Hostname for management traffic. Empty reuses the public ingress host.
       hostname: ""
-      # NGINX regex path for the management-only paths. The public read and the
-      # management writes share /api/v1/status-lists/, so this matches the
-      # write/allocation/credential suffixes specifically.
-      #
-      # Both alternatives are fully anchored (^ at start, $ at end) so nginx
-      # cannot match an attacker-controlled prefix. Note that
-      # `nginx.ingress.kubernetes.io/use-regex: "true"` is set on this Ingress
-      # and applies to ALL paths for the host, making them case-insensitive
-      # POSIX regexes. If you add other path entries to this Ingress they will
-      # also be treated as regexes. For stricter path isolation consider
-      # Gateway API HTTPRoute, which scopes path matching per rule.
-      path: "^(/api/v1/status-lists/.+/(statuses|allocations)|/api/v1/credentials)$"
+      # Regex path for the management-only suffixes. `use-regex: "true"` on this
+      # Ingress treats every path as a POSIX regex; the list id stays one segment
+      # and the path is end-anchored so a longer prefix cannot match.
+      path: "/api/v1/(status-lists/[^/]+/(statuses|allocations)|credentials)$"
       # Extra NGINX annotations (e.g. auth, client-body-size) for the management Ingress.
       annotations: {}
       tls:
