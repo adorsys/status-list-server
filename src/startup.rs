@@ -616,8 +616,16 @@ mod tests {
                 &format!("{API_V1_PREFIX}/status-lists/{list_id}/allocations"),
                 MANAGEMENT,
             ),
-            (Method::POST, &format!("{API_V1_PREFIX}/credentials"), MANAGEMENT),
-            (Method::GET, &format!("{API_V1_PREFIX}/credentials"), MANAGEMENT),
+            (
+                Method::POST,
+                &format!("{API_V1_PREFIX}/credentials"),
+                MANAGEMENT,
+            ),
+            (
+                Method::GET,
+                &format!("{API_V1_PREFIX}/credentials"),
+                MANAGEMENT,
+            ),
             // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
@@ -1203,7 +1211,10 @@ mod tests {
         // Mirror production: with_listener_name wraps with_common_layers so the
         // Extension (and thus the label) is present when track_http_metrics runs.
         let router = with_listener_name(
-            with_common_layers(Router::<AppState>::new().route("/ok", get(ok_handler)), &config),
+            with_common_layers(
+                Router::<AppState>::new().route("/ok", get(ok_handler)),
+                &config,
+            ),
             "management",
         )
         .with_state(state);
