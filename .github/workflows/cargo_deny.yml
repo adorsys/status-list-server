@@ -4,7 +4,6 @@ on:
   workflow_call:
   workflow_dispatch:
 
-# Both jobs only read the tree and query advisory databases.
 permissions:
   contents: read
 

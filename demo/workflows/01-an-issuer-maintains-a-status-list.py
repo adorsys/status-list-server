@@ -106,7 +106,6 @@ print("Retrieved status list successfully:", end=" ")
 jwt_token = response.text
 print(jwt_token)
 
-# validate JWT
 header = jwt.get_unverified_header(jwt_token)
 payload = jwt.decode(jwt_token, options={"verify_signature": False})
 
@@ -135,8 +134,7 @@ tc.assertEqual(
     "CWT retrieval must advertise the statuslist+cwt media type",
 )
 
-# The CWT must carry the same status list as the JWT. It is verified structurally
-# and by decoding its status_list claim and asserting the exact same statuses.
+# The CWT must carry exactly the same statuses as the JWT.
 cwt_status_list = utils.decode_cwt_status_list(response.content)
 cwt_bits = cwt_status_list["bits"]
 tc.assertEqual(bits, cwt_bits, "CWT status_list.bits must match the JWT")
