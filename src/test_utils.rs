@@ -193,6 +193,10 @@ pub(crate) async fn test_app_state_with_cert_provider(
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        links: crate::server::ServiceLinks {
+            documentation: crate::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
@@ -238,6 +242,10 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        links: crate::server::ServiceLinks {
+            documentation: crate::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
@@ -273,6 +281,10 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        links: crate::server::ServiceLinks {
+            documentation: crate::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: crate::server::health::Readiness::new(Vec::new()),
     }
@@ -455,6 +467,10 @@ async fn build_test_app_state(
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        links: crate::server::ServiceLinks {
+            documentation: crate::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: crate::server::cache::TokenBytesCache::new(1_048_576),
         readiness: Readiness::default(),
     }

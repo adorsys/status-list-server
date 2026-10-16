@@ -51,6 +51,8 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # Public port: a port-only rule (empty `from`) allows ANY source, matching
+    # historical behavior. Restrict with statuslist.networkPolicy.ingress.
     - ports:
         - port: {{ .Values.statuslist.service.targetPort | int }}
           protocol: TCP
@@ -58,6 +60,25 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    # Management port: an EMPTY from (no selectors) means NO rule is emitted for
+    # this port, so all management traffic is DENIED. Only when selectors are
+    # given is management reachable.
+    {{- with .Values.statuslist.networkPolicy.managementIngress }}
+    - ports:
+        - port: {{ $.Values.statuslist.service.managementTargetPort | int }}
+          protocol: TCP
+      from:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    # Admin port: same deny-by-default as management, so /metrics and
+    # /health/ready are only reachable from allowed sources.
+    {{- with .Values.statuslist.networkPolicy.adminIngress }}
+    - ports:
+        - port: {{ $.Values.statuslist.service.adminTargetPort | int }}
+          protocol: TCP
+      from:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
 
   egress:
     - ports:

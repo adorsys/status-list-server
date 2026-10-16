@@ -13,8 +13,9 @@ spec:
   selector:
     matchLabels:
       {{- include "status-list-server-chart.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: internal
   endpoints:
-    - port: http
+    - port: admin
       path: /metrics
       {{- if .Values.serviceMonitor.interval }}
       interval: {{ .Values.serviceMonitor.interval }}
