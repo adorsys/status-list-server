@@ -10,8 +10,10 @@ use status_list_server::setup::build_state_with_cert_manager;
 use status_list_server::setup::{run_list_quota_command, setup_snapshot_cleanup_scheduler};
 use status_list_server::telemetry::init_telemetry;
 use status_list_server::{config::Config as AppConfig, startup::HttpServer};
+use std::sync::Arc;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
+use tokio::sync::Notify;
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -68,6 +70,9 @@ async fn main() -> Result<()> {
 
     let http_server = HttpServer::new(&config, app_state, prometheus_registry).await?;
 
+    let shutdown = Arc::new(Notify::new());
+    HttpServer::install_shutdown_handler(&shutdown);
+
     #[cfg(feature = "acme")]
     {
         // Zero-init cert-chain cache counters now that the metrics recorder is installed.
@@ -84,6 +89,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    http_server.run().await?;
+    http_server.run(shutdown).await?;
     Ok(())
 }

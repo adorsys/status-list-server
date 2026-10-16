@@ -647,12 +647,33 @@ if ! echo "$NP_SCOPED" | grep -E '^\s+- port: 8002\s*$' >/dev/null; then
 fi
 
 # --- Three-listener surface ---
-# The Service must expose public (http), management, and admin ports.
-SVC=$(helm template status-list-server "$CHART_DIR" 2>/dev/null | awk '/name: .*-service/{f=1} f{print} /^---$/{if(f)exit}')
-for SVC_PORT in http management admin; do
-  if ! echo "$SVC" | grep -qE "^\s+- name: ${SVC_PORT}\s*$"; then
-    echo "ERROR: Service must expose a ${SVC_PORT} port"; exit 1
-  fi
+# The public Service exposes only the http port; a separate ClusterIP internal
+# Service exposes management and admin, so an internet-facing LoadBalancer on the
+# public Service (e.g. the NLB overlay) never exposes /metrics or the management
+# API.
+helm template status-list-server "$CHART_DIR" 2>/dev/null | awk '
+  /^kind: Service$/{in_svc=1; svc=""; ports=""}
+  in_svc && /^  name: /{svc=$2}
+  in_svc && /^  - name: /{ports=ports " " $3}
+  /^---$/{ if (in_svc && svc != "") { print svc ":" ports; } in_svc=0 }
+' | while IFS= read -r line; do
+  name=${line%%:*}
+  ports=${line#*:}
+  case "$name" in
+    *-internal-service)
+      for SVC_PORT in management admin; do
+        if ! printf '%s\n' "$ports" | grep -qw "$SVC_PORT"; then
+          echo "ERROR: internal Service must expose a ${SVC_PORT} port"; exit 1
+        fi
+      done
+      ;;
+    *-service)
+      printf '%s\n' "$ports" | grep -qw "http" || { echo "ERROR: public Service must expose an http port"; exit 1; }
+      if printf '%s\n' "$ports" | grep -qwE "management|admin"; then
+        echo "ERROR: public Service must not expose management/admin"; exit 1
+      fi
+      ;;
+  esac
 done
 # The admin listener serves readiness and metrics: ServiceMonitor must scrape
 # the admin port, and the readiness probe must target it.

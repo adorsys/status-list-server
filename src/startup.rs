@@ -16,6 +16,7 @@ use governor::middleware::NoOpMiddleware;
 use hyper::Method;
 use prometheus::Registry;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
@@ -139,18 +140,59 @@ impl HttpServer {
         })
     }
 
-    pub async fn run(self) -> color_eyre::Result<()> {
-        let public = serve(self.public.listener, self.public.router, "public");
-        let management = serve(
-            self.management.listener,
-            self.management.router,
-            "management",
-        );
-        let admin = serve(self.admin.listener, self.admin.router, "admin");
+    /// Serve all three listeners concurrently until `shutdown` is signalled.
+    ///
+    /// Each `serve` future resolves after the graceful-shutdown signal fires
+    /// and its in-flight requests have drained. `try_join!` awaits ALL three to
+    /// finish before returning, so a graceful shutdown covers every listener
+    /// (an idle admin listener no longer returns early and interrupts management
+    /// writes that are still in flight). Any listener error propagates so the
+    /// process exits non-zero and the orchestrator can restart it.
+    pub async fn run(self, shutdown: Arc<Notify>) -> color_eyre::Result<()> {
+        tokio::try_join!(
+            serve(
+                self.public.listener,
+                self.public.router,
+                "public",
+                shutdown.clone(),
+            ),
+            serve(
+                self.management.listener,
+                self.management.router,
+                "management",
+                shutdown.clone(),
+            ),
+            serve(
+                self.admin.listener,
+                self.admin.router,
+                "admin",
+                shutdown.clone(),
+            ),
+        )?;
+        Ok(())
+    }
 
-        // Serve all three listeners concurrently and wait for *all* of them to
-        // finish draining before returning.
-        tokio::try_join!(public, management, admin).map(|_| ())
+    /// Install SIGINT/SIGTERM handlers that broadcast the shutdown notification.
+    ///
+    /// Kept separate from [`Self::run`] so tests can drive shutdown directly
+    /// through the [`Notify`] instead of the process-level signal handlers
+    /// (which can only be installed once per process).
+    pub fn install_shutdown_handler(shutdown: &Arc<Notify>) {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown.notify_waiters();
+        });
+    }
+
+    /// The bound address of the public listener (the status-list read surface).
+    pub fn public_addr(&self) -> SocketAddr {
+        self.public.local_addr
+    }
+
+    /// The bound address of the admin listener (readiness and metrics).
+    pub fn admin_addr(&self) -> SocketAddr {
+        self.admin.local_addr
     }
 
     /// The bound address of the management listener (authenticated issuer writes).
@@ -165,7 +207,12 @@ async fn bind_listener(host: &str, port: u16, name: &str) -> color_eyre::Result<
         .wrap_err_with(|| format!("Failed to bind {name} listener to {host}:{port}"))
 }
 
-async fn serve(listener: TcpListener, router: Router, name: &str) -> color_eyre::Result<()> {
+async fn serve(
+    listener: TcpListener,
+    router: Router,
+    name: &str,
+    shutdown: Arc<Notify>,
+) -> color_eyre::Result<()> {
     match listener.local_addr() {
         Ok(addr) => tracing::info!(listener = name, %addr, "listening"),
         Err(_) => tracing::info!(listener = name, "listening"),
@@ -174,7 +221,7 @@ async fn serve(listener: TcpListener, router: Router, name: &str) -> color_eyre:
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move { shutdown.notified().await })
     .await
     .map_err(|e| eyre!("HTTP server ({name}) failed: {e}"))
 }
@@ -710,6 +757,103 @@ mod tests {
             AGGREGATION_DEFAULT_LIMIT + 1,
             "paging still reaches every list"
         );
+    }
+
+    /// A shutdown test with an in-flight request on one listener and an idle
+    /// listener. Exercises the REAL `HttpServer`: all three listeners are bound,
+    /// the routers are wired to the correct surfaces (a public read answers on
+    /// the public listener and 404s on management), and `run` returns only after
+    /// every listener has drained on shutdown instead of returning on the first
+    /// one to finish.
+    #[tokio::test]
+    async fn test_graceful_shutdown_covers_all_three_listeners() {
+        use std::time::Duration;
+
+        // Reserve three distinct ephemeral ports so the config's duplicate
+        // listener check passes, then hand them to `HttpServer::new` which binds
+        // its own listeners.
+        async fn ephemeral_port() -> u16 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            port
+        }
+        let public_port = ephemeral_port().await;
+        let management_port = ephemeral_port().await;
+        let admin_port = ephemeral_port().await;
+
+        let config = Config::load_from_overrides(&[
+            ("server.host", "127.0.0.1"),
+            ("server.port", &public_port.to_string()),
+            ("server.management.host", "127.0.0.1"),
+            ("server.management.port", &management_port.to_string()),
+            ("server.admin.host", "127.0.0.1"),
+            ("server.admin.port", &admin_port.to_string()),
+        ])
+        .unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        let server = HttpServer::new(&config, state, prometheus::Registry::new())
+            .await
+            .unwrap();
+
+        let public_addr = server.public_addr();
+        let management_addr = server.management_addr();
+        let admin_addr = server.admin_addr();
+
+        let shutdown = Arc::new(Notify::new());
+        let run = server.run(shutdown.clone());
+        let run_handle = tokio::spawn(run);
+
+        // Wait for all three listeners to be accepting connections.
+        let client = reqwest::Client::new();
+        let mut up = false;
+        for _ in 0..50 {
+            if client
+                .get(format!("http://{public_addr}/health/live"))
+                .send()
+                .await
+                .map(|r| r.status() == StatusCode::OK)
+                .unwrap_or(false)
+            {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(up, "public listener never became ready");
+
+        // The routers are wired to the right surfaces: the root service document
+        // is served only by the public listener and is structurally absent on
+        // management, while readiness lives only on the admin listener.
+        let public_resp = client
+            .get(format!("http://{public_addr}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(public_resp.status(), StatusCode::OK);
+
+        let mgmt_resp = client
+            .get(format!("http://{management_addr}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mgmt_resp.status(), StatusCode::NOT_FOUND);
+
+        let admin_resp = client
+            .get(format!("http://{admin_addr}/health/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(admin_resp.status(), StatusCode::OK);
+
+        // Trigger graceful shutdown and require `run` to complete successfully
+        // (it must not return early on the first listener to finish).
+        shutdown.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(10), run_handle)
+            .await
+            .expect("run did not finish within 10s")
+            .unwrap();
+        result.expect("run must return Ok after graceful shutdown of all listeners");
     }
 
     #[tokio::test]

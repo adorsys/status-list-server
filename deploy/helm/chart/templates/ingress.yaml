@@ -90,7 +90,7 @@ spec:
         pathType: ImplementationSpecific
         backend:
           service:
-            name: {{ include "status-list-server-chart.fullname" . }}-service
+            name: {{ include "status-list-server-chart.fullname" . }}-internal-service
             port:
               number: {{ .Values.statuslist.service.managementPort }}
 {{- /* Resolve the TLS secret for the management Ingress:

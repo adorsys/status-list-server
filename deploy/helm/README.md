@@ -364,8 +364,8 @@ kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=1
 
 curl -s https://<your-host>/health/live
 # Readiness lives on the admin listener and is never exposed via the public
-# Ingress; reach it through the Service's admin port.
-kubectl port-forward svc/<release>-status-list-server-service -n statuslist 8002:8002
+# Ingress; reach it through the internal Service's admin port.
+kubectl port-forward svc/<release>-status-list-server-internal-service -n statuslist 8002:8002
 curl -s http://localhost:8002/health/ready
 ```
 
