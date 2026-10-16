@@ -177,6 +177,11 @@ The writes tier is applied **before** the `auth` middleware (rate limiting by IP
 happens first, then authentication rejects unauthenticated requests with `401`).
 When a bucket is exhausted the server returns `429 Too Many Requests`.
 
+Behind ingress-nginx, set `use-forwarded-headers` and `set-real-ip-from` in the
+controller's ConfigMap so the writes tier sees the client's IP rather than the
+controller's. Production disables `configuration-snippet` annotations
+(`allow-snippet-annotations: false`), so a per-Ingress snippet can't do it.
+
 > **Note:** Governor state is held in-memory per-replica. In a horizontally
 > scaled deployment each instance maintains its own token bucket, so the
 > effective cluster-wide rate limit is `burst_size × replica_count`. Rate-limit
