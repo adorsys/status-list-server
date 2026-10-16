@@ -84,42 +84,14 @@ impl<T> SeaOrmStore<T> {
         }
     }
 
-    /// Begins a transaction pinned to READ COMMITTED, so PostgreSQL and MySQL
-    /// run at the same level rather than at their differing defaults (READ
-    /// COMMITTED and REPEATABLE READ).
-    ///
-    /// Used by every client-facing write: both publish paths, both update paths,
-    /// and credential registration. Deliberately *not* used by
-    /// `delete_older_than`, which is a batched background sweep and inherits the
-    /// server default.
-    ///
-    /// The guard does not need it — `UPDATE ... WHERE` is a current read on both
-    /// engines, and the only `SELECT`s are on `reserve_list_slot`'s rejection
-    /// path, which relies on seeing rows committed while it waited. Pinning buys:
-    ///
-    /// - A raised server default (`default_transaction_isolation`,
-    ///   `transaction_isolation`) can no longer turn a guard miss into a
-    ///   serialization failure.
-    /// - On InnoDB, READ COMMITTED drops next-key locks. Snapshot inserts all
-    ///   land in the same gap of `idx_status_list_history_exp`, which the
-    ///   retention sweep also scans, so this removes a real source of `1213`.
-    ///   This applies to every stock MySQL deployment, since REPEATABLE READ is
-    ///   the InnoDB default.
-    ///
-    /// Cost is three extra round trips per write (`SET TRANSACTION`, `BEGIN`,
-    /// `COMMIT`); sea-orm issues the isolation level as its own statement.
-    ///
-    /// MySQL requires `binlog_format` ROW or MIXED at this level; STATEMENT
-    /// fails these writes with error 1665. `verify_binlog_format` checks at boot.
-    ///
-    /// SQLite and the mock backend are excluded: SQLite has no per-transaction
-    /// isolation and sea-orm warns on every transaction if a level is supplied.
+    /// Pins READ COMMITTED so Postgres and MySQL match, and InnoDB skips next-key locks (1213).
+    /// MySQL needs binlog_format ROW or MIXED for this (1665); checked at boot.
+    /// Skipped on SQLite, which has no per-transaction isolation.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
         begin_read_committed(&self.db.current()).await
     }
 }
 
-/// See [`SeaOrmStore::begin_read_committed`].
 pub(super) async fn begin_read_committed(
     db: &DatabaseConnection,
 ) -> Result<DatabaseTransaction, DbErr> {
@@ -132,18 +104,9 @@ pub(super) async fn begin_read_committed(
     }
 }
 
-/// Takes one of the issuer's quota slots with a guarded
-/// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
-/// lock makes concurrent publishes re-check the guard, so the quota is exact.
-/// While the quota is off, the guard is lifted but the count still kept.
-///
-/// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
-/// shared lock on this `credentials` row, and two publishes upgrading it would
-/// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
-/// rolled back with any later failure. The caller must roll back on `Err`.
-///
-/// An existing `list_id` is reported as `DuplicateEntry` even at a full quota,
-/// so a retried publish still gets its 409.
+/// Run before the status_lists INSERT, whose FK lock deadlocks racing publishes on InnoDB (1213).
+/// An existing list_id is still a DuplicateEntry at full quota, so retries get their 409.
+/// The caller must roll back on Err.
 async fn reserve_list_slot(
     txn: &DatabaseTransaction,
     issuer: &str,
@@ -196,8 +159,7 @@ async fn reserve_list_slot(
                 max: max_lists_per_issuer,
             })
         }
-        // Auth resolved the credential earlier, so a missing row is a server
-        // fault (500), as the FK violation was before (see `map_insert_err`).
+        // Auth already resolved the credential, so a missing row is a 500.
         None => Err(RepositoryError::InsertError(format!(
             "issuer {issuer} has no credential row to reserve a status list slot on"
         ))),
@@ -230,8 +192,7 @@ impl SeaOrmStore<StatusListRecord> {
         }
     }
 
-    /// Pinned like `insert_one_with_snapshot`, so a racing publish reports the
-    /// same error whichever path `history_retention_secs` selects.
+    /// Pinned too, so a racing publish fails the same way with or without history.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn insert_one(
         &self,
@@ -276,9 +237,7 @@ impl SeaOrmStore<StatusListRecord> {
                 .exec_without_returning(&txn)
                 .await
             {
-                // Classify the insert error only after rolling back: Postgres
-                // marks the transaction failed after an error (25P02), and
-                // MySQL may hold locks until an explicit rollback (1205).
+                // Roll back first: Postgres poisons the txn (25P02), MySQL may hold locks (1205).
                 txn.rollback().await.map_err(|rollback_err| {
                     RepositoryError::InsertError(format!(
                         "status list insert failed ({insert_err}); \
@@ -305,16 +264,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Like [`insert_one`](Self::insert_one), but the row `INSERT` and the
-    /// `status_list_history` `INSERT` covering its initial state run in one
-    /// transaction: both commit or neither does. Without this a publish whose
-    /// snapshot insert fails leaves a list with no snapshot covering it, and -
-    /// unlike an update - no later write repairs that hole.
-    ///
-    /// A duplicate `list_id` is still reported as
-    /// [`RepositoryError::DuplicateEntry`] so the publish conflict keeps mapping
-    /// to 409 rather than 500.
-    ///
+    /// One transaction, because nothing later repairs a list published without its first snapshot.
     #[tracing::instrument(skip(self, entity, snapshot))]
     pub async fn insert_one_with_snapshot(
         &self,
@@ -376,10 +326,6 @@ impl SeaOrmStore<StatusListRecord> {
                     .exec_without_returning(&txn)
                     .await
                 {
-                    // Classify the insert error only after rolling back:
-                    // Postgres marks the transaction failed after an error
-                    // (25P02), and MySQL may hold locks until an explicit
-                    // rollback (1205).
                     txn.rollback().await.map_err(|rollback_err| {
                         RepositoryError::InsertError(format!(
                             "status list insert failed ({insert_err}); \
@@ -458,27 +404,8 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Optimistic-concurrency update guarded on `version`:
-    /// `UPDATE ... WHERE list_id = ? AND version = ?`. `Ok(false)` means the
-    /// guard did not match — a racing writer advanced the version, or the row is
-    /// gone — so a lost update was prevented.
-    ///
-    /// `rows_affected` is used deliberately: its semantics are identical across
-    /// the Postgres/MySQL/SQLite sea-orm backends, unlike `SELECT ... FOR UPDATE`
-    /// row locking (see #143).
-    ///
-    /// Wrapped in a pinned transaction rather than run as a single autocommit
-    /// statement. Autocommit would be correct, but this is the guarded update
-    /// used when history is disabled (`history_retention_secs = 0`), and leaving
-    /// it unpinned made the same race report `update_conflict` on one deployment
-    /// and `write_contention` on another. Costs three extra round trips.
-    ///
-    /// # Caller contract
-    ///
-    /// `entity.version` MUST be strictly greater than `expected_version`. With a
-    /// non-advancing version two same-version writers would both match
-    /// `WHERE version = expected` and both succeed, losing a flip. Enforced
-    /// below rather than trusted.
+    /// Ok(false) means the version guard missed: someone else wrote first, or the row is gone.
+    /// `entity.version` must be greater than `expected_version`, or two writers could both match.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(
         &self,
@@ -517,9 +444,6 @@ impl SeaOrmStore<StatusListRecord> {
             let result = match result {
                 Ok(result) => result,
                 Err(update_err) => {
-                    // Classified after the rollback, and the classification dropped
-                    // if the rollback fails — see `insert_one_with_snapshot` for why
-                    // a transaction that will not roll back must not become a 409.
                     txn.rollback().await.map_err(|rollback_err| {
                         RepositoryError::UpdateError(format!(
                             "guarded update failed ({update_err}); \
@@ -536,20 +460,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Like [`update_one`](Self::update_one), but the guarded `UPDATE` and the
-    /// `status_list_history` `INSERT` run in one transaction: both commit or
-    /// neither does. This closes the split the plain `update_one` leaves open,
-    /// where the row changes but a failing snapshot insert leaves nothing
-    /// recording it. Transaction semantics are portable across all three
-    /// sea-orm backends (#143). Same `false`-on-guard-miss and
-    /// strictly-advancing-version contract as `update_one`.
-    ///
-    /// Concurrency cost: the `UPDATE`'s row lock is held until `COMMIT`, across
-    /// the snapshot `INSERT`. A racing writer guarded on the same version blocks
-    /// on that lock instead of reading `rows_affected == 0` immediately. It
-    /// still resolves to `false`, but a conflict costs a lock wait.
-    ///
-    /// Pinned to READ COMMITTED, same as `update_one`.
+    /// The row lock is held through the snapshot insert, so racers wait before getting false.
     #[tracing::instrument(skip(self, entity, snapshot), fields(db.system = "sea-orm"))]
     pub async fn update_one_with_snapshot(
         &self,
@@ -639,8 +550,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Test-only: does not decrement `credentials.list_count`. A production
-    /// caller must decrement it in the same transaction as the `DELETE`.
+    /// Test only: leaves `credentials.list_count` alone.
     #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         time_query("delete", "status_list", async {
@@ -682,12 +592,8 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Up to `limit` `(list_id, sub)` rows with `list_id` after `after`, via a
-    /// keyset scan on the primary key, or on `(issuer, list_id)` when scoped to
-    /// an `issuer`. `list_id` is used rather than `updated_at`, which every
-    /// status update moves.
-    ///
-    /// `after` comes from a client-supplied cursor, so it stays out of the span.
+    /// Keyset on list_id, not updated_at, which every status update moves.
+    /// `after` is client-supplied, so it stays out of the span.
     #[tracing::instrument(skip(self, after), fields(db.system = "sea-orm"))]
     pub async fn find_status_list_uris_after(
         &self,
@@ -900,19 +806,8 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         .await
     }
 
-    /// Finds the snapshot whose half-open validity interval contains `time`.
-    /// Using `iat <= time < exp` ensures the token returned to a client passes
-    /// the draft-21 §8.4 `iat`/`exp` validation rule.
-    ///
-    /// Intervals intentionally overlap: each update writes a fresh snapshot with
-    /// `exp = iat + token_exp_secs` while the superseded snapshot keeps its
-    /// original (later) `exp`, so both can match a `time` in the overlap. That is
-    /// not an inconsistency — `ORDER BY iat DESC, version DESC LIMIT 1`
-    /// deterministically returns the newest snapshot in effect at `time`, which
-    /// is the correct answer for "what was the status then". The `version`
-    /// tie-breaker disambiguates two snapshots written within the same second
-    /// (identical `iat`) so the post-change snapshot wins. The memory adapter
-    /// mirrors this via `max_by_key((iat, version))`.
+    /// Snapshots overlap on purpose; the newest one in effect at `time` wins.
+    /// `version` breaks ties between snapshots written in the same second.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_valid_at(
         &self,
@@ -934,21 +829,8 @@ impl SeaOrmStore<StatusListHistoryRecord> {
         .await
     }
 
-    /// Deletes snapshots older than the given cutoff timestamp.
-    /// Batches the delete in chunks to avoid holding long-lived locks.
-    /// Returns the total number of rows deleted.
-    ///
-    /// Single-statement batched deletes are used per database backend:
-    /// - **PostgreSQL**: Does not support direct `LIMIT` on `DELETE`. Requires
-    ///   `WHERE snapshot_id IN (SELECT snapshot_id FROM ... LIMIT ...)`.
-    /// - **MySQL**: Fails with Error 1093 if target table is subqueried in an `IN` clause.
-    ///   Uses direct `DELETE FROM status_list_history WHERE exp < ? LIMIT ?`.
-    /// - **SQLite / Fallback**: Uses subquery `WHERE snapshot_id IN (...)` with `?` parameters.
-    ///
-    /// Note: This operation is not atomic across batches. If interrupted,
-    /// some expired snapshots may be deleted while others remain. This is
-    /// acceptable for a cleanup operation; subsequent runs will clean up
-    /// any remaining rows.
+    /// Batched to keep locks short; not atomic across batches, which is fine for cleanup.
+    /// Postgres can't LIMIT a DELETE and MySQL rejects the subquery (1093), so the SQL differs.
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn delete_older_than(&self, cutoff: i64) -> Result<u64, RepositoryError> {
         time_query("delete_older_than", "snapshot", async {
@@ -1005,8 +887,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 }
 
 impl SeaOrmStore<Credentials> {
-    /// Pinned so registration cannot inherit a raised server default and turn a
-    /// duplicate issuer into a serialization failure.
+    /// Pinned so a duplicate issuer stays a 409, not a serialization failure.
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         time_query("insert", "credential", async {
             let active: credentials::ActiveModel = entity.into();
@@ -1041,8 +922,7 @@ impl SeaOrmStore<Credentials> {
         .await
     }
 
-    /// Resolve a management key by its indexed `kid` copy. Return up to two
-    /// matches so callers can fail closed on duplicate kids.
+    /// Returns up to two rows so callers can fail closed on a duplicate kid.
     pub async fn find_credentials_by_kid(
         &self,
         kid: &str,
@@ -1060,8 +940,7 @@ impl SeaOrmStore<Credentials> {
         .await
     }
 
-    /// `None` for an unknown issuer, `Some(None)` for one registered by a
-    /// release that predates aggregation IDs.
+    /// None: unknown issuer. Some(None): registered before aggregation IDs existed.
     pub async fn find_aggregation_id(
         &self,
         issuer: &str,
@@ -1154,24 +1033,8 @@ impl SeaOrmStore<Credentials> {
     }
 }
 
-/// Classifies an insert failure, distinguishing the one case that is a client
-/// conflict rather than a server fault.
-///
-/// Only unique-constraint violations are singled out, because only they are
-/// caused by something the client can see and act on — a `list_id` or `issuer`
-/// that is already taken — and they must reach the client as 409, not 500
-/// (#143, #244).
-///
-/// Foreign-key violations deliberately fall through to `InsertError`/500.
-/// The only FK on the write paths is `status_lists.issuer -> credentials.issuer`,
-/// and authentication resolves the issuer's credential before any handler runs,
-/// so reaching this function with a missing issuer means the credential was
-/// deleted mid-request — a server-side consistency failure, correctly a 500.
-/// If that ever stops holding, add a `ForeignKeyConstraintViolation` arm rather
-/// than widening the unique-violation one.
-///
-/// Order matters in the body: the duplicate-key check runs first, so a unique
-/// violation is never reclassified as retryable contention.
+/// Only unique violations become 409; an FK miss means the credential vanished mid-request, so 500.
+/// Check duplicates first so they're never reported as contention.
 fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
@@ -1183,25 +1046,17 @@ fn map_update_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::UpdateError(e.to_string()))
 }
 
-/// For `status_list_history` inserts, which must **not** use [`map_insert_err`].
-///
-/// A unique violation there is a `snapshot_id` UUID collision, not a client
-/// republishing a list, so reporting `DuplicateEntry` would surface it as
-/// `409 status_list_already_exists` — a lie to the caller. Guarded by
-/// `test_sqlite_update_with_snapshot_is_atomic`. Contention is still classified.
+/// A unique violation here is a snapshot_id collision, not a republish, so never a 409.
 fn map_snapshot_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::InsertError(e.to_string()))
 }
 
-/// Classified because the retention sweep is the likeliest deadlock victim: it
-/// scans a range of `idx_status_list_history_exp` while snapshot inserts write
-/// into the top of that same range.
+/// The retention sweep is the likeliest deadlock victim, so classify contention.
 fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::DeleteError(e.to_string()))
 }
 
-/// Not a classifier, unlike its `map_*_err` siblings: contention maps to 409,
-/// and a 409 on a read claims a conflict with state the request never proposed.
+/// No contention mapping: a 409 on a read would make no sense.
 fn find_err(e: sea_orm::DbErr) -> RepositoryError {
     RepositoryError::FindError(e.to_string())
 }
@@ -1226,13 +1081,6 @@ where
     Ok(())
 }
 
-/// Lets a contention test hold a transaction open at a chosen point so a second
-/// writer provably collides with it, rather than with an already-committed row.
-///
-/// Without this a "race" test is really a sequential test: the first writer has
-/// already committed by the time the second starts, so the second never blocks
-/// on a lock and the interesting window — one writer holding an uncommitted row
-/// or index entry while another arrives — is never entered.
 #[cfg(test)]
 mod snapshot_txn_test_hook {
     use std::collections::HashMap;
@@ -1242,15 +1090,10 @@ mod snapshot_txn_test_hook {
     pub(super) struct Probe {
         #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
         pub(super) list_id: String,
-        /// Fires once the paused writer is inside the transaction, holding its
-        /// locks. The test waits on this before starting the second writer.
         pub(super) ready: oneshot::Sender<()>,
-        /// The test fires this to let the paused writer commit.
         pub(super) release: oneshot::Receiver<()>,
     }
 
-    /// Each site and list owns its pause point so concurrent contention tests
-    /// cannot replace or capture each other's probes.
     pub(super) struct PauseSite {
         slot: OnceLock<Mutex<HashMap<String, Probe>>>,
     }
@@ -1276,9 +1119,6 @@ mod snapshot_txn_test_hook {
             guard.insert(probe_to_install.list_id.clone(), probe_to_install);
         }
 
-        /// Pauses only the writer working on the probed `list_id`, and only
-        /// once — the probe is taken, so every other call is a no-op and the
-        /// production path is untouched for all other rows.
         pub(super) async fn pause(&self, list_id: &str) {
             let installed_probe = { self.slot().lock().await.remove(list_id) };
 
@@ -1289,12 +1129,8 @@ mod snapshot_txn_test_hook {
         }
     }
 
-    /// Inside `update_one_with_snapshot`, after the snapshot INSERT, while the
-    /// guarded UPDATE still holds its exclusive row lock.
     pub(super) static UPDATE_BEFORE_COMMIT: PauseSite = PauseSite::new();
 
-    /// Inside `insert_one_with_snapshot`, after the snapshot INSERT, while the
-    /// row INSERT still holds its uncommitted primary-key entry.
     pub(super) static INSERT_BEFORE_COMMIT: PauseSite = PauseSite::new();
 
     #[cfg(any(feature = "mysql", feature = "postgres-tests"))]

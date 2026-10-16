@@ -13,9 +13,6 @@ use crate::outbound::sql::models::{
 };
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
-/// The lost-update proof: two writers reading the same `updated_at` cannot
-/// both win. Deterministic (no threads) — first write lands, second's guard
-/// misses — and the loser's flip must not overwrite the winner's.
 #[cfg(any(feature = "sqlite", feature = "mysql"))]
 pub(super) async fn assert_guarded_update_rejects_stale_write(
     db: Arc<DatabaseConnection>,
@@ -31,7 +28,6 @@ pub(super) async fn assert_guarded_update_rejects_stale_write(
         .await
         .unwrap();
 
-    // Seed a row at a known guard value V.
     let v = 1000;
     let base = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), v);
     store
@@ -39,7 +35,6 @@ pub(super) async fn assert_guarded_update_rejects_stale_write(
         .await
         .unwrap();
 
-    // Both writers read the same state, so both guard on the same version.
     let writer_a = StatusListRecord {
         status_list: StatusList {
             bits: 1,
@@ -61,22 +56,18 @@ pub(super) async fn assert_guarded_update_rejects_stale_write(
         ..base.clone()
     };
 
-    // First writer wins.
     let a_won = store
         .update_one(&base.list_id, writer_a, base.version)
         .await
         .unwrap();
     assert!(a_won, "first guarded write should land");
 
-    // Second writer guarded on the now-stale version: rejected, not silently
-    // applied.
     let b_won = store
         .update_one(&base.list_id, writer_b, base.version)
         .await
         .unwrap();
     assert!(!b_won, "stale guarded write must be rejected");
 
-    // A's flip survived; B's did not overwrite it.
     let stored = store.find_one_by(&base.list_id).await.unwrap().unwrap();
     assert_eq!(stored.status_list.lst, "flip-A");
     assert_eq!(stored.version, base.version + 1);
@@ -163,8 +154,6 @@ pub(super) async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
 
     let store_a = SeaOrmStore::<StatusListRecord>::new(db.clone());
     let store_b = SeaOrmStore::<StatusListRecord>::new(db.clone());
-    // SQLite's test pool has one connection, so these serialize there; the
-    // MySQL and Postgres variants exercise the row lock with real concurrency.
     let (first, second) = tokio::join!(
         store_a.allocate_indices(&list_id, issuer, 2),
         store_b.allocate_indices(&list_id, issuer, 2),
@@ -223,13 +212,6 @@ pub(super) async fn assert_sql_allocations_are_distinct_and_rollback_exhausted(
     );
 }
 
-/// Publishes `list_id`, then republishes it under a different `snapshot_id`,
-/// asserting the failure is the duplicate `list_id` classified as
-/// `DuplicateEntry`, on both the transactional and non-transactional publish
-/// paths. The distinct `snapshot_id` keeps the assertion aimed at one
-/// constraint — a duplicate `snapshot_id` is intentionally a plain
-/// `InsertError`, and reusing the committed one would couple this test to
-/// statement ordering.
 pub(super) async fn assert_duplicate_list_id_is_conflict(
     db: Arc<DatabaseConnection>,
     issuer: &str,
@@ -279,7 +261,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
         .await
         .unwrap();
 
-    // Racing publish: same list_id, freshly minted snapshot_id.
     let dup = store
         .insert_one_with_snapshot(
             record(2000),
@@ -293,10 +274,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
          on {backend}, got {dup:?}"
     );
 
-    // The rejected publish rolled back cleanly. Its snapshot would have
-    // covered `[2000, 2900)`, and the first publish's covers `[1000, 1900)`,
-    // so *anything* resolvable at 2000 could only be the leak this asserts
-    // against — the windows do not overlap.
     assert!(
         history
             .find_valid_at(list_id, 2000)
@@ -306,7 +283,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
         "the rejected publish must not leave a snapshot behind on {backend}"
     );
 
-    // ...and the failed attempt did not disturb the committed one.
     let first = history
         .find_valid_at(list_id, 1000)
         .await
@@ -314,10 +290,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
         .unwrap_or_else(|| panic!("the first publish's snapshot must survive on {backend}"));
     assert_eq!(first.snapshot_id, "snap-first");
 
-    // The row itself is untouched. The two records differ only in
-    // `updated_at`, so this is what catches a silent upsert: an
-    // `ON CONFLICT DO UPDATE` "optimization" would leave 2000 here while
-    // every assertion above still passed.
     let row = store
         .find_one_by(list_id)
         .await
@@ -328,13 +300,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
         "the rejected publish must not overwrite the committed row on {backend}"
     );
 
-    // The same conflict on the *non-transactional* path. Operators can set
-    // `snapshot_retention_secs = 0`, which builds a `Service` with no
-    // snapshot repo, and `publish_status_list` then calls plain `insert_one`
-    // — a different `map_insert_err` call site with no transaction or
-    // rollback around it. Reuses this test's backend rather than paying for
-    // another container, since the row it collides with is already
-    // committed.
     let plain = store
         .insert_one(record(3000), fixtures::NO_LIST_QUOTA)
         .await;
@@ -345,8 +310,6 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
     );
 }
 
-/// Cross-backend proof (#143): a failed snapshot INSERT must roll the paired
-/// row UPDATE back, on both container backends.
 #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
 pub(super) async fn assert_update_snapshot_rolls_back(
     db: Arc<DatabaseConnection>,
@@ -366,7 +329,6 @@ pub(super) async fn assert_update_snapshot_rolls_back(
         .await
         .unwrap();
 
-    // Commit one snapshot so its primary key exists to collide against.
     store
         .update_one_with_snapshot(
             &base.list_id,
@@ -404,8 +366,6 @@ pub(super) async fn assert_update_snapshot_rolls_back(
         "the backend must round-trip the snapshot JSON"
     );
 
-    // Second update whose snapshot collides on the primary key: the INSERT
-    // fails, so the whole transaction must roll back.
     let result = store
         .update_one_with_snapshot(
             &base.list_id,
@@ -429,7 +389,7 @@ pub(super) async fn assert_update_snapshot_rolls_back(
                 &format!("sub-{list_id}"),
                 v + 2,
                 v + 2 + 900,
-            ), // duplicate PK
+            ),
         )
         .await;
     assert!(result.is_err(), "duplicate snapshot PK must fail the unit");
@@ -446,8 +406,6 @@ pub(super) async fn assert_update_snapshot_rolls_back(
     );
 }
 
-/// The quota is exact on both publish paths, and a publish that fails after
-/// taking a slot gives it back.
 pub(super) async fn assert_list_quota_is_exact(
     db: Arc<DatabaseConnection>,
     issuer: &str,
@@ -538,8 +496,6 @@ pub(super) async fn assert_list_quota_is_exact(
     assert_eq!(fixtures::list_count(&db, issuer).await, 2);
 }
 
-/// A full walk returns every list exactly once. Mixed-case IDs sort differently
-/// per backend collation, so this asserts completeness, not order.
 pub(super) async fn assert_list_uris_walk_is_complete(
     db: Arc<DatabaseConnection>,
     issuer: &str,
@@ -618,8 +574,6 @@ pub(super) async fn assert_list_uris_walk_is_complete(
     );
 }
 
-/// Lists that existed when a walk started appear exactly once, even with
-/// publishes mid-walk. Lowercase IDs sort the same under every collation.
 pub(super) async fn assert_list_uris_walk_survives_concurrent_publishes(
     db: Arc<DatabaseConnection>,
     issuer: &str,
@@ -655,7 +609,6 @@ pub(super) async fn assert_list_uris_walk_survives_concurrent_publishes(
         ["sub-list-b"],
         "first page on {backend}"
     );
-    // One list behind the cursor, one ahead of it.
     publish("list-a").await;
     publish("list-z").await;
 
@@ -679,7 +632,6 @@ pub(super) async fn assert_list_uris_walk_survives_concurrent_publishes(
             "{existing} existed when the walk started and must appear on {backend}: {seen:?}"
         );
     }
-    // Beyond the contract, which allows missing either; pins keyset behaviour.
     assert!(
         unique.contains("sub-list-z") && !unique.contains("sub-list-a"),
         "keyset paging sees lists ahead of the cursor, not behind it, on {backend}: {seen:?}"
@@ -695,9 +647,6 @@ pub(in super::super) fn list_count_migration_index() -> usize {
         .expect("the list_count migration must be registered")
 }
 
-/// The backfill counts existing lists, and old-pod credential inserts still
-/// work. `column_already_added` recreates a failed MySQL backfill: column
-/// present, migration unrecorded.
 pub(super) async fn assert_list_count_migration_backfills(
     db: &DatabaseConnection,
     column_already_added: bool,

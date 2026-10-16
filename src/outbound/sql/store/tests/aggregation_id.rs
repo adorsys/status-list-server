@@ -1,6 +1,3 @@
-//! The per-issuer aggregation ID: stored at registration, resolvable both ways,
-//! kept across credential updates and rollbacks, and assigned on first lookup
-//! to credentials a release that predates it registered.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -22,14 +19,12 @@ use crate::outbound::sql::test_containers::postgres_helpers;
 
 const MIGRATION: &str = "m20260929_000001_credentials_aggregation_id";
 
-/// Migration records removed to simulate rollback to a pre-aggregation release.
 const ROLLBACK_MIGRATIONS: [&str; 3] = [
     MIGRATION,
     "m20260929_000002_status_lists_issuer_list_id_index",
     "m20261014_000001_credentials_key_id",
 ];
 
-/// SQL a failed MySQL run may already have committed, in migration order.
 const PARTIAL_MIGRATION: [&str; 2] = [
     "ALTER TABLE credentials ADD COLUMN aggregation_id VARCHAR(36) NULL",
     "CREATE UNIQUE INDEX idx_credentials_aggregation_id ON credentials (aggregation_id)",
@@ -89,9 +84,6 @@ async fn assert_aggregation_id_round_trip(db: Arc<DatabaseConnection>, backend: 
     );
 }
 
-/// Credentials from before the migration, and from an old pod after it, get
-/// an ID on their first lookup and keep it. `already_applied` recreates a
-/// failed MySQL run that committed that many statements before stopping.
 async fn assert_migration_and_backfill(
     db: Arc<DatabaseConnection>,
     already_applied: usize,
@@ -138,7 +130,6 @@ async fn assert_migration_and_backfill(
         "a second lookup must return the same ID on {backend}"
     );
 
-    // What a pod that lost the race to assign one would write.
     store
         .assign_aggregation_id("issuer-before", &AggregationId::generate().to_string())
         .await
@@ -162,8 +153,6 @@ async fn assert_migration_and_backfill(
     );
 }
 
-/// Rolling back deletes the two migrations' records and upgrading again re-runs
-/// them; every ID must survive, or URIs already handed out return 404.
 async fn assert_rollback_keeps_aggregation_ids(db: Arc<DatabaseConnection>, backend: &str) {
     let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
     let registered = AggregationId::generate();
