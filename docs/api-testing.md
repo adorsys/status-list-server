@@ -20,6 +20,7 @@ The environment exposes these variables:
 | `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
 | `token`           | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
 | `issuer_private_jwk` | empty                               | Local secret used to reuse the generated issuer key pair.             |
+| `issuer_private_jwks` | empty                              | Secret key cache indexed by issuer, retained when switching issuers.   |
 | `issuer_public_key`  | empty                               | Public JWK generated for issuer registration.                         |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
@@ -31,6 +32,26 @@ Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK registered through `POST /api/v1/credentials`.
 For fully automated local collection testing, use the Newman script below; it
 generates and registers a temporary issuer for the run.
+
+In Postman, select the included environment and send **Register issuer
+credentials** before publishing. Generated keys are saved per issuer in that
+environment; switching `issuer_id` back to an earlier issuer reuses its key.
+Existing `issuer_private_jwk` and `issuer_key_owner` values are migrated into
+the cache automatically. Keep these secret values when backing up your local
+environment.
+
+A registration conflict (`409`) is accepted only after an authenticated
+`GET /api/v1/credentials` confirms the saved key works for that issuer. If it
+fails, the collection clears `token` and reports a failed test. Restore the
+issuer's original private key/environment, or choose a new `issuer_id` and
+register again. Reimporting an empty environment cannot recover the private
+key of an issuer already registered on the server.
+
+Run the registration-script regression checks with:
+
+```bash
+node --test scripts/tests/test_postman_registration.cjs
+```
 
 ## Local Prerequisites
 
