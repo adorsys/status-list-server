@@ -1,5 +1,3 @@
-//! ACME / Store Certificate adapter implementing `CertificateProvider`.
-
 #[cfg(not(feature = "acme"))]
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -13,7 +11,6 @@ use crate::domain::{
 };
 use crate::utils::crypto::SigningKey;
 
-/// Adapter bridging ACME `CertManager` to domain `CertificateProvider` port.
 #[cfg(feature = "acme")]
 #[derive(Clone)]
 pub struct AcmeCertificateProvider {
@@ -38,9 +35,7 @@ impl CertificateProvider for AcmeCertificateProvider {
     }
 }
 
-/// Filesystem-backed certificate provider.
-///
-/// Loads PEM certificate chain and PEM private key (PKCS#8, SEC1, or PKCS#1) from filesystem paths.
+/// Accepts PKCS#8, SEC1 or PKCS#1 keys.
 #[cfg(not(feature = "acme"))]
 #[derive(Clone)]
 pub struct ReloadingCertificateProvider {
@@ -49,8 +44,6 @@ pub struct ReloadingCertificateProvider {
 
 #[cfg(not(feature = "acme"))]
 impl ReloadingCertificateProvider {
-    /// Load and validate initial material from disk.  Fails immediately if files
-    /// are missing, unreadable, or the certificate and signing key do not match.
     pub async fn from_files(cert_path: String, key_path: String) -> Result<Self, StatusListError> {
         let material = load_and_validate_signing_material(&cert_path, &key_path).await?;
         Ok(Self {
@@ -78,7 +71,6 @@ impl CertificateProvider for ReloadingCertificateProvider {
     }
 }
 
-/// Inline certificate provider
 #[cfg(not(feature = "acme"))]
 #[derive(Clone)]
 pub struct InlineCertificateProvider {
@@ -87,8 +79,6 @@ pub struct InlineCertificateProvider {
 
 #[cfg(not(feature = "acme"))]
 impl InlineCertificateProvider {
-    /// Validate and construct an inline provider.  Fails immediately if the
-    /// certificate and signing key do not match or are malformed.
     pub fn new(cert_pem: String, signing_key_pem: String) -> Result<Self, StatusListError> {
         let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
         let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
@@ -167,9 +157,7 @@ pub(crate) fn validate_signing_material(
                 err.to_string(),
             )))
         })?;
-    // x509-parser exposes the subjectPublicKey BIT STRING payload, rather than
-    // the enclosing SPKI DER. aws-lc-rs exposes the same family-specific
-    // public-key representation for the supported signing algorithms.
+    // Both sides are the raw key bits, not SPKI DER, so they compare directly.
     let cert_public_key = certificate.public_key().subject_public_key.data.as_ref();
     let key_public_key = signing_key.public_key_bytes();
     if cert_public_key != key_public_key {

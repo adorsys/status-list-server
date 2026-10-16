@@ -141,7 +141,6 @@ async fn test_sqlite_negative_paths() {
         0,
     );
     let fk_err = store.insert_one(rec, fixtures::NO_LIST_QUOTA).await;
-    // A missing credential must stay a 500, not look like a full quota.
     assert!(
         matches!(fk_err, Err(RepositoryError::InsertError(_))),
         "insert with dangling FK must be InsertError (500), got {fk_err:?}"
@@ -155,7 +154,7 @@ async fn test_sqlite_negative_paths() {
                 "issuer-neg-sqlite",
                 "compressed",
                 "sub-neg-sqlite",
-                1, // must advance past the guard value below
+                1,
             ),
             0,
         )
@@ -174,9 +173,6 @@ async fn test_sqlite_duplicate_insert_maps_to_duplicate_entry() {
         .await;
 }
 
-/// Cross-backend proof (#143): MySQL's duplicate-key error must also parse
-/// into `SqlErr::UniqueConstraintViolation`, where the driver format could
-/// diverge from sqlite.
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_duplicate_insert_maps_to_duplicate_entry() {

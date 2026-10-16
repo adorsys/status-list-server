@@ -1,11 +1,5 @@
-//! The switch behind `limits.max_lists_per_issuer`, and the `list-quota`
-//! operator commands.
-//!
-//! A fresh database enforces the quota from the first start ([`on_startup`]).
-//! On one a release without the quota served, whose pods publish uncounted, it
-//! stays off until [`recount`] and [`enable`] run. Both hold the switch row's
-//! exclusive lock, and a publish that reads the quota as off re-reads it under
-//! a shared lock, so no publish slips past. SQLite's database lock does the same.
+//! Fresh databases enforce the quota at once; upgraded ones wait for recount and enable.
+//! Both lock the switch row exclusively, and publish re-reads it shared, so nothing slips past.
 
 use std::fmt::Write;
 
@@ -98,8 +92,7 @@ fn list_issuers(
     }
 }
 
-/// Read in the publish transaction. While the quota reads as off, the shared
-/// lock waits out an `enable` or `recount` in progress.
+/// If it reads off, re-read under a shared lock to wait out a running enable or recount.
 pub(crate) async fn list_quota_enforced(txn: &DatabaseTransaction) -> Result<bool, DbErr> {
     let enforced = read_switch(txn, None).await? || read_switch(txn, Some(LockType::Share)).await?;
     record_list_quota_enforced(enforced);
@@ -118,9 +111,7 @@ pub enum StartupState {
     Transition,
 }
 
-/// Runs after migrations. No release without the quota has written to a
-/// `fresh` database, so the quota is turned on there. Otherwise the pod may
-/// serve unenforced only while `transition` is set.
+/// On for fresh databases; elsewhere it may stay off only while transition is set.
 pub async fn on_startup(
     db: &DatabaseConnection,
     fresh: bool,
@@ -140,8 +131,7 @@ pub async fn on_startup(
     }
 }
 
-/// Refuses, naming them, while any issuer is over the cap or has a
-/// `list_count` that differs from its lists.
+/// Refuses while any issuer is over the cap or miscounted, and names them.
 pub async fn enable(
     db: &DatabaseConnection,
     max_lists_per_issuer: u64,
@@ -179,8 +169,7 @@ pub async fn enable(
     })
 }
 
-/// Issuers with more than `limit` status lists. The quota bounds new lists
-/// only, so an issuer can still hold more from under an earlier, higher cap.
+/// The quota only bounds new lists, so issuers can be over from an earlier, higher cap.
 pub async fn issuers_over(db: &DatabaseConnection, limit: u64) -> Result<Vec<IssuerCount>, DbErr> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     // `limit` is an integer, so interpolating it is safe.
@@ -190,16 +179,13 @@ pub async fn issuers_over(db: &DatabaseConnection, limit: u64) -> Result<Vec<Iss
         .await
 }
 
-/// Names `issuers` the way a refusal does.
 pub fn name_issuers(issuers: &[IssuerCount]) -> String {
     let mut out = String::new();
     list_issuers(&mut out, issuers, |c| format!("{} lists", c.actual));
     out
 }
 
-/// Each issuer's `list_count` beside the lists it has (`actual`), where
-/// `condition` holds, counted in one pass. The outer query lets `condition`
-/// name `actual`, which Postgres does not allow in `HAVING`.
+/// Wrapped in an outer query since Postgres can't use the `actual` alias in HAVING.
 fn issuer_counts(condition: &str) -> String {
     format!(
         "SELECT issuer, list_count, actual FROM (\

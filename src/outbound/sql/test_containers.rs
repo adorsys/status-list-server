@@ -1,73 +1,6 @@
-//! Throwaway MySQL and Postgres databases with the migrations already applied,
-//! for tests that need a real backend rather than `MockDatabase`.
-//!
-//! These live here rather than inside `store`'s `#[cfg(test)] mod test` because
-//! the HTTP-layer publish tests need them too: an item inside a private test
-//! module has no path nameable from another module, whatever its visibility.
-//!
-//! Each submodule carries only its backend's own feature gate. Both call
-//! `Migrator::up`, but `Migrator` is re-exported unconditionally from
-//! [`crate::outbound::sql`], whose own gate any consumer of these fixtures
-//! already satisfies.
-//!
-//! # Isolation
-//!
-//! Each fixture owns its container and a freshly migrated database. Keep the
-//! fixture in scope until all pools and spawned tasks using that database have
-//! finished. Dropping the fixture removes its container, including during panic
-//! unwinding. Static container handles must not be used: statics are never dropped
-//! at process exit, so nextest would leave a database server behind for every test.
-//!
-//! Cleanup requires a live Tokio runtime and a reachable Docker daemon. SIGTERM
-//! (including nextest slow-timeouts), Ctrl-C, SIGKILL, process aborts, or
-//! `TESTCONTAINERS_COMMAND=keep` can leave containers behind without running Drop.
-//! Under nextest, fixtures automatically use its shared `NEXTEST_RUN_ID`, printed
-//! at the start of the run. To override it (or group ordinary Cargo test fixtures),
-//! set a unique run ID before testing:
-//!
-//! ```sh
-//! export STATUS_LIST_TEST_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-//! cargo nextest run --workspace --all-targets --all-features
-//! ```
-//!
-//! After that run has stopped, inspect and remove only its SQL containers and
-//! anonymous data volumes. If using the automatic nextest ID, first set
-//! `STATUS_LIST_TEST_RUN_ID` in your shell to the ID printed by nextest:
-//!
-//! ```sh
-//! : "${STATUS_LIST_TEST_RUN_ID:?Set the interrupted run ID first}"
-//! docker container ls -a --filter label=org.adorsys.status-list-server.fixture=sql \
-//!   --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"
-//! for id in $(docker container ls -aq --filter label=org.adorsys.status-list-server.fixture=sql \
-//!   --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"); do
-//!   docker container rm -fv "$id"
-//! done
-//! ```
-//!
-//! If neither non-empty run ID is available, each process generates a UUID; its
-//! containers still carry both labels. These filters never select Redis fixtures
-//! or containers from other projects. The cleanup regression tests additionally
-//! require the Docker CLI on PATH; ordinary fixtures use the Docker API directly.
-//!
-//! Pools are pinned with `max_connections(1).min_connections(1)` so a test that
-//! wants two genuinely distinct connections gets them: with a shared multi-slot
-//! pool, both halves of a contention test can be handed the same connection and
-//! the row lock they mean to fight over is never contended. Tests needing an
-//! extra pool of known size call [`mysql_helpers::connect_to_test_db`].
-//!
-//! # Concurrency
-//!
-//! The `containers` test group in `.config/nextest.toml` bounds simultaneous
-//! database and ACME container starts under nextest. Scoped ownership also bounds
-//! resource use over repeated runs: completed tests no longer retain servers.
-//! Keep `mysql` or `postgres` in new database test names so they join that group.
-//! A shared process-wide semaphore limits MySQL and Postgres fixtures to four
-//! live containers under ordinary `cargo test`, regardless of test thread count.
-//! The permit is held until container cleanup completes. This is a per-process
-//! limit; nextest's group is still needed to bound its separate test processes.
-//! Each test must hold only one fixture at a time: concurrent tests retaining a
-//! fixture while awaiting another can exhaust all slots and deadlock. Open extra
-//! pools on the same fixture when multiple connections are needed.
+//! Hold one fixture per test: waiting on a second can deadlock the four-container limit.
+//! Pools are pinned to one connection so contention tests really get two.
+//! Cleanup steps for containers left by a killed run: see CONTRIBUTING.md.
 
 #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
 mod lifecycle {
@@ -82,8 +15,7 @@ mod lifecycle {
 
     pub(super) struct FixtureContainer<I: Image> {
         pub(super) inner: ContainerAsync<I>,
-        // Declaration order keeps the slot reserved through cleanup, including
-        // when database creation or migration panics before the fixture is built.
+        // Field order matters: the permit must drop after the container.
         _permit: SemaphorePermit<'static>,
     }
 
@@ -134,7 +66,6 @@ mod lifecycle {
     }
 }
 
-/// MySQL fixture owning a container and a uniquely named migrated database.
 #[cfg(feature = "mysql")]
 pub(crate) mod mysql_helpers {
     use sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -142,12 +73,9 @@ pub(crate) mod mysql_helpers {
     use std::sync::Arc;
     use testcontainers_modules::{mysql::Mysql as MysqlImage, testcontainers::ImageExt};
 
-    /// Keep this guard alive until all connections and tasks using its URL finish.
-    /// Drop it inside a live Tokio runtime; pools do not retain the container.
+    /// Drop inside a Tokio runtime; pools don't keep the container alive.
     #[must_use = "keep the fixture alive until all database operations finish"]
     pub(crate) struct MysqlTestDb {
-        /// Connection URL for this test's database, for opening further pools —
-        /// see [`connect_to_test_db`].
         pub(crate) url: String,
         container: super::lifecycle::FixtureContainer<MysqlImage>,
     }
@@ -175,7 +103,6 @@ pub(crate) mod mysql_helpers {
                 .await
                 .expect("Failed to resolve MySQL port");
 
-            // Connect without a database first, to create this test's own.
             let admin_url = format!("mysql://{host}:{port}");
             let db_name = format!("test_{}", uuid::Uuid::new_v4().simple());
 
@@ -207,7 +134,6 @@ pub(crate) mod mysql_helpers {
             self.container.inner.id()
         }
 
-        /// Opens a fresh single-connection pool against this test's database.
         pub(crate) async fn connection(&self) -> Arc<DatabaseConnection> {
             Self::connect_pinned(&self.url).await
         }
@@ -223,9 +149,6 @@ pub(crate) mod mysql_helpers {
         }
     }
 
-    /// Opens an additional pool of a caller-chosen size against an
-    /// already-migrated database. Contention tests use this to hold a known
-    /// number of connections; ordinary tests want [`MysqlTestDb::connection`].
     pub(crate) async fn connect_to_test_db(
         mysql_url: &str,
         max_connections: u32,
@@ -238,14 +161,11 @@ pub(crate) mod mysql_helpers {
             .expect("Failed to connect to MySQL test database")
     }
 
-    /// Backward-compatible helper that creates a new test database.
-    /// Prefer [`MysqlTestDb::start`] for new tests.
     pub(crate) async fn mysql_connection() -> MysqlTestDb {
         MysqlTestDb::start().await
     }
 }
 
-/// Postgres fixture owning a container, migrated database, and connection pool.
 #[cfg(feature = "postgres-tests")]
 pub(crate) mod postgres_helpers {
     use sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -253,13 +173,10 @@ pub(crate) mod postgres_helpers {
     use std::sync::Arc;
     use testcontainers_modules::postgres::Postgres as PostgresImage;
 
-    /// Keep this guard alive until all pools and tasks finish, then drop it inside
-    /// a live Tokio runtime. Cloned pools do not retain the container.
+    /// Drop inside a Tokio runtime; cloned pools don't keep the container alive.
     #[must_use = "keep the fixture alive until all database operations finish"]
     pub(crate) struct PostgresTestDb {
         pub(crate) db: Arc<DatabaseConnection>,
-        /// Connection URL for this test's database, for opening further pools —
-        /// see [`connect_to_test_db`].
         pub(crate) url: String,
         // Release our pool reference first; callers may still hold clones.
         container: super::lifecycle::FixtureContainer<PostgresImage>,
@@ -271,11 +188,6 @@ pub(crate) mod postgres_helpers {
         }
     }
 
-    /// Opens an additional pool of a caller-chosen size against an
-    /// already-migrated database. The counterpart of
-    /// [`super::mysql_helpers::connect_to_test_db`]; contention tests need it
-    /// because two halves sharing one multi-slot pool can be handed the same
-    /// connection, and the row lock they mean to fight over is never contended.
     pub(crate) async fn connect_to_test_db(
         postgres_url: &str,
         max_connections: u32,
@@ -344,9 +256,7 @@ pub(crate) mod postgres_helpers {
 mod cleanup_tests {
     use sea_orm::ConnectionTrait;
 
-    // testcontainers 0.27 waits for removal inside Drop on both Tokio runtime
-    // flavors. Revisit these immediate assertions when upgrading the crate.
-    /// Listing must succeed: an unreachable daemon must not look like cleanup.
+    // Relies on testcontainers 0.27 removing containers inside Drop.
     async fn assert_container_exists(id: &str, expected: bool) {
         let output = tokio::process::Command::new("docker")
             .args([
@@ -392,7 +302,6 @@ mod cleanup_tests {
         let fixture = super::mysql_helpers::MysqlTestDb::start().await;
         let id = fixture.container_id().to_owned();
         assert_container_exists(&id, true).await;
-        // The returned pool remains usable while its fixture is retained.
         fixture
             .connection()
             .await

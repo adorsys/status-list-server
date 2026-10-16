@@ -47,8 +47,7 @@ static REDIS_PUT_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLoc
 });
 
 #[cfg(feature = "redis")]
-// Committed OCC version markers intentionally have no expiry: a delayed stale read-fill
-// must never become cacheable after the record entry expires.
+// No TTL on version markers: a late stale fill must never become cacheable.
 static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
     std::sync::LazyLock::new(|| {
         redis::Script::new(
@@ -65,13 +64,7 @@ static REDIS_INVALIDATE_SCRIPT: std::sync::LazyLock<redis::Script> =
         )
     });
 
-/// Cache-hit/miss SLI counters.
-///
-/// Handles are cached through `cached_instruments`, keyed on the global
-/// meter-provider generation, so a fresh provider (e.g. a re-run of
-/// `setup_metrics` in tests) never leaves stale no-op handles behind. Unlike an
-/// eager `global::meter()` binding at construction, this is robust to the cache
-/// being built before `init_telemetry`.
+/// Through cached_instruments, so it's fine to build this before init_telemetry.
 #[derive(Clone)]
 struct CacheMetrics {
     hits: Counter<u64>,
@@ -157,7 +150,6 @@ pub struct MokaStatusListCache {
 }
 
 impl MokaStatusListCache {
-    /// Build an in-process cache.
     pub fn new(ttl_secs: NonZeroU64, max_capacity: u64) -> Self {
         let inner = MokaCache::builder()
             .time_to_live(Duration::from_secs(ttl_secs.get()))
@@ -193,9 +185,7 @@ impl StatusListCache for MokaStatusListCache {
     }
 }
 
-/// Keeps the aggregation IDs it finds, both ways. Every signed token needs its
-/// issuer's ID and every scoped aggregation page its ID's issuer, so without
-/// this both would query the database.
+/// Caches aggregation IDs both ways, since every token and every scoped page needs one.
 pub struct CachingCredentialRepo {
     inner: Arc<dyn CredentialRepo>,
     aggregation_ids: MokaCache<String, AggregationId>,
@@ -203,8 +193,7 @@ pub struct CachingCredentialRepo {
 }
 
 const AGGREGATION_ID_CACHE_CAPACITY: u64 = 10_000;
-// An ID never changes once assigned. The TTL only bounds how long a credential
-// re-created directly in the database keeps its old one here.
+// IDs never change; the TTL only covers credentials re-created by hand in the DB.
 const AGGREGATION_ID_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 impl CachingCredentialRepo {
@@ -258,8 +247,7 @@ impl CredentialRepo for CachingCredentialRepo {
         Ok(aggregation_id)
     }
 
-    /// A miss is not kept, so random IDs sent to the public endpoint can't fill
-    /// the cache.
+    /// Misses aren't cached, so random IDs on the public endpoint can't fill it.
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
@@ -386,10 +374,7 @@ impl RedisStatusListCache {
     }
 
     fn marker_key(&self, list_id: &str) -> String {
-        // The invalidation marker now stores the committed monotonic `version`,
-        // not a timestamp. The key name is deliberately distinct from the old
-        // `meta:{id}:updated` timestamp markers so stale timestamp markers left
-        // in Redis by a previous release never fence out version-stamped fills.
+        // New key name so old timestamp markers from earlier releases can't fence version fills.
         format!("{}meta:{{{}}}:version", self.key_prefix, list_id)
     }
 
@@ -907,8 +892,6 @@ mod redis_tests {
             .put(record_at(&list_id, updated_at))
             .await
             .expect("put stale base");
-        // The base record carries version 1; the invalidation marker is a
-        // strictly higher version so any delayed older fill is fenced out.
         cache
             .invalidate_after_update(&list_id, 2)
             .await
