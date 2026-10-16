@@ -1,5 +1,3 @@
-//! Unified telemetry initialization for tracing, metrics, and logging.
-
 use color_eyre::eyre::Context;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -21,8 +19,7 @@ use tracing_subscriber::{
 
 use crate::{config::TelemetryConfig, utils::metrics::setup_metrics};
 
-/// Guard that shuts down OpenTelemetry providers on drop, ensuring pending
-/// telemetry is flushed before the process exits.
+/// Flushes pending telemetry on drop; hold it until shutdown.
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: SdkMeterProvider,
@@ -47,7 +44,6 @@ impl Drop for TelemetryGuard {
     }
 }
 
-/// Extractor for reading W3C trace context headers from HTTP requests.
 pub struct HeaderExtractor<'a>(pub &'a axum::http::HeaderMap);
 
 impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
@@ -60,8 +56,6 @@ impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
     }
 }
 
-/// Creates a tracing span for an incoming HTTP request and populates parent context
-/// from W3C traceparent headers if present.
 pub fn make_http_request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
     let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
         propagator.extract(&HeaderExtractor(request.headers()))
@@ -76,12 +70,6 @@ pub fn make_http_request_span(request: &axum::http::Request<axum::body::Body>) -
     span
 }
 
-/// Initializes the global telemetry stack (tracing + metrics) based on the
-/// provided configuration.
-///
-/// Returns a [`TelemetryGuard`] that must be held until application
-/// shutdown. Also returns a [`prometheus::Registry`] that the `/metrics`
-/// endpoint uses to render Prometheus metrics.
 pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(TelemetryGuard, Registry)> {
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
@@ -90,11 +78,10 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
 
     let resource = Resource::builder().with_service_name(service_name).build();
 
-    // Prometheus metrics registry (always active)
+    // Always on, even with OTLP disabled.
     let prometheus_registry = Registry::new();
     let meter_provider = setup_metrics(&prometheus_registry, config, resource.clone())?;
 
-    // Build the global env filter
     let env_filter = build_env_filter();
 
     let (tracer_provider, logger_provider) = if config.enabled {
@@ -196,7 +183,6 @@ pub fn init_telemetry(config: &TelemetryConfig) -> color_eyre::Result<(Telemetry
     ))
 }
 
-/// Builds an OTLP-backed tracer provider with batch export.
 fn build_otlp_tracer_provider(
     config: &TelemetryConfig,
     resource: Resource,
@@ -236,8 +222,7 @@ fn build_otlp_logger_provider(
         .build())
 }
 
-/// Constructs the [`EnvFilter`] from the `RUST_LOG` env var with sensible
-/// defaults for noisy dependencies.
+/// RUST_LOG wins; otherwise info with noisy crates turned down.
 fn build_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info")
@@ -263,7 +248,6 @@ mod tests {
         };
 
         let result = init_telemetry(&config);
-        // init_telemetry succeeds or returns try_init error if subscriber already set by another test
         if let Ok((guard, _registry)) = result {
             assert!(guard.tracer_provider.is_none());
             assert!(guard.logger_provider.is_none());
@@ -272,8 +256,6 @@ mod tests {
 
     #[test]
     fn test_init_telemetry_prod_mode_providers() {
-        // The OTLP/tonic exporter builder touches the Tokio reactor; wrap in a
-        // single-threaded runtime so the test is self-contained.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
