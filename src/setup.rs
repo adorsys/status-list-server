@@ -1,5 +1,3 @@
-//! Composition root assembling outbound infrastructure adapters and creating the AppState container.
-
 #[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
@@ -306,7 +304,6 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
     });
 }
 
-/// Usage of `status-list-server list-quota`.
 pub const LIST_QUOTA_USAGE: &str =
     "usage: status-list-server list-quota <status|recount|enable|disable>
 
@@ -316,7 +313,7 @@ pub const LIST_QUOTA_USAGE: &str =
            has more lists than the cap or a stale count
   disable  stop enforcing the quota";
 
-/// Runs `list-quota <action>` and returns what to print. Does not migrate.
+/// Does not run migrations.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
     if !matches!(action, "status" | "recount" | "enable" | "disable") {
@@ -361,7 +358,6 @@ pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeRe
     ))
 }
 
-/// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     build_state_with_cert_manager(config)
@@ -399,9 +395,7 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
-    // Hoisted DB handle captured from the backend branches below so the
-    // readiness probe can reach the real adapter (the domain ports only expose
-    // the higher-level repositories).
+    // Kept so the readiness probe can reach the real DB, which the ports hide.
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
     let aggregation_withheld_from: HashSet<Issuer>;
@@ -619,7 +613,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             cert_inline,
             key_inline,
         ) {
-            // Filesystem mode: both paths → ReloadingCertificateProvider with hot-reload
             (Some(cp), Some(kp), None, None) => {
                 let p = ReloadingCertificateProvider::from_files(cp.to_owned(), kp.to_owned())
                     .await
@@ -627,19 +620,16 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 spawn_cert_rotation(config.clone(), p.clone());
                 Arc::new(p)
             }
-            // Inline mode: both inline PEM values → InlineCertificateProvider (validated at startup)
             (None, None, Some(ci), Some(ki)) => Arc::new(
                 InlineCertificateProvider::new(ci.to_owned(), ki.to_owned())
                     .map_err(|e| color_eyre::eyre::eyre!("{e}"))?,
             ),
-            // Conflict: cannot mix sources
             _ if has_fs && has_inline => {
                 return Err(color_eyre::eyre::eyre!(
                     "certificate and signing key must both come from the same source; \
                      do not mix filesystem paths with inline (env var) values"
                 ));
             }
-            // Missing: neither source fully configured — fail immediately at startup
             _ => {
                 return Err(color_eyre::eyre::eyre!(
                     "static certificate mode requires both certificate and signing key; \
@@ -745,7 +735,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         cert_provider,
     ));
 
-    // Assemble the readiness probes from the real adapters captured above.
     let mut readiness = Readiness::default();
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -775,17 +764,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
-    // A `localhost`/loopback `sub` can never be reached by a relying party, so a
-    // production profile refuses to start rather than silently signing tokens
-    // that every relying party rejects. Private/local addresses (`.local`,
-    // private IPv4, link-local, ULA) may be valid internal setups, so those only
-    // warn with an accurate message. The Helm chart falls back to `localhost`
-    // with APP_ENV=production when no host is configured, which this catches.
-    // `APP_ENV` is read directly (not telemetry.environment, which operators may
-    // override just to change the log format) so the guard is tied to the real
-    // deployment profile. `normalize_app_env` applies the same normalization as
-    // config (trim, lowercase, `prod`/`production`), so a production profile set
-    // with e.g. `APP_ENV=prod` is caught here exactly as config treats it.
+    // Read APP_ENV, not telemetry.environment, which operators may flip just for log format.
+    // Also catches the Helm chart's localhost fallback under APP_ENV=production.
     let app_env = crate::config::normalize_app_env();
     let base_url = config.server.resolved_public_base_url();
     match check_production_base_url(app_env, &base_url) {
@@ -794,14 +774,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Ok(None) => {}
     }
 
-    // ACME issues a certificate only for `server.domain`; when `sub` comes from
-    // a different host, relying parties that check the token signature against
-    // the host in `sub` will reject it.
-    //
-    // Both sides are compared as normalized hosts: the WHATWG parser lowercases
-    // domain names and brackets a bare IPv6 address the same way
-    // `resolved_public_base_url` renders the domain into the URL authority, so
-    // an identical host never false-positives here.
+    // ACME only covers `server.domain`, so a `sub` on another host fails relying-party checks.
     #[cfg(feature = "acme")]
     {
         let base_url = config.server.resolved_public_base_url();
@@ -864,9 +837,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
-/// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
-/// page of an issuer's aggregation as complete, so tokens leave the claim out,
-/// for the reason in `withheld`, while one might not fit in it.
+/// Omitted while an issuer's lists might not fit one page: §9.3 clients treat page one as complete.
 fn advertised_aggregation_uri(
     config: &AppConfig,
     withheld: Option<&str>,
@@ -912,10 +883,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
                     }
-                    // Expected, not exceptional: the sweep scans a range of
-                    // `idx_status_list_history_exp` while snapshot inserts write
-                    // into the top of it. The next run retries the lost batch, so
-                    // this must not page.
+                    // Expected now and then; the next run retries, so warn instead of paging.
                     Err(crate::domain::models::status_list::StatusListError::Contention {
                         code,
                     }) => {
@@ -938,12 +906,9 @@ pub async fn setup_snapshot_cleanup_scheduler(
     Ok(())
 }
 
-/// Whether the resolved public base URL's authority is a localhost/loopback
-/// address that can never be reached by any relying party. `server.public_base_url`
-/// is authoritative, so this inspects it rather than `server.domain`.
 fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
-        // Config validation already rejected an unparsable URL; be conservative.
+        // Config already rejected unparsable URLs.
         return false;
     };
     let Some(host) = parsed.host() else {
@@ -961,12 +926,6 @@ fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
     }
 }
 
-/// Whether the resolved public base URL's authority is a private or local
-/// address that may be valid for an internal deployment but is not generally
-/// reachable by external relying parties: `.local` domains, private IPv4,
-/// link-local addresses, and IPv6 unique-local/ULA addresses. Unlike
-/// [`resolved_base_url_is_localhost`], these are not categorically unusable, so
-/// production only warns about them.
 fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
         return false;
@@ -984,14 +943,7 @@ fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
     }
 }
 
-/// In a production profile the resolved base URL must be reachable by relying
-/// parties. A localhost/loopback host can never be, so it is returned as a hard
-/// startup error; a private/local host may be a valid internal deployment, so
-/// it is returned as a warning string. A public host returns `Ok(None)`.
-///
-/// Non-production profiles always return `Ok(None)`. `app_env` is passed
-/// explicitly so the decision is testable without mutating the process
-/// environment.
+/// Production only: localhost is an error, private or .local addresses just warn.
 fn check_production_base_url(app_env: &str, base_url: &str) -> Result<Option<String>, String> {
     if !crate::config::classify_app_env(app_env).is_production() {
         return Ok(None);
@@ -1306,8 +1258,6 @@ mod general_tests {
         );
     }
 
-    /// Overrides that let `build_state` start whichever features are built.
-    /// Keep it while the state is in use: it serves the mocked Vault.
     struct Startable {
         overrides: Vec<(&'static str, String)>,
         #[cfg(feature = "vault")]
@@ -1383,9 +1333,6 @@ mod general_tests {
         }
     }
 
-    /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
-    /// the default feature set, catching missing test_data/ or config mismatch issues.
-    /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
     #[tokio::test]
     async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1400,7 +1347,6 @@ mod general_tests {
         }
     }
 
-    /// Pods of a deployment, restarted on one SQLite database.
     #[cfg(feature = "sqlite")]
     mod aggregation_withheld {
         use super::*;
@@ -1409,8 +1355,6 @@ mod general_tests {
 
         const AGGREGATION_URI: &str = "https://statuslist.example.com/api/v1/aggregation";
 
-        /// A database file, which outlives a restart as a deployment's does.
-        /// Returns its directory, to remove afterwards, and its URL.
         fn database_file() -> (std::path::PathBuf, String) {
             let dir = std::env::temp_dir().join(format!("status-list-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -1418,8 +1362,6 @@ mod general_tests {
             (dir, url)
         }
 
-        /// In transition publishes past the cap are accepted, so an issuer's
-        /// aggregation can outgrow one page.
         #[tokio::test]
         async fn in_quota_transition_with_an_issuer_over_the_cap() {
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1435,7 +1377,6 @@ mod general_tests {
             let fresh = build_state(&config).await.expect("first start");
             assert!(fresh.aggregation_uri.is_some());
 
-            // As on a database a release without the quota has served.
             run_list_quota_command(&config, "disable")
                 .await
                 .expect("disable the quota");
@@ -1456,8 +1397,6 @@ mod general_tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
-        /// The quota bounds new lists only, so an issuer keeps any it published
-        /// under an earlier, higher cap.
         #[tokio::test]
         async fn only_from_an_issuer_with_more_lists_than_one_page() {
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1471,7 +1410,6 @@ mod general_tests {
             let state = build_state(&config).await.expect("first start");
             assert!(state.aggregation_uri.is_some());
 
-            // An earlier build enforced a cap above one page.
             run_list_quota_command(&config, "disable")
                 .await
                 .expect("disable the quota");
@@ -1717,8 +1655,6 @@ mod general_tests {
         assert!(!rendered.contains("postgres://"));
     }
 
-    /// Verifies that a saturated pool returns an error within `acquire_timeout`
-    /// rather than queuing indefinitely.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test]
     async fn test_pool_acquire_timeout_fires() {
@@ -1749,11 +1685,6 @@ mod general_tests {
             )
         };
 
-        // sea-orm folds `connect_timeout` and `acquire_timeout` onto sqlx's
-        // single `PoolOptions::acquire_timeout`, and pool construction opens a
-        // connection eagerly under it — so this bound also caps the initial
-        // handshake, which exceeds a second on some hosts (Docker Desktop on
-        // Windows). Sized to clear that while staying under the holder's 10s.
         const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
         let mut opt = ConnectOptions::new(db_url);
@@ -1767,7 +1698,6 @@ mod general_tests {
                 .expect("Failed to connect for pool test"),
         );
 
-        // Hold the single connection with a long-running query
         let db_clone = db.clone();
         let _holder = tokio::spawn(async move {
             let _ = sea_orm::ConnectionTrait::execute_unprepared(
@@ -1777,7 +1707,6 @@ mod general_tests {
             .await;
         });
 
-        // Give the holder time to acquire the connection
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let start = Instant::now();
@@ -1785,15 +1714,11 @@ mod general_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
-        // Lower bound: the failure came from the acquire timeout, not an
-        // unrelated early error.
         assert!(
             elapsed >= ACQUIRE_TIMEOUT,
             "failed before acquire_timeout could fire, so the error was not \
              pool exhaustion: {elapsed:?}"
         );
-        // Upper bound: it gave up instead of queueing behind the holder's 10s
-        // query. Sized against that 10s, leaving headroom for jitter.
         const UPPER_BOUND: Duration = Duration::from_secs(8);
         assert!(
             elapsed < UPPER_BOUND,
@@ -1959,12 +1884,6 @@ mod general_tests {
         let _ = tokio::fs::remove_dir_all(temp_dir).await;
     }
 
-    /// The local-address checks key off the resolved public base URL, not the
-    /// `server.domain` string. `localhost`/loopback can never be reached by a
-    /// relying party, while private/local addresses (`.local`, private IPv4,
-    /// link-local, ULA) may be valid internal setups — the two must be told
-    /// apart because production fails on the former but only warns on the
-    /// latter.
     #[test]
     fn resolved_base_url_local_host_detection() {
         use super::{resolved_base_url_is_localhost, resolved_base_url_is_private_or_local};
@@ -2019,10 +1938,6 @@ mod general_tests {
         }
     }
 
-    /// A production profile with an explicit localhost `public_base_url` must
-    /// be classified as localhost, while a localhost `server.domain` overridden
-    /// by an explicit public URL must not. Config validation is independent of
-    /// the startup check, so these assert the resolved URL used for it.
     #[test]
     fn production_localhost_public_base_url_detection() {
         use super::resolved_base_url_is_localhost;
@@ -2054,16 +1969,11 @@ mod general_tests {
         );
     }
 
-    /// The production base-URL guard: localhost/loopback is a hard startup
-    /// error, private/local is a warning, public is quiet, and non-production
-    /// profiles never fire. The decision is keyed off the explicit `app_env`
-    /// argument so it is testable without mutating the process environment.
     #[test]
     fn production_base_url_check() {
         use super::check_production_base_url;
         use crate::config::ENV_PRODUCTION;
 
-        // localhost/loopback -> hard startup error in production.
         for url in [
             "https://localhost/api/v1",
             "https://localhost.localdomain/api/v1",
@@ -2079,7 +1989,6 @@ mod general_tests {
             );
         }
 
-        // private/local -> warning in production, not a failure.
         for url in [
             "https://10.0.0.5/api/v1",
             "https://192.168.1.10/api/v1",
@@ -2097,7 +2006,6 @@ mod general_tests {
             );
         }
 
-        // public -> quiet.
         for url in [
             "https://statuslist.example.com/api/v1",
             "https://statuslist.example.org/api/v1",
@@ -2110,7 +2018,6 @@ mod general_tests {
             );
         }
 
-        // Non-production profiles never fire.
         let dev = crate::config::ENV_DEVELOPMENT;
         assert!(
             check_production_base_url(dev, "https://localhost/api/v1")
@@ -2120,11 +2027,6 @@ mod general_tests {
         );
     }
 
-    /// A production profile set via the `prod` alias (any casing, surrounding
-    /// whitespace) must still fire the localhost base-URL guard: the guard runs
-    /// the raw `APP_ENV` through `classify_app_env`, so it catches the same
-    /// profiles config treats as production. Regression for a guard that
-    /// compared the raw value to exactly `production`.
     #[test]
     fn prod_alias_fires_production_base_url_guard() {
         use super::check_production_base_url;
