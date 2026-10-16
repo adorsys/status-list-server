@@ -16,7 +16,7 @@ use governor::middleware::NoOpMiddleware;
 use hyper::Method;
 use prometheus::Registry;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
@@ -67,8 +67,8 @@ impl HttpServer {
         let (strict_governor, issuer_governor, permissive_governor) =
             build_governor_configs(&config.rate_limit)?;
 
-        let public_router = with_common_layers(
-            with_listener_name(
+        let public_router = with_listener_name(
+            with_common_layers(
                 public_routes(permissive_governor)
                     // CORS is applied only to the public router: admin and management
                     // have no browser clients, and a dev machine should not let any
@@ -79,24 +79,24 @@ impl HttpServer {
                             .allow_origin(Any)
                             .allow_headers(Any),
                     ),
-                "public",
+                config,
             ),
-            config,
+            "public",
         )
         .with_state(state.clone());
 
-        let management_router = with_common_layers(
-            with_listener_name(
+        let management_router = with_listener_name(
+            with_common_layers(
                 management_routes(state.clone(), issuer_governor, strict_governor),
-                "management",
+                config,
             ),
-            config,
+            "management",
         )
         .with_state(state.clone());
 
-        let admin_router = with_common_layers(
-            with_listener_name(admin_routes(config, prometheus_registry), "admin"),
-            config,
+        let admin_router = with_listener_name(
+            with_common_layers(admin_routes(config, prometheus_registry), config),
+            "admin",
         )
         .with_state(state);
 
@@ -148,7 +148,7 @@ impl HttpServer {
     /// (an idle admin listener no longer returns early and interrupts management
     /// writes that are still in flight). Any listener error propagates so the
     /// process exits non-zero and the orchestrator can restart it.
-    pub async fn run(self, shutdown: Arc<Notify>) -> color_eyre::Result<()> {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> color_eyre::Result<()> {
         tokio::try_join!(
             serve(
                 self.public.listener,
@@ -172,16 +172,16 @@ impl HttpServer {
         Ok(())
     }
 
-    /// Install SIGINT/SIGTERM handlers that broadcast the shutdown notification.
+    /// Install SIGINT/SIGTERM handlers that broadcast the shutdown signal.
     ///
     /// Kept separate from [`Self::run`] so tests can drive shutdown directly
-    /// through the [`Notify`] instead of the process-level signal handlers
-    /// (which can only be installed once per process).
-    pub fn install_shutdown_handler(shutdown: &Arc<Notify>) {
+    /// through the [`watch`] channel instead of the process-level signal
+    /// handlers (which can only be installed once per process).
+    pub fn install_shutdown_handler(shutdown: &watch::Sender<bool>) {
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
             shutdown_signal().await;
-            shutdown.notify_waiters();
+            let _ = shutdown.send(true);
         });
     }
 
@@ -211,7 +211,7 @@ async fn serve(
     listener: TcpListener,
     router: Router,
     name: &str,
-    shutdown: Arc<Notify>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> color_eyre::Result<()> {
     match listener.local_addr() {
         Ok(addr) => tracing::info!(listener = name, %addr, "listening"),
@@ -221,7 +221,14 @@ async fn serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async move { shutdown.notified().await })
+    // `wait_for` checks the current value first and resolves immediately if
+    // shutdown already fired, so a listener whose graceful-shutdown future is
+    // only polled after the signal still sees it. Unlike `Notify::notify_waiters`,
+    // the signal is retained in the channel rather than lost when nobody is
+    // waiting yet.
+    .with_graceful_shutdown(async move {
+        let _ = shutdown.wait_for(|shutdown| *shutdown).await;
+    })
     .await
     .map_err(|e| eyre!("HTTP server ({name}) failed: {e}"))
 }
@@ -420,6 +427,11 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
 /// Wraps a `Router<S>` with an [`Extension`] layer that injects a
 /// [`ListenerName`] into every request. The name is consumed by
 /// [`track_http_metrics`] to record which listener accepted the connection.
+///
+/// This must be applied OUTSIDE the shared middleware layers (i.e. wrap
+/// [`with_common_layers`]) so the extension is present when
+/// [`track_http_metrics`] reads it. Applied inside, the metrics middleware
+/// would run before the extension is inserted and report `"unknown"`.
 fn with_listener_name<S: Clone + Send + Sync + 'static>(
     router: Router<S>,
     name: &'static str,
@@ -526,6 +538,8 @@ mod tests {
     /// unknown.
     #[tokio::test]
     async fn test_routes_404_on_the_wrong_listener() {
+        use crate::test_utils::{publish_list, register_issuer};
+
         let config = Config::load_from_overrides(&[
             // Enable metrics so /metrics is a real route on admin, not a
             // universal 404 from a missing route.
@@ -533,7 +547,13 @@ mod tests {
         ])
         .unwrap();
         let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+
+        // Seed a registered issuer and a published list so the public read
+        // routes return a real (non-404) response on their owner.
         let state = crate::test_utils::test_app_state(None).await;
+        let aggregation_id = register_issuer(&state.service, "issuer1").await;
+        let list_id = uuid::Uuid::new_v4().to_string();
+        publish_list(&state.service, "issuer1", &list_id).await;
 
         let public = public_routes(permissive).with_state(state.clone());
         let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
@@ -556,42 +576,48 @@ mod tests {
         const MANAGEMENT: &str = "management";
         const ADMIN: &str = "admin";
 
-        let list_id = "477121aa-b598-419e-916f-1e74654ff38b";
-        let _aggregation_id = "d6c9b1f2-3a4b-4c5d-8e6f-7a8b9c0d1e2f";
-
         // Table: (method, path, owning_listener).
         // Every route must be reachable (non-404) on exactly its owner, and
-        // must return 404 on the other two listeners.
-        //
-        // NOTE: public read routes like GET /api/v1/status-lists/{id} are
-        // intentionally absent from this table. They are routed to the public
-        // listener but return 404 from the handler when the list doesn't exist
-        // in the (empty) test DB, making the response indistinguishable from a
-        // missing-route 404. The management write routes below are sufficient
-        // to verify the public/management boundary: they return a non-404
-        // (auth error) on management and 404 on public/admin.
+        // must return 404 on the other two listeners. The public read routes
+        // are included and seeded above so their owner check is a real response
+        // (the scoped aggregation and status-list reads resolve to data, and
+        // the deprecated /aggregation returns a page).
         let routes: &[(Method, &str, &str)] = &[
-            // Public routes (confirmed non-404 on owner without hitting the DB)
+            // Public read routes (seeded so the owner check is not a 404)
+            (
+                Method::GET,
+                &format!("{API_V1_PREFIX}/status-lists/{list_id}"),
+                PUBLIC,
+            ),
+            (
+                Method::GET,
+                &format!("{API_V1_PREFIX}/aggregation/{aggregation_id}"),
+                PUBLIC,
+            ),
+            // Deprecated, unscoped aggregation
+            (Method::GET, &format!("{API_V1_PREFIX}/aggregation"), PUBLIC),
+            // Public service/liveness routes (no data needed)
             (Method::GET, "/", PUBLIC),
             (Method::GET, "/health", PUBLIC),
             (Method::GET, "/health/live", PUBLIC),
             // Management routes (return 4xx auth error on owner, not 404)
             (
                 Method::PUT,
-                &format!("/api/v1/status-lists/{list_id}/statuses"),
+                &format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"),
                 MANAGEMENT,
             ),
             (
                 Method::PATCH,
-                &format!("/api/v1/status-lists/{list_id}/statuses"),
+                &format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"),
                 MANAGEMENT,
             ),
             (
                 Method::POST,
-                &format!("/api/v1/status-lists/{list_id}/allocations"),
+                &format!("{API_V1_PREFIX}/status-lists/{list_id}/allocations"),
                 MANAGEMENT,
             ),
-            (Method::POST, "/api/v1/credentials", MANAGEMENT),
+            (Method::POST, &format!("{API_V1_PREFIX}/credentials"), MANAGEMENT),
+            (Method::GET, &format!("{API_V1_PREFIX}/credentials"), MANAGEMENT),
             // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
@@ -800,8 +826,8 @@ mod tests {
         let management_addr = server.management_addr();
         let admin_addr = server.admin_addr();
 
-        let shutdown = Arc::new(Notify::new());
-        let run = server.run(shutdown.clone());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let run = server.run(shutdown_rx);
         let run_handle = tokio::spawn(run);
 
         // Wait for all three listeners to be accepting connections.
@@ -848,7 +874,7 @@ mod tests {
 
         // Trigger graceful shutdown and require `run` to complete successfully
         // (it must not return early on the first listener to finish).
-        shutdown.notify_waiters();
+        let _ = shutdown_tx.send(true);
         let result = tokio::time::timeout(Duration::from_secs(10), run_handle)
             .await
             .expect("run did not finish within 10s")
@@ -1134,6 +1160,75 @@ mod tests {
         assert!(
             body.contains("http_server_duration_seconds_count"),
             "expected duration histogram count; body:\n{body}"
+        );
+    }
+
+    /// The HTTP metrics listener label must reflect the owning listener, not
+    /// "unknown". This goes through the SAME layer order as the production
+    /// router (`with_listener_name` wrapping `with_common_layers`), regressing
+    /// the bug where the Extension was applied INSIDE the metrics middleware so
+    /// the label always read "unknown".
+    // Same test-only serialization lock rationale as the middleware test above.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn http_metrics_listener_label_is_not_unknown() {
+        use crate::utils::metrics::{metrics_test_lock, setup_metrics};
+        use opentelemetry_sdk::Resource;
+        use prometheus::{Encoder, Registry, TextEncoder};
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let telemetry = crate::config::TelemetryConfig {
+            environment: crate::config::TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &telemetry,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+
+        async fn ok_handler() -> impl IntoResponse {
+            "ok"
+        }
+
+        // Mirror production: with_listener_name wraps with_common_layers so the
+        // Extension (and thus the label) is present when track_http_metrics runs.
+        let router = with_listener_name(
+            with_common_layers(Router::<AppState>::new().route("/ok", get(ok_handler)), &config),
+            "management",
+        )
+        .with_state(state);
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/ok")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut buffer = Vec::new();
+        TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode metrics");
+        let body = String::from_utf8(buffer).expect("metrics are valid UTF-8");
+
+        assert!(
+            body.contains("listener=\"management\"") && !body.contains("listener=\"unknown\""),
+            "expected a real listener label, not unknown; body:\n{body}"
         );
     }
 

@@ -59,10 +59,11 @@ helm install statuslist-local ./deploy/helm/chart \
 
 # 4. Verify
 kubectl get pods -n local
-# Public listener (status-list reads, liveness) on service port 8081; admin
-# listener (readiness, metrics) on service port 8002.
-kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081 8002:8002
+# Public listener (status-list reads, liveness) on service port 8081.
+kubectl port-forward -n local svc/statuslist-local-status-list-server-service 8081:8081
 curl http://localhost:8081/health/live
+# Admin listener (readiness, metrics) lives on the internal ClusterIP service.
+kubectl port-forward -n local svc/statuslist-local-status-list-server-internal-service 8002:8002
 curl http://localhost:8002/health/ready
 ```
 

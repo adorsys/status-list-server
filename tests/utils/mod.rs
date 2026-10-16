@@ -174,8 +174,13 @@ impl TestServer {
             started.expect("server bound within retry limit")
         };
         // Each #[tokio::test] owns its runtime; shutdown drops its server tasks.
-        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
-        tokio::spawn(server.run(shutdown));
+        // Hold the sender alive for the server task's lifetime so the graceful
+        // shutdown future never resolves mid-test; teardown happens on runtime drop.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let _shutdown_tx = shutdown_tx;
+            server.run(shutdown_rx).await
+        });
         let client = reqwest::Client::builder()
             .no_proxy()
             .no_gzip()
