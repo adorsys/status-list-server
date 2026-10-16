@@ -33,8 +33,8 @@ use crate::config::{Config, PUBLIC_API_PATH_PREFIX};
 use crate::server::AppState;
 use crate::server::auth::auth;
 use crate::server::handlers::{
-    allocate_indices_route, credential_handler, get_aggregation, get_credential,
-    get_issuer_aggregation, get_status_list, publish_status_route, update_status_route,
+    allocate_indices_route, get_aggregation, get_credential, get_issuer_aggregation,
+    get_status_list, publish_status_route, update_status_route,
 };
 use crate::server::health;
 use crate::utils::metrics::metrics_handler;
@@ -67,8 +67,7 @@ impl HttpServer {
 
         let max_body_size = config.limits.max_body_size_bytes;
 
-        let (strict_governor, issuer_governor, permissive_governor) =
-            build_governor_configs(&config.rate_limit)?;
+        let (issuer_governor, permissive_governor) = build_governor_configs(&config.rate_limit)?;
 
         let mut router = Router::new()
             .route("/", get(welcome))
@@ -79,7 +78,6 @@ impl HttpServer {
                 PUBLIC_API_PATH_PREFIX,
                 api_v1_routes(
                     state.clone(),
-                    strict_governor.clone(),
                     issuer_governor.clone(),
                     permissive_governor.clone(),
                 ),
@@ -143,7 +141,6 @@ async fn shutdown_signal() {
 }
 
 type GovernorPolicies = (
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
@@ -151,13 +148,6 @@ type GovernorPolicies = (
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let strict = Arc::new(
-        GovernorConfigBuilder::default()
-            .burst_size(config.strict_burst_size)
-            .period(Duration::from_secs(config.strict_period_secs))
-            .finish()
-            .ok_or_else(|| eyre!("strict governor requires non-zero burst_size and period"))?,
-    );
     let issuer = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.strict_burst_size)
@@ -173,12 +163,11 @@ fn build_governor_configs(
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((strict, issuer, permissive))
+    Ok((issuer, permissive))
 }
 
 fn api_v1_routes(
     state: AppState,
-    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
@@ -197,20 +186,13 @@ fn api_v1_routes(
         .route_layer(from_fn_with_state(state.clone(), auth))
         .layer(GovernorLayer::new(issuer_governor));
 
-    let credentials = Router::new()
-        .route("/credentials", post(credential_handler))
-        .layer(GovernorLayer::new(strict_governor));
-
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
         .route("/status-lists/{list_id}", get(get_status_list))
         .layer(GovernorLayer::new(permissive_governor));
 
-    Router::new()
-        .merge(protected)
-        .merge(credentials)
-        .merge(public_reads)
+    Router::new().merge(protected).merge(public_reads)
 }
 
 /// Axum middleware recording HTTP latency + request-count SLIs.
@@ -273,19 +255,22 @@ fn attach_metrics(router: Router, config: &Config, registry: Registry) -> Router
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::Body;
+    #[cfg(feature = "sqlite")]
+    use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
-    /// `/credentials` has a public POST and an authenticated GET, and each must
-    /// keep its own layers once the routers are merged.
+    /// The retired registration method stays absent while issuer GET remains
+    /// protected by management authentication.
     #[tokio::test]
-    async fn test_api_routes_register_issuers_and_serve_their_aggregation() {
+    async fn test_api_routes_reject_registration_and_serve_issuer_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
-        let router = api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state);
+        let aggregation_id = crate::test_utils::register_issuer(&state.service, "issuer1").await;
+        let router = api_v1_routes(state.clone(), issuer, permissive).with_state(state.clone());
         let send = |method: Method, uri: String, body: String| {
             let request = Request::builder()
                 .method(method)
@@ -304,20 +289,21 @@ mod tests {
             Method::POST,
             "/credentials".into(),
             format!(
-                r#"{{"issuer":"issuer1","public_key":{}}}"#,
+                r#"{{"issuer":"new-issuer","public_key":{}}}"#,
                 crate::test_fixtures::TEST_EC_PUBLIC_JWK
             ),
         )
         .await
         .unwrap();
-        assert_eq!(registration.status(), StatusCode::ACCEPTED);
-        let registration: serde_json::Value = serde_json::from_slice(
-            &to_bytes(registration.into_body(), usize::MAX)
+        assert_eq!(registration.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            state
+                .service
+                .find_credential("new-issuer")
                 .await
-                .unwrap(),
-        )
-        .unwrap();
-        let aggregation_id = registration["aggregation_id"].as_str().unwrap();
+                .unwrap()
+                .is_none()
+        );
 
         let unauthenticated = send(Method::GET, "/credentials".into(), String::new())
             .await
@@ -357,9 +343,8 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
-        let router =
-            api_v1_routes(state.clone(), strict, issuer, permissive).with_state(state.clone());
+        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let router = api_v1_routes(state.clone(), issuer, permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)
                 .extension(axum::extract::ConnectInfo(SocketAddr::new(

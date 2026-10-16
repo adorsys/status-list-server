@@ -133,6 +133,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_SERVER__HOST: "0.0.0.0"
+      APP_MANAGEMENT_AUTH__ISSUERS_FILE: /etc/status-list/issuers.yaml
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
       APP_STATUS_LIST__TOKEN_EXP_SECS: ${APP_STATUS_LIST__TOKEN_EXP_SECS:-900}
       APP_STATUS_LIST__TOKEN_TTL_SECS: ${APP_STATUS_LIST__TOKEN_TTL_SECS:-300}
@@ -151,6 +152,7 @@ services:
     volumes:
       - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
       - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro
+      - ./demo/issuers.yaml:/etc/status-list/issuers.yaml:ro
       - certdata:/etc/status-list/generated:ro
     depends_on:
       db:

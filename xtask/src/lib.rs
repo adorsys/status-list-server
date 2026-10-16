@@ -7,6 +7,8 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{OptionExt, Result, WrapErr, ensure};
 
+mod issuer;
+
 /// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -28,6 +30,13 @@ pub fn run() -> Result<()> {
         ),
         Task::Compose { profile } => run_spec(compose_spec(profile), &workspace),
         Task::Ci => run_spec(ci_spec(), &workspace),
+        Task::Issuer {
+            command:
+                IssuerTask::Export {
+                    database_url,
+                    output,
+                },
+        } => issuer::export(&database_url, &output),
     }
 }
 
@@ -74,6 +83,24 @@ enum Task {
     },
     /// Run the complete local CI pipeline.
     Ci,
+    /// Export the existing issuer database as a registry draft.
+    Issuer {
+        #[command(subcommand)]
+        command: IssuerTask,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq, Subcommand)]
+enum IssuerTask {
+    /// Export issuer ids, aggregation ids and public keys to issuers.yaml.
+    Export {
+        /// Database URL for the running server's credential database.
+        #[arg(long)]
+        database_url: String,
+        /// Output path for the reviewable registry draft.
+        #[arg(long, default_value = "issuers.yaml")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -482,6 +509,27 @@ mod tests {
             .expect_err("extra lint argument must be rejected")
             .to_string();
         assert!(extra.contains("unexpected argument 'extra'"));
+    }
+
+    #[test]
+    fn issuer_export_accepts_database_url_and_output_path() {
+        let cli = Cli::try_parse_from([
+            "cargo xtask",
+            "issuer",
+            "export",
+            "--database-url",
+            "postgres://user:password@localhost/status-list",
+            "--output",
+            "draft.yaml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Task::Issuer {
+                command: IssuerTask::Export { database_url, output }
+            } if database_url == "postgres://user:password@localhost/status-list"
+                && output == PathBuf::from("draft.yaml")
+        ));
     }
 
     #[test]

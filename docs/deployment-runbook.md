@@ -422,9 +422,8 @@ During the upgrade:
   relying party following a token from a new pod may get a `404` from an old
   one until the rollout completes. The claim is optional, and relying parties
   still fetch each status list directly.
-- Issuers registered before the upgrade, or by an old pod during it, get an
-  aggregation ID the first time one of their tokens is served. They can read it
-  from `GET /api/v1/credentials`.
+- Existing issuers keep their exported `aggregation_id` values. They can read
+  them from authenticated `GET /api/v1/credentials` after the rollout.
 - The signed-token cache is per pod and starts empty, so every token a new pod
   serves carries the scoped URI. Tokens relying parties cached earlier carry
   the unscoped one, which keeps working.
@@ -453,8 +452,7 @@ hand either. The IDs are lost, new ones are assigned, and every URI already in
 tokens or issuer metadata returns `404`. Restoring a backup taken before it
 does the same and loses status changes too; see
 [Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
-Deleting an issuer's credential in the database and registering it again does
-the same to that issuer.
+Deleting an issuer's credential in the database does the same to that issuer.
 
 ### Metrics
 
@@ -802,14 +800,14 @@ Coordinate repairs with each issuer before enabling the new verifier:
    **both columns in one transaction**. Use bound parameters with the database
    client: `UPDATE credentials SET public_key = :public_jwk, key_id = :kid
    WHERE issuer = :issuer`. Cast the JSON parameter as required by the driver.
-   Do not delete and re-register the issuer to work around a 409.
+   Do not delete the issuer's credential to work around a conflict.
 4. Rerun the inventory query. After migration, verify `key_id` equals the
    JWK's `kid`, then have each issuer authenticate using its agreed algorithm,
    `typ: statuslist-management+jwt`, matching `kid`, configured audience, and
    a lifetime within the configured maximum (300 seconds by default).
 
-There is no public credential-update endpoint in this release. An operator must
-perform these repairs; re-registering an existing issuer returns 409. Plan a
+There is no public issuer credential write endpoint in this release. An operator must
+perform these repairs. Plan a
 coordinated cutover if old and new servers overlap, because their accepted token
 contracts differ.
 

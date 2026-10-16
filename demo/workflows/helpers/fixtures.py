@@ -22,9 +22,9 @@ def get_gondwana_digital_pole_issuer():
     Returns the Gondwana Digital Pole issuer dictionary with a random suffix
     appended to the label.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"gondwana-digital-pole-{random_suffix}",
+        "label": "gondwana-digital-pole",
+        "kid": "kiKS9vJacRm2xI6KR5ZxXt4zogn77ED2pA72XxiRS2M",
         "keypair": {
             "alg": "ES256",
             "public_key": (
@@ -47,9 +47,9 @@ def get_scott_holdings_issuer():
     Returns the Scott Holdings issuer dictionary with a random suffix
     appended to the label.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"scott-holdings-{random_suffix}",
+        "label": "scott-holdings",
+        "kid": "sS8x1t9Zdr3LHY3JSZVx0ZuxvDfr1I_5rVn4eXuk7Z0",
         "keypair": {
             "alg": "PS256",
             "public_key": (
@@ -86,7 +86,15 @@ def get_public_jwk(issuer: dict) -> dict:
     jwk.pop("key_ops", None)
 
     # Management JWTs are resolved by kid and pinned to this signing algorithm.
-    return {**jwk, "alg": alg, "kid": issuer["label"]}
+    return {**jwk, "alg": alg, "kid": issuer["kid"]}
+
+
+def get_unregistered_issuer():
+    """Return a signer whose issuer and kid are absent from the local registry."""
+    issuer = get_scott_holdings_issuer()
+    issuer["label"] = f"unregistered-{generate_random_string(8)}"
+    issuer["kid"] = issuer["label"]
+    return issuer
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
@@ -114,5 +122,5 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
         payload,
         issuer['keypair']['private_key'],
         algorithm=issuer["keypair"]["alg"],
-        headers={"typ": "statuslist-management+jwt", "kid": issuer["label"]},
+        headers={"typ": "statuslist-management+jwt", "kid": issuer["kid"]},
     )

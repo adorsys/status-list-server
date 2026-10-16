@@ -9,7 +9,9 @@ use status_list_server::{
     config::Config,
     crypto::SigningKey,
     domain::{
+        models::credential::{AggregationId, Credential, Issuer, PublicJwk},
         models::status_list::StatusListError,
+        ports::CredentialRepo,
         ports::{CertificateProvider, SigningMaterial},
         service::Service,
     },
@@ -78,10 +80,30 @@ fn fixture_config() -> Config {
     })).unwrap()
 }
 
-fn fixture_state(config: &Config) -> AppState {
+async fn fixture_state(config: &Config) -> AppState {
     use base64::prelude::BASE64_STANDARD;
     let snapshots = MemoryStatusListSnapshotRepo::default();
     let lists = MemoryStatusLists::default().with_snapshot(&snapshots);
+    let credentials = MemoryCredentials::default();
+    let key = SigningKey::from_pem(KEY).unwrap();
+    let public = key.public_key_bytes();
+    let jwk = json!({
+        "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
+        "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
+        "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
+    });
+    credentials
+        .insert(
+            Credential {
+                issuer: Issuer(ISSUER.into()),
+                public_key: PublicJwk::try_new(serde_json::to_vec(&jwk).unwrap()).unwrap(),
+            },
+            "c4cc9a37-8a61-4d72-880e-266e7bc72646"
+                .parse::<AggregationId>()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let material = SigningMaterial::new(
         Some(vec![
             BASE64_STANDARD.encode(pem::parse(certificate()).unwrap().contents()),
@@ -92,7 +114,7 @@ fn fixture_state(config: &Config) -> AppState {
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
-            Arc::new(MemoryCredentials::default()),
+            Arc::new(credentials),
             Arc::new(MokaStatusListCache::new(
                 std::num::NonZeroU64::new(config.cache.ttl).unwrap(),
                 config.cache.max_capacity,
@@ -143,8 +165,12 @@ impl TestServer {
                 // Connect directly to HTTP rather than a production TLS terminator.
                 config.server.public_base_url = Some(format!("{base_url}/api/v1"));
                 drop(listener);
-                match HttpServer::new(&config, fixture_state(&config), prometheus::Registry::new())
-                    .await
+                match HttpServer::new(
+                    &config,
+                    fixture_state(&config).await,
+                    prometheus::Registry::new(),
+                )
+                .await
                 {
                     Ok(server) => {
                         started = Some((base_url, server));
@@ -177,28 +203,23 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let mut app = Self {
+        let app = Self {
             base_url,
             client,
-            aggregation_id: String::new(),
+            aggregation_id: "c4cc9a37-8a61-4d72-880e-266e7bc72646".to_owned(),
         };
-        let key = SigningKey::from_pem(KEY).unwrap();
-        let public = key.public_key_bytes();
+        uuid::Uuid::parse_str(&app.aggregation_id).unwrap();
         let response = app
             .client
-            .post(app.url("/api/v1/credentials"))
-            .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
-                "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
-                "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
-            }}))
+            .get(app.url("/api/v1/credentials"))
+            .bearer_auth(app.bearer_token())
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-        let registration: serde_json::Value = response.json().await.unwrap();
-        app.aggregation_id = registration["aggregation_id"].as_str().unwrap().to_owned();
-        uuid::Uuid::parse_str(&app.aggregation_id).unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let metadata: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(metadata["issuer"], ISSUER);
+        assert_eq!(metadata["aggregation_id"], app.aggregation_id);
         app
     }
 

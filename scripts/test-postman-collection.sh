@@ -95,14 +95,10 @@ const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
 
 const now = Math.floor(Date.now() / 1000);
-const issuerId = `newman-issuer-${Date.now()}`;
+const issuerId = 'gondwana-digital-pole';
+const keyId = 'kiKS9vJacRm2xI6KR5ZxXt4zogn77ED2pA72XxiRS2M';
 const listId = crypto.randomUUID();
-
-const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-  namedCurve: 'P-256',
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-});
+const privateKey = fs.readFileSync('demo/keys/gondwana-digital-pole-private.pem', 'utf8');
 
 function base64url(input) {
   return Buffer.from(input)
@@ -112,7 +108,7 @@ function base64url(input) {
     .replace(/\//g, '_');
 }
 
-const header = { alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuerId };
+const header = { alg: 'ES256', typ: 'statuslist-management+jwt', kid: keyId };
 const payload = { iss: issuerId, aud: audience, iat: now, exp: now + 300 };
 const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
 const signature = crypto.sign('sha256', Buffer.from(signingInput), {
@@ -120,26 +116,6 @@ const signature = crypto.sign('sha256', Buffer.from(signingInput), {
   dsaEncoding: 'ieee-p1363'
 });
 const token = `${signingInput}.${base64url(signature)}`;
-const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
-publicKeyJwk.kid = header.kid;
-publicKeyJwk.alg = header.alg;
-
-function visitItems(items, visitor) {
-  for (const item of items || []) {
-    visitor(item);
-    if (item.item) visitItems(item.item, visitor);
-  }
-}
-
-visitItems(collection.item, (item) => {
-  if (item.name === 'Register issuer credentials' && item.request?.body?.raw) {
-    item.request.body.raw = JSON.stringify({
-      issuer: issuerId,
-      public_key: publicKeyJwk,
-    }, null, 2);
-  }
-});
-
 const values = new Map([
   ['baseUrl', baseUrl],
   ['list_id', listId],
