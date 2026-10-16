@@ -19,7 +19,7 @@ use sea_orm::{ConnectOptions, DbErr};
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
-use std::{num::NonZeroU64, sync::Arc, time::Duration};
+use std::{collections::HashSet, num::NonZeroU64, sync::Arc, time::Duration};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -55,6 +55,7 @@ use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
+    models::credential::Issuer,
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
@@ -403,7 +404,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
-    // Why tokens must leave out `aggregation_uri`, when they must.
+    let aggregation_withheld_from: HashSet<Issuer>;
+    // Why all tokens must leave out `aggregation_uri`, when they must.
     let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
@@ -418,6 +420,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 db_arc = None;
             }
             aggregation_withheld = None;
+            aggregation_withheld_from = HashSet::new();
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -480,21 +483,30 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     false
                 }
             };
-            aggregation_withheld = if list_quota_enforced {
+            aggregation_withheld =
+                (!list_quota_enforced).then(|| "the list quota is not enforced".to_string());
+            aggregation_withheld_from = if list_quota_enforced {
                 let over = list_quota::issuers_over(&db, AGGREGATION_DEFAULT_LIMIT as u64)
                     .await
                     .wrap_err("Failed to count each issuer's status lists")?;
-                (!over.is_empty()).then(|| {
-                    format!(
-                        "{} issuer(s) have more status lists than one aggregation page \
+                if !over.is_empty()
+                    && config
+                        .server
+                        .aggregation_uri(config.telemetry.environment)?
+                        .is_some()
+                {
+                    tracing::warn!(
+                        "server.aggregation_uri is not advertised in the tokens of {} issuer(s) \
+                         that have more status lists than one aggregation page \
                          ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
                          restart:{}",
                         over.len(),
                         list_quota::name_issuers(&over)
-                    )
-                })
+                    );
+                }
+                over.into_iter().map(|count| Issuer(count.issuer)).collect()
             } else {
-                Some("the list quota is not enforced".to_string())
+                HashSet::new()
             };
 
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
@@ -823,6 +835,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         service,
         public_base_url: config.server.resolved_public_base_url(),
         aggregation_uri: advertised_aggregation_uri(config, aggregation_withheld.as_deref())?,
+        aggregation_withheld_from: Arc::new(aggregation_withheld_from),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -1391,6 +1404,7 @@ mod general_tests {
     #[cfg(feature = "sqlite")]
     mod aggregation_withheld {
         use super::*;
+        use crate::server::handlers::status_list::utils::token::issuer_aggregation_uri;
         use crate::test_utils::{publish_list, publish_list_under_quota, register_issuer};
 
         const AGGREGATION_URI: &str = "https://statuslist.example.com/api/v1/aggregation";
@@ -1445,7 +1459,7 @@ mod general_tests {
         /// The quota bounds new lists only, so an issuer keeps any it published
         /// under an earlier, higher cap.
         #[tokio::test]
-        async fn while_an_issuer_has_more_lists_than_one_page() {
+        async fn only_from_an_issuer_with_more_lists_than_one_page() {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let startable = Startable::new().await;
             let (dir, database) = database_file();
@@ -1465,13 +1479,25 @@ mod general_tests {
             for _ in 0..=AGGREGATION_DEFAULT_LIMIT {
                 publish_list(&state.service, "issuer1", &uuid::Uuid::new_v4().to_string()).await;
             }
+            let issuer2 = register_issuer(&state.service, "issuer2").await;
+            for _ in 0..AGGREGATION_DEFAULT_LIMIT {
+                publish_list(&state.service, "issuer2", &uuid::Uuid::new_v4().to_string()).await;
+            }
             let db = connect_database_pool(&config).await.expect("connect");
             list_quota::enable(&db, 2 * AGGREGATION_DEFAULT_LIMIT as u64)
                 .await
                 .expect("enable under the earlier cap");
 
             let restarted = build_state(&config).await.expect("restart");
-            assert_eq!(restarted.aggregation_uri, None);
+            assert!(restarted.aggregation_uri.is_some());
+            assert_eq!(
+                issuer_aggregation_uri(&restarted, &Issuer::from("issuer1")).await,
+                None
+            );
+            assert_eq!(
+                issuer_aggregation_uri(&restarted, &Issuer::from("issuer2")).await,
+                Some(format!("{AGGREGATION_URI}/{issuer2}"))
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
     }

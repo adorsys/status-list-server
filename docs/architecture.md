@@ -252,9 +252,9 @@ quota normally keeps every issuer within one page. Changes must preserve:
 
 1. An unpaged scoped request never gets part of an aggregation: it is complete,
    or `409 paging_required`. Sending `limit` opts in to paging.
-2. Tokens advertise `aggregation_uri` only when the quota is enforced and no
-   issuer exceeded one page at startup. This withholding applies to the whole
-   pod, not per issuer (#623).
+2. Tokens advertise `aggregation_uri` only while the quota is enforced, and
+   never for an issuer that exceeded one page at startup. The credentials
+   responses carry it only when the issuer's tokens do.
 3. A cursor only works on the aggregation that issued it, so one replayed
    elsewhere cannot skip lists.
 
