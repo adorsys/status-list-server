@@ -12,8 +12,7 @@ import os, sys, yaml
 from pathlib import Path
 from jsonschema import Draft7Validator
 
-# The pinned CRD uses the OpenAPI "=" scalar (e.g. enum: ["=", "!=", ...])
-# which yaml.safe_load rejects; map the value tag to a scalar/mapping safely.
+# The CRD's enum contains "=", which safe_load rejects as a value tag.
 def _value_constructor(loader, node):
     if isinstance(node, yaml.ScalarNode):
         return loader.construct_scalar(node)
@@ -41,8 +40,7 @@ if version not in served:
              f"kube-prometheus-stack 91.4.0 CRD serves only {served}")
 
 schema = next(v for v in versions if v['name'] == version)['schema']['openAPIV3Schema']
-# The CRD schema is a full-object schema (required: ['spec', 'metadata', ...]).
-# Validate the rendered spec against the spec sub-schema, not the object schema.
+# Validate against the spec sub-schema; the object schema requires metadata too.
 spec_schema = schema['properties']['spec']
 errors = sorted(Draft7Validator(spec_schema).iter_errors(amc['spec']),
                 key=lambda e: list(e.path))
