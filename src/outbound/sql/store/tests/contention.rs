@@ -20,8 +20,6 @@ mod database_implementation {
     #[cfg(feature = "postgres-tests")]
     use crate::outbound::sql::test_containers::postgres_helpers;
 
-    /// A's guarded update + snapshot wins; B's concurrent guarded update blocks
-    /// on A's row lock, loses the guard, and records no loser snapshot.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_concurrent_update_loses_guarded_update() {
@@ -37,7 +35,6 @@ mod database_implementation {
         let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
         let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
-        // Seed a credential first (required for FK)
         let cred_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
         let issuer = "issuer-contention-mysql";
         let cred_store = SeaOrmStore::<Credentials>::from_handle(store_a.db.clone());
@@ -46,7 +43,6 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // Seed a status list at a known version and timestamp
         let base_timestamp = 1000i64;
         let list_id = "list-contention-mysql";
         let base_record = StatusListRecord {
@@ -67,7 +63,6 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // Channels for coordination (using Instants for happens-before assertions)
         let (tx_a_ready, rx_a_ready) = oneshot::channel();
         let (tx_b_started, rx_b_started) = oneshot::channel();
         let (tx_a_release, rx_a_release) = oneshot::channel();
@@ -81,8 +76,6 @@ mod database_implementation {
             })
             .await;
 
-        // Connection A: run the real update + snapshot method, pausing after
-        // the snapshot insert and before commit while the row lock is held.
         let store_a_clone = store_a.clone();
         let base_record_a = base_record.clone();
         let handle_a = tokio::spawn(async move {
@@ -114,20 +107,15 @@ mod database_implementation {
                 .expect("Update A should complete")
         });
 
-        // Connection B: Try to update concurrently
         let store_b_clone = store_b.clone();
         let base_record_b = base_record.clone();
         let b_snapshot_id = "snap-contention-b".to_string();
         let b_snapshot_id_for_task = b_snapshot_id.clone();
         let handle_b = tokio::spawn(async move {
-            // Wait for A to be ready (ensuring A holds the lock)
             rx_a_ready.await.expect("Failed to receive A ready");
 
-            // Signal that B is starting
             tx_b_started.send(()).expect("Failed to signal B started");
 
-            // Try to update - this should BLOCK until A commits
-            // because InnoDB row locks are exclusive for writes
             let updated_at_b = base_timestamp + 2;
             let record_b = StatusListRecord {
                 status_list: StatusList {
@@ -150,16 +138,11 @@ mod database_implementation {
                 version: record_b.version,
             };
 
-            // This update uses the ORIGINAL base version as guard. After A
-            // commits, the row has version = base + 1, so this stale guard
-            // (base) should miss → returns false.
             let result = store_b_clone
                 .update_one_with_snapshot(list_id, record_b, base_record_b.version, snapshot_b)
                 .await
                 .expect("Update B should complete");
 
-            // Capture completion immediately after the repository method returns.
-            // No channel ordering is allowed to manufacture this timestamp.
             let b_done = Instant::now();
 
             tx_b_complete
@@ -169,23 +152,17 @@ mod database_implementation {
 
         rx_b_started.await.expect("Failed to receive B started");
 
-        // Give B a moment to reach MySQL and block on A's row lock.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // B cannot complete before this instant if it is blocked on A's row
-        // lock. Capturing before releasing A avoids a scheduler race after MySQL
-        // has already released the lock but before this task resumes.
         let a_releasing_lock = Instant::now();
         tx_a_release.send(()).expect("Failed to release A");
 
-        // Wait for both tasks with timeout, joining both handles for proper error reporting
         let timeout = Duration::from_secs(10);
         let (a_result, b_result) = tokio::join!(
             tokio::time::timeout(timeout, handle_a),
             tokio::time::timeout(timeout, handle_b)
         );
 
-        // Unwrap results to get proper panic messages from either task
         let a_won = a_result
             .expect("Test timed out waiting for task A")
             .expect("Task A panicked");
@@ -194,11 +171,8 @@ mod database_implementation {
             .expect("Test timed out waiting for task B")
             .expect("Task B panicked");
 
-        // Receive the results from the oneshot channels
         let (b_won, b_done) = rx_b_complete.await.expect("Failed to receive B result");
 
-        // Falsifiable ordering assertion: if B were not blocked on A's row lock,
-        // it would complete during A's hold sleep, before A starts committing.
         assert!(
             b_done > a_releasing_lock,
             "B should complete only after A starts releasing the row lock (B: {:?}, A: {:?})",
@@ -212,7 +186,6 @@ mod database_implementation {
          B blocked, then got a stale guard"
         );
 
-        // Verify the final state has A's changes (use verify pool to avoid deadlock)
         let final_record = store_verify
             .find_one_by(list_id)
             .await
@@ -228,7 +201,6 @@ mod database_implementation {
             "version should reflect A's committed write"
         );
 
-        // Verify A's winning snapshot was created.
         let history_store =
             SeaOrmStore::<StatusListHistoryRecord>::from_handle(store_verify.db.clone());
         let winning_snapshot = history_store
@@ -253,11 +225,6 @@ mod database_implementation {
         );
     }
 
-    /// The real publish race on two connections: writer B blocks on writer A's
-    /// uncommitted quota slot (the `credentials` row lock taken first by
-    /// `reserve_list_slot`), then collides with A's committed primary key, and
-    /// must get `DuplicateEntry` (409), not a generic error (500), leaving no
-    /// snapshot behind and giving its quota slot back.
     #[cfg(any(feature = "mysql", feature = "postgres-tests"))]
     async fn assert_concurrent_publish_loser_gets_conflict(
         pool_a: DatabaseConnection,
@@ -274,8 +241,6 @@ mod database_implementation {
         let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
         let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
-        // status_lists.issuer is a foreign key onto credentials.issuer, so the
-        // credential has to be committed before either writer starts.
         SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
             .insert_one(Credentials::new(
                 issuer.to_string(),
@@ -284,8 +249,6 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // `move` so both closures capture the `&'static str`s by copy and stay
-        // `Copy` themselves — each spawned writer below needs its own.
         let record = move |lst: &str, updated_at: i64| StatusListRecord {
             list_id: list_id.to_string(),
             issuer: issuer.to_string(),
@@ -328,8 +291,6 @@ mod database_implementation {
             })
             .await;
 
-        // Writer A: the winning publish, paused just before COMMIT while its
-        // primary-key entry is still uncommitted.
         let handle_a = tokio::spawn(async move {
             store_a
                 .insert_one_with_snapshot(
@@ -340,8 +301,6 @@ mod database_implementation {
                 .await
         });
 
-        // Writer B: the losing publish. Starts only once A is known to be
-        // holding the uncommitted key.
         let handle_b = tokio::spawn(async move {
             rx_a_ready.await.expect("A never reached its pause point");
             tx_b_started.send(()).expect("failed to signal B started");
@@ -353,8 +312,6 @@ mod database_implementation {
                     fixtures::NO_LIST_QUOTA,
                 )
                 .await;
-            // Timestamped the instant the call returns, before any channel work,
-            // so nothing downstream can manufacture the ordering.
             let b_done = Instant::now();
             tx_b_done
                 .send((result, b_done))
@@ -362,7 +319,6 @@ mod database_implementation {
         });
 
         rx_b_started.await.expect("B never started");
-        // Give B time to reach the database and block on A's key.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let a_releasing = Instant::now();
@@ -383,23 +339,18 @@ mod database_implementation {
 
         let (b_result, b_done) = rx_b_done.await.expect("failed to receive B result");
 
-        // Falsifiable: if B had not blocked on A's uncommitted key it would have
-        // finished during the sleep above, before A began committing.
         assert!(
             b_done > a_releasing,
             "B must block until A commits on {backend} — otherwise this is not a \
          race (B: {b_done:?}, A releasing: {a_releasing:?})"
         );
 
-        // The property under test: a genuinely concurrent duplicate is still a
-        // client conflict, not a server error.
         assert!(
             matches!(b_result, Err(RepositoryError::DuplicateEntry)),
             "the losing publisher of a real race must get DuplicateEntry (409) \
          on {backend}, not a generic error (500), got {b_result:?}"
         );
 
-        // A's row won and B disturbed nothing.
         let row = store_verify
             .find_one_by(list_id)
             .await
@@ -431,9 +382,6 @@ mod database_implementation {
         );
     }
 
-    /// Two concurrent publishes for one issuer with different `list_id`s: B
-    /// must queue on A's quota slot and re-check it after A commits, so it is
-    /// refused at quota and never deadlocks.
     async fn assert_concurrent_publishes_share_quota_exactly(
         pool_a: DatabaseConnection,
         pool_b: DatabaseConnection,
@@ -488,7 +436,6 @@ mod database_implementation {
             })
             .await;
 
-        // Writer A: paused before COMMIT, holding its slot's row lock.
         let (record_a, snapshot_a) = (record(&list_a), snapshot(&list_a));
         let handle_a = tokio::spawn(async move {
             store_a
@@ -496,7 +443,6 @@ mod database_implementation {
                 .await
         });
 
-        // Writer B: a different list, starting only once A holds the slot.
         let (record_b, snapshot_b) = (record(&list_b), snapshot(&list_b));
         let handle_b = tokio::spawn(async move {
             rx_a_ready.await.expect("A never reached its pause point");
@@ -511,7 +457,6 @@ mod database_implementation {
         });
 
         rx_b_started.await.expect("B never started");
-        // Give B time to reach the database and block on A's slot.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let a_releasing = Instant::now();
@@ -532,7 +477,6 @@ mod database_implementation {
 
         let (b_result, b_done) = rx_b_done.await.expect("failed to receive B result");
 
-        // Had B not queued on A's slot, it would have finished during the sleep.
         assert!(
             b_done > a_releasing,
             "B must block on A's quota slot until A commits on {backend} \
@@ -603,7 +547,6 @@ mod database_implementation {
         }
     }
 
-    /// Without waiting, `enable` would miss this list and leave the issuer over the cap.
     async fn assert_enable_waits_for_in_flight_publish(
         pool_publish: DatabaseConnection,
         pool_enable: DatabaseConnection,
@@ -720,7 +663,6 @@ mod database_implementation {
         .await;
     }
 
-    /// The publish race on MySQL, whose driver reports duplicate keys as `1062`.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_mysql_concurrent_publish_loser_gets_conflict() {
@@ -736,10 +678,6 @@ mod database_implementation {
         .await;
     }
 
-    /// The same race on Postgres, the production backend and the one the issue
-    /// singles out: a failed statement poisons the transaction (`25P02`), so a
-    /// classification taken from anywhere but the original `23505` degrades to a
-    /// 500 here and nowhere else.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_postgres_concurrent_publish_loser_gets_conflict() {
@@ -755,11 +693,6 @@ mod database_implementation {
         .await;
     }
 
-    /// Blocks until at least `expected` sessions are waiting on a lock.
-    ///
-    /// Used instead of a fixed sleep: contention tests must interleave two
-    /// sessions, and a sleep that expires early silently asserts something
-    /// other than what the test claims.
     #[cfg(feature = "postgres-tests")]
     async fn await_blocked_sessions(db: &DatabaseConnection, expected: i64) {
         use std::time::{Duration, Instant};
@@ -790,9 +723,6 @@ mod database_implementation {
         }
     }
 
-    /// Forces a real MySQL `1205` (`ER_LOCK_WAIT_TIMEOUT`) to exercise the
-    /// `SqlxMySqlError` downcast, since that error type cannot be constructed
-    /// outside its own crate.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_lock_wait_timeout_maps_to_contention() {
@@ -801,13 +731,10 @@ mod database_implementation {
         let conn_a = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
         let conn_b = mysql_helpers::connect_to_test_db(&test_db.url, 1).await;
 
-        // Both pools are pinned to a single connection, so this session setting
-        // sticks to the connection B actually uses. Without it B would wait out
-        // InnoDB's 50s default and the test would hang rather than fail.
         conn_b
             .execute_unprepared("SET SESSION innodb_lock_wait_timeout = 1")
             .await
-            .expect("failed to shorten B's lock wait");
+            .expect("failed to shorten B's lock wait; InnoDB's 50 s default would hang the test");
 
         let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(conn_b));
 
@@ -829,7 +756,6 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // A takes an exclusive row lock and holds it, uncommitted.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
             .execute_raw(Statement::from_sql_and_values(
@@ -840,9 +766,6 @@ mod database_implementation {
             .await
             .expect("A failed to take the row lock");
 
-        // B's guard is valid — the row really is still at `base.version`. B fails
-        // purely because it cannot acquire the lock within its 1s budget, which is
-        // what makes this contention rather than a lost race.
         let result = store_b
             .update_one(
                 list_id,
@@ -870,8 +793,6 @@ mod database_implementation {
         txn_a.rollback().await.expect("failed to release A's lock");
     }
 
-    /// Credential registration is a pinned write too, and reaches the client as
-    /// `409 write_contention` via `CredentialError`, not `StatusListError`.
     #[cfg(feature = "mysql")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mysql_credential_insert_contention_is_classified() {
@@ -882,13 +803,11 @@ mod database_implementation {
         conn_b
             .execute_unprepared("SET SESSION innodb_lock_wait_timeout = 1")
             .await
-            .expect("failed to shorten B's lock wait");
+            .expect("failed to shorten B's lock wait; InnoDB's 50 s default would hang the test");
 
         let issuer = "issuer-contention-credential";
         let key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
 
-        // A holds the primary-key entry uncommitted, so B's insert of the same
-        // issuer blocks on it rather than failing fast as a duplicate.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
             .execute_raw(Statement::from_sql_and_values(
@@ -916,10 +835,6 @@ mod database_implementation {
         txn_a.rollback().await.expect("failed to release A's lock");
     }
 
-    /// Forces a real Postgres `40P01` (`deadlock_detected`), the only way to
-    /// exercise the `SqlxPostgresError` downcast. B is chosen as the deadlock
-    /// victim by giving it a shorter `deadlock_timeout` than A; A's narrower
-    /// window is closed by committing B's rollback that releases the row lock.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_postgres_deadlock_maps_to_contention() {
@@ -929,8 +844,6 @@ mod database_implementation {
         let conn_a = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
         let conn_b = postgres_helpers::connect_to_test_db(&test_db.url, 1).await;
 
-        // Victim selection. Both pools are pinned to one connection, so a
-        // session-scoped setting sticks to the session that uses it.
         conn_a
             .execute_unprepared("SET SESSION deadlock_timeout = '30s'")
             .await
@@ -959,8 +872,6 @@ mod database_implementation {
             .await
             .unwrap();
 
-        // A claims the snapshot's primary key and holds it uncommitted, so B's
-        // history insert will block on it.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
             .execute_raw(Statement::from_sql_and_values(
@@ -981,7 +892,6 @@ mod database_implementation {
             .await
             .expect("A failed to claim the snapshot key");
 
-        // B takes the row lock, then blocks on A's snapshot key.
         let b_call = tokio::spawn(async move {
             store_b
                 .update_one_with_snapshot(
@@ -1017,12 +927,8 @@ mod database_implementation {
                 .await
         });
 
-        // B must hold the row lock before A closes the cycle, or A waits on a
-        // lock B has not taken yet and the test hangs for real.
         await_blocked_sessions(&test_db.db, 1).await;
 
-        // A closes the cycle. Blocks until B is rolled back as the victim, whose
-        // rollback releases the row lock A is waiting on.
         txn_a
             .execute_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -1044,10 +950,6 @@ mod database_implementation {
         );
     }
 
-    /// Verifies both write paths (`update_one` and `update_one_with_snapshot`)
-    /// pin to READ COMMITTED: a racing write committed underneath an in-flight
-    /// guarded update degrades to a clean guard miss (`Ok(false)`), never a
-    /// `40001` serialization failure.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_postgres_pinned_isolation_downgrades_serialization_failure() {
@@ -1138,8 +1040,6 @@ mod database_implementation {
                 }
             });
 
-            // Block until B is actually waiting on A's row lock, so A's commit
-            // lands underneath an in-flight statement rather than before one.
             await_blocked_sessions(&test_db.db, 1).await;
             txn_a.commit().await.expect("A failed to commit");
 
