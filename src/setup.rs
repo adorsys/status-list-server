@@ -404,8 +404,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // the higher-level repositories).
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
+    // Some feature profiles have only the in-memory backend; in those profiles
+    // the database match below diverges before these values are consumed.
+    #[allow(unused_variables)]
     let aggregation_withheld_from: HashSet<Issuer>;
     // Why all tokens must leave out `aggregation_uri`, when they must.
+    #[allow(unused_variables)]
     let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
@@ -588,6 +592,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(not(feature = "acme"))]
+    #[allow(unreachable_code)]
     let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = {
         use crate::outbound::cert::{InlineCertificateProvider, ReloadingCertificateProvider};
 
