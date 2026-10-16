@@ -123,24 +123,18 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
             let key = registry_key(&jwk, &alg)?;
             let mut issuer = serde_yaml::Mapping::from_iter([
                 (
-                    serde_yaml::Value::String("id".into()),
+                    "id".into(),
                     serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
                 ),
                 (
-                    serde_yaml::Value::String("aggregation_id".into()),
+                    "aggregation_id".into(),
                     serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
                 ),
-                (
-                    serde_yaml::Value::String("tier".into()),
-                    serde_yaml::Value::String(tier),
-                ),
-                (
-                    serde_yaml::Value::String("keys".into()),
-                    serde_yaml::Value::Sequence(vec![key]),
-                ),
+                ("tier".into(), serde_yaml::Value::String(tier)),
+                ("keys".into(), serde_yaml::Value::Sequence(vec![key])),
             ]);
             if let Some(display_name) = display_name {
-                issuer.insert("display_name".into(), display_name.into());
+                issuer.insert("display_name", display_name.into());
             }
             root.get_mut("issuers")
                 .and_then(serde_yaml::Value::as_sequence_mut)
@@ -190,9 +184,9 @@ fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_yaml::Value> {
         .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
         .wrap_err("compute JWK thumbprint")?;
     let mut map = serde_yaml::Mapping::new();
-    map.insert("kid".into(), kid.into());
-    map.insert("alg".into(), alg.into());
-    map.insert("jwk".into(), serde_yaml::to_value(json)?);
+    map.insert("kid", kid.into());
+    map.insert("alg", alg.into());
+    map.insert("jwk", serde_yaml::to_value(&json)?);
     Ok(serde_yaml::Value::Mapping(map))
 }
 

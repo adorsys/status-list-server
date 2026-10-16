@@ -49,7 +49,7 @@ pub struct IssuerEntry {
     pub tier: String,
     #[serde(default)]
     pub disabled: bool,
-    pub keys: Vec<RegistryKey>,
+    pub keys: Vec<Arc<RegistryKey>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,7 +58,7 @@ pub struct AdminEntry {
     pub scopes: Vec<String>,
     #[serde(default)]
     pub disabled: bool,
-    pub keys: Vec<RegistryKey>,
+    pub keys: Vec<Arc<RegistryKey>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,7 +75,7 @@ pub struct RegistryKey {
 #[derive(Clone, Debug)]
 pub struct ResolvedKey {
     pub principal_id: String,
-    pub key: RegistryKey,
+    pub key: Arc<RegistryKey>,
 }
 
 impl ResolvedKey {
@@ -90,8 +90,8 @@ impl ResolvedKey {
 
 #[derive(Clone, Debug)]
 pub struct ValidatedRegistry {
-    registry: Arc<IssuerRegistry>,
-    keys: Arc<HashMap<String, ResolvedKey>>,
+    registry: IssuerRegistry,
+    keys: HashMap<String, Arc<ResolvedKey>>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -103,7 +103,7 @@ pub struct RegistryHandle {
 
 /// Port used by authentication to resolve an operator-trusted signing key.
 pub trait IssuerKeyResolver: Send + Sync {
-    fn resolve(&self, kid: &str) -> Option<ResolvedKey>;
+    fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>>;
 }
 
 /// File-backed implementation name used in the issue and operational docs.
@@ -152,10 +152,10 @@ impl RegistryHandle {
 }
 
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Option<ResolvedKey> {
+    fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
         let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
         let timestamp = u64::try_from(timestamp).ok()?;
-        self.snapshot().resolve_at(kid, timestamp).cloned()
+        self.snapshot().resolve_at(kid, timestamp)
     }
 }
 
@@ -170,7 +170,7 @@ impl IssuerRegistry {
         let json: Value =
             serde_json::to_value(&yaml).map_err(|err| RegistryError::Schema(err.to_string()))?;
         validate_schema(&json)?;
-        let registry: Self = serde_yaml::from_value(yaml)?;
+        let registry: Self = serde_yaml::from_value(&yaml)?;
         validate_semantics(&registry)?;
         let now = time::OffsetDateTime::now_utc();
         for issuer in &registry.issuers {
@@ -184,10 +184,10 @@ impl IssuerRegistry {
             for key in &issuer.keys {
                 keys.insert(
                     key.kid.clone(),
-                    ResolvedKey {
+                    Arc::new(ResolvedKey {
                         principal_id: issuer.id.clone(),
-                        key: key.clone(),
-                    },
+                        key: Arc::clone(key),
+                    }),
                 );
             }
         }
@@ -195,28 +195,25 @@ impl IssuerRegistry {
             for key in &admin.keys {
                 keys.insert(
                     key.kid.clone(),
-                    ResolvedKey {
+                    Arc::new(ResolvedKey {
                         principal_id: admin.id.clone(),
-                        key: key.clone(),
-                    },
+                        key: Arc::clone(key),
+                    }),
                 );
             }
         }
 
-        Ok(ValidatedRegistry {
-            registry: Arc::new(registry),
-            keys: Arc::new(keys),
-        })
+        Ok(ValidatedRegistry { registry, keys })
     }
 }
 
 impl ValidatedRegistry {
-    pub fn resolve(&self, kid: &str) -> Option<&ResolvedKey> {
-        self.keys.get(kid)
+    pub fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
+        self.keys.get(kid).cloned()
     }
 
     /// Resolve a key that is active at the supplied Unix timestamp.
-    pub fn resolve_at(&self, kid: &str, unix_timestamp: u64) -> Option<&ResolvedKey> {
+    pub fn resolve_at(&self, kid: &str, unix_timestamp: u64) -> Option<Arc<ResolvedKey>> {
         let resolved = self.resolve(kid)?;
         let active = |key: &RegistryKey| {
             let now =
@@ -319,7 +316,12 @@ fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
                 issuer.aggregation_id
             )));
         }
-        validate_keys(&issuer.id, &issuer.keys, &mut keys, &mut materials)?;
+        validate_keys(
+            &issuer.id,
+            issuer.keys.iter().map(Arc::as_ref),
+            &mut keys,
+            &mut materials,
+        )?;
     }
     for admin in &registry.admins {
         if principal_ids.insert(&admin.id, ()).is_some() {
@@ -328,14 +330,19 @@ fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
                 admin.id
             )));
         }
-        validate_keys(&admin.id, &admin.keys, &mut keys, &mut materials)?;
+        validate_keys(
+            &admin.id,
+            admin.keys.iter().map(Arc::as_ref),
+            &mut keys,
+            &mut materials,
+        )?;
     }
     Ok(())
 }
 
-fn validate_keys(
+fn validate_keys<'a>(
     principal_id: &str,
-    entries: &[RegistryKey],
+    entries: impl IntoIterator<Item = &'a RegistryKey>,
     kids: &mut HashMap<String, ()>,
     materials: &mut HashMap<String, String>,
 ) -> Result<(), RegistryError> {
