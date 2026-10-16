@@ -59,8 +59,7 @@ statuslist:
     APP_ENV: "development"
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # Parsed certificate chain cache TTL in seconds. "0" means no expiry.
-    # Status-list record cache TTL in seconds. "0" disables this cache.
+    # Seconds; "0" disables it.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
     # Signed status-list token bytes cache: a *byte* budget (entries are weighed
