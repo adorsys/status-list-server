@@ -16,6 +16,7 @@
 // success, and re-publishing seed lists simply replaces the previous set.
 
 const http = require('http');
+const https = require('https');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -38,14 +39,16 @@ const SEED_LISTS = Number(process.env.SEED_LISTS || 50);
 
 function parseTarget(target) {
   const url = new URL(target);
-  return { host: url.hostname, port: url.port || '80', target };
+  const isHttps = url.protocol === 'https:';
+  return { host: url.hostname, port: url.port || (isHttps ? '443' : '80'), target, isHttps };
 }
 
 function request(targetUrl, { method, path: pathname, headers = {}, body }) {
-  const { host, port } = parseTarget(targetUrl);
+  const { host, port, isHttps } = parseTarget(targetUrl);
   const payload = body !== undefined ? JSON.stringify(body) : undefined;
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const client = isHttps ? https : http;
+    const req = client.request(
       {
         host,
         port,
