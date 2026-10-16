@@ -226,7 +226,6 @@ services:
         condition: service_started
     networks:
       - status-list-network
-    # Only scrape metrics if endpoint is exposed
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'

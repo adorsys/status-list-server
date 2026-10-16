@@ -70,6 +70,17 @@ release notes or semantic version bumps.
 4. Address review feedback.
 5. A maintainer will merge using **squash merge** (the squash commit message should also follow Conventional Commits format).
 
+## Code Comments
+
+Comments are the exception. Write one only when the code can't say it: a reason that isn't obvious, a gotcha, or a workaround.
+
+- One short line that says why, not what the next line does.
+- Plain words: no bold or capitals for emphasis, no em dashes.
+- No ticket numbers, review notes or history; those belong in commits and PRs.
+- No comments inside tests. Put a gotcha in the assert message or the helper's name.
+- If the explanation is long, put it in the docs and point there.
+- Leave functional comments alone: the version after a pinned action SHA, `zizmor: ignore[...]`, `# pragma: no cover`, the xtask doc comments (clap prints them as `--help`), and the `# KEY=value` lines in `.env.template`.
+
 ## Branch Protection
 
 Maintainers must configure the `main` and `develop` branch protection rules or

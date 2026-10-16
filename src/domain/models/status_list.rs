@@ -5,10 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 
-/// Errors originating from domain validation, storage conflicts, or compression/parsing failures.
-///
-/// `#[non_exhaustive]` so adding a variant stays patch-level instead of tripping
-/// `cargo-semver-checks` (`enum_variant_added`).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum StatusListError {
