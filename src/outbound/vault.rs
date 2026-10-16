@@ -1,8 +1,4 @@
-//! Vault / OpenBao KV v2 secrets-storage adapter implementing [`Storage`].
-//!
-//! Both HashiCorp Vault and OpenBao expose the same KV v2 HTTP API, so this
-//! single adapter covers both. Authentication is supported via **AppRole**
-//! or **Kubernetes** auth methods.
+//! Vault and OpenBao share the KV v2 API, so one adapter covers both.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,36 +15,21 @@ use tracing::{info, warn};
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
-/// Vault / OpenBao KV v2 storage adapter.
-///
-/// Implements the [`Storage`] trait so it can be used as a secrets backend
-/// by the certificate manager. Authentication is supported via **AppRole**
-/// and **Kubernetes** auth methods.
 #[derive(Debug)]
 pub struct VaultClient {
     client: Client,
-    /// Vault/OpenBao API address (e.g. `http://vault:8200`).
     addr: String,
-    /// KV v2 engine mount path (default `secret`).
     mount: String,
-    /// Prefix prepended to all secret paths.
     path_prefix: String,
-    /// Optional Vault Enterprise / OpenBao namespace.
     namespace: Option<String>,
-    /// Optional in-process TTL cache.
     cache: Option<Cache<String, String>>,
-    /// Token manager handling authentication and proactive renewal.
     auth: Arc<TokenManager>,
 }
 
 impl VaultClient {
-    /// Maximum number of distinct secrets kept in the in-process cache.
-    /// 100 entries covers multi-domain deployments (20+ domains with cert +
-    /// key per domain) with plenty of headroom, while still bounding memory.
+    /// Room for 20+ domains at a cert and key each.
     const CACHE_MAX_CAPACITY: u64 = 100;
 
-    /// Return a [`VaultClientBuilder`] for constructing a [`VaultClient`] adapter
-    /// with AppRole authentication.
     pub fn builder_approle(
         addr: impl Into<String>,
         role_id: impl Into<String>,
@@ -57,8 +38,6 @@ impl VaultClient {
         VaultClientBuilder::approle(addr, role_id, secret_id)
     }
 
-    /// Return a [`VaultClientBuilder`] for constructing a [`VaultClient`] adapter
-    /// with Kubernetes authentication.
     pub fn builder_kubernetes(
         addr: impl Into<String>,
         role: impl Into<String>,
@@ -67,23 +46,19 @@ impl VaultClient {
         VaultClientBuilder::kubernetes(addr, role, token_path)
     }
 
-    /// Build the full URL for KV v2 `data` operations.
     fn data_url(&self, key: &str) -> String {
         let path = self.qualify_key(key);
         let encoded_mount = Self::encode_path_segment(&self.mount);
         format!("{}/v1/{}/data/{}", self.addr, encoded_mount, path)
     }
 
-    /// Build the full URL for KV v2 `metadata` (used by hard-delete).
     fn metadata_url(&self, key: &str) -> String {
         let path = self.qualify_key(key);
         let encoded_mount = Self::encode_path_segment(&self.mount);
         format!("{}/v1/{}/metadata/{}", self.addr, encoded_mount, path)
     }
 
-    /// Qualify a key by prepending the configured path prefix, then
-    /// percent-encode each path segment so that characters such as `?`, `#`,
-    /// or spaces cannot corrupt the HTTP request URL.
+    /// Percent-encodes each segment so `?`, `#` or spaces can't break the URL.
     fn qualify_key(&self, key: &str) -> String {
         let normalized = normalize_key(key);
         let raw = if self.path_prefix.is_empty() {
@@ -99,11 +74,6 @@ impl VaultClient {
             .join("/")
     }
 
-    /// Percent-encode a single URL path segment (RFC 3986).
-    ///
-    /// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) and sub-delimiters
-    /// allowed in path segments (`! $ & ' ( ) * + , ; = : @`) are left as-is;
-    /// everything else (including `?`, `#`, ` `, `%`) is percent-encoded.
     pub(crate) fn encode_path_segment(segment: &str) -> String {
         let mut out = String::with_capacity(segment.len());
         for b in segment.bytes() {
@@ -137,7 +107,6 @@ impl VaultClient {
         out
     }
 
-    /// Ensure the Vault token is valid, then add common headers to a request.
     async fn add_auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
@@ -156,7 +125,6 @@ impl VaultClient {
     }
 }
 
-/// Authentication configuration for [`VaultClientBuilder`].
 #[derive(Debug, Clone)]
 enum AuthConfig {
     AppRole {
@@ -169,15 +137,6 @@ enum AuthConfig {
     },
 }
 
-/// Builder for constructing a [`VaultClient`] adapter with AppRole or Kubernetes authentication.
-///
-/// # Optional Fields & Default Behavior
-/// - `mount`: KV v2 secret engine mount path. **Default**: `"secret"`
-/// - `path_prefix`: Prefix prepended to all secret keys. **Default**: `""` (no prefix)
-/// - `namespace`: Optional Vault Enterprise / OpenBao namespace header (`X-Vault-Namespace`). **Default**: `None`
-/// - `auth_mount`: Auth engine mount path. **Default**: `"approle"` for AppRole, `"kubernetes"` for Kubernetes
-/// - `secrets_cache_ttl`: In-memory TTL cache duration for fetched secrets. Setting to `Duration::ZERO` disables caching. **Default**: 5 minutes
-/// - `timeout`: HTTP client request timeout. **Default**: 30 seconds
 #[derive(Debug, Clone)]
 pub struct VaultClientBuilder {
     addr: String,
@@ -191,7 +150,6 @@ pub struct VaultClientBuilder {
 }
 
 impl VaultClientBuilder {
-    /// Create a new [`VaultClientBuilder`] configured for AppRole authentication.
     pub fn approle(
         addr: impl Into<String>,
         role_id: impl Into<String>,
@@ -212,7 +170,6 @@ impl VaultClientBuilder {
         }
     }
 
-    /// Create a new [`VaultClientBuilder`] configured for Kubernetes authentication.
     pub fn kubernetes(
         addr: impl Into<String>,
         role: impl Into<String>,
@@ -233,75 +190,43 @@ impl VaultClientBuilder {
         }
     }
 
-    /// Set the KV v2 secret engine mount path.
-    ///
-    /// **Default**: `"secret"`
     pub fn mount(mut self, mount: impl Into<String>) -> Self {
         self.mount = mount.into();
         self
     }
 
-    /// Set the auth engine mount path.
-    ///
-    /// **Default**: `"approle"` for AppRole auth, `"kubernetes"` for Kubernetes auth.
     pub fn auth_mount(mut self, auth_mount: impl Into<String>) -> Self {
         self.auth_mount = Some(auth_mount.into());
         self
     }
 
-    /// Set a path prefix prepended to all secret keys.
-    ///
-    /// **Default**: `""` (empty prefix)
     pub fn path_prefix(mut self, path_prefix: impl Into<String>) -> Self {
         self.path_prefix = path_prefix.into();
         self
     }
 
-    /// Set an optional Vault Enterprise or OpenBao namespace header (`X-Vault-Namespace`).
-    ///
-    /// **Default**: `None`
     pub fn namespace(mut self, namespace: Option<impl Into<String>>) -> Self {
         self.namespace = namespace.map(Into::into);
         self
     }
 
-    /// Set the in-memory cache TTL for secret values.
-    ///
-    /// Setting `secrets_cache_ttl` to `Duration::ZERO` (or `0` seconds) disables caching completely.
-    ///
-    /// **Default**: 5 minutes
+    /// `Duration::ZERO` disables caching.
     pub fn secrets_cache_ttl(mut self, secrets_cache_ttl: Duration) -> Self {
         self.secrets_cache_ttl = secrets_cache_ttl;
         self
     }
 
-    /// Set the HTTP request timeout duration.
-    ///
-    /// **Default**: 30 seconds
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Build the [`VaultClient`] adapter instance.
-    ///
-    /// Performs the initial login (AppRole or Kubernetes) during construction.
-    ///
-    /// # Errors
-    ///
-    /// Returns `StorageError::Backend` if:
-    /// - `addr` is empty or not a valid URL.
-    /// - `mount` is empty.
-    /// - `auth_mount` is empty.
-    /// - AppRole credentials (`role_id` or `secret_id`) are empty.
-    /// - Kubernetes credentials (`role` must not be empty; `token_path` is read and validated during initial login).
-    /// - The initial login fails.
+    /// Logs in once up front, so bad credentials fail here.
     pub async fn build(self) -> Result<VaultClient, StorageError> {
         let addr = self.addr.trim().trim_end_matches('/').to_string();
         let mount = self.mount.trim().to_string();
         let path_prefix = self.path_prefix.trim().to_string();
 
-        // Validate address, must be non-empty and parseable as a URL.
         if addr.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: address must not be empty"
@@ -311,7 +236,6 @@ impl VaultClientBuilder {
             StorageError::Backend(eyre!("Vault configuration error: invalid address: {e}"))
         })?;
 
-        // Mount must be non-empty.
         if mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: mount path must not be empty"
@@ -326,7 +250,6 @@ impl VaultClientBuilder {
             },
         };
 
-        // Auth mount must be non-empty.
         if auth_mount.is_empty() {
             return Err(StorageError::Backend(eyre!(
                 "Vault configuration error: auth_mount must not be empty"
@@ -397,7 +320,6 @@ impl VaultClientBuilder {
     }
 }
 
-/// Helper functions for OpenTelemetry Vault auth metrics.
 fn record_vault_login(method: &'static str) {
     opentelemetry::global::meter("status-list-server")
         .u64_counter("vault_auth_logins_total")
@@ -439,7 +361,6 @@ fn record_vault_auth_failure(operation: &'static str, result: &'static str, meth
         );
 }
 
-/// Authentication backend configuration for Vault.
 #[derive(Debug)]
 enum AuthBackend {
     AppRole {
@@ -505,11 +426,6 @@ impl AuthBackend {
         Self::perform_login(client, &url, &body, namespace, method).await
     }
 
-    /// Send the login POST and handle the response.
-    ///
-    /// Shared by both AppRole and Kubernetes auth methods; the caller builds
-    /// the method-specific URL and body, then delegates here for the common
-    /// HTTP round-trip, deserialization, and metrics recording.
     async fn perform_login(
         client: &Client,
         url: &str,
@@ -577,33 +493,18 @@ impl AuthBackend {
     }
 }
 
-/// Manages the Vault client token obtained via AppRole or Kubernetes login.
-///
-/// Handles:
-/// - Initial login via `POST /v1/auth/{mount}/login`
-/// - Proactive renewal at 80% of TTL via `POST /v1/auth/token/renew-self`
-/// - Full re-authentication when renewal fails or the token exceeds `max_ttl`
-/// - Double-checked locking to serialize token renewals and prevent concurrency stampedes
-/// - Failure cooldown backoff to protect degraded/unreachable Vault instances
+/// Renews at 80% of the TTL and falls back to a fresh login when renewal fails.
 #[derive(Debug)]
 struct TokenManager {
-    /// Current client token, swapped atomically on renewal/re-login.
     token: RwLock<SecretString>,
-    /// When the current token was issued.
     issued_at: RwLock<Instant>,
-    /// TTL in seconds from the last login or renewal response.
     lease_duration: RwLock<u64>,
-    /// Whether the current token is renewable.
     renewable: RwLock<bool>,
-    /// Underlying authentication backend.
     backend: AuthBackend,
-    /// Mutex serializing proactive renewal and re-login across concurrent requests.
     renewal_lock: tokio::sync::Mutex<()>,
-    /// Timestamp of last auth/renewal failure for backoff cooldown.
     last_failure: RwLock<Option<Instant>>,
 }
 
-/// Response from `POST /v1/auth/{mount}/login` and `POST /v1/auth/token/renew-self`
 #[derive(Deserialize)]
 struct LoginOrRenewResponse {
     auth: AuthData,
@@ -617,13 +518,10 @@ struct AuthData {
 }
 
 impl TokenManager {
-    /// Fraction of TTL elapsed before proactive renewal/re-login (80%).
     const RENEW_MARGIN: f64 = 0.8;
 
-    /// Cooldown window after an auth failure before retrying.
     const FAILURE_COOLDOWN: Duration = Duration::from_secs(5);
 
-    /// Perform the initial login and return a ready manager.
     async fn login(
         client: &Client,
         addr: &str,
@@ -643,16 +541,12 @@ impl TokenManager {
         })
     }
 
-    /// Ensure the current token is still valid, renewing or re-authenticating
-    /// as needed. Uses double-checked locking to serialize token renewal and prevent
-    /// thundering-herd stampedes under high concurrency.
     async fn ensure_valid(
         &self,
         client: &Client,
         addr: &str,
         namespace: Option<&str>,
     ) -> Result<(), StorageError> {
-        // Fast path: check under read lock if current token is still within safe window
         {
             let elapsed = self.issued_at.read().await.elapsed();
             let ttl = *self.lease_duration.read().await;
@@ -662,10 +556,9 @@ impl TokenManager {
             }
         }
 
-        // Acquire serialization lock to prevent concurrent renew/login stampedes
         let _guard = self.renewal_lock.lock().await;
 
-        // Re-check after acquiring lock in case another task already renewed/re-logged-in
+        // Another task may have renewed while we waited.
         let elapsed = self.issued_at.read().await.elapsed();
         let ttl = *self.lease_duration.read().await;
         let safe_window = Duration::from_secs_f64(ttl as f64 * Self::RENEW_MARGIN);
@@ -673,7 +566,6 @@ impl TokenManager {
             return Ok(());
         }
 
-        // Check failure cooldown backoff to protect degraded/unreachable Vault
         if let Some(last_fail) = *self.last_failure.read().await
             && last_fail.elapsed() < Self::FAILURE_COOLDOWN
         {
@@ -682,7 +574,6 @@ impl TokenManager {
             )));
         }
 
-        // Try renewal first if the token is renewable
         if *self.renewable.read().await {
             match self.try_renew(client, addr, namespace).await {
                 Ok(()) => {
@@ -695,7 +586,6 @@ impl TokenManager {
             }
         }
 
-        // Full re-login
         match self.re_login(client, addr, namespace).await {
             Ok(()) => {
                 *self.last_failure.write().await = None;
@@ -708,7 +598,6 @@ impl TokenManager {
         }
     }
 
-    /// Attempt to renew the current token via `POST /v1/auth/token/renew-self`.
     async fn try_renew(
         &self,
         client: &Client,
@@ -767,7 +656,6 @@ impl TokenManager {
         }
     }
 
-    /// Perform a full re-login.
     async fn re_login(
         &self,
         client: &Client,
@@ -791,26 +679,21 @@ impl TokenManager {
         Ok(())
     }
 
-    /// Return the current client token.
     async fn current_token(&self) -> SecretString {
         self.token.read().await.clone()
     }
 }
 
-/// Top-level response for KV v2 `GET /data/{path}`.
 #[derive(Deserialize)]
 struct KvReadResponse {
     data: KvDataEnvelope,
 }
 
-/// Inner `data` field of a KV v2 payload.
 #[derive(Serialize, Deserialize)]
 struct KvDataEnvelope {
     data: KvDataPayload,
 }
 
-/// The actual key-value pairs stored in Vault.
-/// We store a single field named `value`.
 #[derive(Serialize, Deserialize)]
 struct KvDataPayload {
     value: String,
@@ -835,7 +718,6 @@ impl Storage for VaultClient {
 
         let status = resp.status();
         if status.is_success() {
-            // Update cache on successful write
             if let Some(cache) = &self.cache {
                 cache.insert(key.to_string(), value.to_string()).await;
             }
@@ -854,7 +736,6 @@ impl Storage for VaultClient {
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError> {
-        // Check cache first
         if let Some(cache) = &self.cache
             && let Some(value) = cache.get(key).await
         {
@@ -874,7 +755,6 @@ impl Storage for VaultClient {
                 let kv: KvReadResponse = resp.json().await?;
                 let secret_value = kv.data.data.value;
 
-                // Populate cache
                 if let Some(cache) = &self.cache {
                     cache.insert(key.to_string(), secret_value.clone()).await;
                 }
@@ -893,7 +773,7 @@ impl Storage for VaultClient {
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
-        // Use metadata endpoint for permanent delete of all versions
+        // The metadata endpoint deletes every version; `data` would only soft-delete the latest.
         let url = self.metadata_url(key);
         let resp = self
             .add_auth_headers(self.client.delete(&url))
@@ -920,8 +800,6 @@ impl Storage for VaultClient {
         }
     }
 
-    /// Verify the Vault/OpenBao endpoint is reachable and the configured mount
-    /// is accessible with the provided credentials.
     async fn reachable(&self) -> Result<(), StorageError> {
         let encoded_mount = Self::encode_path_segment(&self.mount);
         let url = format!("{}/v1/{}/config", self.addr, encoded_mount);
@@ -985,7 +863,6 @@ mod tests {
         })
     }
 
-    /// Write a temp file with a unique name and return its path.
     fn write_temp_token(suffix: &str, content: &str) -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("k8s_token_{suffix}_{}.txt", uuid::Uuid::new_v4()));
@@ -1012,7 +889,6 @@ mod tests {
             .await;
     }
 
-    /// Mount KV v2 store/load/delete mocks for a given key.
     async fn mock_kv_round_trip(server: &MockServer, key: &str, value: &str, token: &str) {
         Mock::given(method("POST"))
             .and(path(format!("/v1/secret/data/{key}")))
@@ -1160,7 +1036,6 @@ mod tests {
 
     #[tokio::test]
     async fn login_failure_returns_denied_error() {
-        // AppRole
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
@@ -1173,7 +1048,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("AppRole login denied"));
 
-        // Kubernetes
         let token_path = write_temp_token("fail", "jwt");
         let k8s_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1191,7 +1065,6 @@ mod tests {
 
     #[tokio::test]
     async fn login_custom_mount_and_namespace() {
-        // AppRole
         let ar_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/auth/custom-auth/login"))
@@ -1213,7 +1086,6 @@ mod tests {
             "s.ns-token"
         );
 
-        // Kubernetes
         let token_path = write_temp_token("custom", "custom-jwt");
         let k8s_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1275,7 +1147,6 @@ mod tests {
     async fn token_renewal_and_reauth_flows() {
         let server = MockServer::start().await;
 
-        // Initial login (short 1s TTL)
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(ResponseTemplate::new(200).set_body_json(auth_response("s.token-1", 1)))
@@ -1283,7 +1154,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Token renewal succeeds
         Mock::given(method("POST"))
             .and(path("/v1/auth/token/renew-self"))
             .and(header("X-Vault-Token", "s.token-1"))
@@ -1294,7 +1164,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Subsequent renewal fails with 403, triggering re-login
         Mock::given(method("POST"))
             .and(path("/v1/auth/token/renew-self"))
             .and(header("X-Vault-Token", "s.token-renewed"))
@@ -1310,7 +1179,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Data mock accepting requests
         Mock::given(method("GET"))
             .and(path("/v1/secret/data/key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1325,7 +1193,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Near expiry -> renewal triggers
         tokio::time::sleep(Duration::from_millis(850)).await;
         client.load("key").await.unwrap();
         assert_eq!(
@@ -1333,7 +1200,6 @@ mod tests {
             "s.token-renewed"
         );
 
-        // Renewal failure -> re-login triggers
         tokio::time::sleep(Duration::from_millis(850)).await;
         client.load("key").await.unwrap();
         assert_eq!(
@@ -1499,10 +1365,8 @@ mod tests {
                 .unwrap(),
         );
 
-        // Wait past renewal threshold (0.8s)
         tokio::time::sleep(Duration::from_millis(850)).await;
 
-        // Launch 10 concurrent requests
         let mut handles = Vec::new();
         for _ in 0..10 {
             let client_clone = Arc::clone(&client);
@@ -1527,7 +1391,6 @@ mod tests {
     async fn vault_auth_cooldown_backoff() {
         let server = MockServer::start().await;
 
-        // Initial login with short 1s TTL (non-renewable to force re-login)
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1537,7 +1400,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Re-login fails with 500
         Mock::given(method("POST"))
             .and(path("/v1/auth/approle/login"))
             .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
@@ -1551,14 +1413,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait past TTL
         tokio::time::sleep(Duration::from_millis(850)).await;
 
-        // First attempt triggers re-login and fails
         let err1 = client.load("key").await.unwrap_err();
         assert!(err1.to_string().contains("HTTP 500"));
 
-        // Immediate second attempt should hit cooldown backoff
         let err2 = client.load("key").await.unwrap_err();
         assert!(err2.to_string().contains("cooldown backoff"));
     }
