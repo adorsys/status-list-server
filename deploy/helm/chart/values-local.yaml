@@ -14,8 +14,6 @@ statuslist:
           echo "Database is up."
 
   aws:
-    # Local has no External Secrets Operator and no cloud role, so do not mount the
-    # ESO-provisioned aws-credentials-secret.
     mountCredentials: false
 
   fallbackSecret:
@@ -62,12 +60,9 @@ statuslist:
     # Seconds; "0" disables it.
     APP_CACHE__TTL: "120"
     APP_CACHE__MAX_CAPACITY: "500"
-    # Signed status-list token bytes cache: a *byte* budget (entries are weighed
-    # by their size). "0" disables the cache. Each entry expires at the end of its
-    # own validity window, so there is no TTL setting.
+    # Bytes; "0" disables it.
     APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "67108864"
-    # Status-list token lifetime (secs). Both must be >= 1 and ttl strictly less
-    # than exp; the application rejects violations at startup.
+    # Seconds; TTL must stay below EXP.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
