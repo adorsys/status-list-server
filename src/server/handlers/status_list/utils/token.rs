@@ -71,9 +71,11 @@ pub(crate) async fn issuer_aggregation_uri(
     state: &crate::server::AppState,
     issuer: &Issuer,
 ) -> Option<String> {
-    state.aggregation_uri.as_ref()?;
+    if state.aggregation_uri.is_none() || state.aggregation_withheld_from.contains(issuer) {
+        return None;
+    }
     match state.service.find_aggregation_id(issuer).await {
-        Ok(aggregation_id) => state.aggregation_uri_for(aggregation_id?),
+        Ok(aggregation_id) => state.aggregation_uri_for(issuer, aggregation_id?),
         Err(error) => {
             tracing::debug!(
                 ?error,
