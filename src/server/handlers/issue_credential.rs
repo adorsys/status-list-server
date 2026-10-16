@@ -10,30 +10,25 @@ use crate::{
     },
 };
 
-/// Request body for registering issuer public key credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialsRequest {
     pub issuer: String,
     pub public_key: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Response body for a registration. The issuer cannot derive its aggregation
-/// URI itself, so it is told here.
+/// Issuers can't derive their aggregation URI, so registration returns it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialsResponse {
     pub status: String,
     pub aggregation_id: AggregationId,
-    /// Present when the server advertises an aggregation endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_uri: Option<String>,
 }
 
-/// Response body for GET /credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegistrationResponse {
     pub issuer: String,
     pub aggregation_id: AggregationId,
-    /// Present when the server advertises an aggregation endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_uri: Option<String>,
 }
@@ -51,9 +46,7 @@ impl From<AuthenticationError> for CredentialError {
     }
 }
 
-/// `err(level = "info")` for the reason on `update_status`: the default ERROR
-/// level would page on write contention and on a duplicate registration, both
-/// 409s the response layer already logs at the right severity.
+/// Errors log at info, like update_status.
 #[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(level = "info", Debug))]
 pub async fn credential_handler(
     State(state): State<AppState>,
@@ -78,9 +71,7 @@ pub async fn credential_handler(
         .into_response())
 }
 
-/// Handle GET /credentials: the calling issuer's aggregation ID and URI. The
-/// only other place an issuer learns them is the registration response, which
-/// issuers registered before aggregation IDs existed never got.
+/// For issuers registered before aggregation IDs existed, the only way to learn theirs.
 #[tracing::instrument(skip_all, fields(issuer = %issuer), err(level = "info", Debug))]
 pub async fn get_credential(
     State(state): State<AppState>,

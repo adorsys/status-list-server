@@ -21,13 +21,9 @@ pub struct ApiError {
     pub status: StatusCode,
     pub error: Cow<'static, str>,
     pub error_description: Option<String>,
-    /// RFC 9110 §10.2.3 permits `Retry-After` on any response, not just
-    /// 503/429. It is the only machine-readable part of the retry instruction.
+    /// Allowed on any status (RFC 9110 §10.2.3), not just 503 and 429.
     pub retry_after_secs: Option<u64>,
-    /// Extra headers attached to the error response. Used for negotiation-
-    /// dependent responses that must advertise `Vary` even when they fail
-    /// (e.g. `406 Not Acceptable`), so a shared cache never serves the error
-    /// to a client with a different `Accept`.
+    /// For headers like Vary that must ride along on errors such as 406.
     pub extra_headers: Vec<(axum::http::HeaderName, HeaderValue)>,
 }
 
@@ -46,9 +42,6 @@ impl ApiError {
         }
     }
 
-    /// Attach an extra header to the error response. Kept distinct from the
-    /// error body so a caller can add negotiation headers (`Vary`) without
-    /// changing the JSON contract.
     pub(crate) fn with_header(mut self, name: axum::http::HeaderName, value: HeaderValue) -> Self {
         self.extra_headers.push((name, value));
         self
@@ -89,19 +82,8 @@ impl ApiError {
         )
     }
 
-    /// 409 for a storage-level lock race: the write was rolled back, nothing
-    /// landed, and the same request can be retried unchanged.
-    ///
-    /// Not `update_conflict`, which promises the opposite — that a racing
-    /// writer's value won and the client must re-read first.
-    ///
-    /// Not 503 either, though 503 is the better protocol fit and is the class
-    /// generic retry middleware actually replays (409 is treated as terminal by
-    /// most SDKs and meshes). 409 is chosen because it matches what the
-    /// optimistic guard already returns on the same endpoint and keeps
-    /// single-row contention out of the availability SLO. `Retry-After` below
-    /// offsets the cost. If clients need to recover without bespoke handling,
-    /// revisit: 503 + `Retry-After` already exists in `openapi.yaml`.
+    /// 409, not 503: matches the version-conflict response and keeps contention out of the SLO.
+    /// Unlike update_conflict, the client can retry this unchanged.
     pub fn write_contention() -> Self {
         Self::new(
             StatusCode::CONFLICT,
@@ -112,8 +94,7 @@ impl ApiError {
                     .into(),
             ),
         )
-        // A floor, not a schedule; clients are told to add jitter, since a fixed
-        // hint would resynchronise the writers that just collided.
+        // A floor; clients add jitter so collided writers don't retry in lockstep.
         .retry_after(1)
     }
 
@@ -130,7 +111,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self.status {
-            // 409 Conflict is logged at INFO level to avoid tripping alert systems during high write contention.
+            // Info, so write contention doesn't trip alerts.
             StatusCode::CONFLICT => {
                 tracing::info!(
                     status = %self.status,
@@ -163,17 +144,12 @@ impl IntoResponse for ApiError {
             axum::http::HeaderValue::from_static("no-store, max-age=0"),
         );
         if let Some(secs) = self.retry_after_secs {
-            // Infallible for the values this module chooses, but not worth a
-            // panic on a request that is otherwise handled correctly.
+            // Can't fail for our values, but not worth a panic.
             if let Ok(value) = axum::http::HeaderValue::try_from(secs.to_string()) {
                 headers.insert(axum::http::header::RETRY_AFTER, value);
             }
         }
         for (name, value) in self.extra_headers {
-            // `insert` overwrites, so a caller must not silently clobber the
-            // managed freshness/retry headers set above. In debug builds, catch
-            // that mistake instead of shipping a response with a mutated
-            // `Cache-Control`/`Retry-After`.
             debug_assert!(
                 name != axum::http::header::CACHE_CONTROL
                     && name != axum::http::header::RETRY_AFTER,
@@ -190,13 +166,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// `code` separates waiters that gave up (`1205`/`40001` — lock-wait budget,
-/// transaction scope) from cycles the server broke (`1213`/`40P01` — lock
-/// ordering); the remediations differ. Both attributes are closed compile-time
-/// sets, so there is no cardinality risk.
-///
-/// The meter is resolved per increment rather than cached: a handle taken before
-/// `setup_metrics` installs the global provider would bind a no-op permanently.
+/// Resolved per call: a meter cached before setup_metrics would stay a no-op forever.
 fn record_write_contention(resource: &'static str, code: &'static str) {
     use opentelemetry::KeyValue;
 
@@ -290,8 +260,7 @@ impl IntoApiError for StatusListError {
                 "allocation_exhausted",
                 "status list does not have enough unallocated indices",
             ),
-            // Not 429: waiting never frees a slot, so no retry hint. Not 403,
-            // which this API reserves for ownership failures.
+            // Not 429 (waiting won't free a slot) and not 403 (reserved for ownership).
             StatusListError::QuotaExceeded { count, max } => ApiError::bad_request(
                 "list_quota_exceeded",
                 format!("issuer already has {count} status lists; the configured maximum is {max}"),
@@ -501,17 +470,14 @@ mod tests {
         let api_err: ApiError = err.into();
         let response = api_err.into_response();
 
-        // Verify status code
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // Verify Cache-Control header is present
         let cache_control = response
             .headers()
             .get(axum::http::header::CACHE_CONTROL)
             .expect("Cache-Control header should be present");
         assert_eq!(cache_control, "no-store, max-age=0");
 
-        // Verify JSON body contains both error and error_description
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -572,8 +538,6 @@ mod tests {
         );
     }
 
-    /// `Retry-After` is the only machine-actionable part of the retry
-    /// instruction; without it the contract is advisory-only.
     #[tokio::test]
     async fn test_write_contention_response_carries_retry_after() {
         let api_err: ApiError = StatusListError::Contention { code: "40001" }.into();
@@ -596,8 +560,6 @@ mod tests {
         );
     }
 
-    /// Advertising `Retry-After` on a permanent failure would tell a client to
-    /// replay a write that can never succeed.
     #[tokio::test]
     async fn test_other_errors_do_not_carry_retry_after() {
         for err in [
@@ -620,9 +582,6 @@ mod tests {
         }
     }
 
-    /// Extra headers attached via `with_header` must land on the wire response,
-    /// so negotiation-dependent errors can advertise `Vary` without altering the
-    /// JSON body.
     #[tokio::test]
     async fn test_extra_headers_are_emitted() {
         let err = ApiError::new(
@@ -640,7 +599,6 @@ mod tests {
             response.headers().get(axum::http::header::VARY).unwrap(),
             "Accept, Accept-Encoding"
         );
-        // The standard error caching directive must still be present.
         assert_eq!(
             response
                 .headers()
@@ -650,8 +608,6 @@ mod tests {
         );
     }
 
-    /// The two 409s carry opposite instructions, so the field clients branch on
-    /// must actually differ.
     #[tokio::test]
     async fn test_the_two_conflicts_are_distinguishable_in_the_body() {
         async fn error_code_of(err: StatusListError) -> String {
