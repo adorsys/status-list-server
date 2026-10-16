@@ -76,7 +76,7 @@ curl -s http://localhost:8000/
   * Compact bit-packed representation (1/2/4/8 bits), zlib-compressed, base64url-encoded
   * Status list payload compression follows the specification; HTTP gzip compression is applied independently at the transport layer.
 - Publisher workflow
-  * Register issuer public key (JWK)
+  * Issuer public keys are provisioned by operators from a reviewed registry
   * Authenticated publish/update using a JWT Bearer signed by the issuer’s private key
 - Reliability & ops
   * ACME-based certificate provisioning/renewal
@@ -88,7 +88,7 @@ curl -s http://localhost:8000/
 - `GET /` → "Status list Server"
 - `GET /health/live` → liveness probe (`/health` remains a compatibility alias)
 - `GET /health/ready` → dependency-aware readiness probe
-- `POST /api/v1/credentials` → register an issuer’s public key (JWK)
+- Issuer keys are provisioned by the operator; issuers use authenticated `GET /api/v1/credentials` to read their aggregation metadata.
 - `PUT /api/v1/status-lists/{list_id}/statuses` (auth) → create a status list
 - `PATCH /api/v1/status-lists/{list_id}/statuses` (auth) → update a status list
 - `GET /api/v1/status-lists/{list_id}` (public) → gzip-compressed JWT or CWT

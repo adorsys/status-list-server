@@ -63,7 +63,7 @@ SQLite is not a distributed database, so it is not a good match for horizontally
 
 ## Transaction Isolation
 
-Every client-facing write — publishing a list, updating one, the snapshot each writes alongside it, and credential registration — runs in a transaction pinned to **READ COMMITTED** on PostgreSQL and MySQL. The level is set by the application, not inherited from the server, so both backends behave identically instead of running at their differing defaults (PostgreSQL READ COMMITTED, InnoDB REPEATABLE READ).
+Every client-facing write — publishing a list, updating one, and the snapshot each writes alongside it — runs in a transaction pinned to **READ COMMITTED** on PostgreSQL and MySQL. The level is set by the application, not inherited from the server, so both backends behave identically instead of running at their differing defaults (PostgreSQL READ COMMITTED, InnoDB REPEATABLE READ).
 
 The one write that is **not** pinned is the retention sweep (`delete_older_than`); see _Other notes_ below.
 
@@ -98,7 +98,7 @@ SET GLOBAL binlog_format = 'ROW';  -- then restart the server
 
 - **SQLite is unaffected.** It has no per-transaction isolation level, so none is requested there.
 - **The retention sweep is not pinned.** `delete_older_than` runs as batched autocommit statements and inherits the server default. It is the likeliest deadlock victim in the system — it sweeps a range of `idx_status_list_history_exp` while snapshot inserts write into the top of that range — so its errors are classified too: a deadlock there is a retryable classification the scheduler logs at `warn`, and the next run cleans up whatever the aborted batch left.
-- **Pinning costs three extra round trips per write.** sea-orm issues the isolation level as its own statement, so a write that was one autocommit statement becomes `SET TRANSACTION`, `BEGIN`, the statement, `COMMIT`. That is the price of the two properties above, and it is paid on every publish, update and registration.
+- **Pinning costs three extra round trips per write.** sea-orm issues the isolation level as its own statement, so a write that was one autocommit statement becomes `SET TRANSACTION`, `BEGIN`, the statement, `COMMIT`. That is the price of the two properties above, and it is paid on every publish and update.
 
 ## Compose Profiles
 
