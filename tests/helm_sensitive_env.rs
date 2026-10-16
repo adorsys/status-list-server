@@ -220,8 +220,6 @@ fn release_production_overlays_supply_the_management_audience() {
         assert!(env::var_os("CI").is_none(), "helm is required in CI");
         return;
     }
-    // Match deploy.yml's overlays without the helper's CLI audience override:
-    // that override would conceal an incomplete production configuration.
     let chart_dir = dependency_free_chart();
     let output = Command::new("helm")
         .args(["template", "statuslist"])
@@ -845,13 +843,6 @@ fn rendered_chart_rejects_uppercase_database_backend() {
 
 #[test]
 fn rendered_chart_rejects_integer_env_values() {
-    // Env vars not explicitly typed in the chart schema fall through to
-    // `additionalProperties` of type string, so an integer passed for them is
-    // rejected at render time. Without this guard, a large integer like a byte
-    // budget would be rendered by Helm in scientific notation (e.g. 2592000 ->
-    // 2.592e+06) and crash the u64 parse in the application. (The token-lifetime
-    // vars are deliberately excluded here: the schema whitelists them as
-    // integer-or-string, so valid integers are accepted.)
     let arg = "statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY=2592000";
     let Some(output) = render_helm_failure(&["--set", arg]) else {
         return;
@@ -860,7 +851,7 @@ fn rendered_chart_rejects_integer_env_values() {
     assert!(
         stderr.contains("got number, want string")
             || stderr.contains("Expected: string, given: integer"),
-        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
+        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema, or Helm renders 2592000 as 2.592e+06 and the u64 parse fails: {stderr}"
     );
     assert!(
         stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY")
@@ -982,8 +973,6 @@ fn rendered_chart_rejects_plain_database_password_env() {
 
 #[test]
 fn rendered_chart_uses_default_database_port() {
-    // With APP_DATABASE__BACKEND defaulting to "postgres", the chart derives 5432
-    // without requiring APP_DATABASE__PORT in values.yaml.
     let Some(rendered) = render_helm(&[]) else {
         return;
     };
@@ -1020,10 +1009,6 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 
 #[test]
 fn rendered_chart_rejects_zero_string_token_lifetime() {
-    // The schema `minimum` only applies to numeric instances; a quoted `"0"`
-    // previously slipped through as a string via the canonical
-    // `statuslist.env.APP_STATUS_LIST__TOKEN_*` route. Regression: reject it via
-    // `--set-string`.
     let Some(output) = render_helm_failure(&[
         "--set-string",
         "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0",
@@ -1051,10 +1036,6 @@ fn rendered_chart_rejects_zero_string_token_lifetime() {
 
 #[test]
 fn rendered_chart_rejects_numeric_zero_token_lifetime() {
-    // A numeric `0` (via `--set`, not `--set-string`) must be rejected by the
-    // schema's `minimum: 1` integer constraint. Regression for the numeric path.
-    // Helm versions describe that constraint as either "minimum" or
-    // "Must be greater than or equal to 1".
     let Some(output) =
         render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0"])
     else {
