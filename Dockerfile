@@ -1,28 +1,20 @@
 ARG APP_NAME=status-list-server
 
-# Use buildx's automatic platform detection.
 FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl@sha256:875ccf23ed478f7edee9be54d3dd6556dbca067e9af8e33f22f6b316226a5d5e AS builder-amd64
 FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl@sha256:9f1f5a00c2ef54ab851b8cbf4e5a843c74314679a2f7f4af5664b3a7ce21bce8 AS builder-arm64
 
-# Select the appropriate builder based on target platform
 FROM builder-${TARGETARCH} AS builder
 ARG APP_NAME
 ARG TARGETPLATFORM
 ARG TARGETARCH
 WORKDIR /app
 
-# cargo-auditable records the dependency graph in a .dep-v0 linker section. Without
-# it the scratch runtime image carries one static binary and no package metadata, so
-# scanners enumerate zero packages and the published SBOM is empty.
-#
-# These pins are invisible to every Dependabot ecosystem configured here; see
-# docs/supply-chain.md, "Tool Ownership", for the bump path.
-#
-# Declared above ARG FEATURES so a feature-set change does not invalidate this layer.
+# cargo-auditable embeds the dependency graph; without it scanners see zero packages in a scratch image.
+# Dependabot can't see these pins (docs/supply-chain.md, "Tool Ownership").
+# Above ARG FEATURES so a feature change doesn't rebuild this layer.
 ARG CARGO_AUDITABLE_VERSION=0.7.5
 ARG RUST_AUDIT_INFO_VERSION=0.5.4
-# Unset CARGO_BUILD_TARGET so cargo compiles the build tools natively for the builder host
-# (e.g. x86_64) rather than cross-compiling them for TARGETARCH.
+# Build the tools for the host, not TARGETARCH.
 RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPLATFORM} \
     set -eu; \
     env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
@@ -30,14 +22,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPL
 
 ARG FEATURES="postgres,aws,redis"
 
-# The release profile sets strip, lto and codegen-units = 1, each of which can drop
-# .dep-v0. A missing section yields a passing scan and an empty SBOM, so this must
-# fail the build here rather than surface downstream as a clean result.
-#
-# The assertion requires the section to decode AND to be non-empty: decoding an empty
-# dependency graph exits zero, so an exit-status check alone would pass on exactly the
-# empty-but-present artifact it exists to catch. The decode is captured before it is
-# counted so a rust-audit-info crash fails as itself rather than as a count of 0.
+# strip, lto and codegen-units=1 can drop .dep-v0, which would make scans pass on nothing.
+# Require a non-empty decode; an empty graph still exits 0.
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=test_data,target=test_data \
     --mount=type=bind,source=xtask,target=xtask \
@@ -61,11 +47,9 @@ RUN --mount=type=bind,source=src,target=src \
         exit 1; \
     fi
 
-# Minimal scratch-based runtime image
 FROM scratch AS runtime
 ARG APP_NAME
 
-# CA certificates for TLS connections
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Non-root user identity (UID 65534 = nobody)
