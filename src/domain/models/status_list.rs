@@ -1,5 +1,3 @@
-//! Status list domain models, compressed bitpack serialization, and business operations.
-
 use crate::domain::models::credential::Issuer;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -45,36 +43,24 @@ pub enum StatusListError {
     ListNotFixedSize,
     #[error("status list does not have enough unallocated indices")]
     AllocationExhausted,
-    /// The issuer already holds its configured maximum number of status lists.
     #[error("issuer has {count} status lists, reaching the configured maximum of {max}")]
     QuotaExceeded { count: u64, max: u64 },
     #[error("the status list was modified concurrently")]
     Conflict,
-    /// The write lost a lock race in storage and was rolled back.
-    ///
-    /// Distinct from [`Conflict`]: there a racing writer's value won and the
-    /// client must re-read first. Here nothing was written and nobody won, so
-    /// the request is safe to retry verbatim.
-    ///
-    /// `code` is an opaque backend tag for the metric only. It never reaches the
-    /// client and nothing in the domain branches on it.
-    ///
-    /// [`Conflict`]: StatusListError::Conflict
+    /// Unlike Conflict, nothing was written, so the client can retry as-is.
+    /// `code` only feeds the metric; it never reaches the client.
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
     #[error("the service is currently unavailable. Please try again later")]
     Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// `iat + token_exp_secs` overflows `i64`; the configured token lifetime
-    /// cannot be added to the issuance timestamp without wrapping `exp` negative.
     #[error(
         "token exp ({iat} + {token_exp_secs}) overflows i64; configured token lifetime is too large for the issuance timestamp"
     )]
     TokenExpiryOverflow { iat: i64, token_exp_secs: u64 },
 }
 
-/// Represents the status of a specific index in a status list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     Valid,
@@ -83,7 +69,6 @@ pub enum Status {
     ApplicationSpecific(u32),
 }
 
-/// Pair of status list index and target status state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusEntry {
     pub index: i32,
@@ -96,40 +81,26 @@ pub struct StatusListRecord {
     pub issuer: Issuer,
     pub status_list: StatusList,
     pub sub: String,
-    /// Unix timestamp (seconds) of last modification.
-    ///
-    /// This is a real wall-clock value (never artificially advanced past the
-    /// present), so it can be used directly as the token's `iat` and the
-    /// `Last-Modified`/ETag validator without drifting ahead of the clock.
+    /// Real wall-clock seconds, never pushed ahead; it doubles as the token's iat.
     pub updated_at: i64,
-    /// Monotonic optimistic-concurrency version, bumped on every committed
-    /// mutation. This is the value used for conflict detection and distributed
-    /// cache stale-fill fencing — deliberately separate from `updated_at`, which
-    /// stays a real timestamp so it cannot be pushed into the future by a burst
-    /// of writes to one list (see the update path).
+    /// Bumped on every change; the concurrency guard and cache fence, kept apart from updated_at.
     pub version: u64,
 }
 
-/// Aggregation page size when the client sends no `limit`, which a draft-21
-/// §9.3 client never does. It also caps `limits.max_lists_per_issuer`, so an
-/// issuer's aggregation always fits in that one page.
+/// Also caps max_lists_per_issuer, so an issuer's lists always fit one page.
 pub const AGGREGATION_DEFAULT_LIMIT: usize = 1000;
-/// Largest aggregation page a client may request.
 pub const AGGREGATION_MAX_LIMIT: usize = 1000;
 const _: () = assert!(AGGREGATION_DEFAULT_LIMIT <= AGGREGATION_MAX_LIMIT);
 
-/// One page of published status list URIs, in `list_id` order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusListUriPage {
-    /// `sub` URIs of the lists on this page.
     pub status_lists: Vec<String>,
-    /// `list_id` of the last list on this page; `None` on the last page.
+    /// None on the last page.
     pub next_after: Option<String>,
 }
 
 impl StatusListUriPage {
-    /// Builds a page from `(list_id, sub)` rows fetched with `limit + 1`; the
-    /// extra row only signals that another page exists.
+    /// Expects limit + 1 rows; the extra one only signals a next page.
     pub fn from_rows(mut rows: Vec<(String, String)>, limit: usize) -> Self {
         let has_more = rows.len() > limit;
         rows.truncate(limit);
@@ -148,14 +119,9 @@ pub struct StatusListSnapshot {
     pub issuer: Issuer,
     pub status_list: StatusList,
     pub sub: String,
-    /// Unix timestamp (seconds) when this snapshot becomes valid.
     pub iat: i64,
-    /// Unix timestamp (seconds) when this snapshot stops being valid.
     pub exp: i64,
-    /// The record's monotonic optimistic-concurrency version at the moment this
-    /// snapshot was taken. Two snapshots written within the same second share an
-    /// `iat`; `version` breaks that tie so `?time=` resolution returns the
-    /// post-change snapshot deterministically.
+    /// Breaks iat ties between snapshots from the same second.
     pub version: u64,
 }
 
@@ -163,11 +129,9 @@ pub struct StatusListSnapshot {
 pub struct StatusList {
     pub bits: u8,
     pub lst: String,
-    /// Fixed entry count requested at publish time. `None` preserves legacy,
-    /// grow-on-write lists.
+    /// None for legacy grow-on-write lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u32>,
-    /// Default status used to pre-initialise fixed-size lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_status: Option<Status>,
 }
@@ -260,8 +224,7 @@ impl StatusList {
             validate_within_size(&status_updates, size)?;
         }
         let old_bits = self.bits as usize;
-        // Draft-21 only permits 1, 2, 4, or 8. Older rows with wider values
-        // are repacked when their stored values are still representable.
+        // Draft-21 allows 1, 2, 4 or 8 bits; repack older rows stored wider.
         if validate_bits(old_bits).is_err() {
             return self.repack_legacy_width()?.update(status_updates);
         }
@@ -278,10 +241,7 @@ impl StatusList {
                     status,
                 })
                 .collect();
-            // The pre-existing entries are re-emitted first and the caller's
-            // updates appended after them: an index present in both must end up
-            // with the *update's* value, so this widening path relies on
-            // [`apply_updates`] letting the last write win for any given index.
+            // Updates go last so they win: apply_updates is last-write-wins.
             full_statuses.extend(status_updates);
             return Self::create_with_bits(
                 full_statuses,
@@ -365,8 +325,7 @@ impl StatusList {
         Ok(())
     }
 
-    /// The `lst` as it must appear in a token: the stored value, or a valid
-    /// zlib-compressed empty stream for legacy `lst = ""` rows.
+    /// Legacy rows store lst = "", which isn't valid zlib, so emit an empty stream instead.
     pub(crate) fn token_lst(&self) -> Result<(u8, String), StatusListError> {
         if validate_bits(self.bits as usize).is_err() {
             let normalized = self.repack_legacy_width()?;
@@ -380,7 +339,7 @@ impl StatusList {
         Ok((self.bits, lst))
     }
 
-    /// Raw compressed bytes for the Draft-21 §4.3 CBOR byte string.
+    /// For CWT, which carries lst as a CBOR byte string (draft-21 §4.3).
     pub(crate) fn token_lst_bytes(&self) -> Result<(u8, Vec<u8>), StatusListError> {
         let (bits, lst) = self.token_lst()?;
         let compressed = base64url::decode(&lst).map_err(|err| {
@@ -426,12 +385,7 @@ fn status_value(status: &Status) -> Result<u32, StatusListError> {
     }
 }
 
-/// Reject duplicate indices within a single update payload.
-///
-/// Only the caller-supplied entries are validated, never the entries a widening
-/// [`StatusList::update`] re-derives from the existing list: overlapping an
-/// already-set index is a legitimate "change that position", so this check is
-/// scoped to the request itself.
+/// Only checks the request itself; overwriting an index already in the list is fine.
 pub(crate) fn validate_unique_indices(
     status_updates: &[StatusEntry],
 ) -> Result<(), StatusListError> {
@@ -1354,9 +1308,6 @@ mod tests {
         ));
     }
 
-    /// Duplicate detection runs before the negative-index check, so a payload
-    /// whose duplicate is also negative must report `DuplicateIndex`, never
-    /// `InvalidIndex`. This pins that ordering in both create and update.
     #[test]
     fn duplicate_negative_index_reports_duplicate_before_invalid() {
         let duplicates = vec![entry(-1, Status::Valid), entry(-1, Status::Invalid)];
@@ -1373,8 +1324,6 @@ mod tests {
         ));
     }
 
-    /// Duplicate detection must not depend on the duplicates being adjacent:
-    /// a duplicate with other distinct indices in between is still rejected.
     #[test]
     fn create_rejects_non_adjacent_duplicate_indices() {
         let result = StatusList::create(vec![
@@ -1388,10 +1337,6 @@ mod tests {
         ));
     }
 
-    /// Re-sending the current value on a legacy-width row must still repack the
-    /// list to a supported width, so the result differs from the input. This
-    /// keeps the service's no-op guard (which compares whole lists) from
-    /// swallowing that one-time normalisation write.
     #[test]
     fn update_value_identical_on_legacy_width_repacks() {
         let legacy = from_raw(&[8, 0], 3);

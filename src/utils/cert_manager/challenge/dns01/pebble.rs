@@ -6,7 +6,6 @@ use serde_json::json;
 use super::{DnsProvider, http_client};
 use crate::cert_manager::challenge::ChallengeError;
 
-/// Handler for Pebble DNS (mainly for generating test certificates)
 pub struct PebbleDnsProvider {
     client: Client,
     addr: String,

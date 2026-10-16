@@ -1,5 +1,3 @@
-//! Credential domain model, error types, and core domain business operations.
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::{fmt, str::FromStr};
 
@@ -10,7 +8,6 @@ use jsonwebtoken::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Algorithms permitted by the management-token contract.
 pub(crate) const MANAGEMENT_SIGNING_ALGORITHMS: [Algorithm; 4] = [
     Algorithm::ES256,
     Algorithm::ES384,
@@ -26,19 +23,13 @@ pub enum CredentialError {
     InvalidPublicJwk(String),
     #[error("credentials already exist for this issuer or key ID")]
     AlreadyExists,
-    /// The write lost a lock race in storage and was rolled back; the request is
-    /// safe to retry verbatim. Mirrors [`StatusListError::Contention`], `code`
-    /// included, so the same driver error does not become a 409 on one write
-    /// path and a 500 on the other.
-    ///
-    /// [`StatusListError::Contention`]: crate::domain::models::status_list::StatusListError::Contention
+    /// Mirrors StatusListError::Contention so both write paths answer the same way.
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// Unique issuer identifier string.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Issuer(pub String);
 
@@ -54,8 +45,7 @@ impl From<&str> for Issuer {
     }
 }
 
-/// Opaque identifier that names an issuer's Status List Aggregation in public
-/// URIs, so tokens never disclose the issuer identifier itself.
+/// Opaque so public aggregation URIs never reveal the issuer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AggregationId(pub Uuid);
@@ -80,7 +70,6 @@ impl FromStr for AggregationId {
     }
 }
 
-/// Validated JSON Web Key document bytes representing an issuer's public key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
 pub struct PublicJwk {
@@ -104,9 +93,7 @@ impl From<PublicJwk> for Vec<u8> {
 }
 
 impl PublicJwk {
-    /// Create public JWK bytes from UTF-8 JSON.
-    ///
-    /// Ensures the payload is a supported public signing key.
+    /// Accepts only a public signing key with a `kid`; private and symmetric keys are rejected.
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, CredentialError> {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
             CredentialError::InvalidPublicJwk(format!("expected UTF-8 JSON: {err}"))
@@ -235,7 +222,6 @@ impl PublicJwk {
     }
 }
 
-/// Domain entity representing an issuer's registered public key credentials.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub issuer: Issuer,

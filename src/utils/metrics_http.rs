@@ -1,16 +1,4 @@
-//! HTTP request latency and count SLI instruments.
-//!
-//! These are the two series the SLO dashboards and burn-rate alerts in
-//! `deploy/observability/` query:
-//! - `http_server_duration_seconds` – a histogram of server-side request latency
-//! - `http_server_requests_total` – a counter of requests by status class
-//!
-//! The instruments are created lazily on first use through a [`OnceLock`]. The
-//! first request only ever arrives after `init_telemetry`/`setup_metrics` has
-//! installed the global meter provider, so the cached handles are valid and are
-//! never no-ops (the `http` crate's "resolve the meter per event" rule from
-//! `src/server/error.rs` exists precisely because a handle taken *before* the
-//! provider is installed binds a permanent no-op).
+//! deploy/observability dashboards and alerts query these series by name.
 
 use opentelemetry::{
     KeyValue, global,
@@ -21,14 +9,11 @@ use std::sync::{Mutex, OnceLock};
 const DURATION_METRIC: &str = "http_server_duration";
 const REQUESTS_TOTAL_METRIC: &str = "http_server_requests";
 
-/// Histogram bucket boundaries (seconds) tuned to this service's SLO target of
-/// p95 < 300 ms. The upper buckets still catch slow requests without exploding
-/// cardinality.
+/// Dense around the p95 < 300 ms SLO target.
 const DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// A pair of HTTP SLI instruments bound to the `status-list-server` meter.
 #[derive(Clone)]
 pub(crate) struct HttpMetrics {
     duration: Histogram<f64>,
@@ -54,12 +39,7 @@ impl HttpMetrics {
         Self { duration, requests }
     }
 
-    /// Record one completed request.
-    ///
-    /// `route` must be the bounded route pattern (e.g. `/status-lists/{list_id}`),
-    /// never a URI with path parameters substituted, to keep label cardinality
-    /// bounded. `listener` identifies which TCP listener accepted the connection
-    /// ("public", "management", or "admin").
+    /// Pass the route pattern, never the raw path, or label cardinality explodes.
     pub(crate) fn record(
         &self,
         method: &str,
@@ -86,14 +66,11 @@ impl HttpMetrics {
     }
 }
 
-/// The process-wide `HttpMetrics`, rebuilt whenever the global meter provider
-/// changes (see `cached_instruments`).
 fn shared() -> HttpMetrics {
     static METRICS: OnceLock<Mutex<Option<(u64, HttpMetrics)>>> = OnceLock::new();
     crate::utils::metrics::cached_instruments(&METRICS, HttpMetrics::new)
 }
 
-/// Record an HTTP request/response pair emitted from the axum metrics layer.
 pub(crate) fn record_request(
     method: &str,
     route: &str,
