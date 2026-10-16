@@ -107,8 +107,7 @@ pub enum RenewalStrategy {
     /// Renew the certificate a certain number of days before it expires.
     /// Defaults to 30 days before expiry if not specified
     DaysBeforeExpiry(Option<u32>),
-    /// Renew the certificate a certain percentage of its lifetime.
-    /// Defaults to 2/3 of the certificate lifetime if not specified
+    /// A fraction (0.0 to 1.0), not a percent; defaults to 2/3.
     PercentageOfLifetime(Option<f32>),
 }
 
@@ -136,11 +135,9 @@ pub struct CertManager {
     provisioning_lock: Mutex<()>,
     // The subject alternative names
     domains: Vec<String>,
-    // The company email
     email: String,
     // The company name
     organization: Option<String>,
-    // The key usage extensions code
     eku: Option<Vec<u64>>,
     // The ACME directory URL
     acme_directory_url: String,

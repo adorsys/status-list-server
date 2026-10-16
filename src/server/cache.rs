@@ -180,14 +180,12 @@ impl CachedToken {
 fn compress_gzip(bytes: &[u8]) -> Bytes {
     use std::io::Write as _;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    // Compression should never fail for valid input; if it does, fall back to
-    // uncompressed (the caller will handle the error by not using gzip).
+    // Writing into a Vec can't fail; if it ever did, the plain bytes would be served as gzip.
     if encoder.write_all(bytes).is_ok()
         && let Ok(compressed) = encoder.finish()
     {
         return Bytes::from(compressed);
     }
-    // Fallback: return uncompressed (should not happen in practice).
     Bytes::from(bytes.to_vec())
 }
 
@@ -284,11 +282,7 @@ impl Expiry<TokenCacheKey, CachedToken> for EntryExpiry {
         value: &CachedToken,
         _created_at: Instant,
     ) -> Option<Duration> {
-        // Window width is `exp_secs` clamped to `>= 1` — the same formula the
-        // handler's `token_window` uses (expiry-sized windows), so the cache
-        // frees a closed window's bytes at exactly the instant the window rolls
-        // over. Keeping the two in lockstep means an entry can never silently
-        // outlive (or be freed before) the window it is anchored to.
+        // Must match the handler's `token_window` width, or entries outlive their window.
         let width = i64::try_from(key.token_exp_secs).unwrap_or(i64::MAX).max(1);
         let window_end = key.window_start.saturating_add(width);
         let secs = (window_end - value.created_at_unix).max(1) as u64;

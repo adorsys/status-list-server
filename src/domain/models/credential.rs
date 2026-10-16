@@ -18,10 +18,6 @@ pub(crate) const MANAGEMENT_SIGNING_ALGORITHMS: [Algorithm; 4] = [
     Algorithm::PS256,
 ];
 
-/// Domain errors encountered during issuer credential management.
-///
-/// `#[non_exhaustive]` so adding a variant stays patch-level instead of tripping
-/// `cargo-semver-checks` (`enum_variant_added`).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
