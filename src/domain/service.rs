@@ -1,5 +1,3 @@
-//! Service container holding injected outbound adapter ports and domain business operations.
-
 use std::sync::Arc;
 
 use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
@@ -31,7 +29,6 @@ pub struct PublishStatusListCommand {
     pub default_status: Option<Status>,
 }
 
-/// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
 pub struct Service {
     pub(crate) status_list_repo: Arc<dyn StatusListRepo>,
@@ -100,16 +97,11 @@ impl Service {
         self.cert_provider.as_ref()
     }
 
-    /// Whether historical snapshot retention is enabled.
     pub fn snapshots_enabled(&self) -> bool {
         self.snapshot_repo.is_some()
     }
 
-    /// Create and publish a new status list record, enforcing uniqueness, size
-    /// invariants and the per-issuer list quota.
-    ///
-    /// The quota is checked by the repository inside creation, since a
-    /// count-then-insert here would race concurrent publishes.
+    /// The repo enforces the quota inside the insert; counting here first would race.
     pub async fn publish_status_list(
         &self,
         command: PublishStatusListCommand,
@@ -236,10 +228,6 @@ impl Service {
         let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
 
-        // A request that does not change the list is a successful no-op. It must
-        // not bump the version or `updated_at`, or insert a redundant history
-        // snapshot, which would bloat history with a duplicate entry for an
-        // unchanged state.
         if existing.status_list == current_status_list {
             return Ok(existing);
         }
@@ -248,19 +236,9 @@ impl Service {
             return Err(StatusListError::TooLarge);
         }
 
-        // Optimistic-concurrency version: strictly monotonic, bumped on every
-        // committed change and used for conflict detection and cache fencing. It
-        // is deliberately separate from `updated_at`, which stays a real
-        // wall-clock timestamp so a burst of writes to one list can never push a
-        // token's `iat` into the future (RPs reject a future `iat`).
         let previous_version = existing.version;
         existing.version = next_version(previous_version);
-        // `updated_at` stays a real wall-clock timestamp and never moves
-        // backwards, even on a replica with a slightly slow clock: two writes in
-        // the same second can therefore share an `updated_at`, which is fine
-        // because the monotonic `version` is the concurrency guard and the
-        // snapshot/history tie-breaker. Advancing it with `max(now, previous)`
-        // (rather than `previous + 1`) keeps it from drifting ahead of the clock.
+        // max(), not +1: two writes in one second may share updated_at, and that's fine.
         existing.updated_at = existing.updated_at.max(current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
@@ -321,7 +299,6 @@ impl Service {
             .await
     }
 
-    /// Retrieve a status list record from cache or fallback to persistent storage.
     pub async fn get_status_list(
         &self,
         list_id: &str,
@@ -342,7 +319,6 @@ impl Service {
         Ok(record)
     }
 
-    /// List one page of published status list URIs, starting after `after`.
     pub async fn list_uris(
         &self,
         after: Option<&str>,
@@ -419,7 +395,6 @@ impl Service {
             .ok_or(StatusListError::HistoricalNotFound)
     }
 
-    /// Purge snapshots older than `cutoff` timestamp.
     pub async fn cleanup_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
         let Some(snapshot_repo) = &self.snapshot_repo else {
             return Ok(0);
@@ -427,19 +402,7 @@ impl Service {
         snapshot_repo.delete_older_than(cutoff).await
     }
 
-    /// Publish new credentials for an issuer.
-    ///
-    /// Uniqueness is enforced by the primary key on `credentials.issuer`, not by
-    /// a `find` pre-check — same reasoning as [`Self::publish_status_list`]: the
-    /// pre-check is a TOCTOU race that still has to defer to the constraint when
-    /// two registrations for one issuer arrive together, so it buys a round trip
-    /// and no guarantee. `insert_one` classifies the violation through
-    /// `map_insert_err` (proven on SQLite and MySQL by
-    /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
-    /// `impl From<RepositoryError> for CredentialError` maps it to
-    /// `AlreadyExists`, so the 409 is unchanged.
-    ///
-    /// Returns the aggregation ID the issuer was registered under.
+    /// No find pre-check: the primary key catches duplicates, and a pre-check would race anyway.
     pub async fn publish_credential(
         &self,
         credential: Credential,
@@ -458,7 +421,6 @@ impl Service {
             .await
     }
 
-    /// The issuer's aggregation ID, or `None` for an unknown issuer.
     pub async fn find_aggregation_id(
         &self,
         issuer: &Issuer,
@@ -466,7 +428,6 @@ impl Service {
         self.credential_repo.find_aggregation_id(&issuer.0).await
     }
 
-    /// Retrieve credentials by issuer identifier.
     pub async fn find_credential(
         &self,
         issuer: &str,
@@ -474,7 +435,6 @@ impl Service {
         self.credential_repo.find(issuer).await
     }
 
-    /// Retrieve credentials by the registered management-token key ID.
     pub async fn find_credential_by_kid(
         &self,
         kid: &str,
@@ -514,14 +474,6 @@ pub fn current_unix_timestamp() -> i64 {
     time::UtcDateTime::now().unix_timestamp()
 }
 
-/// The next monotonic optimistic-concurrency version for a record currently at
-/// `previous`.
-///
-/// The version is the concurrency guard and distributed cache-fencing stamp; it
-/// is deliberately decoupled from `updated_at` (which stays a real wall-clock
-/// timestamp) so a burst of writes to one list can never push the token's `iat`
-/// into the future. `saturating_add` keeps a saturated version monotonic rather
-/// than wrapping.
 pub fn next_version(previous: u64) -> u64 {
     previous.saturating_add(1)
 }
@@ -663,10 +615,6 @@ mod tests {
 
     #[test]
     fn snapshot_exp_guards_against_iat_plus_exp_overflow() {
-        // Synthetic issuance-time boundary: an `updated_at` (the iat used for the
-        // exp claim) near i64::MAX with a representable token_exp_secs still overflows
-        // `iat + token_exp_secs`. `checked_add` must fail closed rather than wrap exp
-        // negative (which previously panicked in debug and wrapped in release).
         let record = record_with_updated_at(i64::MAX - 5);
         let err = build_snapshot(&record, 10)
             .expect_err("iat near i64::MAX with token_exp_secs=10 must overflow and be rejected");
@@ -676,7 +624,6 @@ mod tests {
             "expected TokenExpiryOverflow, got {err:?}"
         );
 
-        // A representable value that does not overflow still builds the snapshot.
         let ok = build_snapshot(&record_with_updated_at(1_000), 900)
             .expect("non-overflowing iat + token_exp_secs should build a snapshot");
         assert_eq!(ok.exp, 1_900);
@@ -684,11 +631,6 @@ mod tests {
 
     #[test]
     fn snapshot_exp_rejects_u64_max_token_exp_secs_via_try_from() {
-        // Direct-construction bypass: an AppState/Service caller could pass
-        // `token_exp_secs = u64::MAX` without going through config validation.
-        // The guard must convert via `i64::try_from` before `checked_add`, so
-        // `u64::MAX` does NOT silently become `-1` and produce a bogus (lower)
-        // exp. It must fail closed instead.
         let record = record_with_updated_at(1_000);
         let err = build_snapshot(&record, u64::MAX)
             .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");

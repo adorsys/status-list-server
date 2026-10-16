@@ -45,7 +45,6 @@ use opentelemetry::{
     metrics::{Counter, Gauge},
 };
 
-// Renewal metrics constants
 const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts";
 const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes";
 const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures";
@@ -89,7 +88,6 @@ impl Default for CertManagerMetrics {
     }
 }
 
-/// Struct that hold the certificate and its metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CertificateData {
     pub certificate: String,
@@ -98,14 +96,11 @@ pub struct CertificateData {
     pub updated_at: i64,
 }
 
-/// Type representing the certificate renewal strategy
 #[derive(Debug, Clone)]
 pub enum RenewalStrategy {
-    /// Renew the certificate at a fixed interval.
-    /// If not specified, it defaults to 60 days starting from the issue date
+    /// Days after issue; defaults to 60.
     FixedInterval(Option<u32>),
-    /// Renew the certificate a certain number of days before it expires.
-    /// Defaults to 30 days before expiry if not specified
+    /// Defaults to 30.
     DaysBeforeExpiry(Option<u32>),
     /// A fraction (0.0 to 1.0), not a percent; defaults to 2/3.
     PercentageOfLifetime(Option<f32>),
@@ -113,45 +108,31 @@ pub enum RenewalStrategy {
 
 type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 
-/// Struct representing the certificate manager
 pub struct CertManager {
-    // Consolidated backend for certificate chain, signing key, and ACME account material.
     crypto_storage: Option<CryptoStorage>,
-    // ACME challenge handler
     challenge_handler: Option<Box<dyn ChallengeHandler>>,
-    // ACME client
     acme_client: Arc<Mutex<Option<Account>>>,
-    // ACME HTTP client factory
     acme_http_client_factory: Option<ACMEHttpClientFactory>,
-    // Certificate provisioning strategy
     provisioning_strategy: Box<dyn CertProvisioningStrategy>,
-    // Certificate renewal strategy
     renewal_strategy: RenewalStrategy,
-    // Parsed certificate chain cache
     cert_chain_cache: CertChainCache,
-    // Active token-signing material exposed to request handlers.
     active_signing_material: ArcSwapOption<SigningMaterial>,
-    // Serializes explicit reloads and renewal cron provisioning.
+    // Serializes manual reloads with the renewal cron.
     provisioning_lock: Mutex<()>,
-    // The subject alternative names
     domains: Vec<String>,
     email: String,
-    // The company name
     organization: Option<String>,
     // One Extended Key Usage OID as its numbers, e.g. 1,3,6,1,5,5,7,3,30.
     eku: Option<Vec<u64>>,
-    // The ACME directory URL
     acme_directory_url: String,
     metrics: CertManagerMetrics,
 }
 
 impl CertManager {
-    /// Create a certificate manager builder.
     pub fn builder() -> CertificateManagerBuilder {
         CertificateManagerBuilder::default()
     }
 
-    /// Create a new instance of [CertManager] with required parameters
     pub fn new(
         domains: impl IntoIterator<Item = impl Into<String>>,
         email: impl Into<String>,
@@ -186,37 +167,27 @@ impl CertManager {
         })
     }
 
-    /// Set the consolidated backend for server certificate and signing-key material.
     pub fn with_crypto_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.crypto_storage = Some(CryptoStorage::new(storage));
         self
     }
 
-    /// Set the handler for the ACME challenge.
-    ///
-    /// **Note:** This method is required.
+    /// Required.
     pub fn with_challenge_handler(mut self, handler: impl ChallengeHandler + 'static) -> Self {
         self.challenge_handler = Some(Box::new(handler));
         self
     }
 
-    /// Override the default http client used by the ACME client
-    ///
-    /// Default: [`DefaultHttpClient`]
     pub fn with_acme_http_client(mut self, client: impl HttpClient + Clone + 'static) -> Self {
         self.acme_http_client_factory = Some(Box::new(move || Box::new(client.clone())));
         self
     }
 
-    /// Override the default certificate renewal strategy
-    ///
-    /// Default: `PercentageOfLifetime`
     pub fn with_renewal_strategy(mut self, strategy: RenewalStrategy) -> Self {
         self.renewal_strategy = strategy;
         self
     }
 
-    /// Override the certificate provisioning strategy.
     pub fn with_provisioning_strategy(
         mut self,
         strategy: impl CertProvisioningStrategy + 'static,
@@ -225,40 +196,29 @@ impl CertManager {
         self
     }
 
-    /// Set the key usage extensions code
     pub fn with_eku(mut self, eku: &[u64]) -> Self {
         self.eku = Some(eku.to_vec());
         self
     }
 
-    /// Zero-initialize the certificate chain cache counters so they appear
-    /// in Prometheus scrapes before first use.
-    ///
-    /// **Must** be called after the global metrics recorder has been installed.
-    /// If metrics are disabled this is a harmless no-op.
+    /// Call after the metrics recorder is installed, or the zeros go nowhere.
     pub fn init_cert_chain_cache_counters(&self) {
         self.cert_chain_cache.init_counters();
     }
 
-    /// Zero-initialize renewal counters so they appear in Prometheus scrapes
-    /// before first use.
-    ///
-    /// **Must** be called after the global metrics recorder has been installed.
-    /// If metrics are disabled this is a harmless no-op.
+    /// Call after the metrics recorder is installed.
     pub fn init_renewal_counters(&self) {
         self.metrics.attempts.add(0, &[]);
         self.metrics.successes.add(0, &[]);
         self.metrics.failures.add(0, &[]);
     }
 
-    /// Update the time-to-expiry gauge with the current certificate's expiry time.
     fn update_time_to_expiry(&self, cert_data: &CertificateData) {
         let now = now_unix_timestamp();
         let time_to_expiry = cert_data.expires_at.saturating_sub(now);
         self.metrics.time_to_expiry.record(time_to_expiry, &[]);
     }
 
-    /// Record a successful renewal by updating counters and gauges.
     fn record_successful_renewal(&self) {
         self.metrics.successes.add(1, &[]);
         self.metrics
@@ -266,12 +226,10 @@ impl CertManager {
             .record(now_unix_timestamp(), &[]);
     }
 
-    /// Record a failed renewal attempt.
     fn record_failed_renewal(&self) {
         self.metrics.failures.add(1, &[]);
     }
 
-    /// Provision a certificate with the configured strategy.
     #[instrument(
         name = "Provisioning certificate",
         skip(self),
@@ -308,33 +266,26 @@ impl CertManager {
             .map(|ident| Identifier::Dns(ident.into()))
             .collect();
 
-        // Create the ACME order based on the given domain name(s).
         let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
 
         let mut cleanup_futures = vec![];
-        // Process the authorizations
         let mut authorizations = order.authorizations();
         while let Some(authz_result) = authorizations.next().await {
             let mut authz = authz_result?;
 
-            // Skip already valid authorizations
             if authz.status == AuthorizationStatus::Valid {
                 continue;
             }
 
-            // Handle the ACME challenge
             let cleanup_future = challenge_handler.handle_authorization(&mut authz).await?;
             cleanup_futures.push(cleanup_future);
         }
 
-        // poll order until it is ready or an error occurs
         self.poll_order(&mut order, cleanup_futures).await?;
 
-        // Generate the certificate signing request
         let server_key_pem = self.signing_key_pem().await?;
         let csr_der_bytes = self.generate_csr(&server_key_pem)?;
 
-        // Finalize the order and try to get the certificate
         order.finalize_csr(&csr_der_bytes).await?;
         let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
@@ -348,7 +299,6 @@ impl CertManager {
 
         let cert_data = CertificateData::new(cert_chain_pem, not_before, not_after);
 
-        // Store the certificate
         self.persist_certificate_data(&cert_data).await?;
         self.cache_provisioned_chain(&cert_data.certificate).await?;
         self.store_active_signing_material(&cert_data.certificate, &server_key_pem)
@@ -380,7 +330,7 @@ impl CertManager {
             Ok(())
         };
 
-        // perform clean up, regardless of success or failure
+        // Runs whether or not issuance succeeded.
         for cleanup_future in cleanup_futures {
             if let Err(e) = cleanup_future.run().await {
                 warn!("Failed to clean up challenge: {e}");
@@ -389,7 +339,6 @@ impl CertManager {
         result
     }
 
-    /// Attempt to get the signing key
     #[instrument(
         name = "Getting Server Signing Secret",
         skip(self),
@@ -401,14 +350,12 @@ impl CertManager {
 
         let material_storage = self.crypto_storage()?;
 
-        // Try to load the existing signing key
         let secret_id = self.signing_secret_id();
         if let Some(secret) = material_storage.load_signing_key(&secret_id).await? {
             info!("Found existing server secret. Skipping...");
             return Ok(secret);
         }
 
-        // If the secret does not exist, try to generate and store a new one
         warn!("No existing server secret found. Generating a new one...");
         let key = SigningKey::generate(SigningAlgorithm::Es256)?;
         let key_pem = key.to_pkcs8_pem()?;
@@ -435,10 +382,6 @@ impl CertManager {
         }
     }
 
-    /// Attempt to get the certificate data
-    ///
-    /// # Errors
-    /// Returns an error if the certificate data cannot be parsed or if there was an issue when trying to retrieve the certificate data.
     pub async fn certificate(&self) -> Result<Option<CertificateData>, CertError> {
         let material_storage = self.crypto_storage()?;
         let cert_key = self.cert_key();
@@ -448,12 +391,7 @@ impl CertManager {
         Ok(None)
     }
 
-    /// Extract individual certificates from the certificate chain and return shared base64-encoded chain parts.
-    ///
-    /// This function will return `None` if the server certificate was not found.
-    ///
-    /// # Errors
-    /// Returns an error if the certificate chain cannot be parsed or if there was an issue when trying to retrieve the server certificate
+    /// None when no certificate has been provisioned yet.
     pub async fn cert_chain_parts(&self) -> Result<Option<CertificateChain>, CertError> {
         let cert_key = self.cert_key();
         if let Some(certs) = self.cert_chain_cache.get(&cert_key).await {
@@ -461,21 +399,14 @@ impl CertManager {
         }
         if let Some(cert_data) = self.certificate().await? {
             let certs = self.parse_cert_chain_parts(&cert_data.certificate)?;
-            // NOTE: There is a benign race between this read-path insert and
-            // the provisioning-path `replace` in `cache_provisioned_chain`.
-            // If a concurrent `request_certificate` replaces the cache entry
-            // between our miss and this insert, we overwrite the fresh chain
-            // with the (still valid) old chain. The stale entry persists until
-            // the next provisioning or renewal cycle. This is acceptable
-            // because the signing key is stable across renewals, so the old
-            // chain remains valid for token verification.
+            // May race a renewal and cache the old chain; harmless, the key survives renewals.
             self.cert_chain_cache.insert(cert_key, certs.clone()).await;
             return Ok(Some(certs));
         }
         Ok(None)
     }
 
-    /// Return certificate chain and signing key from one active snapshot.
+    /// Chain and key always come from the same snapshot.
     pub async fn signing_material(&self) -> Result<Arc<SigningMaterial>, CertError> {
         if let Some(material) = self.active_signing_material.load_full() {
             return Ok(material);
@@ -500,18 +431,15 @@ impl CertManager {
         Ok(material)
     }
 
-    /// Renew the certificate if needed
     #[instrument(
         name = "Checking Certificate Renewal",
         skip(self),
         fields(domains = ?self.domains)
     )]
     pub async fn renew_cert_if_needed(&self) -> Result<(), CertError> {
-        // Record renewal attempt
         self.metrics.attempts.add(1, &[]);
 
         if let Some(cert_data) = self.certificate().await? {
-            // Update time-to-expiry gauge regardless of whether we renew
             self.update_time_to_expiry(&cert_data);
 
             if self
@@ -556,7 +484,6 @@ impl CertManager {
         Ok(())
     }
 
-    // Attempt to retrieve existing or create an ACME account
     #[instrument(
         name = "Getting or Creating ACME Account",
         skip(self),
@@ -591,7 +518,6 @@ impl CertManager {
                 }
             }
         }
-        // Create a new ACME account
         let (account, credentials) = Account::builder_with_http(self.create_http_client()?)
             .create(
                 &NewAccount {
@@ -603,7 +529,6 @@ impl CertManager {
                 None,
             )
             .await?;
-        // Store new credentials
         material_storage
             .store_secret(&account_id, &serde_json::to_string(&credentials)?)
             .await?;
@@ -612,9 +537,7 @@ impl CertManager {
         Ok(account)
     }
 
-    // Generate a certificate signing request with optional EKU
     fn generate_csr(&self, signing_key: &str) -> Result<Vec<u8>, CertError> {
-        // Build certificate request parameters
         let mut params = CertificateParams::new(self.domains.clone())
             .map_err(|e| CertError::Parsing(e.to_string()))?;
         let mut dn = DistinguishedName::new();
@@ -623,14 +546,12 @@ impl CertManager {
             dn.push(DnType::OrganizationName, organization);
         }
         params.distinguished_name = dn;
-        // Add Extended Key Usage for Status List Token signing
-        // https://www.ietf.org/archive/id/draft-ietf-oauth-status-list-10.html#section-10.1
+        // EKU for status list signing, draft-ietf-oauth-status-list §10.1.
         if let Some(eku) = &self.eku {
             params.extended_key_usages = vec![ExtendedKeyUsagePurpose::Other(eku.to_vec())];
         }
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
 
-        // Generate certificate signing request
         let keypair =
             rcgen::KeyPair::from_pem(signing_key).map_err(|e| CertError::Parsing(e.to_string()))?;
         let csr = params
@@ -644,20 +565,17 @@ impl CertManager {
 
         match self.renewal_strategy {
             RenewalStrategy::DaysBeforeExpiry(value) => {
-                // Default to 30 days if not specified
                 let days_before = value.unwrap_or(30);
                 let renewal_time = cert_data.expires_at - days_to_secs(days_before);
                 now_unix_timestamp() >= renewal_time
             }
             RenewalStrategy::PercentageOfLifetime(value) => {
-                // Default to 2/3 of the lifetime if not specified
                 let percentage = value.unwrap_or(2.0 / 3.0);
                 let lifetime = cert_data.expires_at - cert_data.valid_from;
                 let elapsed = now_unix_timestamp() - cert_data.valid_from;
                 (elapsed as f32 / lifetime as f32) >= percentage
             }
             RenewalStrategy::FixedInterval(value) => {
-                // Default to 60 days if not specified
                 let interval = value.unwrap_or(60);
                 let renewal_time = cert_data.valid_from + days_to_secs(interval);
                 now_unix_timestamp() >= renewal_time
@@ -786,10 +704,6 @@ impl CertManager {
         Ok(certs.into())
     }
 
-    /// Parse `cert_pem` into chain parts and replace the cached entry so the
-    /// next read returns the fresh chain without an extra storage load/parse.
-    ///
-    /// This is the hook called after a certificate is provisioned or renewed.
     async fn cache_provisioned_chain(&self, cert_pem: &str) -> Result<(), CertError> {
         let cert_key = self.cert_key();
         let parts = self.parse_cert_chain_parts(cert_pem)?;
@@ -836,14 +750,12 @@ impl CertificateData {
     }
 }
 
-/// Setup the certificate renewal scheduler
 pub async fn setup_cert_renewal_scheduler(
     cert_manager: Arc<CertManager>,
     cron_schedule: &str,
 ) -> Result<(), CertError> {
     let scheduler = JobScheduler::new().await?;
 
-    // Schedule certificate renewal check based on the configured cron schedule
     scheduler
         .add(Job::new_async(cron_schedule, move |_, _| {
             let cert_manager = cert_manager.clone();
@@ -860,7 +772,6 @@ pub async fn setup_cert_renewal_scheduler(
     Ok(())
 }
 
-// Helper function to format timestamp as UTC time
 fn ts_to_utc(timestamp: i64) -> String {
     const FORMAT: &[time::format_description::FormatItem<'_>] =
         format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
@@ -875,7 +786,6 @@ fn now_unix_timestamp() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
 
-// Helper function to get the TLD+1
 fn tld_plus_one(domains: &[String]) -> String {
     use public_suffix::{DEFAULT_PROVIDER, EffectiveTLDProvider};
 
@@ -883,7 +793,6 @@ fn tld_plus_one(domains: &[String]) -> String {
         return String::new();
     };
 
-    // Get the effective TLD+1 for the first domain
     DEFAULT_PROVIDER
         .effective_tld_plus_one(first)
         .unwrap_or(first)

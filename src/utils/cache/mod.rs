@@ -4,7 +4,6 @@ mod cert_chain;
 #[cfg(feature = "acme")]
 pub(crate) use cert_chain::{CertChainCache, CertificateChain};
 
-/// Pins that certificate chain cache entries stay cached until replacement.
 #[cfg(all(test, feature = "acme"))]
 mod cert_chain_cache_semantics {
     use std::sync::Arc;
