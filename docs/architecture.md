@@ -125,7 +125,7 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
-- **Admin** (`server.admin.host:server.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
 ### Data Flow
 

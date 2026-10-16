@@ -793,19 +793,22 @@ mod tests {
         );
     }
 
-    /// A shutdown test with an in-flight request on one listener and an idle
-    /// listener. Exercises the REAL `HttpServer`: all three listeners are bound,
-    /// the routers are wired to the correct surfaces (a public read answers on
-    /// the public listener and 404s on management), and `run` returns only after
-    /// every listener has drained on shutdown instead of returning on the first
-    /// one to finish.
+    /// Graceful shutdown must cover all three listeners. A request is held in
+    /// flight on the management listener (headers + half the body sent) while
+    /// the public and admin listeners sit idle. After shutdown is signalled,
+    /// `run` must stay pending until that request completes, and the request
+    /// must still get its response. With the old `select!`, an idle listener
+    /// would finish first and `run` would return with the request in flight.
+    ///
+    /// Also exercises the real `HttpServer::new` wiring: the root service
+    /// document answers on public and 404s on management, readiness answers on
+    /// admin.
     #[tokio::test]
     async fn test_graceful_shutdown_covers_all_three_listeners() {
         use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
 
-        // Reserve three distinct ephemeral ports so the config's duplicate
-        // listener check passes, then hand them to `HttpServer::new` which binds
-        // its own listeners.
         async fn ephemeral_port() -> u16 {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -835,10 +838,9 @@ mod tests {
         let admin_addr = server.admin_addr();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let run = server.run(shutdown_rx);
-        let run_handle = tokio::spawn(run);
+        let mut run_handle = tokio::spawn(server.run(shutdown_rx));
 
-        // Wait for all three listeners to be accepting connections.
+        // Wait for the public listener to accept connections.
         let client = reqwest::Client::new();
         let mut up = false;
         for _ in 0..50 {
@@ -856,23 +858,19 @@ mod tests {
         }
         assert!(up, "public listener never became ready");
 
-        // The routers are wired to the right surfaces: the root service document
-        // is served only by the public listener and is structurally absent on
-        // management, while readiness lives only on the admin listener.
+        // Routers are wired to the right surfaces.
         let public_resp = client
             .get(format!("http://{public_addr}/"))
             .send()
             .await
             .unwrap();
         assert_eq!(public_resp.status(), StatusCode::OK);
-
         let mgmt_resp = client
             .get(format!("http://{management_addr}/"))
             .send()
             .await
             .unwrap();
         assert_eq!(mgmt_resp.status(), StatusCode::NOT_FOUND);
-
         let admin_resp = client
             .get(format!("http://{admin_addr}/health/ready"))
             .send()
@@ -880,14 +878,60 @@ mod tests {
             .unwrap();
         assert_eq!(admin_resp.status(), StatusCode::OK);
 
-        // Trigger graceful shutdown and require `run` to complete successfully
-        // (it must not return early on the first listener to finish).
-        let _ = shutdown_tx.send(true);
-        let result = tokio::time::timeout(Duration::from_secs(10), run_handle)
+        // Hold a request in flight on the management listener: send the head
+        // and only half of the body, so the handler is waiting on the rest.
+        let body = format!(
+            r#"{{"issuer":"issuer1","public_key":{}}}"#,
+            crate::test_fixtures::TEST_EC_PUBLIC_JWK
+        );
+        let (first_half, second_half) = body.as_bytes().split_at(body.len() / 2);
+        let mut slow = TcpStream::connect(management_addr).await.unwrap();
+        let head = format!(
+            "POST {API_V1_PREFIX}/credentials HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        slow.write_all(head.as_bytes()).await.unwrap();
+        slow.write_all(first_half).await.unwrap();
+        slow.flush().await.unwrap();
+        // Give the server time to read the head and start the handler, so the
+        // request is genuinely in flight when shutdown is signalled.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Signal shutdown. The public and admin listeners are idle and drain
+        // immediately; management still has the request in flight, so `run`
+        // must NOT return yet. With the old `select!` it would.
+        shutdown_tx.send(true).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut run_handle)
+                .await
+                .is_err(),
+            "run returned while a request was still in flight on the management listener"
+        );
+
+        // Finish the request: it must still be served despite shutdown.
+        slow.write_all(second_half).await.unwrap();
+        slow.flush().await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut response))
             .await
-            .expect("run did not finish within 10s")
+            .expect("in-flight request was not answered during graceful shutdown")
             .unwrap();
-        result.expect("run must return Ok after graceful shutdown of all listeners");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 202"),
+            "in-flight request must complete normally, got: {response}"
+        );
+
+        // Only now may `run` finish, and it must do so cleanly.
+        tokio::time::timeout(Duration::from_secs(10), run_handle)
+            .await
+            .expect("run did not finish after the in-flight request completed")
+            .unwrap()
+            .expect("run must return Ok after graceful shutdown of all listeners");
     }
 
     #[tokio::test]
