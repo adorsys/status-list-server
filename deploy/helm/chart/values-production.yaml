@@ -67,18 +67,69 @@ grafanaDashboard:
     release: kube-prometheus-stack
     grafana_dashboard: "1"
 
-# OpenTelemetry Collector Production Exporter Setup (Guidance):
-# In production, ensure opentelemetry-collector.config exporters are configured
-# to forward to your enterprise backends (e.g. Tempo for traces, Loki for logs)
-# rather than printing debug output to stdout.
+# OpenTelemetry Collector: export traces to Grafana Tempo and logs to Grafana
+# Loki, both in the shared `monitoring` namespace. This block is a self-contained
+# `opentelemetry-collector.config` override (applied after values-aws.yaml by the
+# production deploy workflow) and is authoritative for the collector in production.
 #
-# Metrics: the /metrics endpoint discovered by the ServiceMonitor is the
-# authoritative Prometheus path for SLI metrics (see helm/chart/values.yaml
-# cluster note #4). Do NOT remote-write OTLP metrics back into this same shared
-# Prometheus -- the app exports the same instruments through both its pull reader
-# and its OTLP reader, so that would ingest identical series twice. If you export
-# OTLP metrics, send them to a different backend. Traces and logs are independent
-# and may flow through the configured OTLP exporters above.
+# Traces -> Tempo via OTLP gRPC (insecure) on 4317.
+# Logs   -> Loki via OTLP HTTP to the gateway (port 80) /loki/api/v1/push.
+# Metrics stay on the `debug` exporter: the /metrics endpoint discovered by the
+# ServiceMonitor is the authoritative Prometheus path for SLI metrics (see
+# helm/chart/values.yaml cluster note #4). Do NOT remote-write OTLP metrics back
+# into this same shared Prometheus -- the app exports the same instruments through
+# both its pull reader and its OTLP reader, so that would ingest identical series
+# twice. Metrics already reach Prometheus via the ServiceMonitor scrape.
+opentelemetry-collector:
+  config:
+    receivers:
+      jaeger: null
+      zipkin: null
+      prometheus: null
+      otlp:
+        protocols:
+          grpc:
+            endpoint: ${env:MY_POD_IP}:4317
+          http:
+            endpoint: ${env:MY_POD_IP}:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+    exporters:
+      # Traces -> Grafana Tempo (OTLP gRPC) in the shared monitoring namespace.
+      otlp/tempo:
+        endpoint: "tempo.monitoring.svc.cluster.local:4317"
+        tls:
+          insecure: true
+      # Logs -> Grafana Loki (OTLP HTTP to the gateway, port 80) in the shared
+      # monitoring namespace. The gateway routes /loki/api/v1/push to the backend.
+      loki:
+        endpoint: "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
+      # 'debug' is dev/troubleshooting scaffolding (prints to stdout). Metrics stay
+      # here: the /metrics ServiceMonitor scrape is the authoritative Prometheus
+      # path for SLI metrics, so OTLP metrics are intentionally NOT remote-written
+      # back into the shared kube-prometheus-stack (double ingestion).
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [loki]
 
 # Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
 # Enable this block and set alerting.platform + credentials to receive SLO alert

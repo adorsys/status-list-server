@@ -974,32 +974,31 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
-      # 'debug' is development scaffolding (prints telemetry to stdout).
-      # IMPORTANT: Operators MUST configure production exporters before deploying to production.
+      # Traces -> Grafana Tempo (OTLP gRPC) in the shared monitoring namespace.
+      otlp/tempo:
+        endpoint: "tempo.monitoring.svc.cluster.local:4317"
+        tls:
+          insecure: true
+      # Logs -> Grafana Loki (OTLP HTTP to the gateway) in the shared monitoring
+      # namespace. The gateway (port 80) routes /otlp/v1/logs to the backend.
+      # Note: the 'loki' exporter was removed from otel/opentelemetry-collector-contrib
+      # (>= 0.106), so logs use the native OTLP HTTP exporter to Loki's OTLP ingest.
+      # logs_endpoint is used (not endpoint) because otlphttp appends '/v1/logs' to
+      # 'endpoint', which would double the path (…/otlp/v1/logs/v1/logs) and 400.
+      otlphttp/loki:
+        logs_endpoint: "http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs"
+      # 'debug' is dev/troubleshooting scaffolding (prints to stdout). Metrics stay
+      # here: the /metrics ServiceMonitor scrape is the authoritative Prometheus path
+      # for SLI metrics, so OTLP metrics are intentionally NOT remote-written back
+      # into the shared kube-prometheus-stack (that would ingest identical series twice).
       debug:
         verbosity: basic
-      # PRODUCTION EXPORTER EXAMPLES:
-      # Un-comment and configure the appropriate sink for your infrastructure:
-      #
-      # Traces (e.g. Jaeger / Grafana Tempo via OTLP gRPC):
-      # otlp/tempo:
-      #   endpoint: "tempo.monitoring.svc.cluster.local:4317"
-      #   tls:
-      #     insecure: true
-      #
-      # Metrics (e.g. Prometheus Remote Write):
-      # prometheusremotewrite:
-      #   endpoint: "http://prometheus-k8s.monitoring.svc.cluster.local:9090/api/v1/write"
-      #
-      # Logs (e.g. Grafana Loki):
-      # loki:
-      #   endpoint: "http://loki-gateway.monitoring.svc.cluster.local:3100/loki/api/v1/push"
     service:
       pipelines:
         traces:
           receivers: [otlp]
           processors: [memory_limiter, batch]
-          exporters: [debug]
+          exporters: [otlp/tempo]
         metrics:
           receivers: [otlp]
           processors: [memory_limiter, batch]
@@ -1007,4 +1006,4 @@ opentelemetry-collector:
         logs:
           receivers: [otlp]
           processors: [memory_limiter, batch]
-          exporters: [debug]
+          exporters: [otlphttp/loki]
