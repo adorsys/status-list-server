@@ -11,6 +11,7 @@ NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
 NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
 MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
+POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
 tmp_dir=""
@@ -86,11 +87,11 @@ generate_postman_artifacts() {
   local collection_out="$1"
   local environment_out="$2"
 
-  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$MANAGEMENT_AUDIENCE" <<'NODE'
+  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$MANAGEMENT_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 
-const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, audience] = process.argv.slice(2);
+const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, audience, registryFile] = process.argv.slice(2);
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
 
@@ -123,6 +124,20 @@ const token = `${signingInput}.${base64url(signature)}`;
 const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 publicKeyJwk.kid = header.kid;
 publicKeyJwk.alg = header.alg;
+
+if (registryFile) {
+  fs.writeFileSync(registryFile, JSON.stringify({
+    version: 1,
+    issuers: [{
+      id: issuerId,
+      aggregation_id: listId,
+      display_name: 'Newman test issuer',
+      tier: 'standard',
+      keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
+    }],
+    admins: [],
+  }, null, 2));
+}
 
 function visitItems(items, visitor) {
   for (const item of items || []) {
@@ -175,6 +190,12 @@ collection_mount="/etc/newman/status-list-server.postman_collection.json"
 environment_mount="/etc/newman/status-list-server.postman_environment.json"
 
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
+# The server watches this file and atomically reloads the newly generated key.
+# Give the watcher a chance to validate and publish the snapshot before Newman
+# sends the first authenticated request.
+if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
+  sleep 2
+fi
 wait_for_api
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then

@@ -404,6 +404,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
     // Why tokens must leave out `aggregation_uri`, when they must.
+    #[allow(unused_variables)]
     let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
@@ -576,6 +577,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(not(feature = "acme"))]
+    #[allow(unreachable_code)]
     let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = {
         use crate::outbound::cert::{InlineCertificateProvider, ReloadingCertificateProvider};
 

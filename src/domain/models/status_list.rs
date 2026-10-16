@@ -561,6 +561,7 @@ pub(crate) fn allocation_limit_from_max_index(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn choose_unallocated_indices(
     allocated: &BTreeSet<i32>,
     count: usize,
