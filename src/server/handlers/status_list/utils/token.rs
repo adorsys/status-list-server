@@ -26,10 +26,7 @@ const TOKEN_ATTEMPTS_METRIC: &str = "token_generation_attempts";
 const TOKEN_FAILURES_METRIC: &str = "token_generation_failures";
 const AGGREGATION_URI_OMITTED_METRIC: &str = "aggregation_uri_omitted";
 
-/// Token-generation SLI counters. Cached after first use: the first token is
-/// only ever generated after `init_telemetry`/`setup_metrics` has installed the
-/// global meter provider, so the handles are valid (unlike a handle taken at
-/// module init, which would be a permanent no-op).
+/// Safe to cache: no token is built before setup_metrics runs.
 #[derive(Clone)]
 struct TokenMetrics {
     attempts: Counter<u64>,
@@ -61,12 +58,8 @@ fn token_metrics() -> TokenMetrics {
     })
 }
 
-/// The `aggregation_uri` claim for an issuer's tokens. The claim is optional,
-/// so a failed lookup leaves it out rather than failing the request. Falling
-/// back to the unscoped URI would be worse: relying parties may keep it.
-///
-/// Logged at DEBUG: the metric counts failures, and a database outage would
-/// otherwise log once per request.
+/// A failed lookup drops the claim instead of failing the request; RPs would keep an unscoped URI.
+/// Logs at debug: the metric counts failures, and an outage would log every request.
 pub(crate) async fn issuer_aggregation_uri(
     state: &crate::server::AppState,
     issuer: &Issuer,
@@ -87,7 +80,6 @@ pub(crate) async fn issuer_aggregation_uri(
     }
 }
 
-/// Classify the client's negotiated format into the bounded `format` label value.
 fn token_format(accept: AcceptType) -> &'static str {
     match accept {
         AcceptType::Cwt => "cwt",
@@ -119,18 +111,6 @@ struct JwtHeader<'a> {
     x5c: &'a [String],
 }
 
-/// Build a signed status-list token (JWT or CWT) for the given record.
-///
-/// # Parameters
-/// * `accept` – the negotiated format (`AcceptType::Jwt` or `AcceptType::Cwt`)
-/// * `status_record` – the status list data to encode
-/// * `aggregation_uri` – the `aggregation_uri` claim, if any
-/// * `validity_window` – `(iat, exp)` pair; defaults to `(now, now + token_exp_secs)`
-/// * `client_accepts_gzip` – whether to gzip-compress JWT output
-/// * `signing_material` – an already-fetched signing snapshot; this lets the
-///   caller pin the exact key/certificate used so a rotated key (whose
-///   fingerprint also keys the signed-bytes cache) never produces an entry under
-///   a mismatched fingerprint
 pub(crate) async fn build_status_list_token(
     state: &crate::server::AppState,
     accept: AcceptType,
@@ -233,8 +213,7 @@ async fn build_status_list_token_inner(
     .map_err(|err| StatusListError::Backend(Box::new(err)))?
 }
 
-/// A missing certificate chain is a misconfiguration that will not recover on
-/// its own, so it is surfaced as a 500 (Backend) rather than a retryable 503.
+/// 500, not 503: a missing chain won't fix itself.
 fn missing_chain_error() -> StatusListError {
     StatusListError::Backend(Box::new(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -242,12 +221,7 @@ fn missing_chain_error() -> StatusListError {
     )))
 }
 
-/// Build the CBOR `x5chain` protected-header value from the pre-decoded DER
-/// chain, following the status-list spec: a single certificate maps to a
-/// `ByteString`, multiple certificates to an `Array` of `ByteString`s.
-///
-/// The DER is already decoded and stored on [`crate::domain::ports::SigningMaterial`], so this runs
-/// without a base64 decode, a global lock, or a comparison on every request.
+/// One cert is a bare byte string, several are an array, per the spec.
 fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
     if certs.len() == 1 {
         CborValue::Bytes(certs[0].to_vec())
@@ -261,7 +235,6 @@ fn x5chain_from_der(certs: &[Box<[u8]>]) -> CborValue {
     }
 }
 
-/// Encode the §4.3 status_list map shared by CWT issuance and reference vectors.
 fn cwt_status_list(
     status_list: &crate::domain::models::status_list::StatusList,
     aggregation_uri: Option<String>,
@@ -513,10 +486,6 @@ mod tests {
     #[test]
     fn draft21_appendix_c_1_and_c_2_vectors() {
         use crate::domain::models::status_list::{Status, StatusEntry};
-        // Indices, status values, and expected lst strings are from the specification:
-        // draft-ietf-oauth-status-list-21, Appendix C.1 (1-bit) and C.2 (2-bit).
-        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.1
-        // https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-21#appendix-C.2
         let indices = [
             0, 1993, 25460, 159495, 495669, 554353, 645645, 723232, 854545, 934534, 1000345,
         ];
@@ -546,7 +515,6 @@ mod tests {
                     },
                 })
                 .collect();
-            // Appendix C lists have exactly 2^20 entries, including the trailing zeros.
             entries.push(StatusEntry {
                 index: 1_048_575,
                 status: Status::Valid,
@@ -560,8 +528,6 @@ mod tests {
                 inflate_vector(expected),
                 "decompressed reference bytes"
             );
-            // Different conforming DEFLATE encoders need not produce identical bytes.
-            // Keep miniz in production; compare the Appendix C vectors after inflation.
         }
     }
 
@@ -662,10 +628,6 @@ mod tests {
 
     #[tokio::test]
     async fn default_validity_window_rejects_iat_plus_exp_overflow() {
-        // Synthetic issuance-time boundary: with a real (positive) `now`, an
-        // `APP_STATUS_LIST__TOKEN_EXP_SECS` of `i64::MAX` makes `iat + token_exp_secs`
-        // overflow the instant the default validity window is computed. The
-        // `checked_add` guard must fail closed instead of wrapping `exp` negative.
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = i64::MAX as u64;
 
@@ -726,10 +688,6 @@ mod tests {
 
     #[tokio::test]
     async fn default_validity_window_rejects_u64_max_token_exp_secs_via_try_from() {
-        // Direct-construction bypass: a caller could set `token_exp_secs = u64::MAX`
-        // on an AppState without going through config validation. The guard must
-        // convert via `i64::try_from` before `checked_add`, so `u64::MAX` does NOT
-        // silently become `-1` and produce a bogus (lower) exp. It must fail closed.
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_exp_secs = u64::MAX;
 
@@ -758,11 +716,6 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_ttl_conversion_rejects_u64_max_via_try_from() {
-        // Direct-construction bypass: a caller could set `token_ttl_secs = u64::MAX`
-        // on an AppState without going through config validation. The TTL is emitted
-        // as an i64 claim, so the conversion must fail closed with a plain internal
-        // (Backend) error rather than silently wrapping negative or misleadingly
-        // reporting a token-exp overflow.
         let mut state = crate::test_utils::test_app_state(None).await;
         state.token_ttl_secs = u64::MAX;
 
