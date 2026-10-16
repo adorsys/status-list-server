@@ -109,25 +109,26 @@ RUST_LOG=info \
 
 ```bash
 curl -s -o /dev/null -w "health -> %{http_code}\n" http://localhost:8000/health/live   # 200
-curl -s -o /dev/null -w "metrics -> %{http_code}\n" http://localhost:8000/metrics      # 200, NOT 404
-curl -s http://localhost:8000/metrics | grep -E "http_server_duration_seconds|status_list_cache"
+curl -s -o /dev/null -w "metrics -> %{http_code}\n" http://localhost:8002/metrics      # 200, NOT 404 (admin listener)
+curl -s http://localhost:8002/metrics | grep -E "http_server_duration_seconds|status_list_cache"
 ```
 
 A `404` on `/metrics` means the flag was not set (or the process was started
-before this change) — restart with `APP_SERVER__ENABLE_METRICS=true`.
+before this change) — restart with `APP_SERVER__ENABLE_METRICS=true`. `/metrics`
+is served on the admin listener (`server.admin`, port `8002`).
 
 ---
 
 ## 5. Point Prometheus at the app
 
-Prometheus's default scrape target is `app:8000` (the Compose DNS name for the
-in-Docker app). If you run the app **on the host** (as in this demo), that DNS
+Prometheus's default scrape target is `app:8002` (the Compose DNS name for the
+in-Docker app, admin listener). If you run the app **on the host** (as in this demo), that DNS
 name does not resolve, so change the target to the Docker bridge gateway
 (host from the container's perspective) and reload:
 
 ```bash
 # edit deploy/observability/prometheus/prometheus.yml
-#   targets: ['app:8000']  ->  targets: ['192.168.0.1:8000']
+#   targets: ['app:8002']  ->  targets: ['192.168.0.1:8002']
 # gateway IP:
 docker network inspect status-list-server_status-list-network \
   --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
@@ -376,7 +377,7 @@ webhooks) is handled outside of this repository.
 ## 10. Cleanup / revert dev-only changes
 
 - **Restore the scrape target** in `deploy/observability/prometheus/prometheus.yml` to
-  `app:8000` when running the app in Docker.
+  `app:8002` when running the app in Docker.
 - **Rate-limit overrides** are runtime env only — don't ship the high values to
   production.
 - **Datasource `uid: prometheus`** in `datasources.yml` is a permanent, correct

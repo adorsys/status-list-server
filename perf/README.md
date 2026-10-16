@@ -13,7 +13,12 @@ This suite contains four tests exercising the StatusList Server:
 3. Spike test
 4. Authentication test
 
-Each test targets `http://localhost:8000` by default.
+Each test targets `http://localhost:8000` by default. Public reads (health,
+welcome, status-list retrieval) hit that target. Management writes (credential
+registration and status-list publishes/updates) go to the management listener at
+`http://localhost:8001` by default. Override the write destination with
+`MANAGEMENT_TARGET` (e.g. `MANAGEMENT_TARGET=https://mgmt.example.com npm run
+test:load`) for a deployment with a separate management hostname.
 
 ## Prerequisites
 

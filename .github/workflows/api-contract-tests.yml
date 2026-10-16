@@ -98,6 +98,8 @@ jobs:
           issuer_registry_file=$(mktemp)
           printf 'version: 1\nissuers: []\nadmins: []\n' > "$issuer_registry_file"
           APP_SERVER__HOST=0.0.0.0 \
+            APP_SERVER__MANAGEMENT__HOST=0.0.0.0 \
+            APP_SERVER__ADMIN__HOST=0.0.0.0 \
             APP_SERVER__ENABLE_METRICS=true \
             APP_MANAGEMENT_AUTH__ISSUERS_FILE="$issuer_registry_file" \
             APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \

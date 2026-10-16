@@ -9,6 +9,7 @@ pub mod rate_limit;
 
 use crate::domain::models::credential::{AggregationId, Issuer};
 use crate::domain::service::{Service, StatusListPolicy};
+use axum::{Json, extract::State};
 use std::collections::HashSet;
 use std::sync::Arc;
 use url::Url;
@@ -41,6 +42,21 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
     }
 }
 
+/// Links exposed in the `GET /` service document.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceLinks {
+    pub documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portal: Option<String>,
+}
+
+/// The minimal `application/json` service document returned by `GET /`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceDocument {
+    pub service: &'static str,
+    pub links: ServiceLinks,
+}
+
 /// Shared application state injected into web handlers.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -65,6 +81,8 @@ pub struct AppState {
     pub management_auth: ManagementAuthConfig,
     /// Last-known-good operator-managed issuer trust registry snapshot.
     pub issuer_registry: Arc<auth::issuer_registry::RegistryHandle>,
+    /// Links exposed in the `GET /` service document.
+    pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
@@ -98,4 +116,15 @@ impl AppState {
             max_lists_per_issuer: self.max_lists_per_issuer,
         }
     }
+}
+
+/// `GET /` service document: a minimal `application/json` body naming the
+/// service and its documentation (and portal when configured). No version and
+/// no HTML, so a proxy/ingress health-checking the root sees a stable JSON
+/// contract.
+pub async fn service_document(State(state): State<AppState>) -> Json<ServiceDocument> {
+    Json(ServiceDocument {
+        service: "Status List Server",
+        links: state.links,
+    })
 }

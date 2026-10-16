@@ -6,7 +6,9 @@ import requests
 import uuid
 
 BASE_URL = utils.get_base_url()
+MANAGEMENT_URL = utils.get_management_url()
 print(f"Using base URL: {BASE_URL}")
+print(f"Using management URL: {MANAGEMENT_URL}")
 
 # Test the health check endpoint (GET /health)
 health_endpoint = f"{BASE_URL}/health"
@@ -19,7 +21,7 @@ tc.assertEqual("OK", response.text)
 print("Health check successful! Server is running.")
 
 # Register one issuer
-credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
+credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
 print(f"Testing POST: {credentials_endpoint}")
 
 gondwana_digital_pole = fixtures.get_gondwana_digital_pole_issuer()
@@ -38,7 +40,7 @@ print("Credentials published successfully!")
 bearer_token = fixtures.create_bearer_jwt_token(gondwana_digital_pole)
 status_list_id = str(uuid.uuid4())
 
-status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PUT: {status_publish_endpoint}")
 
 response = requests.put(
@@ -55,7 +57,7 @@ scott_holdings = fixtures.get_scott_holdings_issuer()
 bearer_token = fixtures.create_bearer_jwt_token(scott_holdings)
 status_list_id = str(uuid.uuid4())
 
-status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PUT: {status_publish_endpoint}")
 
 response = requests.put(

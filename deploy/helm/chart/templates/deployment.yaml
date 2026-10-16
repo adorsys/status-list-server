@@ -64,7 +64,7 @@ spec:
       annotations:
         {{- if .Values.statuslist.prometheusAnnotations }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.statuslist.service.targetPort | quote }}
+        prometheus.io/port: {{ .Values.statuslist.service.adminTargetPort | quote }}
         prometheus.io/path: "/metrics"
         {{- end }}
         {{- if .Values.externalSecret.enabled }}
@@ -138,6 +138,12 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.statuslist.service.targetPort | int }}
+              protocol: TCP
+            - name: management
+              containerPort: {{ .Values.statuslist.service.managementTargetPort | int }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.statuslist.service.adminTargetPort | int }}
               protocol: TCP
           {{- with .Values.statuslist.livenessProbe }}
           livenessProbe:
@@ -215,6 +221,18 @@ spec:
               {{- else }}
                 {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
               {{- end }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__MANAGEMENT__HOST") }}
+              {{- $_ := set $env "APP_SERVER__MANAGEMENT__HOST" "0.0.0.0" }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__MANAGEMENT__PORT") }}
+              {{- $_ := set $env "APP_SERVER__MANAGEMENT__PORT" (.Values.statuslist.service.managementTargetPort | toString) }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__ADMIN__HOST") }}
+              {{- $_ := set $env "APP_SERVER__ADMIN__HOST" "0.0.0.0" }}
+            {{- end }}
+            {{- if not (hasKey $env "APP_SERVER__ADMIN__PORT") }}
+              {{- $_ := set $env "APP_SERVER__ADMIN__PORT" (.Values.statuslist.service.adminTargetPort | toString) }}
             {{- end }}
             {{- $otel := index .Values "opentelemetry-collector" | default dict }}
             {{- if $otel.enabled }}
