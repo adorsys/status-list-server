@@ -19,26 +19,14 @@ tc.assertEqual("OK", response.text)
 
 print("Health check successful! Server is running.")
 
-# Publish credentials to register as an Issuer (POST /api/v1/credentials)
+# Use an issuer provisioned in the local registry fixture.
 issuer_data = fixtures.get_gondwana_digital_pole_issuer()
 print("Proceeding with Issuer:", issuer_data.get("label"))
-
+bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
 credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
-print(f"Testing POST: {credentials_endpoint}")
-
-payload = {
-    "issuer": issuer_data.get("label"),
-    "public_key": fixtures.get_public_jwk(issuer_data),
-}
-
-response = requests.post(credentials_endpoint, json=payload)
-tc.assertEqual(response.status_code, 202, "Failed to publish credentials")
-print("Credentials published successfully!")
-
-# It should not be possible to replay the request to publish credentials for the same issuer.
-response = requests.post(credentials_endpoint, json=payload)
-tc.assertEqual(response.status_code, 409)
-tc.assertEqual("credentials_already_exist", response.json().get("error"))
+response = requests.get(credentials_endpoint, headers={"Authorization": f"Bearer {bearer_token}"})
+tc.assertEqual(response.status_code, 200, "Issuer registry fixture was not loaded")
+tc.assertEqual(response.json().get("issuer"), issuer_data["label"])
 
 # Publish token statuses to a status list (PUT /api/v1/status-lists/{list_id}/statuses)
 status_list_id = str(uuid.uuid4())
@@ -46,8 +34,6 @@ print("Publishing status list:", status_list_id)
 
 status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PUT: {status_publish_endpoint}")
-
-bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
 
 response = requests.put(
     status_publish_endpoint,

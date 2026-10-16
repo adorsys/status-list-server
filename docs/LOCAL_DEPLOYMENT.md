@@ -13,7 +13,7 @@ For variables listed under `environment:` in `docker-compose.yml`, Compose uses 
 
 ## Docker Compose profiles
 
-`docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
+`docker compose up --build` starts only the server. It uses in-memory storage, a checked-in local test certificate, and the public issuer fixture at `demo/issuers.yaml`. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
 
 - `postgres`: Add PostgreSQL (`db`) only.
 - `mysql`: Add MySQL (`mysql`) only.

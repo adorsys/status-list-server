@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "issuers": [
+    {
+      "id": "gondwana-digital-pole",
+      "aggregation_id": "e3281a1c-c73e-4551-9351-603ab3f3923b",
+      "tier": "standard",
+      "keys": [
+        {
+          "kid": "kiKS9vJacRm2xI6KR5ZxXt4zogn77ED2pA72XxiRS2M",
+          "alg": "ES256",
+          "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "swasdMSg9Y6ZhBSheyx8KVq4ZkKuA54Azf8lVCj4zJ0",
+            "y": "JlVfgqhvaGzfiUwxgEFs42vQyk9KMoVDIDQ7UAfeMU8"
+          }
+        }
+      ]
+    },
+    {
+      "id": "scott-holdings",
+      "aggregation_id": "09f25d84-7df9-48dc-b2dc-ef51d4ea812f",
+      "tier": "standard",
+      "keys": [
+        {
+          "kid": "sS8x1t9Zdr3LHY3JSZVx0ZuxvDfr1I_5rVn4eXuk7Z0",
+          "alg": "PS256",
+          "jwk": {
+            "kty": "RSA",
+            "n": "s4Df4EUySK6d7pRQkLhM6lbgtSuKwDOnJ3IpUyiP6yY8Bl4-ksmSC3Q3xe9KgAltkQd-hVo_3bSw1Mn5Ozzcs-xXTkt7IIDpFE8wWe4sPdm1-OZ0tZb3FWJV2fM4ZsFeo6-ucaiZjmUIeq-xccMaNcPkP6xhBtlMXuvtf2PkKqov9Im8MgmrTwSMZa1AWHo0bgS5AdB9n3KKjp75CCTtLdT4_fRpehgfu9F-QHPl6YYHSKNEYzzSt-Ix0A76IYceuryQFps3iIVDRlFAqfFTjHlP3Cg7byhjee4YCqL9YwTSLyRVxYKfUU9byiDGqf9jeiXZRssVNLK99c8MxzEvfw",
+            "e": "AQAB"
+          }
+        }
+      ]
+    }
+  ]
+}

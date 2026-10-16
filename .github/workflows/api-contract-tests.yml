@@ -97,6 +97,7 @@ jobs:
           cargo build --no-default-features --features memory
           APP_SERVER__HOST=0.0.0.0 \
             APP_SERVER__ENABLE_METRICS=true \
+            APP_MANAGEMENT_AUTH__ISSUERS_FILE=demo/issuers.yaml \
             APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \
             APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
             APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \

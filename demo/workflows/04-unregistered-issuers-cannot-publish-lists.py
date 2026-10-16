@@ -18,21 +18,8 @@ tc.assertEqual("OK", response.text)
 
 print("Health check successful! Server is running.")
 
-# Register one issuer
-credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
-print(f"Testing POST: {credentials_endpoint}")
-
+# Use a provisioned issuer and an unregistered signer.
 gondwana_digital_pole = fixtures.get_gondwana_digital_pole_issuer()
-print("Proceeding with Issuer:", gondwana_digital_pole.get("label"))
-
-payload = {
-    "issuer": gondwana_digital_pole.get("label"),
-    "public_key": fixtures.get_public_jwk(gondwana_digital_pole),
-}
-
-response = requests.post(credentials_endpoint, json=payload)
-tc.assertEqual(response.status_code, 202, "Failed to publish credentials")
-print("Credentials published successfully!")
 
 # The registered issuer publishes a status list
 bearer_token = fixtures.create_bearer_jwt_token(gondwana_digital_pole)
@@ -51,7 +38,7 @@ tc.assertEqual(response.status_code, 201, "Failed to publish token statuses")
 print(f"Issuer A published status list {status_list_id}")
 
 # An unregistered issuer is refused when publishing a list
-scott_holdings = fixtures.get_scott_holdings_issuer()
+scott_holdings = fixtures.get_unregistered_issuer()
 bearer_token = fixtures.create_bearer_jwt_token(scott_holdings)
 status_list_id = str(uuid.uuid4())
 
