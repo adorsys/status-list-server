@@ -4,24 +4,16 @@ import jwt
 import time
 import os
 
-# ---------------------------------------------------------------------
-# Example token issuer configurations
-# These are placeholder structures for demonstration.
-# In a real application, keypair information would be managed securely.
-# ---------------------------------------------------------------------
+# Demo keypairs only; real issuers keep keys in a secret store.
 
 
 def generate_random_string(length):
-    """Generates a random string of specified length."""
     characters = string.ascii_lowercase + string.digits
     return ''.join(random.choice(characters) for i in range(length))
 
 
 def get_gondwana_digital_pole_issuer():
-    """
-    Returns the Gondwana Digital Pole issuer dictionary with a random suffix
-    appended to the label.
-    """
+    """Random label suffix so reruns don't hit 409."""
     random_suffix = generate_random_string(5)
     issuer_data = {
         "label": f"gondwana-digital-pole-{random_suffix}",
@@ -43,10 +35,7 @@ def get_gondwana_digital_pole_issuer():
 
 
 def get_scott_holdings_issuer():
-    """
-    Returns the Scott Holdings issuer dictionary with a random suffix
-    appended to the label.
-    """
+    """Random label suffix so reruns don't hit 409."""
     random_suffix = generate_random_string(5)
     issuer_data = {
         "label": f"scott-holdings-{random_suffix}",
@@ -68,15 +57,7 @@ def get_scott_holdings_issuer():
 
 
 def get_public_jwk(issuer: dict) -> dict:
-    """
-    Derives the issuer's public JWK (RFC 7517) from its PEM public key.
-
-    Args:
-        issuer (dict): Issuer dictionary containing label and keypair.
-
-    Returns:
-        dict: Public JWK carrying the issuer's signing algorithm.
-    """
+    """Public JWK (RFC 7517) from the issuer's PEM key, tagged with its alg."""
     alg = issuer["keypair"]["alg"]
     algorithm = jwt.get_algorithm_by_name(alg)
     public_key = algorithm.prepare_key(issuer["keypair"]["public_key"])
@@ -90,17 +71,7 @@ def get_public_jwk(issuer: dict) -> dict:
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
-    """
-    Creates a JWT using the issuer's keypair and a default payload.
-
-    Args:
-        issuer (dict): Issuer dictionary containing label and keypair.
-        lifespan (int): Lifetime of the token in seconds (default is 5 minutes,
-            the server's default maximum).
-
-    Returns:
-        str: Encoded JWT.
-    """
+    """Lifespan defaults to 300 s, the server's default maximum."""
     current_time = int(time.time())
     payload = {
         # The verified issuer must own the key named by the JWT header.

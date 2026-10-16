@@ -5,13 +5,10 @@ const path = require('path');
 
 const scriptsDir = __dirname;
 
-// The server rejects management JWTs whose lifetime (`exp - iat`) exceeds
-// `management_auth.max_token_lifetime_secs` (default 300s). Workers refresh
-// expired tokens from this run's private key instead of extending the lifetime.
+// The server caps exp - iat at 300 s by default, so workers re-sign expired tokens.
 const TOKEN_LIFETIME_SECS = 300;
 const audience = process.env.MANAGEMENT_AUDIENCE || 'status-list-server-management';
 
-// Generate EC key pair
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
   namedCurve: 'P-256',
   publicKeyEncoding: {
@@ -24,7 +21,6 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
   }
 });
 
-// Convert public key to JWK format
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
 const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
@@ -35,7 +31,6 @@ console.log('Generating tokens...');
 console.log('Issuer ID:', issuerId);
 console.log('Public Key JWK:', jwk);
 
-// Generate tokens
 const tokens = [];
 const now = Math.floor(Date.now() / 1000);
 
@@ -59,7 +54,6 @@ for (let i = 0; i < 100; i++) {
   tokens.push(token);
 }
 
-// Save tokens and issuer info
 const testData = {
   issuerId,
   publicKeyJwk: jwk,
@@ -69,11 +63,7 @@ const testData = {
   generatedAt: new Date().toISOString()
 };
 
-// Write only test-tokens.json. All Artillery scenarios read the issuer, public
-// key and signed JWTs from this one file, so the separate ec-private-key.pem and
-// ec-public-key.jwk files would be unread dead weight. The data is sensitive
-// (it contains the ephemeral private signing key), so it is written once with
-// mode 0600 (owner read/write only).
+// Holds this run's private signing key, so it's owner-only (0600).
 const testDataPath = path.join(scriptsDir, 'test-tokens.json');
 const serialized = JSON.stringify(testData, null, 2);
 const tmp = `${testDataPath}.tmp-${process.pid}`;

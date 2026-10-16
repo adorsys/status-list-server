@@ -27,11 +27,10 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # Performance thresholds
   ensure:
-    maxErrorRate: 5 # Max 5% error rate
-    p95: 800 # 95th percentile < 800ms
-    p99: 1500 # 99th percentile < 1.5s
+    maxErrorRate: 5
+    p95: 800
+    p99: 1500
 
 scenarios:
   - name: "Health Check Flow"
@@ -52,7 +51,7 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - matchesRegexp: "Status.*Server" # Matches "Status list Server" or similar
+            - matchesRegexp: "Status.*Server"
 
   - name: "Status List Retrieval Flow"
     weight: 30
@@ -77,8 +76,8 @@ scenarios:
             public_key: "{{ publicKeyJwk }}"
           expect:
             - statusCode:
-                - 202 # Accepted
-                - 409 # Conflict (duplicate) is acceptable
+                - 202
+                - 409
           afterResponse: "handleCredentialResponse"
 
   - name: "Authenticated Update Flow"
@@ -87,7 +86,6 @@ scenarios:
       - function: "loadTestData"
       - function: "selectRandomToken"
       - function: "generateUUID"
-      # First publish
       - put:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
@@ -99,7 +97,6 @@ scenarios:
           expect:
             - statusCode: 201
           afterResponse: "handlePublishResponse"
-      # Then update
       - think: 0.5
       - patch:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
