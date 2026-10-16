@@ -24,23 +24,17 @@ const path = require('path');
 
 const scriptsDir = __dirname;
 const seedFile = path.join(scriptsDir, 'seed-lists.json');
-const DEFAULT_TARGET = process.env.TEST_TARGET || 'http://localhost:8000';
 // Writes (credential registration, seed status-list publishing) go to the
-// management listener, which is the sibling of the public target at :8001 by
-// default. Override with MANAGEMENT_TARGET for a separate management host.
-function siblingManagementTarget(target) {
-  const url = new URL(target);
-  url.port = '8001';
-  return url.toString().replace(/\/$/, '');
-}
-const MANAGEMENT_TARGET =
-  process.env.MANAGEMENT_TARGET || siblingManagementTarget(DEFAULT_TARGET);
+// management listener at :8001 by default, matching the MANAGEMENT_TARGET
+// default the npm test:* scripts pass to Artillery. Override with
+// MANAGEMENT_TARGET for a separate management host.
+const MANAGEMENT_TARGET = process.env.MANAGEMENT_TARGET || 'http://localhost:8001';
 const SEED_LISTS = Number(process.env.SEED_LISTS || 50);
 
 function parseTarget(target) {
   const url = new URL(target);
   const isHttps = url.protocol === 'https:';
-  return { host: url.hostname, port: url.port || (isHttps ? '443' : '80'), target, isHttps };
+  return { host: url.hostname, port: url.port || (isHttps ? '443' : '80'), isHttps };
 }
 
 function request(targetUrl, { method, path: pathname, headers = {}, body }) {
