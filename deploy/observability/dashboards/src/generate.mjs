@@ -1,9 +1,4 @@
-// Deterministic generator for the Status List SLO dashboard.
-//
-// Run `npm run generate-dashboards` (in this directory) to regenerate
-// `../generated/status-list-slo.json`. The output is byte-for-byte stable
-// (JSON.stringify with 2-space indent), so a changed intent shows up as a
-// reviewable diff in the committed JSON.
+// Run npm run generate-dashboards here; output is byte-stable so intent changes show up in review.
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,18 +10,11 @@ const sloThresholds = JSON.parse(
 
 const thresholds = (steps, unit) => ({ unit, thresholds: { mode: "absolute", steps } });
 
-// Namespace isolation. This dashboard is published to a cluster-wide Grafana,
-// and the recording series retain the `namespace` label, so multiple Status
-// List releases must never be mixed into the same panel. Every query is
-// therefore routed through the `$namespace` template variable (a
-// Prometheus-backed dashboard variable) and every legend carries {{namespace}}.
+// Every query goes through $namespace so releases sharing a Grafana never mix.
 const NAMESPACE_MATCHER = '{namespace=~"$namespace"}';
 const scoped = (expr) => `${expr}${NAMESPACE_MATCHER}`;
 
-// A one-line timeseries panel target. `warnAt` is the value at which the panel
-// turns red; values below stay green. Use this for "higher = worse" metrics
-// (latency, error/failure rates). For "higher = better" metrics use
-// `timeseriesInverted`, which turns red when the value drops `below`.
+// Red at warnAt and above; use timeseriesInverted when higher is better.
 function timeseries(title, expr, legend, unit, warnAt, x, y, w = 12, h = 8) {
   return {
     title,
@@ -46,8 +34,6 @@ function timeseries(title, expr, legend, unit, warnAt, x, y, w = 12, h = 8) {
   };
 }
 
-// "Higher = better" timeseries: green while the value is at/above `minOk`,
-// red when it drops below.
 function timeseriesInverted(title, expr, legend, unit, minOk, x, y, w = 12, h = 8) {
   return {
     title,
@@ -67,8 +53,6 @@ function timeseriesInverted(title, expr, legend, unit, minOk, x, y, w = 12, h = 
   };
 }
 
-// Stat panels (no legendFormat expected for a single scalar, but the query is
-// still namespace-scoped so it cannot pick up a sibling release).
 function stat(title, expr, x, y) {
   return {
     title,
@@ -130,9 +114,7 @@ const dashboard = {
   ],
 };
 
-// Write the canonical artifact AND the chart-local copy the Helm chart embeds
-// via .Files.Get. Keeping both in one generator run means a dashboard update
-// cannot land while the deployed ConfigMap drifts — CI diffs both byte-for-byte.
+// Also writes the copy the Helm chart embeds; CI diffs both.
 const outDir = join(here, "..", "generated");
 const outFile = join(outDir, "status-list-slo.json");
 const json = `${JSON.stringify(dashboard, null, 2)}\n`;

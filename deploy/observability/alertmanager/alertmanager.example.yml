@@ -1,39 +1,6 @@
-# Example Alertmanager Configuration for status-list-server (webhook + Discord)
-#
-# This is the hand-written example for the webhook notification mechanism. The deployed stack instead generates a similar config from
-# environment variables via deploy/observability/prometheus/generate-alertmanager-config.sh,
-# so webhook URLs never live in a committed file. Keep this example's URLs as
-# placeholders; replace them only in your secret store / .env.
-#
-# Route tree:
-#   - severity=page -> page channel (Discord here; swap for Slack/Teams/PD)
-#   - severity=warn -> warn channel (Discord here; swap for Slack/Mattermost/email)
-#   - severity=none (Watchdog) -> dead-man's-switch (NOT a human channel)
-#   - everything else -> noop (so nothing silently spams a human channel)
-#
-# NOTE: the deployed generator (generate-alertmanager-config.sh) collapses page
-# and warn into ONE human channel (one credential per platform), whereas this
-# hand-written example shows per-severity channels as an alternative. Both share
-# the same noop default + severity=none dead-man's-switch + inhibit_rules below;
-# only the number of human target channels differs.
-#
-# Supported native receivers (Alertmanager image prom/alertmanager:v0.28.1):
-#   discord_configs  (Discord webhook URL)
-#   slack_configs    (Slack incoming-webhook URL)
-#   email_configs    (SMTP)
-# Generic (accepts Alertmanager's standard JSON notification payload):
-#   webhook_configs  (any HTTPS endpoint, incl. MS Teams / Mattermost inbound webhooks)
-#
-# Notification payload (what a webhook receiver receives) — each POST body is the
-# standard Alertmanager JSON and includes ALL of the following, which is what an
-# engineer needs to act on an alert:
-#   status          firing | resolved
-#   alerts[].labels.alertname / severity / service / sli
-#   alerts[].labels.startsAt  (timestamp)
-#   alerts[].annotations.summary / description
-#   alerts[].annotations.runbook_url   (link to runbook)
-#   generatorURL / externalURL          (links to Prometheus / Alertmanager)
-# With send_resolved: true, Discord/Slack also receive the resolved embed.
+# Hand-written example; the compose stack generates its config with generate-alertmanager-config.sh.
+# Keep URLs as placeholders. Unlike the generator, this splits page and warn into separate channels.
+# Webhook payloads are Alertmanager's standard JSON (status, labels, annotations incl. runbook_url).
 
 global:
   resolve_timeout: 5m
@@ -45,18 +12,16 @@ route:
   repeat_interval: 4h
   receiver: "noop"
   routes:
-    # Watchdog (severity=none) -> dead-man's-switch (pages on ABSENCE, not firing).
+    # Watchdog goes to the dead man's switch, which pages on absence.
     - matchers:
         - severity="none"
       receiver: "watchdog-deadmansswitch"
 
-    # Page (someone must look now): route to the page Discord channel.
     - matchers:
         - severity="page"
       receiver: "discord-page"
       continue: false
 
-    # Warn (degradation): route to the warn Discord channel.
     - matchers:
         - severity="warn"
       receiver: "discord-warn"
@@ -71,17 +36,13 @@ inhibit_rules:
     equal: ["sli", "service"]
 
 receivers:
-  # Absorbs anything not explicitly routed, so it never spams a human channel.
+  # Catch-all, so unrouted alerts reach no human.
   - name: "noop"
 
-  # Dead-man's-switch for the always-firing Watchdog (pages on absence).
   - name: "watchdog-deadmansswitch"
     webhook_configs:
       - url: "https://deadmansswitch.example.com/<DMS_WEBHOOK>"
 
-  # NATIVE DISCORD receiver. webhook_url is the Discord channel webhook
-  # (https://discord.com/api/webhooks/<ID>/<TOKEN>). send_resolved: true so the
-  # resolved notification is also delivered.
   - name: "discord-page"
     discord_configs:
       - webhook_url: "https://discord.com/api/webhooks/REPLACE_ME/REPLACE_ME"
@@ -96,9 +57,7 @@ receivers:
         title: '{{ template "discord.default.title" . }}'
         message: '{{ template "discord.default.message" . }}'
 
-# ---------------------------------------------------------------------------
-# ALTERNATIVES: swap a receiver above for any of these. Only credentials differ.
-# ---------------------------------------------------------------------------
+# Alternatives: swap a receiver above for one of these; only the credentials differ.
 # - name: "slack-page"
 #   slack_configs:
 #     - api_url: "https://hooks.slack.com/services/REPLACE_ME/REPLACE_ME/REPLACE_ME"
