@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# These checks render production profiles with an explicit test-only audience.
-# Keep the actual chart default unset so deployments must choose their own.
+# Adds a test-only audience: the chart has no default, so deployments must choose one.
 helm() {
   local action="$1"
   shift
@@ -24,22 +23,12 @@ import os, subprocess, yaml
 from pathlib import Path
 work = Path(os.environ['CHECK_TEMP'])
 
-# Extract the rendered PrometheusRule groups (the deployed rule copy).
 docs = [d for d in yaml.safe_load_all(open(str(work / 'helm-render.yaml'))) if d]
 cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
 with open(str(work / 'helm-rules.yml'), 'w') as f:
     yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
 
-# Drift guard: the deployed copy must define the same rule names as the
-# standalone, promtool-tested rules EXCEPT for the one intentional
-# difference — Watchdog. kube-prometheus-stack 91.4.0 already ships its own
-# always-firing Watchdog, so a per-release copy would duplicate it and, with
-# the optional app AlertmanagerConfig disabled in production, page the
-# platform's matcher-free fallback as a normal notification. The deployed
-# rule therefore omits Watchdog (StatusListMetricsAbsent covers application
-# scrape health); only the standalone Docker rules retain their own
-# Watchdog. Thresholds are parameterized via values, so compare names, not
-# numeric values.
+# Same rule names as the standalone set, minus Watchdog (kube-prometheus-stack ships its own).
 def rule_names(path):
     rules = yaml.safe_load(open(path))['groups']
     names = set()
@@ -58,28 +47,8 @@ if deployed != expected:
         f"  only in deployed:   {sorted(deployed - standalone)}"
     )
 
-# Unit-test the deployed copy with the same alerting suite used for the
-# standalone rules, adjusted for the differences introduced by the Helm
-# template -- and rule_files. The deployed copy differs from the
-# standalone rules in exactly these ways:
-#   1. It ships NO Watchdog (see the drift-guard note above), so any
-#      Watchdog expectations from the standalone suite are dropped.
-#   2. Every remaining alert carries a static `namespace: ns1` label (it
-#      is namespaced to the release), so StatusListMetricsAbsent
-#      expectations gain `namespace: ns1`.
-#   3. StatusListMetricsAbsent is based on the scrape-generated `up`
-#      series selected by `service` (the rendered ServiceMonitor
-#      Service), not the standalone job/target selector or the app's
-#      otel_scope_name label, so its expected label set has only
-#      namespace/service/static labels and its description namespaces
-#      the message.
-#
-# Rather than maintaining a second copy of the suite for the deployed
-# rules, we rewrite the fixture to match the deployed semantics: any
-# standalone `up{job="status_list_server",instance="app:8000"}` input
-# series becomes the deployed `up{namespace="ns1",service="status-list-server-service"}`
-# selector, the Watchdog expectations are removed, and the
-# StatusListMetricsAbsent expectations are normalized.
+# Reuse the standalone promtool suite, rewritten for the deployed copy:
+# no Watchdog, a namespace: ns1 label, and up selected by service instead of job/instance.
 test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
 test['rule_files'] = ['helm-rules.yml']
 deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
@@ -89,8 +58,6 @@ for block in test['tests']:
         if isinstance(series, dict) and 'up{' in str(series.get('series', '')):
             series['series'] = series['series'].replace(
                 standalone_up, deployed_up)
-    # Drop the standalone Watchdog expectations: the deployed rule omits
-    # Watchdog by design (kube-prometheus-stack provides the platform one).
     block['alert_rule_test'] = [
         at for at in block.get('alert_rule_test', [])
         if at.get('alertname') != 'Watchdog'
@@ -102,24 +69,12 @@ for block in test['tests']:
                 alert['exp_labels'].pop('instance', None)
                 alert['exp_labels'].pop('otel_scope_name', None)
                 alert['exp_labels']['namespace'] = 'ns1'
-            # The deployed Helm rules keep namespace context in their
-            # descriptions (namespace {{ $labels.namespace }}: ...),
-            # while the standalone descriptions no longer carry the
-            # empty-namespace prefix. Prepend the ns1 namespace to
-            # every deployed description except RedisCacheErrors, whose
-            # description has no namespace prefix in either copy.
+            # Deployed descriptions start with the namespace, except RedisCacheErrors.
             if at['alertname'] != 'RedisCacheErrors':
                 d = alert.get('exp_annotations', {}).get('description', '')
                 alert['exp_annotations']['description'] = 'namespace ns1: ' + d
 
-# Behavioral cross-namespace isolation (the reviewer-requested outcome
-# test, not just substring greps). The ns1 rule copy must never consume
-# ns2 series, and loss of the expected ns1 scrape target must not be
-# masked by a healthy ns2 target. Feed ONLY ns2 data (firing 5xx series,
-# Redis cache errors, and a healthy ns2 `up`) and assert (a) ns1 SLO
-# alerts stay silent, (b) ns1's own absence still pages despite ns2
-# being healthy, and (c) the ns1 RedisCacheErrors alert does not fire
-# from ns2's Redis error series.
+# Feed only ns2 data: ns1 alerts must stay silent, and ns1's own absence must still page.
 ns2_up = 'up{namespace="ns2",service="status-list-server-service"}'
 test['tests'].append({
     'interval': '1m',

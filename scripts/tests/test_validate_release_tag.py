@@ -23,8 +23,7 @@ _SCRIPT = "scripts/validate-release-tag.sh"
 class ValidateReleaseTagTest(unittest.TestCase):
     def run_script(self, ref_name: str, is_tag: str = "true") -> subprocess.CompletedProcess:
         return subprocess.run(
-            # Relative path, resolved against the repo root: some bash builds (git-bash on
-            # Windows) do not accept a drive-lettered path as the script argument.
+            # git-bash can't take a drive-lettered script path, so use a relative one.
             ["bash", _SCRIPT, ref_name, is_tag],
             cwd=_REPO_ROOT,
             capture_output=True,
@@ -60,14 +59,11 @@ class ValidateReleaseTagTest(unittest.TestCase):
                 self.assert_accepted(tag)
 
     def test_rejects_glob_matches_that_are_not_semver(self) -> None:
-        # Each of these matches deploy.yml's `v*.*.*` push filter, so without this
-        # script they reach build-and-push and deploy `latest`.
         for tag in ("v2024.01.release", "v1.2.3.4", "v1.2.x", "va.b.c"):
             with self.subTest(tag=tag):
                 self.assert_rejected(tag)
 
     def test_rejects_build_metadata(self) -> None:
-        # Valid semver, but `+` is not a legal Docker image tag character.
         for tag in ("v1.2.3+meta", "v1.2.3-rc.1+build.5"):
             with self.subTest(tag=tag):
                 self.assert_rejected(tag)
@@ -81,8 +77,6 @@ class ValidateReleaseTagTest(unittest.TestCase):
         self.assert_rejected("1.2.3")
 
     def test_non_tag_run_is_a_no_op(self) -> None:
-        # workflow_dispatch has no tag to validate. The job must pass rather than
-        # skip: a skipped validate-tag would cascade into everything that needs it.
         for ref_name in ("develop", "v2024.01.release", ""):
             with self.subTest(ref_name=ref_name):
                 result = self.run_script(ref_name, is_tag="false")
