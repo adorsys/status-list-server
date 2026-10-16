@@ -7,8 +7,9 @@ pub mod handlers;
 pub mod health;
 pub mod rate_limit;
 
-use crate::domain::models::credential::AggregationId;
+use crate::domain::models::credential::{AggregationId, Issuer};
 use crate::domain::service::{Service, StatusListPolicy};
+use std::collections::HashSet;
 use std::sync::Arc;
 use url::Url;
 
@@ -52,6 +53,8 @@ pub struct AppState {
     /// The aggregation endpoint's URL. Tokens and registrations advertise it
     /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
     pub aggregation_uri: Option<Url>,
+    /// Issuers that were over one aggregation page at startup.
+    pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
@@ -70,8 +73,15 @@ pub struct AppState {
 
 impl AppState {
     /// The issuer's aggregation URI, or `None` when aggregation is not
-    /// configured.
-    pub fn aggregation_uri_for(&self, aggregation_id: AggregationId) -> Option<String> {
+    /// configured or is withheld from the issuer.
+    pub fn aggregation_uri_for(
+        &self,
+        issuer: &Issuer,
+        aggregation_id: AggregationId,
+    ) -> Option<String> {
+        if self.aggregation_withheld_from.contains(issuer) {
+            return None;
+        }
         let mut uri = self.aggregation_uri.clone()?;
         uri.path_segments_mut()
             .ok()?

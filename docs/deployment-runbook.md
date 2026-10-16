@@ -392,24 +392,24 @@ relying parties that do not page; pods refuse to start above it (see
 It only holds while the list quota is enforced. With
 `APP_LIMITS__LIST_QUOTA_TRANSITION` set, publishes past the cap are accepted and
 an issuer can outgrow one page, so tokens carry no `aggregation_uri` until the
-quota is enforced. Nor do they while any one issuer still holds more than 1000
-lists from under an earlier, higher cap: pods decide this at startup, so that one
-issuer removes `aggregation_uri` from the tokens of **every** issuer until it is
-back under the cap and the pods restart. Pods name such issuers at startup.
-Per-issuer withholding is tracked in #623.
+quota is enforced. An issuer that still holds more than 1000 lists from under an
+earlier, higher cap gets no `aggregation_uri` in its own tokens; other issuers
+keep theirs. Pods decide this at startup and name such issuers, so it lasts until
+the issuer is back under the cap and every pod has restarted. Pods that started
+at different times can disagree meanwhile, so that issuer's tokens may differ
+from pod to pod.
 
 ### Upgrading to issuer-scoped aggregation
 
 Before the upgrade:
 
 - Make sure `APP_LIMITS__MAX_LISTS_PER_ISSUER` is at most `1000`.
-- Find issuers at or near 1000 lists. Those above it keep their lists, but on a
-  shared server **any one of them turns `aggregation_uri` off for every
-  issuer's tokens**, and its own aggregation requests without `limit` get
-  `409 paging_required` instead of a multi-page answer. While the quota is
-  enforced, **every further publish is refused** with `400 list_quota_exceeded`
-  until they are back under the cap, which only deleting lists does. Those near
-  it reach it sooner than under a higher cap:
+- Find issuers at or near 1000 lists. Those above it keep their lists, but
+  their own tokens carry no `aggregation_uri`, and their aggregation requests
+  without `limit` get `409 paging_required` instead of a multi-page answer.
+  While the quota is enforced, **every further publish is refused** with
+  `400 list_quota_exceeded` until they are back under the cap, which only
+  deleting lists does. Those near it reach it sooner than under a higher cap:
 
   ```sql
   SELECT issuer, COUNT(*) AS lists FROM status_lists
