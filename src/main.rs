@@ -35,6 +35,17 @@ async fn main() -> Result<()> {
         println!("{}", run_list_quota_command(&config, action).await?);
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("issuer-registry") {
+        let registry =
+            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(
+                &config.management_auth.issuers_file,
+            )?;
+        println!(
+            "issuer registry is valid: {} trusted keys",
+            registry.key_count()
+        );
+        return Ok(());
+    }
 
     // Initialize telemetry (tracing + metrics) based on environment.
     // The guard must be held until shutdown to flush pending OTLP spans.

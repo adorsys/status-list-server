@@ -28,6 +28,7 @@ pub fn run() -> Result<()> {
         ),
         Task::Compose { profile } => run_spec(compose_spec(profile), &workspace),
         Task::Ci => run_spec(ci_spec(), &workspace),
+        Task::Issuer { command } => issuer_command(command),
     }
 }
 
@@ -74,6 +75,128 @@ enum Task {
     },
     /// Run the complete local CI pipeline.
     Ci,
+    /// Validate and maintain the operator-managed issuer registry.
+    Issuer {
+        #[command(subcommand)]
+        command: IssuerTask,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq, Subcommand)]
+enum IssuerTask {
+    /// Add a new issuer using a public JWK; the issuer id and kid are generated.
+    Add {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        jwk: String,
+        #[arg(long, default_value = "ES256")]
+        alg: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long, default_value = "standard")]
+        tier: String,
+    },
+    /// Add a rotation key to an existing issuer; kid is derived from the JWK thumbprint.
+    AddKey {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        issuer: String,
+        #[arg(long)]
+        jwk: String,
+        #[arg(long, default_value = "ES256")]
+        alg: String,
+    },
+}
+
+fn issuer_command(command: IssuerTask) -> Result<()> {
+    match command {
+        IssuerTask::Add {
+            file,
+            jwk,
+            alg,
+            display_name,
+            tier,
+        } => {
+            let mut root = load_registry_yaml(&file)?;
+            let key = registry_key(&jwk, &alg)?;
+            let mut issuer = serde_yaml::Mapping::from_iter([
+                (
+                    "id".into(),
+                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
+                ),
+                (
+                    "aggregation_id".into(),
+                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
+                ),
+                ("tier".into(), serde_yaml::Value::String(tier)),
+                ("keys".into(), serde_yaml::Value::Sequence(vec![key])),
+            ]);
+            if let Some(display_name) = display_name {
+                issuer.insert("display_name", display_name.into());
+            }
+            root.get_mut("issuers")
+                .and_then(serde_yaml::Value::as_sequence_mut)
+                .ok_or_eyre("registry issuers must be a sequence")?
+                .push(serde_yaml::Value::Mapping(issuer));
+            write_registry_yaml(&file, root)
+        }
+        IssuerTask::AddKey {
+            file,
+            issuer,
+            jwk,
+            alg,
+        } => {
+            let mut root = load_registry_yaml(&file)?;
+            let key = registry_key(&jwk, &alg)?;
+            let issuers = root
+                .get_mut("issuers")
+                .and_then(serde_yaml::Value::as_sequence_mut)
+                .ok_or_eyre("registry issuers must be a sequence")?;
+            let entry = issuers
+                .iter_mut()
+                .find(|entry| {
+                    entry.get("id").and_then(serde_yaml::Value::as_str) == Some(issuer.as_str())
+                })
+                .ok_or_eyre("issuer not found")?;
+            entry
+                .get_mut("keys")
+                .and_then(serde_yaml::Value::as_sequence_mut)
+                .ok_or_eyre("issuer keys must be a sequence")?
+                .push(key);
+            write_registry_yaml(&file, root)
+        }
+    }
+}
+
+fn load_registry_yaml(file: &Path) -> Result<serde_yaml::Value> {
+    let text = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
+    serde_yaml::from_str(&text).wrap_err("parse issuer registry")
+}
+
+fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_yaml::Value> {
+    let json: serde_json::Value =
+        serde_json::from_str(raw_jwk).wrap_err("parse public JWK JSON")?;
+    let jwk: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(json.clone()).wrap_err("validate public JWK")?;
+    let kid = jwk
+        .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
+        .wrap_err("compute JWK thumbprint")?;
+    let mut map = serde_yaml::Mapping::new();
+    map.insert("kid", kid.into());
+    map.insert("alg", alg.into());
+    map.insert("jwk", serde_yaml::to_value(&json)?);
+    Ok(serde_yaml::Value::Mapping(map))
+}
+
+fn write_registry_yaml(file: &Path, value: serde_yaml::Value) -> Result<()> {
+    let content = serde_yaml::to_string(&value)?;
+    status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(&content)
+        .wrap_err("validate updated issuer registry")?;
+    std::fs::write(file, content).wrap_err("write issuer registry")?;
+    println!("updated {}", file.display());
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -761,5 +884,45 @@ mod tests {
             ci_spec(),
             CommandSpec::new("bash", ["local-ci.sh", "--full"])
         );
+    }
+
+    #[test]
+    fn issuer_commands_generate_ids_and_validate_before_writing() {
+        let file = std::env::temp_dir().join(format!(
+            "issuer-registry-xtask-{}.yaml",
+            uuid::Uuid::new_v4()
+        ));
+        let initial = "version: 1\nissuers: []\nadmins: []\n";
+        std::fs::write(&file, initial).unwrap();
+        let public_jwk = r#"{"kty":"EC","crv":"P-256","x":"chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY","y":"YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"}"#;
+
+        issuer_command(IssuerTask::Add {
+            file: file.clone(),
+            jwk: public_jwk.to_string(),
+            alg: "ES256".into(),
+            display_name: None,
+            tier: "standard".into(),
+        })
+        .unwrap();
+        let validated =
+            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
+                .unwrap();
+        assert_eq!(validated.key_count(), 1);
+        let issuer_id = validated.issuers()[0].id.parse::<uuid::Uuid>().unwrap();
+        assert_eq!(issuer_id.get_version(), Some(uuid::Version::Random));
+        let bytes_before_invalid_update = std::fs::read(&file).unwrap();
+
+        let private_jwk = public_jwk.replace("\"y\":", "\"d\":\"private\",\"y\":");
+        assert!(
+            issuer_command(IssuerTask::AddKey {
+                file: file.clone(),
+                issuer: validated.issuers()[0].id.clone(),
+                jwk: private_jwk,
+                alg: "ES256".into(),
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), bytes_before_invalid_update);
+        let _ = std::fs::remove_file(file);
     }
 }

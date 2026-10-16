@@ -69,7 +69,7 @@ fn fixture_config() -> Config {
         "cache": {"backend": "memory", "ttl": 300, "max_capacity": 100},
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
-        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": []},
+        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
@@ -82,7 +82,7 @@ fn fixture_config() -> Config {
 }
 
 fn fixture_state(config: &Config) -> AppState {
-    use base64::prelude::BASE64_STANDARD;
+    use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD};
     let snapshots = MemoryStatusListSnapshotRepo::default();
     let lists = MemoryStatusLists::default().with_snapshot(&snapshots);
     let material = SigningMaterial::new(
@@ -92,6 +92,13 @@ fn fixture_state(config: &Config) -> AppState {
         Arc::new(SigningKey::from_pem(KEY).unwrap()),
     )
     .unwrap();
+    let signing_key = SigningKey::from_pem(KEY).unwrap();
+    let public = signing_key.public_key_bytes();
+    let issuer_registry = format!(
+        "version: 1\nissuers:\n  - id: {ISSUER}\n    aggregation_id: 00000000-0000-4000-8000-000000000001\n    keys:\n      - kid: {KEY_ID}\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: {KEY_ID}\n          alg: ES256\n          x: {}\n          y: {}\nadmins: []\n",
+        BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
+        BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
+    );
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -117,6 +124,12 @@ fn fixture_state(config: &Config) -> AppState {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        issuer_registry: Arc::new(
+            status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(
+                &issuer_registry,
+            )
+            .unwrap(),
+        ),
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,

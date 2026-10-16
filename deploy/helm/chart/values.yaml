@@ -257,6 +257,17 @@ statuslist:
   # Workload Identity (IRSA) is NOT configured by default - you opt in by adding the
   # serviceAccount.annotations below and the cloud-side trust relationship. This block is
   # only needed for the legacy path that mounts static shared-credential files.
+  issuerRegistry:
+    # The registry is operator-managed and mounted as a whole directory so
+    # ConfigMap updates can be observed without restarting the pod.
+    path: /etc/status-list-server/issuers.yaml
+    configMap:
+      create: false
+      name: status-list-server-issuers
+      key: issuers.yaml
+      # Set create=true and provide the complete issuers.yaml content for
+      # environments that manage the registry through Helm.
+      content: ""
   aws:
     # Mount AWS credential files from aws-credentials-secret into the pod.
     # Disabled by default so the base chart stays provider-neutral. Do NOT combine this

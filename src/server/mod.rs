@@ -79,6 +79,8 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Last-known-good operator-managed issuer trust registry snapshot.
+    pub issuer_registry: Arc<auth::issuer_registry::RegistryHandle>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.

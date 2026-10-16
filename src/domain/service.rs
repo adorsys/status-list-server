@@ -326,6 +326,10 @@ impl Service {
         self.status_list_repo.list_uris(None, after, limit).await
     }
 
+    pub async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        self.status_list_repo.issuers_with_status_lists().await
+    }
+
     /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
     /// `None` when no issuer has it.
     pub async fn list_issuer_uris(
@@ -623,6 +627,10 @@ mod tests {
                 .status_lists
                 .len(),
             2
+        );
+        assert_eq!(
+            service.issuers_with_status_lists().await.unwrap(),
+            ["one", "two"]
         );
     }
 

@@ -1,6 +1,7 @@
 //! Authentication middleware validating bearer JWTs against registered issuer credentials.
 
 pub mod errors;
+pub mod issuer_registry;
 
 use axum::{
     body::Body,
@@ -16,8 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
+use crate::domain::models::credential::{
+    Credential, Issuer, MANAGEMENT_SIGNING_ALGORITHMS, PublicJwk,
+};
 use crate::server::{AppState, error::ApiError};
+use issuer_registry::IssuerKeyResolver;
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
 const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
@@ -155,15 +159,18 @@ pub async fn auth(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     let Some(auth_header) = auth_header else {
+        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     let Some((scheme, token)) = auth_header.split_once(char::is_whitespace) else {
         if auth_header.eq_ignore_ascii_case("Bearer") {
             return Err(invalid_auth(None, None, "empty Bearer token"));
         }
+        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     if !scheme.eq_ignore_ascii_case("Bearer") {
+        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     }
     if token.trim().is_empty() {
@@ -202,22 +209,20 @@ pub async fn auth(
         return Err(invalid_auth(Some(&kid), None, "algorithm is not allowed"));
     }
 
-    let credential = state
-        .service
-        .find_credential_by_kid(&kid)
-        .await
-        .map_err(|error| {
-            if matches!(
-                error,
-                crate::domain::models::credential::CredentialError::InvalidPublicJwk(_)
-            ) {
-                invalid_auth(Some(&kid), None, error)
-            } else {
-                tracing::error!(kid = %kid, error = ?error, "Failed to resolve management JWT key");
-                AuthenticationError::InternalServer
-            }
-        })?
+    let resolved = state
+        .issuer_registry
+        .resolve(&kid)
         .ok_or_else(|| invalid_auth(Some(&kid), None, "unknown kid"))?;
+    let public_key = serde_json::to_vec(&resolved.key.jwk)
+        .map_err(|error| invalid_auth(Some(&kid), Some(&resolved.principal_id), error))
+        .and_then(|bytes| {
+            PublicJwk::try_new(bytes)
+                .map_err(|error| invalid_auth(Some(&kid), Some(&resolved.principal_id), error))
+        })?;
+    let credential = Credential {
+        issuer: Issuer(resolved.principal_id.clone()),
+        public_key,
+    };
     let registered_issuer = credential.issuer.0.as_str();
     let registered_kid = credential.public_key.key_id();
     let registered_alg = credential.public_key.algorithm();
@@ -269,9 +274,15 @@ pub async fn auth(
         )
         .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
+    let authenticated_issuer = credential.issuer.clone();
     request
         .extensions_mut()
-        .insert(AuthenticatedIssuer::new(credential.issuer));
+        .insert(AuthenticatedIssuer::new(authenticated_issuer));
+    crate::utils::metrics::record_management_auth_request(
+        Some(registered_issuer),
+        Some(&kid),
+        "success",
+    );
     Ok(next.run(request).await)
 }
 
@@ -280,6 +291,13 @@ fn invalid_auth(
     iss: Option<&str>,
     reason: impl std::fmt::Display,
 ) -> AuthenticationError {
+    let metric_issuer = bounded_identifier(iss);
+    let metric_kid = bounded_identifier(kid);
+    crate::utils::metrics::record_management_auth_request(
+        Some(&metric_issuer),
+        Some(&metric_kid),
+        "rejected",
+    );
     tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason = %reason, "Management JWT rejected");
     AuthenticationError::InvalidToken
 }
@@ -308,6 +326,7 @@ mod tests {
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn create_test_router(app_state: AppState) -> Router {
@@ -338,6 +357,22 @@ mod tests {
                 "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
             }"#
             .as_bytes()
+            .to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn rotation_private_pem() -> String {
+        "-----BEGIN PRIVATE KEY-----\nMIIBeQIBADCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0BAQIhAP////8AAAAB\nAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAABAAAAAAAAAAAAAAAA\n///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxTsPY7zjw+J9JgSwMV\nAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg\n9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9QIhAP////8A\nAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBBG0wawIBAQQgyO8dO/IXvyo2\nloV5QPB42Gv31v5U5pik40FfQ12VVzWhRANCAASozvoFuoPcmZaeJPgC5JgzkrDE\nLlYA1w9cGkJRB8B/UXP3TuiR9gairPTOlLAzTEO0bGDIMKjjeU4tfYCm/Jy5\n-----END PRIVATE KEY-----".to_string()
+    }
+
+    fn rotation_public_jwk() -> PublicJwk {
+        PublicJwk::try_new(
+            br#"{
+                "kty":"EC", "crv":"P-256", "kid":"rotation-key", "alg":"ES256",
+                "x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E",
+                "y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"
+            }"#
             .to_vec(),
         )
         .unwrap()
@@ -415,16 +450,58 @@ mod tests {
     }
 
     async fn test_state_with_registered_issuer() -> AppState {
-        let state = test_app_state(None).await;
+        let mut state = test_app_state(None).await;
+        let public_key = test_public_jwk();
         state
             .service
             .publish_credential(crate::domain::models::credential::Credential {
                 issuer: Issuer("test-issuer".into()),
-                public_key: test_public_jwk(),
+                public_key: public_key.clone(),
             })
             .await
             .unwrap();
+        let registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "test-issuer",
+                "aggregation_id": uuid::Uuid::new_v4(),
+                "keys": [{
+                    "kid": public_key.key_id(),
+                    "alg": format!("{:?}", public_key.algorithm()),
+                    "jwk": public_key.jwk(),
+                }]
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        state.issuer_registry =
+            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
         state
+    }
+
+    fn set_registry(state: &mut AppState, issuer: &str, keys: &[PublicJwk]) {
+        let entries: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({
+                    "kid": key.key_id(),
+                    "alg": format!("{:?}", key.algorithm()),
+                    "jwk": key.jwk(),
+                })
+            })
+            .collect();
+        let registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": issuer,
+                "aggregation_id": uuid::Uuid::new_v4(),
+                "keys": entries,
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        state.issuer_registry =
+            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
     }
 
     async fn call_with_token(app: Router, token: String) -> axum::response::Response {
@@ -633,10 +710,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_issuer_claim_must_match_the_registered_kid_owner() {
-        let state = test_state_with_registered_issuer().await;
+        let mut state = test_state_with_registered_issuer().await;
         let mut other_key: serde_json::Value =
             serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+        other_key["x"] = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         other_key["kid"] = serde_json::json!("other-key");
+        let other_public = crate::domain::models::credential::PublicJwk::try_new(
+            serde_json::to_vec(&other_key).unwrap(),
+        )
+        .unwrap();
         state
             .service
             .publish_credential(crate::domain::models::credential::Credential {
@@ -648,6 +730,17 @@ mod tests {
             })
             .await
             .unwrap();
+        let own_public = test_public_jwk();
+        set_registry(&mut state, "test-issuer", std::slice::from_ref(&own_public));
+        let registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [
+                {"id": "test-issuer", "aggregation_id": uuid::Uuid::new_v4(), "keys": [{"kid": own_public.key_id(), "alg": format!("{:?}", own_public.algorithm()), "jwk": own_public.jwk()}]},
+                {"id": "another-issuer", "aggregation_id": uuid::Uuid::new_v4(), "keys": [{"kid": other_public.key_id(), "alg": format!("{:?}", other_public.algorithm()), "jwk": other_public.jwk()}]}
+            ], "admins": []
+        })).unwrap();
+        state.issuer_registry =
+            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
         let app = create_test_router(state);
         let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
         let now = now();
@@ -669,6 +762,113 @@ mod tests {
         );
         assert_eq!(
             call_with_token(app, own_token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn key_rotation_accepts_overlap_and_rejects_removed_key_after_reload() {
+        let old_key = test_public_jwk();
+        let new_key = rotation_public_jwk();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let registry_yaml = |keys: &[PublicJwk]| {
+            let keys = keys
+                .iter()
+                .map(|key| {
+                    serde_json::json!({
+                        "kid": key.key_id(),
+                        "alg": format!("{:?}", key.algorithm()),
+                        "jwk": key.jwk(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_yaml::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "test-issuer",
+                    "aggregation_id": uuid::Uuid::new_v4(),
+                    "keys": keys,
+                }],
+                "admins": []
+            }))
+            .unwrap()
+        };
+        std::fs::write(file.path(), registry_yaml(std::slice::from_ref(&old_key))).unwrap();
+
+        let mut state = test_app_state(None).await;
+        state.issuer_registry =
+            Arc::new(issuer_registry::RegistryHandle::load(file.path()).unwrap());
+        let registry = state.issuer_registry.clone();
+        let app = create_test_router(state);
+        let now = now();
+        let old_token = sign_claims_with_header(
+            serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+            management_header(),
+        );
+        let mut new_header = management_header();
+        new_header.kid = Some("rotation-key".into());
+        let new_token = sign_claims_with_header(
+            serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
+            &EncodingKey::from_ec_pem(rotation_private_pem().as_bytes()).unwrap(),
+            new_header,
+        );
+
+        assert_eq!(
+            call_with_token(app.clone(), old_token.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call_with_token(app.clone(), new_token.clone())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        std::fs::write(
+            file.path(),
+            registry_yaml(&[old_key.clone(), new_key.clone()]),
+        )
+        .unwrap();
+        registry.reload().unwrap();
+        assert_eq!(
+            call_with_token(app.clone(), old_token.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call_with_token(app.clone(), new_token.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        std::fs::write(file.path(), "version: invalid").unwrap();
+        assert!(registry.reload().is_err());
+        assert_eq!(
+            call_with_token(app.clone(), old_token.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call_with_token(app.clone(), new_token.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        std::fs::write(file.path(), registry_yaml(std::slice::from_ref(&new_key))).unwrap();
+        registry.reload().unwrap();
+        assert_eq!(
+            call_with_token(app.clone(), old_token).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call_with_token(app, new_token).await.status(),
             StatusCode::OK
         );
     }
@@ -1043,7 +1243,7 @@ mod tests {
             };
             let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&secret, algorithm).unwrap();
             jwk.common.key_id = Some("algorithm-key".into());
-            let state = test_app_state(None).await;
+            let mut state = test_app_state(None).await;
             state
                 .service
                 .publish_credential(Credential {
@@ -1052,6 +1252,14 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let public_key = state
+                .service
+                .find_credential_by_kid("algorithm-key")
+                .await
+                .unwrap()
+                .unwrap()
+                .public_key;
+            set_registry(&mut state, "algorithm-issuer", &[public_key]);
             let mut header = Header::new(algorithm);
             header.kid = Some("algorithm-key".into());
             header.typ = Some(MANAGEMENT_TOKEN_TYPE.into());
@@ -1288,7 +1496,7 @@ mod tests {
     #[tokio::test]
     async fn test_authenticated_issuer_extractor_returns_principal() {
         let private_pem = test_ec_private_pem();
-        let state = test_app_state(None).await;
+        let mut state = test_app_state(None).await;
 
         state
             .service
@@ -1298,6 +1506,8 @@ mod tests {
             })
             .await
             .unwrap();
+        let public_key = test_public_jwk();
+        set_registry(&mut state, "test-issuer", &[public_key]);
 
         async fn extension_test_handler(principal: AuthenticatedIssuer) -> String {
             assert_eq!(principal.issuer(), &Issuer("test-issuer".into()));

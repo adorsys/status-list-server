@@ -240,6 +240,13 @@ impl StatusListRepo for MemoryStatusLists {
         Ok(StatusListUriPage::from_rows(rows, limit))
     }
 
+    async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        let values = self.values.read().await;
+        let mut issuers = values.per_issuer.keys().cloned().collect::<Vec<_>>();
+        issuers.sort();
+        Ok(issuers)
+    }
+
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,

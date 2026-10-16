@@ -719,6 +719,23 @@ impl SeaOrmStore<StatusListRecord> {
     }
 
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
+    pub async fn find_status_list_issuers(&self) -> Result<Vec<String>, RepositoryError> {
+        time_query("list_issuers", "status_list", async {
+            let db = self.db.current();
+            status_lists::Entity::find()
+                .select_only()
+                .column(status_lists::Column::Issuer)
+                .distinct()
+                .order_by_asc(status_lists::Column::Issuer)
+                .into_tuple::<String>()
+                .all(&*db)
+                .await
+                .map_err(find_err)
+        })
+        .await
+    }
+
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn allocate_indices(
         &self,
         list_id: &str,
