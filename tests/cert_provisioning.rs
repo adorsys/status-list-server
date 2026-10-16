@@ -1,12 +1,6 @@
 #![cfg(feature = "aws")]
 
-//! Integration tests for the ACME certificate provisioning flow.
-//!
-//! These tests require Docker to be running. They spin up:
-//! - **Pebble** (ACME CA test server)
-//! - **challtestsrv** (DNS server for Pebble)
-//! - **Floci** (Secrets Manager)
-//! - **Vault** (if enabled) or **OpenBao** (if enabled)
+//! Needs Docker: starts Pebble, challtestsrv, Floci, and Vault or OpenBao.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -75,14 +69,9 @@ const OPENBAO_IMAGE: &str = "openbao/openbao";
 #[cfg(feature = "vault")]
 const OPENBAO_TAG: &str = "2.6";
 
-/// Number of attempts when starting a container, tolerating transient Docker
-/// registry/network failures (e.g. truncated image downloads).
 const CONTAINER_START_RETRIES: u32 = 3;
 const CONTAINER_START_RETRY_DELAY: Duration = Duration::from_secs(3);
 
-/// Retry a container start that performs a Docker image pull, tolerating
-/// transient registry/network failures (e.g. truncated image downloads) that
-/// would otherwise make the integration test flaky.
 async fn start_with_retry<F, T, E>(mut attempt: F) -> ContainerAsync<T>
 where
     T: testcontainers_modules::testcontainers::Image,
@@ -104,11 +93,8 @@ where
     panic!("container start failed after {CONTAINER_START_RETRIES} attempts: {last_err:?}");
 }
 
-/// Minica root CA that signs Pebble's own TLS server certificate.
 const PEBBLE_MINICA_ROOT_CA: &[u8] = include_bytes!("../test_data/pebble.pem");
 
-/// Holds all running containers and resolved ports for a single test run.
-/// Containers are stopped automatically when this is dropped.
 struct TestInfra {
     _challtestsrv: ContainerAsync<GenericImage>,
     _pebble: ContainerAsync<GenericImage>,
@@ -119,10 +105,6 @@ struct TestInfra {
 }
 
 impl TestInfra {
-    /// Spin up all containers on a shared Docker network.
-    ///
-    /// `test_name` is included in Docker resource names for easier debugging.
-    /// A random suffix keeps repeated and parallel test runs from colliding.
     async fn start(test_name: &str) -> Self {
         let run_id = uuid::Uuid::new_v4().simple();
         let resource_prefix = format!("{test_name}-{run_id}");
@@ -146,8 +128,7 @@ impl TestInfra {
                 .with_exposed_port(14000.tcp())
                 .with_wait_for(WaitFor::message_on_stdout("ACME directory available at"))
                 .with_env_var("PEBBLE_VA_NOSLEEP", "1")
-                // Disable Pebble's intentional nonce rejection to prevent flaky tests
-                // See: https://github.com/letsencrypt/pebble#invalid-anti-replay-nonce-errors
+                // Turn off Pebble's deliberate nonce rejection, which makes these tests flaky.
                 .with_env_var("PEBBLE_WFE_NONCEREJECT", "0")
                 .with_network(&network)
                 .with_container_name(&pebble_name)
@@ -176,13 +157,10 @@ impl TestInfra {
         }
     }
 
-    /// Build an AWS SDK config pointing at the Floci endpoint.
     async fn aws_config(&self) -> aws_config::SdkConfig {
         aws_config(&self.aws_emulator).await
     }
 
-    /// Build a `CertManager` with one cryptographic-material backend for both
-    /// certificate chains and signing keys.
     async fn build_cert_manager(
         &self,
         domain: &str,
@@ -214,7 +192,6 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
     let vault_url = format!("http://127.0.0.1:{vault_port}");
     let client = reqwest::Client::new();
 
-    // Enable approle auth engine
     let resp = client
         .post(format!("{vault_url}/v1/sys/auth/approle"))
         .header("X-Vault-Token", "root")
@@ -230,7 +207,6 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
         resp.status()
     );
 
-    // Create a policy granting full access to secrets
     let resp = client
         .put(format!("{vault_url}/v1/sys/policy/test-policy"))
         .header("X-Vault-Token", "root")
@@ -246,7 +222,6 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
         resp.status()
     );
 
-    // Create a role with test-policy
     let resp = client
         .post(format!("{vault_url}/v1/auth/approle/role/status-list-role"))
         .header("X-Vault-Token", "root")
@@ -260,7 +235,6 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
         .expect("Failed to create AppRole");
     assert!(resp.status().is_success());
 
-    // Read role-id
     let resp = client
         .get(format!(
             "{vault_url}/v1/auth/approle/role/status-list-role/role-id"
@@ -272,7 +246,6 @@ async fn setup_vault_approle(vault_port: u16) -> (String, SecretString) {
     let role_data: serde_json::Value = resp.json().await.expect("Failed to parse role-id response");
     let role_id = role_data["data"]["role_id"].as_str().unwrap().to_string();
 
-    // Generate secret-id
     let resp = client
         .post(format!(
             "{vault_url}/v1/auth/approle/role/status-list-role/secret-id"
@@ -324,13 +297,11 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
         .build_cert_manager("test.example.com", material_storage)
         .await;
 
-    // Request a certificate
     let cert_data = cert_manager
         .request_certificate()
         .await
         .expect("Certificate provisioning failed");
 
-    // Verify the certificate
     assert!(
         cert_data
             .certificate
@@ -339,7 +310,6 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate and signing key are in the same material backend.
     let aws_config = infra.aws_config().await;
     let secrets = aws_sdk_secretsmanager::Client::new(&aws_config)
         .list_secrets()
@@ -365,7 +335,6 @@ async fn test_cert_provisioning_with_aws_secrets_manager() {
         "signing key should be present in Secrets Manager: {names:?}"
     );
 
-    // Verify cert chain extraction
     let cert_chain = cert_manager
         .cert_chain_parts()
         .await
@@ -390,13 +359,11 @@ async fn test_certificate_renewal_with_existing_cert() {
             .await,
     );
 
-    // Initial provisioning
     let initial_cert = cert_manager
         .request_certificate()
         .await
         .expect("Initial certificate provisioning failed");
 
-    // Renewal should be a no-op
     cert_manager
         .renew_cert_if_needed()
         .await
@@ -435,13 +402,11 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
         .build_cert_manager("vault.example.com", material_storage)
         .await;
 
-    // Request a certificate
     let cert_data = cert_manager
         .request_certificate()
         .await
         .expect("Certificate provisioning failed with Vault material backend");
 
-    // Verify the certificate content
     assert!(
         cert_data
             .certificate
@@ -450,7 +415,6 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate and signing key were stored in Vault.
     let vault_reader = build_vault_storage(vault_port, role_id, secret_id).await;
     let certificate = Storage::load(&vault_reader, "certs-example.com-cert_data.json")
         .await
@@ -467,7 +431,6 @@ async fn test_cert_provisioning_with_hashicorp_vault() {
         "signing_key should be present in Vault"
     );
 
-    // Verify cert chain extraction
     let cert_chain = cert_manager
         .cert_chain_parts()
         .await
@@ -503,13 +466,11 @@ async fn test_cert_provisioning_with_openbao() {
         .build_cert_manager("openbao.example.com", material_storage)
         .await;
 
-    // Request a certificate
     let cert_data = cert_manager
         .request_certificate()
         .await
         .expect("Certificate provisioning failed with OpenBao material backend");
 
-    // Verify the certificate content
     assert!(
         cert_data
             .certificate
@@ -518,7 +479,6 @@ async fn test_cert_provisioning_with_openbao() {
     assert!(cert_data.valid_from < cert_data.expires_at);
     assert!(cert_data.updated_at > 0);
 
-    // Verify certificate and signing key were stored in OpenBao.
     let openbao_reader = build_vault_storage(openbao_port, role_id, secret_id).await;
     let certificate = Storage::load(&openbao_reader, "certs-example.com-cert_data.json")
         .await
@@ -535,7 +495,6 @@ async fn test_cert_provisioning_with_openbao() {
         "signing_key should be present in OpenBao"
     );
 
-    // Verify cert chain extraction
     let cert_chain = cert_manager
         .cert_chain_parts()
         .await
