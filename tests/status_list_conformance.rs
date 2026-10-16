@@ -72,7 +72,6 @@ fn verified_jwt(body: &[u8]) -> serde_json::Value {
     let der = BASE64_STANDARD.decode(&header.x5c.unwrap()[0]).unwrap();
     let key = jsonwebtoken::DecodingKey::from_ec_der(&certificate_key(&der));
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
-    // Verify the signature independently of wall-clock time; check claim ordering below.
     validation.validate_exp = false;
     let claims: serde_json::Value = jsonwebtoken::decode(token, &key, &validation)
         .unwrap()
@@ -162,7 +161,6 @@ async fn cwt_get_conforms_with_and_without_aggregation_uri() {
             assert!(!response.headers().contains_key("content-encoding"));
             let body = bytes(response).await;
             assert_eq!(body[0], 0xd2);
-            // Decoding a tagged Sign1 and then a bare claims map rejects tag 61 at either level.
             let sign1 = coset::CoseSign1::from_tagged_slice(&body).unwrap();
             let protected =
                 Value::from_slice(sign1.protected.original_data.as_ref().unwrap()).unwrap();
