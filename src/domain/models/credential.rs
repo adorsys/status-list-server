@@ -42,7 +42,7 @@ pub enum CredentialError {
 }
 
 /// Unique issuer identifier string.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Issuer(pub String);
 
 impl From<String> for Issuer {
