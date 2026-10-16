@@ -1,6 +1,4 @@
-# Production values for deploy/helm/chart. Applied after values-aws.yaml by the
-# production deploy workflow (deploy.yml) on release-tag deploys to the
-# statuslist-production namespace.
+# Applied after values-aws.yaml by deploy.yml for the statuslist-production namespace.
 
 serviceAccount:
   create: true
@@ -9,19 +7,15 @@ statuslist:
   replicaCount: 2
   ingress:
     management:
-      # Enable the management listener Ingress in production so issuer writes
-      # (PUT/PATCH .../statuses, POST .../allocations, POST /credentials) reach
-      # the management port (8001) instead of the public listener, which returns
-      # 404 for every write. Shared hostname: the edge routes by path regex.
+      # Without this, issuer writes reach the public listener and get 404.
+      # Shared hostname: the edge routes management paths by regex.
       enabled: true
       annotations:
-        # Match the public Ingress body-size limit; without this nginx falls back
-        # to 1m and large status-list payloads are rejected with 413.
+        # Same limit as the public Ingress; nginx's 1m default rejects large lists with 413.
         nginx.ingress.kubernetes.io/proxy-body-size: "10m"
   env:
     APP_ENV: "production"
-    # Issuers targeting the AWS production deployment must use this exact aud.
-    # Other deployments must override it with their own audience.
+    # The AWS production audience; other deployments must set their own.
     APP_MANAGEMENT_AUTH__AUDIENCES: "https://statuslist.eudi-adorsys.com/api/v1"
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
@@ -34,54 +28,38 @@ statuslist:
       memory: "1Gi"
       cpu: "1000m"
 
-# Horizontal Pod Autoscaling for production workloads.
 autoscaling:
   enabled: true
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 75
 
-# PodDisruptionBudget ensures safe rolling deploys and node drains.
 podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
 
-# Recommended monitoring discovery for kube-prometheus-stack environments.
 serviceMonitor:
   enabled: true
   interval: "15s"
   labels:
     release: kube-prometheus-stack
 
-# Ship SLI recording and SLO alerting rules into the cluster via PrometheusRule CRD.
 prometheusRule:
   enabled: true
   labels:
     release: kube-prometheus-stack
 
-# Auto-provision the SLO dashboard in the shared Grafana via a labelled ConfigMap
-# (grafana_dashboard: "1") that the central Grafana sidecar discovers.
 grafanaDashboard:
   enabled: true
   labels:
     release: kube-prometheus-stack
     grafana_dashboard: "1"
 
-# Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
-# Enable this block and set alerting.platform + credentials to receive SLO alert
-# notifications. In production, always use existingSecret so no webhook URL is
-# stored in this file or in Helm history.
-#
-# Example (Discord, credentials in ESO-managed Secret):
-#   1. Create / sync a Secret named "statuslist-alerting-credentials" with key "webhook-url"
-#      set to your Discord channel webhook URL (and optionally "dms-webhook-url").
-#   2. Uncomment the block below and set existingSecret to match the Secret name.
-#
+# Alerting: keep webhook URLs in existingSecret (key webhook-url), never in this file.
 # alerting:
 #   enabled: true
 #   platform: discord    # slack | discord | teams | mattermost | webhook | email
 #   labels:
 #     release: kube-prometheus-stack
-#   existingSecret: statuslist-alerting-credentials   # pre-existing Secret; chart does not render its own
-#   # dmsWebhookUrl: ""  # set via existingSecret key "dms-webhook-url" instead
+#   existingSecret: statuslist-alerting-credentials
 
