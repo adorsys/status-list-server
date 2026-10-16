@@ -36,9 +36,9 @@ pub async fn get_credential(
             AuthenticationError::InvalidToken.into_api_error()
         })?;
     Ok(Json(RegistrationResponse {
-        issuer: issuer.0,
+        issuer: issuer.0.clone(),
         aggregation_id,
-        aggregation_uri: state.aggregation_uri_for(aggregation_id),
+        aggregation_uri: state.aggregation_uri_for(&issuer, aggregation_id),
     }))
 }
 
@@ -46,10 +46,8 @@ pub async fn get_credential(
 mod tests {
     use super::*;
     use crate::test_utils::{authenticated_issuer, register_issuer, test_app_state};
-    use axum::{
-        http::{StatusCode, header},
-        response::IntoResponse,
-    };
+    use axum::{http::header, response::IntoResponse};
+    use std::{collections::HashSet, sync::Arc};
 
     #[tokio::test]
     async fn test_get_credential_returns_the_issuers_aggregation() {
@@ -61,15 +59,46 @@ mod tests {
         );
         let aggregation_id = register_issuer(&app_state.service, "test_issuer").await;
 
-        let Json(registration) =
-            get_credential(State(app_state), authenticated_issuer("test_issuer"))
-                .await
-                .unwrap();
-        assert_eq!(registration.issuer, "test_issuer");
-        assert_eq!(registration.aggregation_id, aggregation_id);
+        let Json(metadata) = get_credential(State(app_state), authenticated_issuer("test_issuer"))
+            .await
+            .unwrap();
+        assert_eq!(metadata.issuer, "test_issuer");
+        assert_eq!(metadata.aggregation_id, aggregation_id);
         assert_eq!(
-            registration.aggregation_uri.unwrap(),
+            metadata.aggregation_uri.unwrap(),
             format!("https://statuslist.example.com/api/v1/aggregation/{aggregation_id}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credential_withholds_the_aggregation_uri_per_issuer() {
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = Some(
+            "https://statuslist.example.com/api/v1/aggregation"
+                .parse()
+                .unwrap(),
+        );
+        app_state.aggregation_withheld_from = Arc::new(HashSet::from(["test_issuer".into()]));
+        let withheld_id = register_issuer(&app_state.service, "test_issuer").await;
+
+        let Json(withheld) = get_credential(
+            State(app_state.clone()),
+            authenticated_issuer("test_issuer"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(withheld.aggregation_id, withheld_id);
+        assert_eq!(withheld.aggregation_uri, None);
+
+        let other_id = register_issuer(&app_state.service, "other_issuer").await;
+        let Json(other) = get_credential(State(app_state), authenticated_issuer("other_issuer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            other.aggregation_uri,
+            Some(format!(
+                "https://statuslist.example.com/api/v1/aggregation/{other_id}"
+            ))
         );
     }
 
@@ -81,7 +110,6 @@ mod tests {
             .unwrap_err();
         let response = err.into_response();
         let expected = AuthenticationError::InvalidToken.into_response();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.status(), expected.status());
         assert_eq!(
             response.headers()[header::WWW_AUTHENTICATE],

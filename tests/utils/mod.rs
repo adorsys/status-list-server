@@ -127,6 +127,7 @@ async fn fixture_state(config: &Config) -> AppState {
             .server
             .aggregation_uri(config.telemetry.environment)
             .unwrap(),
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
