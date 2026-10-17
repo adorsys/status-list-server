@@ -382,6 +382,11 @@ impl CertManager {
         }
     }
 
+    /// `None` until a certificate has been stored.
+    ///
+    /// # Errors
+    ///
+    /// Fails if no storage backend is configured, the backend errors, or the data doesn't parse.
     pub async fn certificate(&self) -> Result<Option<CertificateData>, CertError> {
         let material_storage = self.crypto_storage()?;
         let cert_key = self.cert_key();
@@ -391,7 +396,11 @@ impl CertManager {
         Ok(None)
     }
 
-    /// None when no certificate has been provisioned yet.
+    /// `None` when no certificate has been provisioned yet.
+    ///
+    /// # Errors
+    ///
+    /// Fails if loading the certificate fails or its chain doesn't parse.
     pub async fn cert_chain_parts(&self) -> Result<Option<CertificateChain>, CertError> {
         let cert_key = self.cert_key();
         if let Some(certs) = self.cert_chain_cache.get(&cert_key).await {

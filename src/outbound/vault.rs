@@ -222,6 +222,11 @@ impl VaultClientBuilder {
     }
 
     /// Logs in once up front, so bad credentials fail here.
+    ///
+    /// # Errors
+    ///
+    /// `StorageError::Backend` for an invalid address, an empty mount or credential,
+    /// or a failed first login.
     pub async fn build(self) -> Result<VaultClient, StorageError> {
         let addr = self.addr.trim().trim_end_matches('/').to_string();
         let mount = self.mount.trim().to_string();
