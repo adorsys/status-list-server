@@ -197,7 +197,7 @@ impl fmt::Debug for SigningMaterial {
 
 #[async_trait]
 pub trait CertificateProvider: Send + Sync + 'static {
-    /// Chain and key come from one consistent snapshot.
+    /// Chain and key come from one consistent snapshot; the Arc keeps per-request clones cheap.
     async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError>;
 }
 
