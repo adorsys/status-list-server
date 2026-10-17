@@ -33,15 +33,7 @@ use super::utils::{
 };
 use crate::server::cache::{CachedToken, TokenCacheKey, TokenEncoding};
 
-/// Conditional-revalidation SLI counter. Cached after first use (the same
-/// pattern as `token.rs`): the global meter provider is installed by
-/// `setup_metrics` before any request is served, so a handle captured here is
-/// valid (unlike one taken at module init, which would be a permanent no-op).
-///
-/// The `outcome` label lets operators verify the 304 path is still serving
-/// unchanged lists efficiently and spot a regression that silently turns every
-/// conditional GET into a full re-sign (the exact failure mode this fix guards
-/// against).
+/// Built lazily: a meter taken before `setup_metrics` runs is a silent no-op.
 #[derive(Clone)]
 struct RevalidationMetrics {
     total: Counter<u64>,
@@ -60,12 +52,6 @@ fn revalidation_metrics() -> RevalidationMetrics {
     })
 }
 
-/// Handle GET /status-lists/{list_id} request.
-///
-/// This function handles the following cases:
-///
-/// - Retrieve a status list identified by its list id.
-/// - Retrieve a historical status list identified by its list id and time.
 #[tracing::instrument(skip_all, fields(list_id = %list_id), err(Debug))]
 pub async fn get_status_list(
     State(state): State<AppState>,
@@ -77,9 +63,7 @@ pub async fn get_status_list(
     get_status_list_at(State(state), list_id, query_result, headers, now).await
 }
 
-/// Request-time implementation of [`get_status_list`] with an explicit `now`
-/// (injected rather than read from the clock inside) so tests can advance the
-/// clock deterministically and pin the token-expiry revalidation behaviour.
+/// Takes `now` as a parameter so tests can control the clock.
 async fn get_status_list_at(
     State(state): State<AppState>,
     list_id: String,
@@ -87,9 +71,7 @@ async fn get_status_list_at(
     headers: HeaderMap,
     now: i64,
 ) -> Result<impl IntoResponse + Debug + use<>, ApiError> {
-    // Not a UUID check like publish: lists created before list_id validation
-    // have other IDs, and issued credentials still point at them. NUL alone is
-    // rejected because Postgres refuses it in text, which would be a 500.
+    // Legacy lists have non-UUID IDs, so only reject NUL, which Postgres can't store.
     if list_id.contains('\0') {
         return Err(ApiError::bad_request(
             "invalid_list_id",
@@ -109,8 +91,7 @@ async fn get_status_list_at(
     };
     let client_accepts_gzip = client_accepts_gzip(&headers);
 
-    // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so read
-    // every line and negotiate the whole set together.
+    // Multiple Accept headers form one list (RFC 9110 §5.3).
     let accept_fields: Vec<&str> = headers
         .get_all(header::ACCEPT)
         .iter()
@@ -119,9 +100,7 @@ async fn get_status_list_at(
     let accept_type = match negotiate_accept(accept_fields) {
         Some(ty) => ty,
         None => {
-            // Advertise that the outcome depends on `Accept`. The 406 is
-            // `no-store` (set by `ApiError`), so a shared cache never stores it
-            // either way; `Vary` just reflects RFC 9110 §12.5.5's SHOULD.
+            // Vary is only an RFC SHOULD here; the 406 is no-store anyway.
             return Err(ApiError::new(
                 StatusCode::NOT_ACCEPTABLE,
                 "invalid_accept_header",
@@ -149,22 +128,14 @@ async fn get_status_list_at(
     let status_record = fetch_status_record(&list_id, &state).await?;
     let aggregation_uri = issuer_aggregation_uri(&state, &status_record.issuer).await;
 
-    // Anchor the token and its validator to the current token validity window so
-    // the representation identity — and hence the strong ETag over the signed
-    // bytes — is stable for the whole window, letting the signed-bytes cache
-    // reuse one sign per window. Under ticket 564 the window is exactly a token's
-    // lifetime: `iat = window_start`, `exp = window_start + exp_secs`.
+    // Pin `iat` to the window start so the bytes, and the ETag, stay stable for the whole window.
     let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
     let window_start = token_window(now, validity).0;
     let iat = window_start;
     let exp = crate::domain::service::token_expiry(iat, state.token_exp_secs)?;
     let validity_window = (iat, exp);
 
-    // Derive the cache key *before* any signing. The key's signer fingerprint
-    // only reads the in-memory signing snapshot; it does not sign. The returned
-    // `signing_material` is the *same* snapshot used for the fingerprint, and is
-    // threaded into the token builder so a concurrent certificate/key reload can
-    // never cache bytes signed by one key under another key's cache entry.
+    // Sign with the key's own snapshot, or a rotation could cache bytes under the wrong signer.
     let (key, signing_material) = build_token_cache_key(
         &state,
         accept_type,
@@ -175,12 +146,7 @@ async fn get_status_list_at(
     )
     .await?;
 
-    // Serve the *uncompressed* signed token for this window (one sign per
-    // `(list, window, format)`), then derive the client's encoding and the strong
-    // ETag over the served bytes. On a warm cache this is a hit and does no
-    // signing; on a cold cache it signs. The conditional check below compares
-    // the client's ETag against the digest of these bytes, so a 304 requires the
-    // representation to be resident (the strong-ETag design of ticket 564).
+    // A 304 needs the cached bytes, since the strong ETag is a digest of them.
     let cached = get_or_build_live_token(
         &state,
         accept_type,
@@ -191,18 +157,13 @@ async fn get_status_list_at(
         now,
     )
     .await?;
-    // Reclaim any superseded (older-generation) entries for this list.
     state
         .token_bytes_cache
         .invalidate_superseded(&list_id, key.version, now)
         .await;
 
-    // Select the appropriate pre-computed encoding and ETag from the cache.
-    // The cache stores both identity and gzip (for JWT) variants with their
-    // strong ETags, so no re-compression is needed even for 304 responses.
     let (served_bytes, served_encoding, current_etag) =
         if client_accepts_gzip && accept_type == AcceptType::Jwt {
-            // Use pre-computed gzip bytes and ETag.
             let gzip_bytes = cached
                 .gzip_bytes
                 .as_ref()
@@ -219,7 +180,6 @@ async fn get_status_list_at(
                 gzip_etag,
             )
         } else {
-            // Use identity (uncompressed) bytes and ETag.
             (cached.bytes.clone(), None, cached.identity_etag.clone())
         };
 
@@ -237,9 +197,6 @@ async fn get_status_list_at(
     let last_modified = format_http_date(last_modified_ts);
     let cache_control = build_cache_control(state.token_ttl_secs, exp_after, now_after);
 
-    // If the window rolled over during the request, the ETag we computed from
-    // the old window's bytes is stale; we must fetch the current-window token
-    // and recompute the validator before evaluating the conditional.
     let (final_etag, final_bytes, final_encoding, _final_exp) = if now_after >= exp {
         let validity = TokenValidity::new(state.token_exp_secs, state.token_ttl_secs);
         let window_start = token_window(now_after, validity).0;
@@ -271,7 +228,6 @@ async fn get_status_list_at(
             .invalidate_superseded(&list_id, key.version, now_after)
             .await;
 
-        // Select the appropriate pre-computed encoding and ETag for the new window.
         let (served_bytes, served_encoding, current_etag) =
             if client_accepts_gzip && accept_type == AcceptType::Jwt {
                 let gzip_bytes = cached
@@ -329,18 +285,7 @@ async fn get_status_list_at(
     }
 }
 
-/// Build the typed cache key for the live token at `window_start`, without
-/// signing. Also returns the signing snapshot used for the key's signer
-/// fingerprint, so the caller can pass the *same* snapshot into the token
-/// builder and never cache bytes signed by one key under another key's entry.
-///
-/// The signer fingerprint reads the current in-memory signing snapshot, so a
-/// rotated key or renewed certificate immediately changes the key even before
-/// any token is built.
-///
-/// Encoding is deliberately **not** a key dimension (ticket 564 review): gzip
-/// and identity are derived from the same uncompressed bytes at serve time, so
-/// one sign per `(list, window, format)` serves every `Accept-Encoding` variant.
+/// Returns the signing snapshot too; sign with that one so the bytes match the key's signer.
 async fn build_token_cache_key(
     state: &AppState,
     accept_type: AcceptType,
@@ -361,14 +306,6 @@ async fn build_token_cache_key(
         .await
         .map_err(|e| ApiError::from(StatusListError::Backend(Box::new(e))))?;
     let signer = signer_fingerprint(&signing_material);
-    // The monotonic optimistic-concurrency `version` is part of the key (and
-    // hence pins the served bytes) so a mid-window content revert to an earlier
-    // state is still a distinct identity: A -> B -> A in one window bumps
-    // `version` even when `content_hash` is unchanged, so the reinstated token
-    // never reuses the earlier identical-content entry's cached bytes (which
-    // carried the stale state). It also drives generation-aware invalidation:
-    // `invalidate_superseded` reclaims every entry for this list with a strictly
-    // older version.
     let key = TokenCacheKey {
         list_id: list_id.to_string(),
         content_hash: hash,
@@ -382,22 +319,6 @@ async fn build_token_cache_key(
     Ok((key, signing_material))
 }
 
-/// Return the signed token bytes for the current window, serving from the
-/// per-replica signed-bytes cache when possible and re-signing only on a miss.
-///
-/// The token is minted with `iat = window_start` and `exp = window_start +
-/// token_exp_secs` (ticket 564 proposal #1), and stored **uncompressed**, so
-/// within a window with unchanged content the bytes are identical across
-/// requests and concurrent misses coalesce onto a single sign for
-/// `(list, window, format)`. Every `Accept-Encoding` variant (gzip / identity)
-/// is derived from these same bytes at serve time — an encoding change never
-/// causes a second sign. Capacity eviction can re-sign a still-valid entry (the
-/// documented capacity policy).
-///
-/// The `signing_material` passed in is the exact snapshot that produced `key`'s
-/// signer fingerprint, so the signed bytes cached under `key` are always signed
-/// by the signer the key claims. The `aggregation_uri` claim is likewise taken
-/// from `key`.
 async fn get_or_build_live_token(
     state: &AppState,
     accept_type: AcceptType,
@@ -407,16 +328,12 @@ async fn get_or_build_live_token(
     validity_window: &(i64, i64),
     now: i64,
 ) -> Result<CachedToken, ApiError> {
-    // A hit serves cached bytes; a miss runs the builder. The builder always
-    // returns the uncompressed token; the client's encoding is applied later.
     state
         .token_bytes_cache
         .get_or_build(
             key,
             || {
                 let signing_material = signing_material.clone();
-                // The record is cloned only when the builder actually runs (a cache
-                // miss); a hit serves cached bytes without touching it.
                 let status_record = status_record.clone();
                 async move {
                     let (bytes, _enc) = build_status_list_token(
@@ -441,7 +358,6 @@ async fn get_or_build_live_token(
         .await
 }
 
-/// Build a `200 OK` status-list token response from already-signed bytes.
 fn build_ok_response(
     token_bytes: Bytes,
     token_encoding: Option<&'static str>,
@@ -477,13 +393,7 @@ fn build_ok_response(
     response
 }
 
-/// Serve a historical status-list snapshot for `?time=` replayed at `(iat, exp)`.
-///
-/// Historical tokens are intentionally **not** cached in the signed-bytes cache:
-/// each request targets a possibly distinct snapshot (`time`), so the hit rate
-/// would be negligible and the cache would only churn retained memory. This is
-/// an explicit out-of-scope decision for the signed-token-bytes cache; the
-/// token is signed fresh per request against one consistent signing snapshot.
+/// Not cached: each `?time=` hits a different snapshot, so the hit rate would be near zero.
 async fn handle_historical_request(
     list_id: &str,
     time: i64,
@@ -504,9 +414,7 @@ async fn handle_historical_request(
 
     let snapshot = state.service.get_snapshot_at(list_id, time).await?;
 
-    // The historical ETag is weak and includes format + encoding so JWT vs CWT
-    // and gzip vs identity responses (distinct bytes, re-signed per request)
-    // never share a validator.
+    // Format and encoding go into the ETag so JWT/CWT and gzip/identity never share one.
     let format = match accept_type {
         AcceptType::Cwt => "cwt",
         AcceptType::Jwt => "jwt",
@@ -527,8 +435,7 @@ async fn handle_historical_request(
         status_list: snapshot.status_list,
         sub: snapshot.sub,
         updated_at: snapshot.iat,
-        // A historical token is built from a snapshot, not an optimistic
-        // concurrency update; the version is unused on this path.
+        // Unused for historical tokens.
         version: 0,
     };
 
@@ -595,14 +502,8 @@ async fn fetch_status_record(
 }
 
 fn build_cache_control(token_ttl_secs: u64, exp: i64, now: i64) -> String {
-    // Deliberately no `immutable`: the representation is *not* immutably fixed.
-    // The token re-signs and its validator rotates each `exp_secs` window, so
-    // freshness-honouring caches/browsers must revalidate to obtain a fresh,
-    // unexpired token rather than serving a stale one for its lifetime.
-    //
-    // Freshness is bounded by the token's *remaining* lifetime (ticket 564
-    // review: "bound HTTP freshness by the token's remaining lifetime"), so a
-    // `304` never extends a cached token past its `exp`: `now + max-age <= exp`.
+    // No `immutable`: the token re-signs every window.
+    // Cap max-age at the remaining lifetime so a 304 never outlives `exp`.
     let remaining = exp.saturating_sub(now).max(0) as u64;
     let max_age = token_ttl_secs.min(remaining);
     format!("max-age={max_age}")
@@ -628,8 +529,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    /// A [`TokenSigner`] that counts every `sign` call, so a test can assert how
-    /// many times the server actually signed during a conditional revalidation.
     struct CountingSigner {
         inner: Arc<dyn crate::domain::ports::TokenSigner>,
         signs: Arc<std::sync::atomic::AtomicUsize>,
@@ -648,9 +547,6 @@ mod tests {
         }
     }
 
-    /// A [`CertificateProvider`] returning a stable [`CountingSigner`] on every
-    /// call, so tests can count signing attempts through the full handler path
-    /// without the fingerprint rotating between requests.
     struct CountingCertProvider {
         signer: Arc<dyn crate::domain::ports::TokenSigner>,
     }
@@ -688,13 +584,6 @@ mod tests {
         }
     }
 
-    /// A [`CertificateProvider`] that hands out a *different* signing snapshot on
-    /// each call: the first call returns `signer_a`, every later call returns
-    /// `signer_b`. This mimics a concurrent key rotation landing *between* the
-    /// key-derivation fetch and the token-construction fetch that a naive
-    /// handler performs. A correct handler must derive the cache key and sign the
-    /// token from the *same* snapshot, so it issues exactly one `signing_material`
-    /// call per request and the served token verifies under `signer_a`.
     struct AlternatingCertProvider {
         signer_a: Arc<dyn crate::domain::ports::TokenSigner>,
         signer_b: Arc<dyn crate::domain::ports::TokenSigner>,
@@ -743,8 +632,6 @@ mod tests {
         }
     }
 
-    /// Decode the JWT payload of a freshly served (uncompressed) token so tests
-    /// can assert the `iat`/`exp` claims directly without a verification key.
     fn decode_jwt_claims(jwt: &[u8]) -> serde_json::Value {
         use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 
@@ -756,9 +643,6 @@ mod tests {
         serde_json::from_slice(&decoded).expect("JWT payload is valid JSON")
     }
 
-    /// Verify an uncompressed ES256 JWT against a raw public key, returning
-    /// whether the signature is valid. Used to assert which signer actually
-    /// produced a served token.
     fn jwt_verifies_under(jwt: &[u8], public_key_bytes: &[u8]) -> bool {
         use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
         use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
@@ -834,10 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_list_negotiates_accept_table() {
-        // (Accept header, expected Content-Type) — the negotiation outcome for
-        // an existing list, exercised end-to-end through the handler.
         let cases: Vec<(&str, &str)> = vec![
-            // Exact match.
             (
                 ACCEPT_STATUS_LISTS_HEADER_JWT,
                 ACCEPT_STATUS_LISTS_HEADER_JWT,
@@ -846,13 +727,10 @@ mod tests {
                 ACCEPT_STATUS_LISTS_HEADER_CWT,
                 ACCEPT_STATUS_LISTS_HEADER_CWT,
             ),
-            // Wildcards serve JWT.
             ("*/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
             ("application/*", ACCEPT_STATUS_LISTS_HEADER_JWT),
-            // Case-insensitive type/subtype.
             ("Application/StatusList+JWT", ACCEPT_STATUS_LISTS_HEADER_JWT),
             ("APPLICATION/STATUSLIST+CWT", ACCEPT_STATUS_LISTS_HEADER_CWT),
-            // Highest acceptable q wins.
             (
                 "application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8",
                 ACCEPT_STATUS_LISTS_HEADER_CWT,
@@ -898,9 +776,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_list_multiline_accept_header() {
-        // RFC 9110 §5.3 folds multiple `Accept` field lines into one list, so
-        // the handler must read every line and negotiate the whole set
-        // together, not just the first one (all `HeaderMap::get` returns).
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         publish_status(
@@ -938,8 +813,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_list_406_table() {
-        // (Accept header) — every header with no acceptable supported type must
-        // yield a 406 advertising `Vary` and listing both supported types.
         let cases: Vec<&str> = vec![
             "text/html",
             "application/json",
@@ -967,13 +840,10 @@ mod tests {
                 StatusCode::NOT_ACCEPTABLE,
                 "Accept: {accept:?}"
             );
-            // The 406 advertises Vary (RFC 9110 §12.5.5). It is `no-store`, so
-            // caches never store it either way.
             assert_eq!(
                 response.headers().get(header::VARY).unwrap(),
                 "Accept, Accept-Encoding"
             );
-            // The 406 body must list both supported media types (scope requirement).
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -991,7 +861,6 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        // Publish first
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -1104,8 +973,6 @@ mod tests {
 
     const AGGREGATION_BASE: &str = "https://statuslist.example.com/api/v1/aggregation";
 
-    /// Publishes a list for `issuer1` and returns the `aggregation_uri` claim of
-    /// the token served for it in the `accept` format.
     async fn served_aggregation_uri(app_state: AppState, accept: &str) -> Option<String> {
         let token_id = uuid::Uuid::new_v4().to_string();
         publish_status(
@@ -1197,9 +1064,6 @@ mod tests {
         );
     }
 
-    /// Gaining or losing the claim, as when a failed aggregation ID lookup
-    /// recovers or aggregation is withheld, makes a new token, so a client
-    /// revalidating the old one gets it instead of a 304.
     #[tokio::test]
     async fn test_revalidation_serves_a_new_token_when_aggregation_uri_changes() {
         let scoped: Option<url::Url> = Some(AGGREGATION_BASE.parse().unwrap());
@@ -1297,8 +1161,6 @@ mod tests {
         }
     }
 
-    /// A revocation check must not fail because the aggregation ID could not
-    /// be looked up; the optional claim is left out and the miss counted.
     #[test]
     fn test_token_omits_aggregation_uri_when_lookup_fails() {
         let metrics = metrics_after(async {
@@ -1354,11 +1216,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_if_modified_since_alone_returns_fresh_200() {
-        // If-Modified-Since on its own never certifies a 304: `updated_at` is a
-        // real wall-clock timestamp, so a revoke landing in the same second as
-        // the client's copy would otherwise be hidden by `updated_at <= IMS`. A
-        // 200 with a freshly signed token is always correct; the exact ETag
-        // (which includes `version`) is the revalidation mechanism.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
@@ -1413,9 +1270,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_within_validity_returns_304() {
-        // Deterministic time-advancement: fetch at `now0`, revalidate a short
-        // while later but *within the same* token validity window. The cached
-        // token is still valid, so a body-less 304 is correct and efficient.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1450,7 +1304,6 @@ mod tests {
         let etag = res1.headers().get(header::ETAG).unwrap().clone();
         headers.insert(header::IF_NONE_MATCH, etag);
 
-        // Same window (60s < token_exp_secs) -> cached token still valid -> 304.
         let res2 = get_status_list_at(
             State(app_state),
             token_id,
@@ -1467,17 +1320,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_revalidation_at_dead_zone_boundaries() {
-        // The ETag is keyed to the expiry-sized window (defaults E=900 -> W=900,
-        // ticket 564). Within the window a matching strong ETag is always -> 304,
-        // even exactly at `window_end - ttl`, because any token issued in the
-        // window still has ttl of validity left. Revalidating at `window_end`
-        // falls into the next window, the ETag rolls over, and the client is
-        // served a fresh token (200) instead of a stale 304.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let ttl = app_state.token_ttl_secs as i64;
         let now0 = 1_000_000_000;
-        // window(1_000_000_000) == [999_999_900, 1_000_000_800)
         let window_end = 999_999_900 + 900;
 
         publish_status(
@@ -1509,8 +1355,6 @@ mod tests {
         let etag = res1.headers().get(header::ETAG).unwrap().clone();
         headers.insert(header::IF_NONE_MATCH, etag);
 
-        // Exactly at `window_end - ttl` the cached token still has > ttl left ->
-        // 304.
         let dead_edge = window_end - ttl;
         let res2 = get_status_list_at(
             State(app_state.clone()),
@@ -1524,7 +1368,6 @@ mod tests {
         .into_response();
         assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
 
-        // Revalidating at `window_end` rolls the window over -> fresh 200.
         let res3 = get_status_list_at(
             State(app_state),
             token_id,
@@ -1544,9 +1387,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_expired_token_returns_fresh_200() {
-        // Fetch at `now0`, then revalidate after the token validity window has
-        // rolled over. The client's cached token has expired, so the server must
-        // bypass the 304 and return a freshly signed 200 with a valid body.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let token_exp_secs = app_state.token_exp_secs;
@@ -1581,8 +1421,6 @@ mod tests {
         let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
         headers.insert(header::IF_NONE_MATCH, etag1.clone());
 
-        // Advance past the window boundary so the previously issued token's
-        // validity window has lapsed.
         let res2 = get_status_list_at(
             State(app_state.clone()),
             token_id.clone(),
@@ -1611,8 +1449,6 @@ mod tests {
             !body.is_empty(),
             "expired-token revalidation must carry a newly signed token body"
         );
-        // Acceptance criterion #1 requires a freshly signed *valid* token: verify
-        // it carries a full validity window rather than expiring at issuance.
         let claims = decode_jwt_claims(&body);
         let iat = claims["iat"].as_i64().expect("token carries iat");
         let exp = claims["exp"].as_i64().expect("token carries exp");
@@ -1625,9 +1461,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_if_modified_since_expired_returns_fresh_200() {
-        // An If-Modified-Since revalidation with an expired cached token must
-        // also bypass the 304 and serve a fresh body, otherwise the original bug
-        // remains reachable through the weaker validator.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let token_exp_secs = app_state.token_exp_secs;
@@ -1662,8 +1495,6 @@ mod tests {
         let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
         headers.insert(header::IF_MODIFIED_SINCE, last_modified);
 
-        // `now` has passed `updated_at + token_exp_secs` -> the cached token is
-        // expired -> the IMS revalidation must not answer 304.
         let res2 = get_status_list_at(
             State(app_state),
             token_id,
@@ -1684,9 +1515,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_cwt_within_window_returns_304() {
-        // The CWT format participates in the same conditional revalidation: a
-        // revalidation within the current `E - ttl` window (matching ETag) must
-        // yield a body-less 304.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1735,8 +1563,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_cwt_window_rolled_returns_fresh_200() {
-        // After the `E - ttl` window rolls over a CWT revalidation must be served
-        // a freshly signed token, not a 304, mirroring the JWT behaviour.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1770,8 +1596,6 @@ mod tests {
         let etag1 = res1.headers().get(header::ETAG).unwrap().clone();
         headers.insert(header::IF_NONE_MATCH, etag1.clone());
 
-        // Past the expiry-sized window boundary (W=exp_secs=900) -> rolled over
-        // -> fresh 200.
         let res2 = get_status_list_at(
             State(app_state),
             token_id,
@@ -1797,9 +1621,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_expired_returns_gzipped_fresh_200() {
-        // When a revalidation falls into the fresh-re-sign path (window rolled)
-        // the freshly signed JWT must still honour the client's `Accept-Encoding`,
-        // i.e. be gzip-compressed on the 200 even though a 304 was bypassed.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1838,7 +1659,6 @@ mod tests {
         let etag = res1.headers().get(header::ETAG).unwrap().clone();
         headers.insert(header::IF_NONE_MATCH, etag);
 
-        // Window rolled (past exp_secs=900) -> fresh 200, still gzipped.
         let res2 = get_status_list_at(
             State(app_state),
             token_id,
@@ -1859,9 +1679,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_expired_token_returns_fresh_headers() {
-        // An expired If-Modified-Since validator must respond 200 with the full
-        // set of validator/freshness headers so downstream caches keep working
-        // after the fresh re-sign.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let token_exp_secs = app_state.token_exp_secs;
@@ -1924,9 +1741,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_request_content_changed_and_window_rolled() {
-        // A genuine content change (new statuses published) with the token window
-        // also rolled over must still be answered with a fresh 200 carrying the
-        // updated content, never a 304.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -1963,8 +1777,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Change the underlying content (update statuses), then revalidate after
-        // the window would have rolled.
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -2008,11 +1820,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_window_content_change_old_etag_gets_200_with_new_bytes() {
-        // A revocation service's core property: updating a credential's status
-        // must never be hidden behind a body-less 304. Even *without the window
-        // rolling over*, a content change must change the representation identity
-        // (`content_hash` is part of the ETag), so revalidating with the
-        // pre-change ETag gets a 200 carrying the new bytes — never a 304.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -2049,8 +1856,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Update the content within the same window (revalidate shortly after the
-        // fetch, far before the window rolls).
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -2098,17 +1903,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_reinstated_content_within_window_gets_fresh_iat_and_bytes() {
-        // Regression for the A -> B -> A reinstatement hole: if a credential is
-        // suspended (B) and then reinstated (back to A) *within one window*, the
-        // content hash returns to A's value, so an `iat`-less cache key would
-        // collide with the earlier A entry and serve its stale bytes (which carry
-        // the old `iat`, claiming VALID from before the suspension). Because the
-        // monotonic `version` is part of the cache key and the ETag, the
-        // reinstated token is a distinct identity even when a same-second burst
-        // leaves `updated_at` (and hence `iat`) unchanged: fresh bytes are minted
-        // under the bumped version and a different ETag, so the stale A bytes are
-        // never reused. And because `updated_at` stays a real wall-clock value,
-        // the reinstated token's `iat` is never pushed into the future.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -2128,7 +1922,6 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        // State A: index 0 VALID, index 1 INVALID.
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -2149,7 +1942,6 @@ mod tests {
         .await
         .unwrap();
 
-        // First GET of A within the window -> cached with iat_a.
         let res_a = get_status_list_at(
             State(app_state.clone()),
             token_id.clone(),
@@ -2167,7 +1959,6 @@ mod tests {
             .unwrap();
         let iat_a = decode_jwt_claims(&body_a)["iat"].as_i64().unwrap();
 
-        // State B: suspend index 0 (VALID -> SUSPENDED), within the same window.
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -2194,7 +1985,6 @@ mod tests {
         .into_response();
         assert_eq!(res_b.status(), StatusCode::OK);
 
-        // State A again: reinstate index 0 (SUSPENDED -> VALID) — content reverts.
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -2248,12 +2038,6 @@ mod tests {
     #[tokio::test]
     async fn test_conditional_request_matching_etag_within_window_certifies_304_even_when_ttl_ge_exp()
      {
-        // Even when `ttl >= exp` (exp > 0) — which startup validation rejects —
-        // a same-window matching strong ETag certifies a 304, because the
-        // advertised `max-age` is bounded by the token's *remaining* lifetime
-        // (`min(ttl, exp - now)`), so a 304 never extends the cached token past
-        // its `exp`. Constructed directly here (bypassing config validation) to
-        // pin the runtime guard that keeps the #482 invariant.
         for (exp, ttl) in [(300u64, 300u64), (300, 600)] {
             let token_id = uuid::Uuid::new_v4().to_string();
             let mut app_state = test_app_state(None).await;
@@ -2269,8 +2053,6 @@ mod tests {
             .await
             .unwrap();
 
-            // Revalidate at a realistic `now` at/after the record's `updated_at`
-            // (which is set from the real clock at publish time).
             let now0 = crate::domain::service::current_unix_timestamp();
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -2292,8 +2074,6 @@ mod tests {
             let etag = res1.headers().get(header::ETAG).unwrap().clone();
             headers.insert(header::IF_NONE_MATCH, etag);
 
-            // Same window/second -> matching ETag certifies a 304 (freshness is
-            // bounded by the remaining token lifetime, so it never extends past exp).
             let res2 = get_status_list_at(
                 State(app_state),
                 token_id,
@@ -2314,10 +2094,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_window_non_conditional_gets_reuse_cached_bytes() {
-        // Two non-conditional 200 GETs in the same window must reuse the same
-        // signed bytes (single sign per window, not one per request): the body is
-        // byte-for-byte identical. The token's `iat` is anchored to the window
-        // start (ticket 564), not the request time.
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let exp_secs = app_state.token_exp_secs;
@@ -2332,9 +2108,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Revalidate at a realistic `now` at/after the record's `updated_at`,
-        // aligned to a window start so `now0 + 30` is guaranteed to stay in the
-        // same window regardless of where the real clock falls.
         let now0 = {
             let t = crate::domain::service::current_unix_timestamp();
             token_window(t, TokenValidity::new(exp_secs, ttl_secs)).1
@@ -2372,8 +2145,6 @@ mod tests {
             exp_secs as i64
         );
 
-        // Second request, no validator: still Modified -> 200, but the signed
-        // bytes come from the cache (identical body => no re-sign).
         let res2 = get_status_list_at(
             State(app_state),
             token_id,
@@ -2396,14 +2167,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_misses_in_fresh_window_single_sign() {
-        // At most one signing operation per (list, window, format) per replica.
-        // Fire many concurrent GETs into a fresh window so they all miss; the
-        // single-flight cache must run the builder once. ECDSA signing is
-        // randomized, so two signs produce different bytes: all concurrent
-        // responses sharing byte-for-byte identical bodies proves a single sign.
-        // (The weak ETag is derived from the representation identity, not the
-        // bytes, so it is identical regardless of how many signs happened — the
-        // bytes are the real proof.)
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
         let now0 = 1_000_000_000;
@@ -2483,8 +2246,6 @@ mod tests {
         use opentelemetry_sdk::Resource;
         use prometheus::Registry;
 
-        // The global meter-provider setup must be serialised with other metric
-        // tests, so the lock is held outside the async runtime below.
         let _metrics_guard = metrics_test_lock();
         let registry = Registry::new();
         let config = TelemetryConfig {
@@ -2510,8 +2271,6 @@ mod tests {
             let token_id = uuid::Uuid::new_v4().to_string();
             let app_state = test_app_state(None).await;
             let token_exp_secs = app_state.token_exp_secs;
-            // Real clock so `now` lines up with the list's `updated_at` (set at
-            // publish time) for the expired If-Modified-Since branch.
             let now0 = time::OffsetDateTime::now_utc().unix_timestamp();
             let (_, window_end) = token_window(
                 now0,
@@ -2534,7 +2293,6 @@ mod tests {
                 ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
             );
 
-            // not_modified: within-window revalidation.
             let res1 = get_status_list_at(
                 State(app_state.clone()),
                 token_id.clone(),
@@ -2561,7 +2319,6 @@ mod tests {
             .into_response();
             assert_eq!(res_nm.status(), StatusCode::NOT_MODIFIED);
 
-            // modified: window rolled over -> ETag mismatch -> fresh 200.
             let mut mod_headers = headers.clone();
             mod_headers.insert(header::IF_NONE_MATCH, etag.clone());
             let res_mod = get_status_list_at(
@@ -2576,8 +2333,6 @@ mod tests {
             .into_response();
             assert_eq!(res_mod.status(), StatusCode::OK);
 
-            // modified via expired If-Modified-Since validator (past the anchored
-            // token's earliest expiry) -> fresh 200.
             let mut expired_headers = headers.clone();
             let last_modified = res1.headers().get(header::LAST_MODIFIED).unwrap().clone();
             expired_headers.insert(header::IF_MODIFIED_SINCE, last_modified);
@@ -2662,9 +2417,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// Generate a fresh, self-signed EC P-256 key (matching the ES256 signature
-    /// algorithm) plus a distinct certificate chain, so a test can rotate either
-    /// the signing key or the certificate between requests.
     fn rotated_signing_material() -> (String, Vec<String>) {
         let certified =
             rcgen::generate_simple_self_signed(vec!["rotated.local".to_string()]).unwrap();
@@ -2676,8 +2428,6 @@ mod tests {
     }
 
     fn assert_jwt_body(body: &[u8]) {
-        // A served JWT must decode to a runnable token: presence of iat/exp
-        // claims with a full validity span.
         let claims = decode_jwt_claims(body);
         let iat = claims["iat"].as_i64().expect("token carries iat");
         let exp = claims["exp"].as_i64().expect("token carries exp");
@@ -2686,9 +2436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_key_rotation_invalidates_cached_token_bytes() {
-        // Rotating the signing key within the same token window must invalidate
-        // the cached signed bytes: the next request re-signs with the new key and
-        // serves different bytes/ETag, never the stale key's token.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             vec!["ZHVtbXlfY2VydA==".to_string()],
@@ -2728,7 +2475,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Rotate the signing key; keep it in the same window.
         let (new_key, new_cert_chain) = rotated_signing_material();
         provider.rotate(new_key, new_cert_chain);
 
@@ -2760,8 +2506,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_certificate_renewal_invalidates_cached_token_bytes() {
-        // Renewing the certificate (fresh x5c/x5chain in the token) within the same
-        // window must also invalidate cached bytes, mirroring key rotation.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             vec!["ZHVtbXlfY2VydA==".to_string()],
@@ -2801,7 +2545,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Renew the certificate only (same signing key), same window.
         let (same_key, _) = (
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             (),
@@ -2835,7 +2578,6 @@ mod tests {
         assert_jwt_body(&body2);
     }
 
-    /// Parse the `max-age` directive out of a `Cache-Control` response header.
     fn parse_max_age(cache_control: &str) -> i64 {
         for directive in cache_control.split(',') {
             let directive = directive.trim();
@@ -2848,14 +2590,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_304_never_outlives_cached_token_exp_property() {
-        // Property-style invariant: a 304 certifies the client's cached token for
-        // `max-age = ttl` more seconds (that is the freshness the 304 advertises),
-        // so we must only ever certify a 304 at `now` while `now + max_age <= exp`,
-        // where `exp` is the *actual* expiry of the token the client holds, decoded
-        // from the JWT of the fetch that produced the validator. We sweep
-        // exp/ttl configs, fetch offsets within the window, revalidation offsets
-        // across the token's lifetime, and both validator kinds (If-None-Match and
-        // If-Modified-Since).
         for (exp, ttl) in [
             (900u64, 300u64),
             (300, 200),
@@ -2889,16 +2623,11 @@ mod tests {
                 ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
             );
 
-            // Base the window on a realistic `now` at/after the record's
-            // `updated_at` (set from the real clock at publish time), so the
-            // token's `iat`/`exp` and the revalidation probes actually exercise
-            // the expiry boundary.
             let validity = TokenValidity::new(exp, ttl);
             let now0 = crate::domain::service::current_unix_timestamp();
             let window_start = token_window(now0, validity).0;
             let width = token_window(now0, validity).1 - window_start;
 
-            // Vary where within the window the client first fetched.
             for fetch_offset in [0, width / 2, width.saturating_sub(1)] {
                 let fetch_at = window_start + fetch_offset;
 
@@ -2937,11 +2666,6 @@ mod tests {
                         headers.insert(header::IF_MODIFIED_SINCE, last_modified.clone());
                     }
 
-                    // Probe a bounded set of strategic revalidation offsets that
-                    // exercise the boundaries (immediate, near the ttl runway
-                    // edge, at/before/after the token's expiry) rather than every
-                    // second, keeping the sweep fast while still sweeping the
-                    // config, fetch-offset and validator dimensions.
                     let remaining = cached_exp - fetch_at;
                     let mut probes: Vec<i64> = vec![
                         fetch_at,
@@ -3007,15 +2731,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_strong_etag_differs_across_replicas() {
-        // The live ETag is a **strong** validator: a digest of the served
-        // representation bytes (ticket 564 proposal #3). ES256 signatures are
-        // randomized, so two replicas — separate sign operations over the same
-        // content and signer — produce byte-different tokens and therefore
-        // byte-different strong ETags for the same list in the same window. This
-        // is the documented, accepted deviation from cross-replica ETag equality
-        // (ticket 564 acceptance criterion: "two replicas return matching ETags
-        // *or the issue documents why they don't*"); within a single replica the
-        // strong ETag is stable for the window, so revalidation still gets a 304.
         let provider = Arc::new(RotatingCertProvider::new(
             include_str!("../../../../test_data/ec-private.pem").to_string(),
             vec!["ZHVtbXlfY2VydA==".to_string()],
@@ -3079,12 +2794,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_matching_inm_304_does_not_sign_with_warm_cache() {
-        // Acceptance criterion: a revalidation within the window must do no
-        // signing. The strong ETag is a digest of the *served bytes*, so a 304 is
-        // certified by comparing the client's ETag against the digest of the
-        // resident (warm) cached bytes — no sign is needed. (On a cold/disabled
-        // cache the bytes are absent, so the server must re-sign to obtain them
-        // and serves a fresh 200; that is the accepted strong-ETag tradeoff.)
         let signs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = Arc::new(CountingCertProvider::new(signs.clone()));
         let app_state = test_app_state_with_cert_provider(provider).await;
@@ -3150,13 +2859,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_signing_material_rotation_between_key_derivation_and_token() {
-        // Regression: the cache key and the signed bytes must be produced from the
-        // *same* signing snapshot. A naive handler fingerprints snapshot A to build
-        // the key, then fetches snapshot B (after a concurrent rotation) to sign,
-        // caching B-signed bytes under A's key and returning an ETag that claims
-        // signer A. `AlternatingCertProvider` returns a different signer on each
-        // `signing_material()` call, so the buggy two-fetch path signs with B; the
-        // correct single-fetch path signs with A.
         let provider = Arc::new(AlternatingCertProvider::new());
         let app_state = test_app_state_with_cert_provider(provider.clone()).await;
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -3206,14 +2908,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cached_live_token_rejects_u64_max_token_exp_secs() {
-        // Regression for the cached live-token path. The expiry window must be
-        // derived through the same fail-closed `token_expiry` conversion as every
-        // other mint site, not via a raw `as i64` (which turns `u64::MAX` into
-        // `-1`) plus `saturating_add` (which would then produce a born-expired
-        // window `iat - 1`). A directly constructed `AppState` with
-        // `token_exp_secs = u64::MAX` must therefore make a `Modified` GET fail
-        // closed with `TokenExpiryOverflow` -> 500, never return a signed token
-        // that is already expired.
         let mut app_state = test_app_state(None).await;
 
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -3226,9 +2920,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Publish under the normal config; flip `token_exp_secs` to `u64::MAX`
-        // only afterwards, so the list exists while the GET exercises the
-        // fail-closed cached-token expiry conversion in isolation.
         app_state.token_exp_secs = u64::MAX;
 
         let mut headers = HeaderMap::new();
@@ -3237,8 +2928,6 @@ mod tests {
             ACCEPT_STATUS_LISTS_HEADER_JWT.parse().unwrap(),
         );
 
-        // No conditional validator -> the handler takes the `Modified` path into
-        // `get_or_build_live_token`, where the expired-window guard must trip.
         let err = get_status_list_at(
             State(app_state),
             token_id,

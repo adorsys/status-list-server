@@ -221,7 +221,6 @@ fn test_renewal_strategy_days_before_expiry() {
 
     let now = now_unix_timestamp();
 
-    // Certificate expires in 20 days - should renew (threshold is 30 days)
     let cert_data_should_renew = CertificateData {
         certificate: "mock_cert".to_string(),
         valid_from: now - days_to_secs(60),
@@ -230,7 +229,6 @@ fn test_renewal_strategy_days_before_expiry() {
     };
     assert!(manager.should_renew_cert(&cert_data_should_renew));
 
-    // Certificate expires in 40 days - should not renew
     let cert_data_should_not_renew = CertificateData {
         certificate: "mock_cert".to_string(),
         valid_from: now - days_to_secs(50),
@@ -258,7 +256,6 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
     let now = now_unix_timestamp();
     let cert_lifetime = days_to_secs(90);
 
-    // Certificate is at 85% of its lifetime - should renew (threshold is 80%)
     let elapsed_time = (cert_lifetime as f32 * 0.85) as i64;
     let cert_data_should_renew = CertificateData {
         certificate: "mock_cert".to_string(),
@@ -268,7 +265,6 @@ async fn test_renewal_strategy_percentage_of_lifetime() {
     };
     assert!(manager.should_renew_cert(&cert_data_should_renew));
 
-    // Certificate is at 70% of its lifetime - should not renew
     let elapsed_time = (cert_lifetime as f32 * 0.70) as i64;
     let cert_data_should_not_renew = CertificateData {
         certificate: "mock_cert".to_string(),
@@ -296,7 +292,6 @@ async fn test_renewal_strategy_fixed_interval() {
 
     let now = now_unix_timestamp();
 
-    // Certificate issued 70 days ago - should renew (interval is 60 days)
     let cert_data_should_renew = CertificateData {
         certificate: "mock_cert".to_string(),
         valid_from: now - days_to_secs(70),
@@ -305,7 +300,6 @@ async fn test_renewal_strategy_fixed_interval() {
     };
     assert!(manager.should_renew_cert(&cert_data_should_renew));
 
-    // Certificate issued 50 days ago - should not renew
     let cert_data_should_not_renew = CertificateData {
         certificate: "mock_cert".to_string(),
         valid_from: now - days_to_secs(50),
@@ -351,7 +345,6 @@ async fn test_certificate_storage_and_retrieval() {
     let cert = manager.certificate().await.unwrap();
     assert!(cert.is_none());
 
-    // Store the certificate manually
     let serialized = include_str!("../../../test_data/cert_data.json");
     let cert_data: CertificateData = serde_json::from_str(serialized).unwrap();
 
@@ -381,16 +374,13 @@ async fn test_signing_key_generation_and_storage() {
     .unwrap()
     .with_crypto_storage(material_storage.clone());
 
-    // First call should generate and store a new key
     let generated_key = manager.signing_key_pem().await.unwrap();
     assert!(generated_key.starts_with("-----BEGIN PRIVATE KEY-----"));
     assert!(generated_key.ends_with("-----END PRIVATE KEY-----\n"));
 
-    // Second call should return the same key
     let key = manager.signing_key_pem().await.unwrap();
     assert_eq!(key, generated_key);
 
-    // The key should have been stored
     let stored_key = material_storage
         .load("keys-example.com")
         .await
@@ -745,7 +735,6 @@ async fn test_cert_chain_parts() {
     .unwrap()
     .with_crypto_storage(material_storage.clone());
 
-    // there are 2 parts in the certificate chain
     let serialized = include_str!("../../../test_data/cert_data.json");
     material_storage
         .store("certs-example.com-cert_data.json", serialized)
@@ -802,20 +791,16 @@ async fn test_cache_provisioned_chain_replaces_cached_entry() {
     let serialized = include_str!("../../../test_data/cert_data.json");
     material_storage.store(&cert_key, serialized).await.unwrap();
 
-    // First read populates the cache from storage.
     let first = cert_manager.cert_chain_parts().await.unwrap().unwrap();
     assert_eq!(first.len(), 2);
     assert_eq!(material_storage.load_count(), 1);
 
-    // Simulate re-provisioning with a different certificate by invoking the
-    // same hook `request_certificate` calls after storing a new cert.
     let replacement_pem = include_str!("../../../test_data/test_cert2.pem");
     cert_manager
         .cache_provisioned_chain(replacement_pem)
         .await
         .unwrap();
 
-    // The next read must return the replaced chain — no storage load needed.
     let reloaded = cert_manager.cert_chain_parts().await.unwrap().unwrap();
     assert_eq!(reloaded.len(), 1);
     assert!(!Arc::ptr_eq(&first, &reloaded));

@@ -2,21 +2,8 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::ports::SigningMaterial;
 
-/// Stable digest of signer identity and certificate chain; changes on key or
-/// certificate rotation.
-///
-/// It hashes the signing algorithm, the public-key bytes, and the certificate
-/// chain (if any). Because the fingerprint keys the signed-bytes cache and the
-/// ETag, rotating the key or renewing the certificate immediately invalidates
-/// both.
-///
-/// Every variable-length component is length-prefixed (including the chain
-/// count and each certificate), so structurally different signing snapshots
-/// cannot collide before hashing: `["YWJj", "ZGVm"]` and `["YWJjZGVm"]` would
-/// otherwise both feed `YWJjZGVm` to SHA-256, letting a certificate rotation
-/// reuse cached bytes and the ETag and break self-invalidation. JWT `x5c` and
-/// CWT `x5chain` encode the chain as an array, so distinct entries must stay
-/// distinct in the digest.
+/// Changes on key or certificate rotation, which invalidates cached bytes and ETags.
+/// Fields are length-prefixed so `["ab", "c"]` and `["abc"]` can't hash the same.
 pub(crate) fn signer_fingerprint(material: &SigningMaterial) -> String {
     let mut hasher = Sha256::new();
     update_len_prefixed(
@@ -81,14 +68,6 @@ mod tests {
 
     #[test]
     fn signer_fingerprint_frames_chain_boundaries_unambiguously() {
-        // Boundary case for the canonical framing: concatenating the entries
-        // without length prefixes is ambiguous. ["YWJj", "ZGVm"] (base64 "abc",
-        // "def") and ["YWJjZGVm"] (base64 "abcdef") both concatenate to the same
-        // byte stream "YWJjZGVm", so a naive digest would collide. A certificate
-        // rotation between those chains would then reuse cached bytes and the
-        // ETag, contradicting self-invalidation. The framed digest must keep
-        // them distinct even though the chain entries differ only in how they
-        // split the same bytes.
         let key: Arc<dyn crate::domain::ports::TokenSigner> = Arc::new(
             crate::utils::crypto::SigningKey::generate(
                 crate::domain::models::token::SigningAlgorithm::Es256,

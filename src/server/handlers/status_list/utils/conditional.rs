@@ -10,13 +10,11 @@ pub(crate) enum ConditionalResponse {
     Modified,
 }
 
-/// Token lifetime policy that shapes the freshness window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TokenValidity {
     /// Length of a token validity window, and the `exp - iat` of a minted token.
     pub exp_secs: u64,
-    /// Freshness advertised to clients via `max-age`, and the `ttl` claim of a
-    /// minted token.
+    /// Sent as max-age and as the token's ttl claim.
     pub ttl_secs: u64,
 }
 
@@ -26,15 +24,7 @@ impl TokenValidity {
     }
 }
 
-/// Boundaries of the token validity window containing `now`.
-///
-/// A live token is minted with `iat = window_start` and `exp = window_start +
-/// exp_secs` (proposal #1 of ticket 564), so the window `[start, start + exp)`
-/// is exactly the token's full lifetime. Anchoring the validator to a window of
-/// that width makes the representation identity — and hence the strong ETag over
-/// the signed bytes — stable for the whole window, so a matching ETag proves the
-/// client holds the current window's token, which is never expired while its
-/// window is live.
+/// Windows are exactly one token lifetime wide, so a token never outlives its window.
 pub(crate) fn token_window(now: i64, validity: TokenValidity) -> (i64, i64) {
     let width = window_width(validity);
     let start = now.div_euclid(width) * width;
@@ -73,16 +63,7 @@ pub(crate) fn evaluate_if_none_match(
     ConditionalResponse::Modified
 }
 
-/// Evaluate the request's conditional headers against the current strong ETag.
-///
-/// A matching `If-None-Match` certifies a `304`; `If-Modified-Since` alone (or
-/// no validator) never does. The current ETag is a digest of the served
-/// representation bytes, so a match proves the client holds the current
-/// window's token for this content and signer. That token is minted with `iat =
-/// window_start` and `exp = window_start + exp_secs`, so it is only ever served
-/// (and its ETag only ever issued) while its window is live — a `304` therefore
-/// never extends a cached token past its `exp`. Freshness is bounded separately
-/// by the caller via `max-age = min(ttl, exp - now)`.
+/// Only If-None-Match can earn a 304; If-Modified-Since alone never does.
 pub(crate) fn evaluate_conditional_request(
     if_none_match: Option<&str>,
     current_etag: &str,
@@ -107,8 +88,7 @@ pub(crate) fn format_http_date(unix_timestamp: i64) -> String {
         .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".to_string())
 }
 
-/// Parse an HTTP-date into a Unix timestamp; used by tests to round-trip
-/// [`format_http_date`].
+/// Only used by tests.
 #[allow(dead_code)]
 pub(crate) fn parse_http_date(date_str: &str) -> Option<i64> {
     use time::OffsetDateTime;
@@ -218,8 +198,6 @@ mod tests {
 
     #[test]
     fn test_token_window() {
-        // Defaults E=900, ttl=300 -> window length W = exp_secs = 900 (proposal
-        // #1 of ticket 564: a window is exactly a token's full lifetime).
         let v = TokenValidity::new(900, 300);
         assert_eq!(token_window(1_000_000, v), (999_900, 1_000_800));
         assert_eq!(token_window(1_000_300, v), (999_900, 1_000_800));
@@ -228,9 +206,6 @@ mod tests {
 
     #[test]
     fn test_token_window_expiry_sized() {
-        // The window width equals `exp_secs`, independent of `ttl_secs`: a
-        // client revalidating every `max-age = ttl` stays inside the same
-        // window and gets a 304 (the core revalidation saving), not a re-sign.
         for ttl in [0u64, 300, 600, 899, 900] {
             let v = TokenValidity::new(900, ttl);
             assert_eq!(token_window(1_000_000, v), (999_900, 1_000_800));
@@ -239,8 +214,6 @@ mod tests {
 
     #[test]
     fn test_token_window_degenerate_no_usable_lifetime() {
-        // `exp_secs = 0` leaves no lifetime; the window still rotates every
-        // second so the caller never certifies a 304 across an empty window.
         assert_eq!(
             token_window(1_000_000, TokenValidity::new(0, 300)),
             (1_000_000, 1_000_001)
@@ -258,9 +231,6 @@ mod tests {
 
     #[test]
     fn test_evaluate_conditional_request_weak_vs_strong_match() {
-        // ETag comparison is weak (RFC 9110 §8.8.3.2): a strong and weak
-        // validator with the same opaque tag are considered to match, so a
-        // client that cached a strong ETag can still revalidate with `W/`.
         let current_etag = r#""abc123""#;
         for inm in [r#""abc123""#, r#"W/"abc123""#] {
             assert_eq!(
@@ -287,8 +257,6 @@ mod tests {
 
     #[test]
     fn test_evaluate_conditional_request_no_inm_modified() {
-        // No If-None-Match (including an IMS-only request) is always a fresh
-        // 200; a matching strong ETag is the only 304 path.
         assert_eq!(
             evaluate_conditional_request(None, r#""abc123""#),
             ConditionalResponse::Modified

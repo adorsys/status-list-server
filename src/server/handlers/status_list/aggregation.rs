@@ -29,7 +29,7 @@ pub struct AggregationQuery {
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AggregationResponse {
     pub(super) status_lists: Vec<String>,
-    /// Opaque cursor for the next page; `null` on the last page.
+    /// null on the last page.
     pub(super) next_cursor: Option<String>,
 }
 
@@ -52,8 +52,7 @@ fn aggregation_pages() -> Counter<u64> {
     })
 }
 
-/// Handle GET /aggregation: every issuer's status lists. Deprecated, but
-/// tokens issued before aggregation was scoped to one issuer point here.
+/// Deprecated, but tokens issued before per-issuer aggregation still point here.
 #[tracing::instrument(skip_all, err(level = "info", Debug))]
 pub async fn get_aggregation(
     State(state): State<AppState>,
@@ -63,7 +62,6 @@ pub async fn get_aggregation(
     aggregation_page(&state, None, &headers, query).await
 }
 
-/// Handle GET /aggregation/{aggregation_id}: one issuer's status lists.
 #[tracing::instrument(skip_all, err(level = "info", Debug))]
 pub async fn get_issuer_aggregation(
     State(state): State<AppState>,
@@ -77,12 +75,7 @@ pub async fn get_issuer_aggregation(
     aggregation_page(&state, Some(aggregation_id), &headers, query).await
 }
 
-/// One page of at most `AGGREGATION_MAX_LIMIT` status list URIs, from one
-/// issuer when `scope` is given. No total count is returned, as counting every
-/// row is unbounded.
-///
-/// The handlers log its errors at INFO: on these public endpoints they are
-/// mostly malformed requests.
+/// No total count: counting every row is unbounded.
 async fn aggregation_page(
     state: &AppState,
     scope: Option<AggregationId>,
@@ -153,8 +146,7 @@ async fn aggregation_page(
 
     let mut response_headers = HeaderMap::new();
     if let Some(cursor) = &next_cursor {
-        // RFC 8288 next link. Resolved against the request URI, it keeps the
-        // path and so the issuer; the base64url cursor needs no percent-encoding.
+        // Relative link keeps the issuer's path; base64url needs no escaping.
         let link = format!("<?limit={limit}&cursor={cursor}>; rel=\"next\"");
         response_headers.insert(
             header::LINK,
@@ -187,15 +179,12 @@ async fn aggregation_page(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PageOutcome {
-    /// No more lists follow.
     Complete,
-    /// The unscoped endpoint's first page, with more lists following, for a
-    /// client that did not page.
+    /// Unscoped first page with more to come, for a client that didn't page.
     Truncated,
     /// The client asked for a page with `limit` or `cursor`.
     Paged,
-    /// As `Truncated`, but for one issuer's aggregation, which a draft-21 §9.3
-    /// client takes as the whole of it: answered `409 paging_required`.
+    /// Like Truncated but scoped; §9.3 clients would take it as complete, so 409 paging_required.
     Refused,
 }
 
@@ -219,20 +208,12 @@ impl PageOutcome {
     }
 }
 
-/// Encodes the last `list_id` of a page as an opaque cursor, bound to `scope`
-/// (an aggregation ID, or `all`): replayed on another aggregation, it would
-/// skip that one's lists that sort before it. The `list_id` is kept exactly as
-/// stored; normalising it would shift the page boundary.
+/// Bound to scope so it can't be replayed on another aggregation; list_id is kept as stored.
 fn encode_cursor(scope: &str, list_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{CURSOR_VERSION}{scope}:{list_id}"))
 }
 
-/// Deliberately not restricted to UUIDs: rows stored before `list_id` was
-/// validated would otherwise produce a `next_cursor` that strands the walk.
-///
-/// NUL is the one exception: Postgres rejects it in text, so letting it through
-/// is a 500. The trade-off is that a pre-validation `list_id` containing NUL,
-/// storable only on MySQL or SQLite, ends a walk at its page.
+/// Not UUID-only, or legacy list_ids would strand a walk; NUL is out since Postgres rejects it.
 fn decode_cursor(scope: &str, cursor: &str) -> Result<String, ApiError> {
     (cursor.len() <= MAX_CURSOR_LEN)
         .then_some(cursor)
@@ -266,7 +247,6 @@ mod tests {
     use std::collections::BTreeSet;
     use tower::ServiceExt;
 
-    /// Publishes a list with a fresh `list_id` and returns its URI.
     async fn publish(state: &AppState, issuer: &str) -> String {
         publish_list(&state.service, issuer, &uuid::Uuid::new_v4().to_string()).await
     }
@@ -319,7 +299,6 @@ mod tests {
         get_page(state, Some(aggregation_id), limit, cursor).await
     }
 
-    /// Sends `uri` through the aggregation routes as they are mounted.
     async fn send(state: &AppState, uri: &str) -> Response {
         axum::Router::new()
             .route("/api/v1/aggregation", axum::routing::get(get_aggregation))
@@ -381,7 +360,6 @@ mod tests {
         assert_eq!(page.next_cursor, None);
     }
 
-    /// Asserts completeness, not order, which differs by backend.
     #[tokio::test]
     async fn test_aggregation_cursor_walk_returns_every_list_once() {
         let state = test_app_state(None).await;
@@ -450,7 +428,6 @@ mod tests {
         let state = test_app_state(None).await;
         for cursor in [
             "not base64!",
-            // A bare list_id, without the version tag.
             URL_SAFE_NO_PAD
                 .encode("477121aa-b598-419e-916f-1e74654ff38b")
                 .as_str(),
@@ -459,7 +436,6 @@ mod tests {
                 .as_str(),
             URL_SAFE_NO_PAD.encode(CURSOR_VERSION).as_str(),
             URL_SAFE_NO_PAD.encode([0xff, 0xfe]).as_str(),
-            // The format before cursors named their aggregation.
             URL_SAFE_NO_PAD
                 .encode("v1:477121aa-b598-419e-916f-1e74654ff38b")
                 .as_str(),
@@ -495,7 +471,6 @@ mod tests {
             "{477121aa-b598-419e-916f-1e74654ff38b}",
             "urn:uuid:477121aa-b598-419e-916f-1e74654ff38b",
             "477121aab598419e916f1e74654ff38b",
-            // Stored before list_id had to be a UUID.
             "legacy-list",
             "list with spaces/and?query",
             "legacy\tlist\n",
@@ -505,8 +480,6 @@ mod tests {
         }
     }
 
-    /// The headline guarantee: an issuer at its full quota still fits in the
-    /// page a draft-21 §9.3 client gets, and only its own lists are in it.
     async fn assert_full_quota_is_one_page(state: AppState, backend: &str) {
         let quota = AGGREGATION_DEFAULT_LIMIT as u64;
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
@@ -579,8 +552,6 @@ mod tests {
         assert_full_quota_is_one_page_on_sql(test_db.db.clone(), "Postgres").await;
     }
 
-    /// Follows `Link` the way a client does, resolving it against the request
-    /// URI, so the walk stays on the issuer's path.
     #[tokio::test]
     async fn test_scoped_walk_follows_link() {
         let state = test_app_state(None).await;
@@ -610,8 +581,6 @@ mod tests {
         assert_eq!(seen, expected);
     }
 
-    /// A cursor from one aggregation, replayed on another, would skip that
-    /// one's lists that sort before it.
     #[tokio::test]
     async fn test_cursor_is_bound_to_its_aggregation() {
         let state = test_app_state(None).await;
@@ -641,8 +610,6 @@ mod tests {
         }
     }
 
-    /// A draft-21 client that does not page must not get part of an issuer's
-    /// aggregation as if it were all of it; a client that pages still can.
     #[tokio::test]
     async fn test_unpaged_aggregation_over_one_page_is_refused() {
         let state = test_app_state(None).await;
@@ -779,7 +746,6 @@ mod tests {
         }
     }
 
-    /// `issuer/refused` is the runbook's alert for an issuer over one page.
     #[test]
     fn test_aggregation_pages_are_counted_by_scope_and_outcome() {
         let metrics = metrics_after(async {
@@ -821,9 +787,6 @@ mod tests {
         }
     }
 
-    /// Every accepted `list_id` form, plus a legacy non-UUID one, must round-trip
-    /// through the cursor, scoped and not, under the backend's collation.
-    /// `limit=1` makes every ID a cursor.
     #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
     async fn assert_aggregation_walk_on_sql(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
@@ -832,8 +795,6 @@ mod tests {
         let state = test_app_state(Some(db)).await;
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
 
-        // Distinct UUIDs: MySQL's case-insensitive collation would treat an
-        // uppercase copy as a duplicate key.
         let uuid = || uuid::Uuid::new_v4();
         let list_ids = [
             uuid().hyphenated().to_string(),
@@ -913,7 +874,6 @@ mod tests {
         assert_aggregation_walk_on_sql(test_db.db.clone(), "Postgres").await;
     }
 
-    /// A legacy non-UUID `list_id` must not strand a walk.
     #[tokio::test]
     async fn test_aggregation_walk_passes_legacy_non_uuid_list_ids() {
         let state = test_app_state(None).await;

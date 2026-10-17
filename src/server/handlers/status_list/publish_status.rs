@@ -29,27 +29,17 @@ impl From<StatusesRequest> for PublishStatusesRequest {
     }
 }
 
-/// Response body of a successful `PUT /status-lists/{list_id}/statuses`.
-///
-/// `uri` is the absolute URI of the newly created status list. Per spec
-/// §5.1/§5.2/§8.3 the issuer MUST embed this exact URI in the Referenced
-/// Token's `status.status_list.uri`; the status list token's own `sub` carries
-/// the same URI so relying parties can resolve it.
+/// Issuers must embed `uri` verbatim as their tokens' `status_list.uri` (spec §5.1).
 #[derive(Debug, Serialize)]
 pub(super) struct PublishStatusResponse {
     pub uri: String,
     pub list_id: String,
-    /// Fixed list size actually stored by the server after byte-alignment
-    /// rounding, or `None` for caller-managed (grow-on-write) lists.
+    /// Rounded up to a whole byte; None for grow-on-write lists.
     pub size: Option<u32>,
-    /// Number of bits stored for each status entry.
     pub bits: u8,
 }
 
-/// Parse a `list_id` path segment as a UUID, accepting only the lowercase,
-/// hyphenated form. [`uuid::Uuid::try_parse`] also accepts braced, `urn:uuid:`,
-/// no-hyphen and uppercase forms, which would otherwise be signed verbatim into
-/// the published `sub` (the braced form is not even a valid URI).
+/// Lowercase hyphenated only; other forms would be signed into `sub` verbatim.
 fn parse_list_id_uuid(list_id: &str) -> Result<uuid::Uuid, String> {
     let uuid = uuid::Uuid::try_parse(list_id).map_err(|err| err.to_string())?;
     if uuid.hyphenated().to_string() != list_id {
@@ -58,13 +48,6 @@ fn parse_list_id_uuid(list_id: &str) -> Result<uuid::Uuid, String> {
     Ok(uuid)
 }
 
-/// Build the absolute `sub`/`Location` URI for a status list by appending
-/// `/status-lists/{list_id}` to the configured public base URL.
-///
-/// The base URL was normalized and validated at config load (no query,
-/// fragment, or trailing slash — except a root-path base, which normalizes to
-/// `https://host/`), so trimming a single trailing slash before appending is
-/// enough to guarantee exactly one `/` at the boundary without a double slash.
 fn build_status_list_uri(public_base_url: &str, list_id: &str) -> String {
     format!(
         "{}/status-lists/{list_id}",
@@ -72,12 +55,7 @@ fn build_status_list_uri(public_base_url: &str, list_id: &str) -> String {
     )
 }
 
-/// Map a publish error to an `ApiError`. A `409` conflict carries the stored
-/// list URI as the `Location` header so a racing publisher can adopt the
-/// canonical `sub` for the `list_id` it already supplied — but only when the
-/// stored list belongs to the caller. Handing a different issuer the URI of a
-/// list they do not own would have them embed it in their own credentials and
-/// then fail on every PATCH.
+/// Only send the stored URI on a 409 when the caller owns the list.
 async fn publish_error(
     appstate: &AppState,
     list_id: &str,
@@ -94,13 +72,7 @@ async fn publish_error(
     err.into()
 }
 
-/// Publish a new status list.
-///
-/// Handle PUT /status-lists/{list_id}/statuses request.
-///
-/// `err(level = "info")` for the reason on `update_status`: the default ERROR
-/// level would page on write contention and on a racing publish, both 409s the
-/// response layer already logs at the right severity.
+/// Errors log at info: race 409s are expected and the response layer logs them.
 #[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %principal), err(level = "info", Debug))]
 pub async fn publish_status(
     State(appstate): State<AppState>,
@@ -133,9 +105,6 @@ async fn publish_status_with_options(
         .collect::<Vec<_>>();
     let default_status = payload.default_status.map(Into::into);
 
-    // Build the sub URI from the normalized base URL and the canonical
-    // `list_id`: it depends only on config, so the value signed into `sub` is
-    // exactly what `record.sub` holds afterwards and the response echoes it.
     let uri = build_status_list_uri(&appstate.public_base_url, &list_id);
 
     let policy = appstate.status_list_policy();
@@ -218,8 +187,6 @@ mod tests {
         decompressed
     }
 
-    /// Decode the JWT payload of a freshly served (uncompressed) token so tests
-    /// can assert the `sub` claim directly without a verification key.
     fn decode_jwt_claims(jwt: &[u8]) -> serde_json::Value {
         use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
         let jwt = std::str::from_utf8(jwt).expect("JWT body is UTF-8");
@@ -230,7 +197,6 @@ mod tests {
         serde_json::from_slice(&decoded).expect("JWT payload is valid JSON")
     }
 
-    /// Extract the `sub` (Subject, label 2) from a freshly served CWT token.
     fn decode_cwt_sub(cwt: &[u8]) -> String {
         use coset::{CborSerializable, TaggedCborSerializable};
         let sign1 = coset::CoseSign1::from_tagged_slice(cwt).expect("CWT is a tagged COSE_Sign1");
@@ -264,7 +230,6 @@ mod tests {
 
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
-        // Mirror the production router, which nests the API under `/api/v1`.
         let router = Router::new()
             .nest(
                 "/api/v1",
@@ -277,7 +242,6 @@ mod tests {
             )
             .with_state(app_state.clone());
 
-        // Publish, capturing the Location header and the body `uri`.
         let mut request = axum::http::Request::builder()
             .method(axum::http::Method::PUT)
             .uri(format!("/api/v1/status-lists/{token_id}/statuses/"))
@@ -305,12 +269,6 @@ mod tests {
             "body `uri` must match the Location header"
         );
 
-        // The absolute Location URI must be resolvable: its scheme/authority
-        // must match the configured public base URL, and its path must be the
-        // route the GET handler serves. The router is nested under `/api/v1` a
-        // few lines up, and `oneshot` cannot route by host, so the request
-        // below sends only the path; the served token's `sub` must still equal
-        // the full absolute URI byte for byte.
         let location_url = url::Url::parse(&location).expect("Location is a valid URL");
         let expected_base =
             url::Url::parse(&app_state.public_base_url).expect("public_base_url is a valid URL");
@@ -331,7 +289,6 @@ mod tests {
             "Location path must map onto the served status-list route"
         );
 
-        // GET that exact URL's path in JWT form and assert `sub` equals it.
         let jwt_resp = router
             .clone()
             .oneshot(
@@ -353,7 +310,6 @@ mod tests {
             "JWT sub must equal the publish Location byte for byte"
         );
 
-        // And in CWT form.
         let cwt_resp = router
             .clone()
             .oneshot(
@@ -374,10 +330,6 @@ mod tests {
             "CWT sub must equal the publish Location byte for byte"
         );
 
-        // Compliance-matrix row 8 (§5.1) additionally requires the *stored*
-        // `sub` to equal the Referenced Token's URI: the URI listed by the
-        // aggregation endpoint must be the same one handed to the issuer at
-        // publish time.
         let page = app_state
             .service
             .status_list_repo
@@ -390,10 +342,6 @@ mod tests {
         );
     }
 
-    /// A configured `public_base_url` whose host differs from `server.domain`
-    /// must win for the published `sub`: the server signs the public base URL,
-    /// not the ACME domain. This builds the base URL from real config so the
-    /// test proves a non-default `public_base_url` actually reaches `sub`.
     #[tokio::test]
     async fn test_published_sub_uses_configured_public_base_url_over_domain() {
         use crate::config::Config;
@@ -475,11 +423,6 @@ mod tests {
         );
     }
 
-    /// The `sub` is fixed when a list is published: rebuilding the server state
-    /// with a different `public_base_url` must not rewrite the stored `sub` of
-    /// existing lists, because issued credentials still point at the original
-    /// host. Both the served token and the aggregation listing must keep the
-    /// first base URL.
     #[tokio::test]
     async fn test_stored_sub_survives_public_base_url_change() {
         use crate::server::handlers::status_list::get_status_list::get_status_list;
@@ -491,7 +434,6 @@ mod tests {
         state_original.public_base_url = "https://one.example/api/v1".to_string();
         state_rebased.public_base_url = "https://two.example/api/v1".to_string();
 
-        // Publish under the original base URL.
         let first_uri = {
             let router = Router::new()
                 .nest(
@@ -525,9 +467,6 @@ mod tests {
         };
         assert!(first_uri.starts_with("https://one.example/"));
 
-        // Rebuild the state with a different base URL but the same stored list,
-        // then serve the token and the aggregation: both must still use the
-        // original URI.
         let rebased_router = Router::new()
             .nest(
                 "/api/v1",
@@ -608,9 +547,6 @@ mod tests {
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
-    /// Only the lowercase hyphenated UUID form is accepted as a `list_id`:
-    /// braced, `urn:uuid:`, no-hyphen and uppercase forms would otherwise be
-    /// signed verbatim into `sub` (the braced form is not even a valid URI).
     #[tokio::test]
     async fn test_publish_rejects_non_canonical_uuid_forms() {
         let canonical = uuid::Uuid::new_v4().to_string();
@@ -740,8 +676,6 @@ mod tests {
             "https://example.com/api/v1/status-lists/".to_string() + &token_id,
             "body `uri` must name the created list"
         );
-        // `size` is the rounded value actually stored (5 -> 8), not the request
-        // value, so callers learn the real list dimensions from the response.
         assert_eq!(json["size"], 8, "size must be the rounded stored value");
         assert_eq!(json["bits"], 1);
 
@@ -949,9 +883,6 @@ mod tests {
         );
     }
 
-    /// Publish is insert-only for a list ID: once `issuer1` creates a list,
-    /// another authenticated issuer cannot overwrite or hijack it with PUT.
-    /// The original issuer's record must remain intact.
     #[tokio::test]
     async fn test_publish_status_rejects_wrong_issuer_republish() {
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -996,25 +927,6 @@ mod tests {
         assert_eq!(record.issuer, Issuer("issuer1".into()));
     }
 
-    /// The losing publisher of a `list_id` race gets 409, not 500 — end to end,
-    /// on a real backend.
-    ///
-    /// `test_token_conflict` above proves the same thing over the in-memory
-    /// adapter, where `AlreadyExists` is returned by a `HashMap` lookup. That
-    /// says nothing about a relational backend, where the conflict surfaces as a
-    /// driver error raised *inside* an open transaction and has to survive the
-    /// rollback with its classification intact:
-    ///
-    /// `sql_err()` → `RepositoryError::DuplicateEntry` (`sql::store::map_insert_err`)
-    /// → `StatusListError::AlreadyExists` (`impl From<RepositoryError>` in `outbound::sql`)
-    /// → **409** (`server::error`).
-    ///
-    /// Only the first hop can vary by backend, so the store's own
-    /// `assert_duplicate_list_id_is_conflict` carries the
-    /// per-backend burden — including the proof that the rolled-back publish
-    /// leaves neither a snapshot nor a modified row. What *this* test adds is
-    /// that the remaining hops are wired up at all: that the classification the
-    /// store produces actually reaches the client as a status code.
     #[cfg(any(feature = "postgres-tests", feature = "mysql"))]
     async fn assert_publish_duplicate_is_conflict(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
@@ -1027,9 +939,6 @@ mod tests {
 
         let app_state = test_app_state(Some(db)).await;
 
-        // status_lists.issuer is a foreign key onto credentials.issuer. Seeded
-        // through the service rather than the store so this test depends only on
-        // the domain API, not on the persistence schema.
         app_state
             .service
             .publish_credential(Credential {
@@ -1039,7 +948,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The handler rejects a non-UUID list_id before reaching the service.
         let list_id = uuid::Uuid::new_v4().to_string();
         let publish = || {
             let state = app_state.clone();
@@ -1079,18 +987,12 @@ mod tests {
             StatusCode::CONFLICT,
             "a duplicate publish must map to 409, not 500, on {backend}"
         );
-        // The status code alone does not pin the contract: 409 is also the
-        // credential-conflict code. Assert the documented error identity too.
         assert_eq!(
             err.error, "status_list_already_exists",
             "the 409 must carry the status-list conflict code on {backend}"
         );
     }
 
-    /// Postgres is the production backend, and the one where this could
-    /// plausibly diverge: a failed statement poisons the transaction (`25P02`),
-    /// so a classification read from the rollback rather than from the original
-    /// `23505` would degrade to a 500 here and nowhere else.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test]
     async fn test_postgres_publish_duplicate_returns_409_not_500() {
@@ -1104,8 +1006,6 @@ mod tests {
         .await;
     }
 
-    /// The same end-to-end proof on MySQL, whose driver reports duplicate keys
-    /// in a different wire format (`1062`) that `sql_err()` has to normalise.
     #[cfg(feature = "mysql")]
     #[tokio::test]
     async fn test_mysql_publish_duplicate_returns_409_not_500() {
@@ -1119,15 +1019,6 @@ mod tests {
         .await;
     }
 
-    /// The snapshot-disabled publish path must also return 409, not 500.
-    ///
-    /// `snapshot_retention_secs = 0` builds a `Service` with no snapshot repo,
-    /// so `publish_status_list` takes its `None` branch into the plain
-    /// non-transactional `insert` — a different duplicate-classification call
-    /// site from `insert_with_snapshot`, and the one no other end-to-end test
-    /// covers. This matters more since `publish_status_list` stopped
-    /// pre-checking with `find`: the constraint is now the only thing standing
-    /// between a duplicate publish and a 500.
     #[tokio::test]
     async fn test_publish_duplicate_without_snapshots_returns_409() {
         use crate::domain::models::credential::{Credential, Issuer, PublicJwk};
@@ -1187,11 +1078,6 @@ mod tests {
         assert_eq!(err.error, "status_list_already_exists");
     }
 
-    /// Registering an issuer twice is a 409.
-    ///
-    /// `publish_credential` no longer pre-checks with `find`, so this pins that
-    /// the primary key on `credentials.issuer` carries the conflict on its own
-    /// and still reaches the client as `credentials_already_exist`.
     #[tokio::test]
     async fn test_duplicate_credential_registration_returns_409() {
         use crate::domain::models::credential::{Credential, Issuer, PublicJwk};
@@ -1346,7 +1232,6 @@ mod tests {
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    /// Covers both publish paths: with and without snapshot retention.
     #[tokio::test]
     async fn test_publish_status_rejects_issuer_over_list_quota() {
         use crate::test_utils::test_app_state_without_snapshots;

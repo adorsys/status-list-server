@@ -1,5 +1,3 @@
-//! Outbound secondary ports defining contracts.
-
 use std::{fmt, sync::Arc};
 
 use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
@@ -9,20 +7,15 @@ use crate::domain::models::status_list::{
 pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 use async_trait::async_trait;
 
-/// Pluggable cache interface for recently used status-list records.
 #[async_trait]
 pub trait StatusListCache: Send + Sync + 'static {
-    /// Retrieve a cached status-list record by list identifier.
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Store a status-list record in the cache.
     async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
 
-    /// Invalidate a cached status-list entry upon mutation.
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
 
-    /// Invalidate a cached entry after a committed update, carrying the committed
-    /// monotonic version for distributed caches that need stale-fill fencing.
+    /// Carries the version so a shared cache can refuse a stale refill.
     async fn invalidate_after_update(
         &self,
         list_id: &str,
@@ -49,20 +42,18 @@ pub struct AllocateStatusListIndices {
 
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
-    /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Create a status list and any initial child records atomically.
+    /// Atomic: the list and its first snapshot land together or not at all.
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
-    /// Concurrently update an existing status list record matching `expected_version`.
     async fn update(
         &self,
         status_list: StatusListRecord,
         expected_version: u64,
     ) -> Result<bool, StatusListError>;
 
-    /// Concurrently update an existing record and atomically record a historical snapshot.
+    /// The update and its snapshot commit together.
     async fn update_with_snapshot(
         &self,
         status_list: StatusListRecord,
@@ -70,9 +61,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 
-    /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
-    /// starting strictly after `after`, from one issuer's lists when `issuer`
-    /// is given and from every issuer's otherwise.
+    /// Ordered by list_id; `limit` must be non-zero.
     async fn list_uris(
         &self,
         issuer: Option<&str>,
@@ -80,14 +69,12 @@ pub trait StatusListRepo: Send + Sync + 'static {
         limit: usize,
     ) -> Result<StatusListUriPage, StatusListError>;
 
-    /// Reserve `count` unused indices for `list_id`, returning the newly
-    /// allocated indices in ascending order.
+    /// Returns the new indices in ascending order.
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,
     ) -> Result<Vec<i32>, StatusListError>;
 
-    /// Return the first requested index that has not been allocated, if any.
     async fn first_unallocated_index(
         &self,
         list_id: &str,
@@ -95,75 +82,53 @@ pub trait StatusListRepo: Send + Sync + 'static {
     ) -> Result<Option<i32>, StatusListError>;
 }
 
-/// Interface for issuer public key credentials.
 #[async_trait]
 pub trait CredentialRepo: Send + Sync + 'static {
-    /// Find issuer credential details by issuer identifier.
     async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError>;
 
-    /// Find the credential owning a registered management-token key ID.
     async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError>;
 
-    /// Insert new issuer credential details into storage.
     async fn insert(
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
     ) -> Result<(), CredentialError>;
 
-    /// The issuer's aggregation ID, or `None` for an unknown issuer.
     async fn find_aggregation_id(
         &self,
         issuer: &str,
     ) -> Result<Option<AggregationId>, CredentialError>;
 
-    /// The issuer an aggregation ID belongs to.
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
     ) -> Result<Option<Issuer>, CredentialError>;
 }
 
-/// Persistence interface for historical status list snapshots.
 #[async_trait]
 pub trait StatusListSnapshotRepo: Send + Sync + 'static {
-    /// Save a historical status list snapshot.
     async fn insert(&self, record: StatusListSnapshot) -> Result<(), StatusListError>;
 
-    /// Find a historical snapshot active at a specific Unix timestamp.
     async fn find_valid_at(
         &self,
         list_id: &str,
         time: i64,
     ) -> Result<Option<StatusListSnapshot>, StatusListError>;
 
-    /// Purge historical snapshots with expiration timestamps older than `cutoff`.
     async fn delete_older_than(&self, cutoff: i64) -> Result<u64, StatusListError>;
 }
 
-/// Certificate chain and signing key captured from one provider snapshot.
-///
-/// The base64 chain (`certificate_chain`) is kept for the JWT `x5c` header, and
-/// decoded once at construction into DER bytes (`certificate_der`) for the CWT
-/// `x5chain` hot path. Both views are derived from the same source and exposed
-/// through accessors, so they can never fall out of sync.
+/// Holds the chain twice: base64 for JWT x5c and DER for CWT x5chain, decoded once.
 #[derive(Clone)]
 pub struct SigningMaterial {
-    /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
     certificate_chain: Option<Vec<String>>,
-    /// DER-encoded x509 certificate chain, decoded once at construction.
     certificate_der: Option<Arc<[Box<[u8]>]>>,
-    /// Pre-parsed signer; retains no PEM/DER encoding.
+    /// Keeps no PEM or DER copy of the key.
     pub signing_key: Arc<dyn TokenSigner>,
 }
 
 impl SigningMaterial {
-    /// Construct material from a validated, pre-parsed signer.
-    ///
-    /// Rejects an empty chain, an empty entry, or a non-base64 entry so a
-    /// malformed chain fails at load/renewal time rather than surfacing later
-    /// as a missing or empty CWT `x5chain`. Callers should treat this as a
-    /// provisioning error.
+    /// Rejects a malformed chain here so it fails at load, not as an empty x5chain later.
     pub fn new(
         certificate_chain: Option<Vec<String>>,
         signing_key: Arc<dyn TokenSigner>,
@@ -204,12 +169,10 @@ impl SigningMaterial {
         })
     }
 
-    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c` header.
     pub fn certificate_chain(&self) -> Option<&[String]> {
         self.certificate_chain.as_deref()
     }
 
-    /// DER-encoded x509 certificate chain for the CWT `x5chain` header.
     pub fn certificate_der(&self) -> Option<&[Box<[u8]>]> {
         self.certificate_der.as_deref()
     }
@@ -232,31 +195,18 @@ impl fmt::Debug for SigningMaterial {
     }
 }
 
-/// Provider interface for certificate chains and signing keys used for VC/token signatures.
 #[async_trait]
 pub trait CertificateProvider: Send + Sync + 'static {
-    /// Retrieve the current certificate chain and signing key from one
-    /// internally consistent snapshot.
-    ///
-    /// Returns an [`Arc`] so a per-request clone of the chain is avoided; token
-    /// encoders move the cheap `Arc` clone into a blocking task and borrow the
-    /// material inside it.
+    /// Chain and key come from one consistent snapshot; the Arc keeps per-request clones cheap.
     async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError>;
 }
 
-/// Cryptographic port used by token encoders.
-///
-/// `sign` receives exactly the bytes defined by the caller's token format and
-/// returns the raw signature bytes for the selected algorithm: fixed-width
-/// IEEE P1363 for ECDSA, 64-byte Ed25519, and PKCS#1 v1.5 for RS256.
+/// Signatures are raw: IEEE P1363 for ECDSA (not DER), 64 bytes for Ed25519, PKCS#1 v1.5 for RS256.
 pub trait TokenSigner: Send + Sync {
-    /// Return the algorithm associated with this signer.
     fn algorithm(&self) -> SigningAlgorithm;
 
-    /// Sign the supplied token-format signing input.
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, TokenSignerError>;
 
-    /// Return raw public-key bytes for X.509 certificate validation.
     fn public_key_bytes(&self) -> &[u8];
 }
 

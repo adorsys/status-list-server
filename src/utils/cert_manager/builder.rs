@@ -13,56 +13,7 @@ use crate::utils::cache::CertChainCache;
 
 type ACMEHttpClientFactory = Box<dyn Fn() -> Box<dyn HttpClient> + Send + Sync>;
 
-/// Builder for [`CertManager`].
-///
-/// Defaults:
-/// - provisioning strategy: ACME
-/// - renewal strategy: `RenewalStrategy::PercentageOfLifetime(None)`, which renews at 2/3 of the certificate lifetime
-/// - ACME HTTP client: [`DefaultHttpClient`] for ACME, no client for store provisioning
-/// - email: empty string when omitted
-/// - organization: none
-/// - EKU: none
-/// - ACME directory URL: empty string, but required when ACME is selected
-/// - cryptographic material backend, domains, and ACME challenge handler: not set
-///
-/// Required for all strategies:
-/// - at least one domain
-/// - cryptographic-material backend
-///
-/// Required for ACME:
-/// - challenge handler
-/// - ACME directory URL
-///
-/// Required for store provisioning:
-/// - a [`StoreProvisioningStrategy`] built from filesystem paths or storage keys
-///
-/// # Examples
-///
-/// ACME example:
-/// ```ignore
-/// let manager = CertManager::builder()
-///     .domains(["statuslist.example.com"])
-///     .email("support@example.com")
-///     .organization(Some("example.com"))
-///     .acme_directory_url("https://acme-v02.api.letsencrypt.org/directory")
-///     .crypto_storage(material_storage)
-///     .challenge_handler(challenge_handler)
-///     .eku(&[1, 3, 6, 1, 5, 5, 7, 3, 30])
-///     .acme_strategy()
-///     .build()?;
-/// ```
-///
-/// Store example:
-/// ```ignore
-/// let manager = CertManager::builder()
-///     .domains(["statuslist.example.com"])
-///     .crypto_storage(material_storage)
-///     .store_strategy(StoreProvisioningStrategy::filesystem(
-///         "/etc/status-list/tls.crt",
-///         "/etc/status-list/tls.key",
-///     ))
-///     .build()?;
-/// ```
+/// ACME needs a challenge handler and directory URL; store mode needs a StoreProvisioningStrategy.
 pub struct CertificateManagerBuilder {
     crypto_storage: Option<Box<dyn Storage>>,
     cache_policy: CryptoCachePolicy,
@@ -96,84 +47,70 @@ impl Default for CertificateManagerBuilder {
 }
 
 impl CertificateManagerBuilder {
-    /// Create a new certificate manager builder.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set subject alternative names for the server certificate.
     pub fn domains(mut self, domains: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.domains = domains.into_iter().map(Into::into).collect();
         self
     }
 
-    /// Set ACME account contact email.
     pub fn email(mut self, email: impl Into<String>) -> Self {
         self.email = Some(email.into());
         self
     }
 
-    /// Set optional certificate organization name.
     pub fn organization(mut self, organization: Option<impl Into<String>>) -> Self {
         self.organization = organization.map(Into::into);
         self
     }
 
-    /// Set the ACME directory URL.
     pub fn acme_directory_url(mut self, url: impl Into<String>) -> Self {
         self.acme_directory_url = Some(url.into());
         self
     }
 
-    /// Set the consolidated backend for server certificate and signing-key material.
     pub fn crypto_storage(mut self, storage: impl Storage + 'static) -> Self {
         self.crypto_storage = Some(Box::new(storage));
         self
     }
 
-    /// Set cache policy for certificate and signing-key material reads.
     pub fn crypto_cache_policy(mut self, policy: CryptoCachePolicy) -> Self {
         self.cache_policy = policy;
         self
     }
 
-    /// Set the ACME challenge handler.
     pub fn challenge_handler(mut self, handler: impl ChallengeHandler + 'static) -> Self {
         self.challenge_handler = Some(Box::new(handler));
         self
     }
 
-    /// Set an ACME HTTP client implementation.
     pub fn acme_http_client(mut self, client: impl HttpClient + Clone + 'static) -> Self {
         self.acme_http_client_factory = Some(Box::new(move || Box::new(client.clone())));
         self
     }
 
-    /// Set the certificate renewal strategy used by ACME.
     pub fn renewal_strategy(mut self, strategy: RenewalStrategy) -> Self {
         self.renewal_strategy = strategy;
         self
     }
 
-    /// Set Extended Key Usage OID.
     pub fn eku(mut self, eku: &[u64]) -> Self {
         self.eku = Some(eku.to_vec());
         self
     }
 
-    /// Use ACME provisioning.
     pub fn acme_strategy(mut self) -> Self {
         self.provisioning_strategy = Some(Box::new(AcmeProvisioningStrategy));
         self
     }
 
-    /// Use direct store-based provisioning.
     pub fn store_strategy(mut self, strategy: StoreProvisioningStrategy) -> Self {
         self.provisioning_strategy = Some(Box::new(strategy));
         self
     }
 
-    /// Build and validate the certificate manager.
     pub fn build(self) -> Result<CertManager, CertError> {
         if self.domains.is_empty() {
             return Err(CertError::validation(
