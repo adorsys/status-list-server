@@ -1571,7 +1571,10 @@ mod tests {
         assert!(parsed.is_loopback());
     }
 
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_middleware_records_route_and_status() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1658,7 +1661,10 @@ mod tests {
         );
     }
 
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_listener_label_is_not_unknown() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1722,7 +1728,10 @@ mod tests {
         );
     }
 
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn panicking_handler_records_5xx_metric() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
