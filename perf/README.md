@@ -14,9 +14,8 @@ This suite contains four tests exercising the StatusList Server:
 4. Authentication test
 
 Each test targets `http://localhost:8000` by default. Public reads (health,
-welcome, status-list retrieval) hit that target. Management writes (credential
-registration and status-list publishes/updates) go to the management listener at
-`http://localhost:8001` by default. Override the write destination with
+welcome, status-list retrieval) hit that target. Authenticated metadata reads and status-list publishes/updates go to the management listener at
+`http://localhost:8001` by default. Override the management destination with
 `MANAGEMENT_TARGET` (e.g. `MANAGEMENT_TARGET=https://mgmt.example.com npm run
 test:load`) for a deployment with a separate management hostname.
 
@@ -36,7 +35,7 @@ cd perf
 # install dependencies
 npm install
 
-# generate test tokens (JWK + signed JWTs written to ./scripts)
+# generate the registry fixture and test tokens before starting the server
 npm run generate-tokens
 ```
 
@@ -46,19 +45,30 @@ Management tokens expire after 300 seconds; workers refresh them during longer
 runs. The ignored `scripts/test-tokens.json` contains the ephemeral private key
 and is written with owner-only permissions. Regenerate it for each run.
 
-`generate-tokens` writes a single, git-ignored `scripts/test-tokens.json`
-containing the issuer ID, the public JWK and a set of signed JWTs. The run and
-setup scripts read everything they need from this file, so the key always
-matches the signed JWTs it was generated with.
+`generate-tokens` writes a git-ignored `scripts/test-tokens.json` containing the
+issuer ID, aggregation ID, public JWK, ephemeral private key and signed JWTs.
+It also writes the matching **public-only** `scripts/issuers.yaml` registry
+fixture. Its `kid` is the RFC 7638 SHA-256 public-key thumbprint. Configure the
+local server with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=perf/scripts/issuers.yaml`
+(from the repository root) and the same `APP_MANAGEMENT_AUTH__AUDIENCES` before
+starting setup. Generating tokens again replaces both files; reload the new
+fixture before running the suite. For a separate deployment, the operator must
+review and provision the generated public fixture before a run. Do not copy
+`test-tokens.json` into the server registry or use these test keys in production.
+The metadata scenarios use authenticated `GET /api/v1/credentials`; there is no
+self-registration scenario. The setup script and Artillery workers read signing
+material from `test-tokens.json`, so their keys match the provisioned fixture.
 
 ### One-time setup against the running server
 
 Before each test, `scripts/setup.js` runs automatically (via the `npm run
-test:*` scripts). It registers the test issuer from `test-tokens.json` and
-publishes a set of seed status lists, writing their IDs to
-`scripts/seed-lists.json` (git-ignored). Registration lets the server resolve the
-token's `kid` to its public key; without it, authenticated requests return
-`401 invalid_token`. The seed lists give the read scenarios real list IDs to query.
+test:*` scripts). It signs a fresh management token and calls authenticated
+`GET /api/v1/credentials`, checking that the issuer and aggregation IDs match
+the generated fixture. A missing or mismatched registry fails setup before any
+lists are published. It then publishes seed status lists and writes their IDs
+to `scripts/seed-lists.json` (git-ignored), giving read scenarios real lists to
+query. Each setup run creates a fresh set of seed lists; repeated runs on a
+persistent server still consume the configured per-issuer list quota.
 
 Setup runs as a separate Node script rather than an Artillery `before:` hook,
 which does not execute processor `function:` steps.
@@ -93,6 +103,8 @@ served token carry `aggregation_uri`, so the read scenarios also measure the
 aggregation ID lookup that comes with it:
 
 ```bash
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=perf/scripts/issuers.yaml \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
 APP_SERVER__ENABLE_METRICS=true \
 APP_SERVER__AGGREGATION_URI=http://localhost:8000/api/v1/aggregation \
 APP_TELEMETRY__ENABLED=true \
@@ -104,6 +116,12 @@ APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS=60 \
 RUST_LOG=info \
 ./target/debug/status-list-server
 ```
+
+## Verify the tooling
+
+After installing dependencies, `npm run test:tooling` checks fixture generation,
+authenticated setup, and rejection of unprovisioned or mismatched issuers using
+a temporary local HTTP server. It generates no load against your deployment.
 
 ## Run a single test
 

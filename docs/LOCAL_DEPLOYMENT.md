@@ -11,6 +11,23 @@ cp .env.template .env
 Compose reads `.env` only; `.env.template` is a reference to copy from and is never loaded.
 For variables listed under `environment:` in `docker-compose.yml`, Compose uses the shell first, then `.env`, then the Compose default. Other variables in `.env` reach the container through `env_file`; Compose does not pass unrelated shell variables through automatically. `APP_TELEMETRY__OTLP_ENDPOINT` is fixed in the Compose file, so setting it in `.env` has no effect. Quote values containing `$` with single quotes, for example `APP_X='a$b'`.
 
+## Local issuer registry
+
+Self-registration is unavailable in every environment. The root `issuers.yaml`
+is an empty registry, so the default setup trusts no issuers. For the demo
+workflows, use the checked-in fixture with its public test keys:
+
+```bash
+cp demo/issuers.yaml issuers.yaml
+```
+
+Compose mounts the root file read-only at the configured registry path. For
+`cargo run`, you can instead set
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=demo/issuers.yaml`. Keep these dummy keys out
+of production. Provision real issuers with `cargo xtask issuer add`; see the
+[registry schema](schemas/issuers.v1.schema.json). Existing deployments must
+follow the [issuer migration guide](ISSUER_REGISTRY_MIGRATION.md).
+
 ## Docker Compose profiles
 
 `docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.

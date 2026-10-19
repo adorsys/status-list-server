@@ -17,7 +17,7 @@ The environment exposes these variables:
 | ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
 | `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
 | `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
-| `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
+| `issuer_id`       | `my-issuer`                            | Operator-provisioned issuer identifier.                   |
 | `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
@@ -26,9 +26,9 @@ Lists, and Aggregation folders. Requests include Postman test scripts that check
 status codes, content types, token response headers, and JSON response shapes.
 
 Protected management routes require a Bearer JWT signed by the private key that
-matches the issuer public JWK registered through `POST /api/v1/credentials`.
+matches a public JWK in the operator-managed issuer registry.
 For fully automated local collection testing, use the Newman script below; it
-generates and registers a temporary issuer for the run.
+generates a temporary issuer and writes its registry fixture for the run.
 
 ## Local Prerequisites
 
@@ -42,9 +42,14 @@ The Postman/Newman runner expects these host tools:
 
 ## Newman Collection Check
 
-Start the API first:
+Create an empty local test registry, then start the API:
 
 ```bash
+printf 'version: 1\nissuers: []\nadmins: []\n' > /tmp/newman-issuers.yaml
+```
+
+```bash
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=/tmp/newman-issuers.yaml \
 APP_SERVER__HOST=0.0.0.0 \
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
@@ -55,12 +60,11 @@ cargo run
 Then run the same collection check used by CI:
 
 ```bash
-./scripts/test-postman-collection.sh
+POSTMAN_ISSUER_REGISTRY_FILE=/tmp/newman-issuers.yaml ./scripts/test-postman-collection.sh
 ```
 
-The script generates a temporary P-256 issuer key, patches a temporary copy of
-the collection so `POST /api/v1/credentials` registers the matching public JWK,
-and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
+The script generates a temporary P-256 issuer key and writes the matching public
+key to `POSTMAN_ISSUER_REGISTRY_FILE` for the server to reload, then runs Newman with a temporary environment containing `baseUrl`, `list_id`,
 `issuer_id`, `token`, and `historical_time`. No generated collection or
 environment is written into the repository. Set `NEWMAN_RUNNER=docker` to use
 the pinned Newman container instead of a locally installed Newman binary.

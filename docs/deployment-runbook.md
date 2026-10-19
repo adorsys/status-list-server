@@ -687,6 +687,13 @@ here; a test fails until it does.
 
 ### Preparing existing management credentials
 
+For the release that removes self-registration, first follow the
+[issuer registry migration guide](ISSUER_REGISTRY_MIGRATION.md), including
+export, audience agreement, coordinated server/chart upgrade, and URI checks.
+The SQL inventory and repair instructions below describe preparation of legacy
+database rows before export. Management authentication after cutover trusts the
+operator-managed registry; database edits alone do not change its trusted keys.
+
 Helm deployments must explicitly set
 `statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES` to an audience unique to that
 deployment (for example, `https://statuslist.prod.example.com/api/v1`). Give
@@ -830,8 +837,8 @@ Coordinate repairs with each issuer before enabling the new verifier:
    `typ: statuslist-management+jwt`, matching `kid`, configured audience, and
    a lifetime within the configured maximum (300 seconds by default).
 
-There is no public credential-update endpoint in this release. An operator must
-perform these repairs; re-registering an existing issuer returns 409. Plan a
+There is no public credential-update or self-registration endpoint in this
+release. An operator must perform these repairs and update the reviewed registry. Plan a
 coordinated cutover if old and new servers overlap, because their accepted token
 contracts differ.
 

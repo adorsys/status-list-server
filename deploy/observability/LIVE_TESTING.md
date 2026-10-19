@@ -92,6 +92,8 @@ defaults to `false` in `src/config.rs`). You must start it with:
 
 ```bash
 # from the repo root
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=perf/scripts/issuers.yaml \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
 APP_SERVER__ENABLE_METRICS=true \
 APP_TELEMETRY__ENABLED=true \
 APP_TELEMETRY__ENVIRONMENT=development \
@@ -194,11 +196,11 @@ server exposes HTTP latency + cache counters, but DB/token-gen/cert families
 appear lazily when those operations occur. Run the simulation below to exercise
 them.
 
-Before running, be aware of two real API contract details (verified against the
+Before running, be aware of these API contract details (verified against the
 running server):
 
-1. **Credential registration takes a JWK** public key, not a PEM string —
-   sending PEM yields `422 invalid type for public_key`.
+1. **Issuers must be provisioned in the operator-managed registry** before
+   the simulation. Self-registration has been removed.
 2. **Statuses are integers** in the request body: `0`=VALID, `1`=INVALID,
    `2`=SUSPENDED (`src/server/handlers/status_list/utils/request.rs`). Sending
    `"VALID"` yields `422`.
@@ -210,11 +212,29 @@ running server):
 The issuer key and signed JWTs used below are generated locally by
 `perf/scripts/token-generator.js` (`npm run generate-tokens` in
 `perf/`). They are git-ignored and never shipped with the repo, so
-generate them before running the simulation (Section 7b). The script writes a
-single `perf/scripts/test-tokens.json` containing the issuer ID, the public JWK
-and the signed JWTs, all of which the following commands read.
+generate them before running the simulation (Section 7a). The script writes a
+private `perf/scripts/test-tokens.json` and a matching public-only
+`perf/scripts/issuers.yaml` registry fixture. Generate them before starting the
+server in Section 7b; if it is already running, configure and reload the fixture
+before Section 7c.
 
-### 7a. Optional: restart the app with raised rate limits (recommended for the demo)
+### 7a. Generate tokens (once)
+
+```bash
+cd perf
+npm install
+# token-generator.js resolves paths via __dirname, so it can run from anywhere;
+# here it is launched from inside perf:
+npm run generate-tokens
+```
+
+This writes git-ignored `perf/scripts/test-tokens.json` (including the ephemeral
+private key for short-lived token refresh) and public-only
+`perf/scripts/issuers.yaml`. Load the latter in the server before proceeding;
+keep the private test data local. Regenerate before a run if its tokens have
+expired.
+
+### 7b. Start or restart the app with the registry fixture and raised limits
 
 ```bash
 # stop the current instance, then:
@@ -229,21 +249,6 @@ RUST_LOG=info \
 ./target/debug/status-list-server
 ```
 
-### 7b. Generate tokens (once)
-
-```bash
-cd perf
-npm install
-# token-generator.js resolves paths via __dirname, so it can run from anywhere;
-# here it is launched from inside perf:
-npm run generate-tokens
-```
-
-This writes a single git-ignored `perf/scripts/test-tokens.json`.
-It holds the public JWK and the signed JWTs (the private signing key is used
-only in-memory to sign and is never persisted), and the run scripts read the key
-from `test-tokens.json`, so the key always matches the tokens.
-
 ### 7c. Run the simulation
 
 ```bash
@@ -251,26 +256,28 @@ cat > /tmp/simulate_slo.py << 'PY'
 import requests, uuid, time, json
 
 BASE = "http://localhost:8000"
+MANAGEMENT = "http://localhost:8001"
 s = requests.Session()
 data = json.load(open("perf/scripts/test-tokens.json"))
 jwk, issuer, tokens = data["publicKeyJwk"], data["issuerId"], data["tokens"]
 
-# 1) Register issuer with a JWK (202 = new, 409 = already exists)
-r = s.post(f"{BASE}/api/v1/credentials",
-           json={"issuer": issuer, "public_key": jwk, "alg": "ES256"})
-print(f"[register] -> {r.status_code} {r.text[:40]}")
-time.sleep(3)  # pace to stay under default rate limits
+# 1) Check the operator-provisioned issuer with an authenticated metadata read.
+r = s.get(f"{MANAGEMENT}/api/v1/credentials",
+          headers={"Authorization": f"Bearer {tokens[0]}"})
+r.raise_for_status()
+assert r.json()["issuer"] == issuer
+assert r.json()["aggregation_id"] == data["aggregationId"]
 
 lists = []
 # 2) Publish + update status lists (token-gen + DB write path) using signed JWTs
 for i in range(3):
     lid = str(uuid.uuid4()); lists.append(lid)
     h = {"Authorization": f"Bearer {tokens[i % len(tokens)]}"}
-    r = s.put(f"{BASE}/api/v1/status-lists/{lid}/statuses", headers=h,
+    r = s.put(f"{MANAGEMENT}/api/v1/status-lists/{lid}/statuses", headers=h,
               json={"statuses": [{"index": 1, "status": 0}, {"index": 2, "status": 1}]})
     print(f"[publish] {lid[:8]} -> {r.status_code}")
     time.sleep(2)
-    r = s.patch(f"{BASE}/api/v1/status-lists/{lid}/statuses", headers=h,
+    r = s.patch(f"{MANAGEMENT}/api/v1/status-lists/{lid}/statuses", headers=h,
                 json={"statuses": [{"index": 3, "status": 1}]})
     print(f"[update ] {lid[:8]} -> {r.status_code}")
     time.sleep(2)
@@ -396,9 +403,9 @@ webhooks) is handled outside of this repository.
 | `app:8000` target down                       | App runs on the host, not in Docker; point the scrape target at the bridge gateway (Section 5). |
 | Ports 9090/3000 unreachable                  | Competing project owns them; check `docker port prometheus/grafana` and free the port.          |
 | "Data source prometheus was not found"       | Datasource UID mismatch — pin `uid: prometheus` (Section 6) and recreate Grafana.               |
-| Prompt `429 Too Many Requests`               | Rate limiter keys by source IP; raise limits (Section 7a) for single-IP load.                   |
+| Prompt `429 Too Many Requests`               | Rate limiter keys by source IP; raise limits (Section 7b) for single-IP load.                   |
 | Panels show `No data` / `NaN`                | That SLI's code path hasn't run yet; generate the matching traffic (Section 7).                 |
-| `422 public_key invalid type`                | Send a JWK, not a PEM (Section 7).                                                              |
+| `401 invalid_token` on management requests  | Load the generated public registry fixture and use matching `kid`, `typ`, `aud`, and unexpired tokens (Section 7). |
 | `422` on status publish                      | Use integer statuses `0/1/2`, not strings (Section 7).                                          |
 | Recording rules show `NaN` right after start | `rate()[5m]` needs a couple of minutes of scrape history; it resolves.                          |
 

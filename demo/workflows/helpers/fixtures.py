@@ -1,5 +1,6 @@
-import random
-import string
+import base64
+import hashlib
+import json
 import jwt
 import time
 import os
@@ -11,20 +12,12 @@ import os
 # ---------------------------------------------------------------------
 
 
-def generate_random_string(length):
-    """Generates a random string of specified length."""
-    characters = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(characters) for i in range(length))
-
-
 def get_gondwana_digital_pole_issuer():
     """
-    Returns the Gondwana Digital Pole issuer dictionary with a random suffix
-    appended to the label.
+    Returns the Gondwana Digital Pole issuer dictionary with its operator-provisioned identifier.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"gondwana-digital-pole-{random_suffix}",
+        "label": "gondwana-digital-pole",
         "keypair": {
             "alg": "ES256",
             "public_key": (
@@ -44,12 +37,10 @@ def get_gondwana_digital_pole_issuer():
 
 def get_scott_holdings_issuer():
     """
-    Returns the Scott Holdings issuer dictionary with a random suffix
-    appended to the label.
+    Returns the Scott Holdings issuer dictionary with its operator-provisioned identifier.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"scott-holdings-{random_suffix}",
+        "label": "scott-holdings",
         "keypair": {
             "alg": "PS256",
             "public_key": (
@@ -86,7 +77,10 @@ def get_public_jwk(issuer: dict) -> dict:
     jwk.pop("key_ops", None)
 
     # Management JWTs are resolved by kid and pinned to this signing algorithm.
-    return {**jwk, "alg": alg, "kid": issuer["label"]}
+    fields = ("crv", "kty", "x", "y") if jwk["kty"] == "EC" else ("e", "kty", "n")
+    canonical = json.dumps({field: jwk[field] for field in fields}, sort_keys=True, separators=(",", ":"))
+    kid = base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).rstrip(b"=").decode()
+    return {**jwk, "alg": alg, "kid": kid}
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
@@ -114,5 +108,5 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
         payload,
         issuer['keypair']['private_key'],
         algorithm=issuer["keypair"]["alg"],
-        headers={"typ": "statuslist-management+jwt", "kid": issuer["label"]},
+        headers={"typ": "statuslist-management+jwt", "kid": get_public_jwk(issuer)["kid"]},
     )

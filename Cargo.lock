@@ -7601,8 +7601,10 @@ dependencies = [
  "color-eyre",
  "jsonwebtoken 11.1.0",
  "noyalib",
+ "sea-orm",
  "serde_json",
  "status-list-server",
+ "tokio",
  "uuid",
 ]
 

@@ -35,8 +35,8 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # The issuer is registered and seed lists are published once before the run by
-  # scripts/setup.js (invoked by `npm run test:spike*`), so authenticated flows
+  # Load the generated registry fixture before the run; scripts/setup.js verifies
+  # the issuer and publishes seed lists (invoked by `npm run test:spike*`), so authenticated flows
   # start with a valid issuer and reads hit real lists.
 
   ensure:
@@ -61,24 +61,20 @@ scenarios:
           url: "/"
           expect:
             - statusCode: 200
-            - contentType: text/plain; charset=utf-8
+            - contentType: application/json
 
-  - name: "Credential Registration During Spike"
+  - name: "Authenticated Issuer Metadata"
     weight: 25
     flow:
-      - function: "generateIssuerPayload"
-      - function: "shouldRegister"
-      - post:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - get:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
-          json:
-            issuer: "{{ issuer }}"
-            public_key: "{{ publicKeyJwk }}"
+          headers:
+            Authorization: "Bearer {{ token }}"
           expect:
-            - statusCode:
-                - 202
-                - 409
-          ifTrue: "shouldRegister" # Only 30% of requests
-      - think: 0.3
+            - statusCode: 200
+          afterResponse: "handleIssuerMetadataResponse"
 
   - name: "Status List Retrieval"
     weight: 30

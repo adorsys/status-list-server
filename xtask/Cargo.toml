@@ -14,4 +14,6 @@ jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 serde_json = "1.0"
 serde_yaml = { package = "noyalib", version = "0.0.58" }
 uuid = { version = "1.28", features = ["v4"] }
-status-list-server = { path = "..", default-features = false }
+status-list-server = { path = "..", default-features = false, features = ["history"] }
+tokio = { version = "1.53", features = ["rt-multi-thread"] }
+sea-orm = { version = "2.0", default-features = false, features = ["runtime-tokio-rustls", "sqlx-postgres", "sqlx-mysql", "sqlx-sqlite"] }

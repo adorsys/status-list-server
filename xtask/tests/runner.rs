@@ -138,3 +138,52 @@ fn ci_uses_bash_for_the_full_local_pipeline() {
     assert!(result.status.success(), "{result:?}");
     assert!(String::from_utf8_lossy(&result.stdout).contains("Usage: ./local-ci.sh"));
 }
+
+#[test]
+fn issuer_export_reads_legacy_database_and_never_overwrites_registry() {
+    use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+
+    let fixture = Fixture::new();
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        fixture.directory.join("legacy.db").display()
+    );
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let db = Database::connect(&database_url).await.unwrap();
+        db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite,
+            "CREATE TABLE credentials (issuer TEXT PRIMARY KEY, public_key JSON NOT NULL, aggregation_id TEXT)"))
+            .await.unwrap();
+        db.execute_raw(Statement::from_sql_and_values(DatabaseBackend::Sqlite,
+            "INSERT INTO credentials VALUES (?, ?, ?)", vec![
+                "existing-issuer".into(),
+                serde_json::json!({"kty":"EC", "crv":"P-256", "kid":"old-kid", "alg":"ES256",
+                    "x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
+                    "y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}).into(),
+                "11111111-1111-4111-8111-111111111111".into(),
+            ])).await.unwrap();
+        db.close().await.unwrap();
+    });
+    let file = fixture.directory.join("issuers.yaml");
+    let args = [
+        "issuer",
+        "export",
+        "--database-url",
+        &database_url,
+        "--file",
+        file.to_str().unwrap(),
+    ];
+    let result = fixture.run(&args);
+    assert!(result.status.success(), "{result:?}");
+    let exported = fs::read_to_string(&file).unwrap();
+    let registry =
+        status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(&exported)
+            .unwrap();
+    let issuer = registry.issuer("existing-issuer").unwrap();
+    assert_eq!(
+        issuer.aggregation_id.to_string(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_ne!(issuer.keys[0].kid, "old-kid");
+    assert!(!fixture.run(&args).status.success());
+    assert_eq!(fs::read_to_string(&file).unwrap(), exported);
+}

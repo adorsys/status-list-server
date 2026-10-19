@@ -21,26 +21,14 @@ tc.assertEqual("OK", response.text)
 
 print("Health check successful! Server is running.")
 
-# Publish credentials to register as an Issuer (POST /api/v1/credentials)
+# Use the issuer provisioned in demo/issuers.yaml and check its metadata.
 issuer_data = fixtures.get_gondwana_digital_pole_issuer()
-print("Proceeding with Issuer:", issuer_data.get("label"))
-
-credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
-print(f"Testing POST: {credentials_endpoint}")
-
-payload = {
-    "issuer": issuer_data.get("label"),
-    "public_key": fixtures.get_public_jwk(issuer_data),
-}
-
-response = requests.post(credentials_endpoint, json=payload)
-tc.assertEqual(response.status_code, 202, "Failed to publish credentials")
-print("Credentials published successfully!")
-
-# It should not be possible to replay the request to publish credentials for the same issuer.
-response = requests.post(credentials_endpoint, json=payload)
-tc.assertEqual(response.status_code, 409)
-tc.assertEqual("credentials_already_exist", response.json().get("error"))
+response = requests.get(
+    f"{MANAGEMENT_URL}/api/v1/credentials",
+    headers={"Authorization": f"Bearer {fixtures.create_bearer_jwt_token(issuer_data)}"},
+)
+tc.assertEqual(response.status_code, 200, "Load demo/issuers.yaml before running workflows")
+tc.assertEqual(response.json()["issuer"], issuer_data["label"])
 
 # Publish token statuses to a status list (PUT /api/v1/status-lists/{list_id}/statuses)
 status_list_id = str(uuid.uuid4())

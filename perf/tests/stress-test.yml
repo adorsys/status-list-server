@@ -30,8 +30,8 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # The issuer is registered and seed lists are published once before the run by
-  # scripts/setup.js (invoked by `npm run test:stress*`), so authenticated flows
+  # Load the generated registry fixture before the run; scripts/setup.js verifies
+  # the issuer and publishes seed lists (invoked by `npm run test:stress*`), so authenticated flows
   # start with a valid issuer and reads hit real lists.
 
   ensure:
@@ -56,7 +56,7 @@ scenarios:
           url: "/"
           expect:
             - statusCode: 200
-            - contentType: text/plain; charset=utf-8
+            - contentType: application/json
 
   - name: "Multiple Status List Queries - Database Load"
     weight: 30
@@ -72,21 +72,18 @@ scenarios:
           - think: 0.2
         count: 3
 
-  - name: "Concurrent Credential Registrations"
+  - name: "Authenticated Issuer Metadata"
     weight: 25
     flow:
-      - function: "generateIssuerPayload"
-      - post:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - get:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
-          json:
-            issuer: "{{ issuer }}"
-            public_key: "{{ publicKeyJwk }}"
+          headers:
+            Authorization: "Bearer {{ token }}"
           expect:
-            - statusCode:
-                - 202
-                - 409
-          afterResponse: "handleCredentialResponse"
-      - think: 0.5
+            - statusCode: 200
+          afterResponse: "handleIssuerMetadataResponse"
 
   - name: "Authenticated Update Flow"
     weight: 40
