@@ -436,7 +436,7 @@ fn attach_metrics<S: Clone + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -496,6 +496,7 @@ mod tests {
         use crate::outbound::sql::issuer_export::export_issuers;
         use crate::server::auth::issuer_registry::RegistryHandle;
         use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
+        use axum::body::to_bytes;
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let db = sqlite_test_db(None).await;
@@ -840,6 +841,7 @@ mod tests {
         use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
         use crate::outbound::sql::list_quota;
         use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
+        use axum::body::to_bytes;
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let db = sqlite_test_db(None).await;
