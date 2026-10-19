@@ -95,7 +95,7 @@ fn fixture_state(config: &Config) -> AppState {
     let signing_key = SigningKey::from_pem(KEY).unwrap();
     let public = signing_key.public_key_bytes();
     let issuer_registry = format!(
-        "version: 1\nissuers:\n  - id: {ISSUER}\n    aggregation_id: 00000000-0000-4000-8000-000000000001\n    keys:\n      - kid: {KEY_ID}\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: {KEY_ID}\n          alg: ES256\n          x: {}\n          y: {}\nadmins: []\n",
+        "version: 1\nissuers:\n  - id: {ISSUER}\n    aggregation_id: {AGGREGATION_ID}\n    keys:\n      - kid: {KEY_ID}\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: {KEY_ID}\n          alg: ES256\n          x: {}\n          y: {}\nadmins: []\n",
         BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
         BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
     );
@@ -140,6 +140,7 @@ fn fixture_state(config: &Config) -> AppState {
 }
 const ISSUER: &str = "conformance-issuer";
 const KEY_ID: &str = "conformance-key";
+const AGGREGATION_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
@@ -205,11 +206,11 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let mut app = Self {
+        let app = Self {
             base_url,
             management_url,
             client,
-            aggregation_id: String::new(),
+            aggregation_id: AGGREGATION_ID.to_owned(),
         };
         let key = SigningKey::from_pem(KEY).unwrap();
         let public = key.public_key_bytes();
@@ -226,8 +227,7 @@ impl TestServer {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
         let registration: serde_json::Value = response.json().await.unwrap();
-        app.aggregation_id = registration["aggregation_id"].as_str().unwrap().to_owned();
-        uuid::Uuid::parse_str(&app.aggregation_id).unwrap();
+        uuid::Uuid::parse_str(registration["aggregation_id"].as_str().unwrap()).unwrap();
         app
     }
 

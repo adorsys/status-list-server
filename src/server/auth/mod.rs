@@ -311,7 +311,7 @@ mod tests {
     use crate::test_utils::{metrics_after, test_app_state};
     use crate::utils::file_watcher::FileWatcher;
     use axum::{
-        Router,
+        Extension, Router,
         body::{Body, to_bytes},
         extract::Request,
         http::{StatusCode, header},
@@ -320,8 +320,32 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
     use tokio::time::{sleep, timeout};
     use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct RequestGate {
+        entered: Notify,
+        release: Notify,
+    }
+
+    async fn gated_test_handler(Extension(gate): Extension<Arc<RequestGate>>) -> &'static str {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+        "Ok"
+    }
+
+    fn create_gated_test_router(app_state: AppState, gate: Arc<RequestGate>) -> Router {
+        Router::new()
+            .route("/test", get(gated_test_handler))
+            .layer(Extension(gate))
+            .layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                auth,
+            ))
+            .with_state(app_state)
+    }
 
     fn create_test_router(app_state: AppState) -> Router {
         async fn test_handler() -> &'static str {
@@ -965,10 +989,11 @@ mod tests {
         state.issuer_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
         let registry = state.issuer_registry.clone();
         let registry_for_assert = registry.clone();
+        let watched_registry = registry.clone();
         FileWatcher::new(vec![file.clone()], Duration::from_secs(1)).spawn(
             "issuer_registry",
             move || {
-                let registry = registry.clone();
+                let registry = watched_registry.clone();
                 async move {
                     // Production keeps serving the active snapshot when a reload
                     // is invalid; this test exercises that same behavior.
@@ -993,7 +1018,16 @@ mod tests {
             new_header,
         );
 
-        std::fs::write(&file, registry_yaml(&[old_key, new_key])).unwrap();
+        let mut gated_state = test_app_state(None).await;
+        gated_state.issuer_registry = registry.clone();
+        let request_gate = Arc::new(RequestGate::default());
+        let in_flight_app = create_gated_test_router(gated_state, request_gate.clone());
+        let in_flight = tokio::spawn(call_with_token(in_flight_app, old_token.clone()));
+        timeout(Duration::from_secs(2), request_gate.entered.notified())
+            .await
+            .expect("request authenticated and reached the blocked handler before reload");
+
+        std::fs::write(&file, registry_yaml(&[old_key.clone(), new_key])).unwrap();
         let rotation = timeout(Duration::from_secs(5), async {
             loop {
                 assert_eq!(
@@ -1018,11 +1052,36 @@ mod tests {
             "watcher did not load the overlapping rotation key; registry has {} key(s)",
             registry_for_assert.snapshot().key_count()
         );
+        request_gate.release.notify_one();
+        assert_eq!(
+            in_flight.await.unwrap().status(),
+            StatusCode::OK,
+            "an authenticated in-flight request must finish across registry replacement"
+        );
 
+        let mut duplicate_key_jwk = serde_json::to_value(old_key.jwk()).unwrap();
+        duplicate_key_jwk
+            .as_object_mut()
+            .unwrap()
+            .retain(|field, _| field != "kid" && field != "alg");
+        let duplicate_kid_registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "test-issuer",
+                "aggregation_id": aggregation_id,
+                "keys": [
+                    {"kid": "duplicate-key", "alg": "ES256", "jwk": duplicate_key_jwk.clone()},
+                    {"kid": "duplicate-key", "alg": "ES256", "jwk": duplicate_key_jwk},
+                ],
+            }],
+            "admins": []
+        }))
+        .unwrap();
         for invalid in [
-            "",
-            "version: 1\nissuers:\n  - id: test-issuer\n    id: disabled\n",
-            "version: 1\nissuers:",
+            String::new(),
+            "version: 1\nissuers:\n  - id: test-issuer\n    id: disabled\n".to_owned(),
+            duplicate_kid_registry,
+            "version: 1\nissuers:".to_owned(),
         ] {
             std::fs::write(&file, invalid).unwrap();
             // Polling can take one interval and the debouncer then waits 500 ms.
@@ -1065,22 +1124,45 @@ mod tests {
             )
             .unwrap();
             let registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
-            let watched_registry = registry.clone();
-            FileWatcher::new(vec![file.clone()], Duration::from_secs(1)).spawn(
-                "issuer_registry",
-                move || {
-                    let registry = watched_registry.clone();
-                    async move {
-                        if registry.reload().is_err() {
-                            crate::utils::metrics::record_issuer_registry_reload_failure();
-                        }
-                    }
-                },
+            let state = test_app_state(None).await;
+            crate::setup::spawn_issuer_registry_watcher(
+                registry.clone(),
+                state.service,
+                file.clone(),
+                Duration::from_secs(1),
             );
             // The watcher first fingerprints the initial file asynchronously.
             sleep(Duration::from_secs(2)).await;
-            std::fs::write(&file, "version: 1\nissuers:").unwrap();
-            // Allow the polling interval and debounce window to invoke reload.
+            let duplicate_key_jwk = serde_json::to_value(test_public_jwk().jwk()).unwrap();
+            let mut duplicate_key_jwk = duplicate_key_jwk;
+            duplicate_key_jwk
+                .as_object_mut()
+                .unwrap()
+                .retain(|field, _| field != "kid" && field != "alg");
+            let duplicate_kid_registry = serde_yaml::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "test-issuer",
+                    "aggregation_id": uuid::Uuid::new_v4(),
+                    "keys": [
+                        {"kid": "duplicate-key", "alg": "ES256", "jwk": duplicate_key_jwk.clone()},
+                        {"kid": "duplicate-key", "alg": "ES256", "jwk": duplicate_key_jwk},
+                    ],
+                }],
+                "admins": []
+            }))
+            .unwrap();
+            for invalid in [
+                String::new(),
+                duplicate_kid_registry,
+                "version: 1\nissuers:".to_owned(),
+            ] {
+                std::fs::write(&file, invalid).unwrap();
+                // Allow the polling interval and debounce window to invoke reload.
+                sleep(Duration::from_secs(2)).await;
+                assert!(registry.resolve("test-key").is_some());
+            }
+            std::fs::remove_file(&file).unwrap();
             sleep(Duration::from_secs(2)).await;
             assert!(registry.resolve("test-key").is_some());
         });
@@ -1088,7 +1170,7 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("issuer_registry_reload_failures_total"))
             .expect("issuer registry reload failures metric is exported");
-        assert!(reload_failures.ends_with(" 1"), "{reload_failures}");
+        assert!(reload_failures.ends_with(" 4"), "{reload_failures}");
     }
 
     #[tokio::test]
