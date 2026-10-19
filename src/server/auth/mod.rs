@@ -1027,7 +1027,7 @@ mod tests {
             .await
             .expect("request authenticated and reached the blocked handler before reload");
 
-        std::fs::write(&file, registry_yaml(&[old_key.clone(), new_key])).unwrap();
+        std::fs::write(&file, registry_yaml(&[old_key.clone(), new_key.clone()])).unwrap();
         let rotation = timeout(Duration::from_secs(5), async {
             loop {
                 assert_eq!(
@@ -1057,6 +1057,29 @@ mod tests {
             in_flight.await.unwrap().status(),
             StatusCode::OK,
             "an authenticated in-flight request must finish across registry replacement"
+        );
+
+        std::fs::write(&file, registry_yaml(std::slice::from_ref(&new_key))).unwrap();
+        let retirement = timeout(Duration::from_secs(5), async {
+            loop {
+                let new_status = call_with_token(app.clone(), new_token.clone())
+                    .await
+                    .status();
+                assert_eq!(new_status, StatusCode::OK);
+                if call_with_token(app.clone(), old_token.clone())
+                    .await
+                    .status()
+                    == StatusCode::UNAUTHORIZED
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            retirement.is_ok(),
+            "watcher did not revoke the retired key while keeping the replacement trusted"
         );
 
         let mut duplicate_key_jwk = serde_json::to_value(old_key.jwk()).unwrap();

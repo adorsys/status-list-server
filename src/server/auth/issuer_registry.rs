@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -111,6 +111,7 @@ pub struct ValidatedRegistry {
 pub struct RegistryHandle {
     path: PathBuf,
     active: ArcSwap<ValidatedRegistry>,
+    aggregation_ids: Mutex<HashMap<String, AggregationId>>,
 }
 
 /// Port used by authentication to resolve an operator-trusted signing key.
@@ -123,29 +124,32 @@ pub type StaticFileRegistry = RegistryHandle;
 
 impl RegistryHandle {
     pub fn from_yaml(content: &str) -> Result<Self, RegistryError> {
-        Ok(Self {
-            path: PathBuf::from("<memory>"),
-            active: ArcSwap::from_pointee(IssuerRegistry::from_yaml(content)?),
-        })
+        Ok(Self::new(
+            PathBuf::from("<memory>"),
+            IssuerRegistry::from_yaml(content)?,
+        ))
     }
 
     pub fn empty() -> Self {
-        Self {
-            path: PathBuf::from("<empty>"),
-            active: ArcSwap::from_pointee(
-                IssuerRegistry::from_yaml("version: 1\nissuers: []\nadmins: []\n")
-                    .expect("empty registry is valid"),
-            ),
-        }
+        Self::new(
+            PathBuf::from("<empty>"),
+            IssuerRegistry::from_yaml("version: 1\nissuers: []\nadmins: []\n")
+                .expect("empty registry is valid"),
+        )
     }
 
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, RegistryError> {
         let path = path.into();
         let registry = IssuerRegistry::from_file(&path)?;
-        Ok(Self {
+        Ok(Self::new(path, registry))
+    }
+
+    fn new(path: PathBuf, registry: ValidatedRegistry) -> Self {
+        Self {
             path,
+            aggregation_ids: Mutex::new(registry.issuer_aggregations.clone()),
             active: ArcSwap::from_pointee(registry),
-        })
+        }
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
@@ -153,10 +157,23 @@ impl RegistryHandle {
     }
 
     pub fn reload(&self) -> Result<(), RegistryError> {
-        let registry = IssuerRegistry::from_file(&self.path)?;
-        self.snapshot()
-            .validate_aggregation_ids_unchanged(&registry)?;
-        self.active.store(Arc::new(registry));
+        let registry = Arc::new(IssuerRegistry::from_file(&self.path)?);
+        let mut aggregation_ids = self
+            .aggregation_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (issuer, next) in &registry.issuer_aggregations {
+            if aggregation_ids
+                .get(issuer)
+                .is_some_and(|current| current != next)
+            {
+                return Err(RegistryError::Semantic(format!(
+                    "aggregation_id for issuer `{issuer}` is immutable"
+                )));
+            }
+        }
+        aggregation_ids.extend(registry.issuer_aggregations.clone());
+        self.active.store(registry);
         Ok(())
     }
 
@@ -319,22 +336,6 @@ impl ValidatedRegistry {
 
     pub fn key_count(&self) -> usize {
         self.keys.len()
-    }
-
-    fn validate_aggregation_ids_unchanged(
-        &self,
-        next: &ValidatedRegistry,
-    ) -> Result<(), RegistryError> {
-        for (issuer, current) in &self.issuer_aggregations {
-            if let Some(next) = next.issuer_aggregations.get(issuer)
-                && next != current
-            {
-                return Err(RegistryError::Semantic(format!(
-                    "aggregation_id for issuer `{issuer}` is immutable"
-                )));
-            }
-        }
-        Ok(())
     }
 }
 
@@ -725,6 +726,28 @@ mod tests {
                 .issuer_aggregation_id("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"),
             before
         );
+    }
+
+    #[test]
+    fn reload_rejects_a_changed_aggregation_id_after_issuer_removal() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), VALID).unwrap();
+        let handle = RegistryHandle::load(file.path()).unwrap();
+
+        let mut removed: serde_yaml::Value = serde_yaml::from_str(VALID).unwrap();
+        removed["issuers"] = serde_yaml::Value::Sequence(Vec::new());
+        std::fs::write(file.path(), serde_yaml::to_string(&removed).unwrap()).unwrap();
+        handle.reload().unwrap();
+        assert!(handle.snapshot().issuers().is_empty());
+
+        let changed_id = "22222222-2222-4222-8222-222222222222";
+        let readded = VALID.replace("0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60", changed_id);
+        std::fs::write(file.path(), readded).unwrap();
+        let error = handle.reload().unwrap_err();
+        assert!(
+            error.to_string().contains("aggregation_id") && error.to_string().contains("immutable")
+        );
+        assert!(handle.snapshot().issuers().is_empty());
     }
 
     #[test]
