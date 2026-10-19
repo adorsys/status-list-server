@@ -80,12 +80,35 @@ struct TestClaims {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticatedIssuer {
     issuer: Issuer,
+    aggregation_id: Option<crate::domain::models::credential::AggregationId>,
 }
 
 impl AuthenticatedIssuer {
     /// Build an authenticated issuer principal from a verified issuer identity.
+    #[cfg(test)]
     pub(crate) fn new(issuer: Issuer) -> Self {
-        Self { issuer }
+        Self {
+            issuer,
+            aggregation_id: None,
+        }
+    }
+
+    /// Build a principal together with the immutable registry data resolved
+    /// while authenticating the request.
+    pub(crate) fn with_aggregation_id(
+        issuer: Issuer,
+        aggregation_id: crate::domain::models::credential::AggregationId,
+    ) -> Self {
+        Self {
+            issuer,
+            aggregation_id: Some(aggregation_id),
+        }
+    }
+
+    pub(crate) fn aggregation_id(
+        &self,
+    ) -> Option<crate::domain::models::credential::AggregationId> {
+        self.aggregation_id
     }
 
     /// Borrow the verified issuer identity associated with this principal.
@@ -274,7 +297,12 @@ pub async fn auth(
     let authenticated_issuer = Issuer(resolved.principal_id.clone());
     request
         .extensions_mut()
-        .insert(AuthenticatedIssuer::new(authenticated_issuer));
+        .insert(AuthenticatedIssuer::with_aggregation_id(
+            authenticated_issuer,
+            resolved
+                .aggregation_id
+                .expect("issuer keys have an aggregation ID"),
+        ));
     crate::utils::metrics::record_management_auth_request(
         Some(registered_issuer),
         Some(&kid),
@@ -336,9 +364,31 @@ mod tests {
         "Ok"
     }
 
+    async fn gated_credentials_handler(
+        State(state): State<AppState>,
+        issuer: AuthenticatedIssuer,
+        Extension(gate): Extension<Arc<RequestGate>>,
+    ) -> Result<axum::Json<crate::server::handlers::issue_credential::RegistrationResponse>, ApiError>
+    {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+        crate::server::handlers::issue_credential::get_credential(State(state), issuer).await
+    }
+
     fn create_gated_test_router(app_state: AppState, gate: Arc<RequestGate>) -> Router {
         Router::new()
             .route("/test", get(gated_test_handler))
+            .layer(Extension(gate))
+            .layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                auth,
+            ))
+            .with_state(app_state)
+    }
+
+    fn create_gated_credentials_router(app_state: AppState, gate: Arc<RequestGate>) -> Router {
+        Router::new()
+            .route("/credentials", get(gated_credentials_handler))
             .layer(Extension(gate))
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
@@ -495,6 +545,103 @@ mod tests {
         state.issuer_registry =
             Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
         state
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_applies_revocation_without_a_second_file_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("issuers.yaml");
+        let public_key = test_public_jwk();
+        let registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "test-issuer",
+                "aggregation_id": uuid::Uuid::new_v4(),
+                "keys": [{
+                    "kid": public_key.key_id(),
+                    "alg": "ES256",
+                    "jwk": public_key.jwk(),
+                }],
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        std::fs::write(&file, registry).unwrap();
+        let handle = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        let state = test_app_state(None).await;
+
+        crate::setup::spawn_issuer_registry_watcher(
+            handle.clone(),
+            state.service,
+            file.clone(),
+            Duration::from_secs(1),
+        );
+        std::fs::write(&file, "version: 1\nissuers: []\nadmins: []\n").unwrap();
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if handle.resolve("test-key").is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup reconciliation did not apply revocation");
+    }
+
+    #[tokio::test]
+    async fn gated_credentials_request_uses_the_authenticated_registry_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("issuers.yaml");
+        let aggregation_id = uuid::Uuid::new_v4();
+        let public_key = test_public_jwk();
+        let registry = serde_yaml::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "test-issuer",
+                "aggregation_id": aggregation_id,
+                "keys": [{
+                    "kid": public_key.key_id(),
+                    "alg": "ES256",
+                    "jwk": public_key.jwk(),
+                }],
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        std::fs::write(&file, registry).unwrap();
+
+        let mut state = test_app_state(None).await;
+        state.issuer_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        let registry_handle = state.issuer_registry.clone();
+        let token = create_test_token(
+            "test-issuer",
+            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+            Algorithm::ES256,
+        );
+        let gate = Arc::new(RequestGate::default());
+        let app = create_gated_credentials_router(state.clone(), gate.clone());
+        let request = Request::builder()
+            .uri("/credentials")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let in_flight = tokio::spawn(app.oneshot(request));
+        gate.entered.notified().await;
+
+        std::fs::write(&file, "version: 1\nissuers: []\nadmins: []\n").unwrap();
+        registry_handle.reload().unwrap();
+        gate.release.notify_one();
+        let response = in_flight.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            call_with_token(create_test_router(state), token)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

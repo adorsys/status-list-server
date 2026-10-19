@@ -66,8 +66,42 @@ impl FileWatcher {
         // Native notifications are low-latency but can miss a replacement on
         // some filesystems. Polling the content fingerprint as well closes
         // that gap; the debouncer discards duplicate notifications.
-        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
-        spawn_debouncer(paths, rx, callback, target);
+        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval, None);
+        spawn_debouncer(paths, rx, callback, target, None);
+    }
+
+    /// Spawn watching and reconcile once both watcher baselines have been
+    /// captured. This closes the startup window in which a file can change
+    /// after the registry is loaded but before polling/debouncing begins.
+    pub(crate) fn spawn_with_initial_reconcile<F, Fut>(self, target: &'static str, on_change: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let callback = Arc::new(on_change);
+        let paths = self.paths.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let ready = Arc::new(tokio::sync::Barrier::new(3));
+
+        let _native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
+        spawn_poll_watcher(
+            paths.clone(),
+            tx,
+            target,
+            self.poll_interval,
+            Some(Arc::clone(&ready)),
+        );
+        spawn_debouncer(
+            paths,
+            rx,
+            Arc::clone(&callback),
+            target,
+            Some(Arc::clone(&ready)),
+        );
+        tokio::spawn(async move {
+            ready.wait().await;
+            callback().await;
+        });
     }
 }
 
@@ -150,9 +184,13 @@ fn spawn_poll_watcher(
     tx: mpsc::Sender<()>,
     target: &'static str,
     poll_interval: Duration,
+    ready: Option<Arc<tokio::sync::Barrier>>,
 ) {
     tokio::spawn(async move {
         let mut fingerprints = fingerprint_all(&paths).await;
+        if let Some(ready) = ready {
+            ready.wait().await;
+        }
         let mut interval = tokio::time::interval_at(Instant::now() + poll_interval, poll_interval);
         loop {
             interval.tick().await;
@@ -178,6 +216,7 @@ fn spawn_debouncer<F, Fut>(
     mut rx: mpsc::Receiver<()>,
     callback: Arc<F>,
     target: &'static str,
+    ready: Option<Arc<tokio::sync::Barrier>>,
 ) where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -186,6 +225,9 @@ fn spawn_debouncer<F, Fut>(
         // Only dispatch when content actually changed; guards against spurious
         // events that slip past the event-kind filter.
         let mut last_fingerprints = fingerprint_all(&paths).await;
+        if let Some(ready) = ready {
+            ready.wait().await;
+        }
 
         while rx.recv().await.is_some() {
             while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
@@ -321,6 +363,7 @@ mod tests {
                 }
             }),
             "test",
+            None,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -368,6 +411,7 @@ mod tests {
                 }
             }),
             "test",
+            None,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -408,6 +452,7 @@ mod tests {
                 }
             }),
             "test",
+            None,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -441,6 +486,7 @@ mod tests {
                 }
             }),
             "test",
+            None,
         );
 
         // Let the debouncer establish its baseline fingerprint.

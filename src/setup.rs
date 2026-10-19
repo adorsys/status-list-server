@@ -888,9 +888,8 @@ pub(crate) fn spawn_issuer_registry_watcher(
     path: std::path::PathBuf,
     poll_interval: Duration,
 ) {
-    crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval).spawn(
-        "issuer_registry",
-        move || {
+    crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval)
+        .spawn_with_initial_reconcile("issuer_registry", move || {
             let registry_handle = registry_handle.clone();
             let service = service.clone();
             async move {
@@ -915,8 +914,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
                     );
                 }
             }
-        },
-    );
+        });
 }
 
 async fn warn_missing_registry_issuers(
