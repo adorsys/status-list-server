@@ -67,7 +67,7 @@ impl FileWatcher {
         // some filesystems. Polling the content fingerprint as well closes
         // that gap; the debouncer discards duplicate notifications.
         spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval, None);
-        spawn_debouncer(paths, rx, callback, target, None);
+        spawn_debouncer(paths, rx, callback, target, None, false);
     }
 
     /// Spawn watching and reconcile once both watcher baselines have been
@@ -81,7 +81,7 @@ impl FileWatcher {
         let callback = Arc::new(on_change);
         let paths = self.paths.clone();
         let (tx, rx) = mpsc::channel(32);
-        let ready = Arc::new(tokio::sync::Barrier::new(3));
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
 
         let _native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
         spawn_poll_watcher(
@@ -91,17 +91,7 @@ impl FileWatcher {
             self.poll_interval,
             Some(Arc::clone(&ready)),
         );
-        spawn_debouncer(
-            paths,
-            rx,
-            Arc::clone(&callback),
-            target,
-            Some(Arc::clone(&ready)),
-        );
-        tokio::spawn(async move {
-            ready.wait().await;
-            callback().await;
-        });
+        spawn_debouncer(paths, rx, callback, target, Some(Arc::clone(&ready)), true);
     }
 }
 
@@ -217,6 +207,7 @@ fn spawn_debouncer<F, Fut>(
     callback: Arc<F>,
     target: &'static str,
     ready: Option<Arc<tokio::sync::Barrier>>,
+    initial_reconcile: bool,
 ) where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -227,6 +218,16 @@ fn spawn_debouncer<F, Fut>(
         let mut last_fingerprints = fingerprint_all(&paths).await;
         if let Some(ready) = ready {
             ready.wait().await;
+        }
+
+        if initial_reconcile {
+            tracing::info!(
+                event = "file_change_detected",
+                rotation.target = target,
+                source = "startup",
+                "reconciling watched file after watcher initialization"
+            );
+            callback().await;
         }
 
         while rx.recv().await.is_some() {
@@ -343,6 +344,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_reconciliation_runs_through_the_serial_callback_path() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "old").await.expect("write initial");
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let callback_active = active.clone();
+        let callback_max = max_active.clone();
+        let callback_completed = completed.clone();
+        let callback_entered = entered.clone();
+        let callback_release = release.clone();
+
+        FileWatcher::new(vec![path.clone()], Duration::from_secs(1)).spawn_with_initial_reconcile(
+            "test",
+            move || {
+                let active = callback_active.clone();
+                let max_active = callback_max.clone();
+                let completed = callback_completed.clone();
+                let entered = callback_entered.clone();
+                let release = callback_release.clone();
+                async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    if completed.load(Ordering::SeqCst) == 0 {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        );
+
+        entered.notified().await;
+        tokio::fs::write(&path, "new").await.expect("write update");
+        release.notify_one();
+
+        timeout(Duration::from_secs(3), async {
+            while completed.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("file change callback did not run after startup reconciliation");
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
         let dir = TempDir::new();
         let path = dir.path.join("secret");
@@ -364,6 +417,7 @@ mod tests {
             }),
             "test",
             None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -412,6 +466,7 @@ mod tests {
             }),
             "test",
             None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -453,6 +508,7 @@ mod tests {
             }),
             "test",
             None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -487,6 +543,7 @@ mod tests {
             }),
             "test",
             None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.

@@ -635,6 +635,12 @@ mod tests {
         gate.release.notify_one();
         let response = in_flight.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let registration: crate::server::handlers::issue_credential::RegistrationResponse =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(registration.issuer, "test-issuer");
+        assert_eq!(registration.aggregation_id.0, aggregation_id);
+        assert_eq!(registration.aggregation_uri, None);
 
         assert_eq!(
             call_with_token(create_test_router(state), token)
