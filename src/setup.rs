@@ -865,38 +865,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness,
     };
 
-    let registry_handle = state.issuer_registry.clone();
-    let registry_service = state.service.clone();
-    crate::utils::file_watcher::FileWatcher::new(
-        vec![config.management_auth.issuers_file.clone().into()],
+    spawn_issuer_registry_watcher(
+        state.issuer_registry.clone(),
+        state.service.clone(),
+        config.management_auth.issuers_file.clone().into(),
         Duration::from_secs(config.watcher.poll_interval_secs),
-    )
-    .spawn("issuer_registry", move || {
-        let registry_handle = registry_handle.clone();
-        let registry_service = registry_service.clone();
-        async move {
-            if let Err(error) = registry_handle.reload() {
-                crate::utils::metrics::record_rotation("issuer_registry", false);
-                crate::utils::metrics::record_issuer_registry_reload_failure();
-                tracing::error!(
-                    event = "issuer_registry_reload_failed",
-                    path = %registry_handle.path().display(),
-                    error = %error,
-                    "keeping last-known-good issuer registry"
-                );
-            } else {
-                crate::utils::metrics::record_rotation("issuer_registry", true);
-                crate::utils::metrics::set_issuer_registry_keys(
-                    registry_handle.snapshot().key_count(),
-                );
-                warn_missing_registry_issuers(&registry_service, &registry_handle.snapshot()).await;
-                tracing::info!(
-                    event = "issuer_registry_reloaded",
-                    "issuer registry reloaded"
-                );
-            }
-        }
-    });
+    );
 
     #[cfg(feature = "acme")]
     {
@@ -906,6 +880,43 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         Ok((state,))
     }
+}
+
+pub(crate) fn spawn_issuer_registry_watcher(
+    registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    service: Arc<Service>,
+    path: std::path::PathBuf,
+    poll_interval: Duration,
+) {
+    crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval).spawn(
+        "issuer_registry",
+        move || {
+            let registry_handle = registry_handle.clone();
+            let service = service.clone();
+            async move {
+                if let Err(error) = registry_handle.reload() {
+                    crate::utils::metrics::record_rotation("issuer_registry", false);
+                    crate::utils::metrics::record_issuer_registry_reload_failure();
+                    tracing::error!(
+                        event = "issuer_registry_reload_failed",
+                        path = %registry_handle.path().display(),
+                        error = %error,
+                        "keeping last-known-good issuer registry"
+                    );
+                } else {
+                    crate::utils::metrics::record_rotation("issuer_registry", true);
+                    crate::utils::metrics::set_issuer_registry_keys(
+                        registry_handle.snapshot().key_count(),
+                    );
+                    warn_missing_registry_issuers(&service, &registry_handle.snapshot()).await;
+                    tracing::info!(
+                        event = "issuer_registry_reloaded",
+                        "issuer registry reloaded"
+                    );
+                }
+            }
+        },
+    );
 }
 
 async fn warn_missing_registry_issuers(

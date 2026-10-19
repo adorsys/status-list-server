@@ -62,10 +62,11 @@ impl FileWatcher {
         let paths = self.paths.clone();
         let (tx, rx) = mpsc::channel(32);
 
-        let native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
-        if !native_started {
-            spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
-        }
+        let _native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
+        // Native notifications are low-latency but can miss a replacement on
+        // some filesystems. Polling the content fingerprint as well closes
+        // that gap; the debouncer discards duplicate notifications.
+        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
         spawn_debouncer(paths, rx, callback, target);
     }
 }

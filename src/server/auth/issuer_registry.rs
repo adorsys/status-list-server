@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::domain::models::credential::{AggregationId, PublicJwk};
+
 const REGISTRY_SCHEMA: &str = include_str!("../../../docs/schemas/issuers.v1.schema.json");
 
 #[derive(Debug, Error)]
@@ -75,7 +77,15 @@ pub struct RegistryKey {
 #[derive(Clone, Debug)]
 pub struct ResolvedKey {
     pub principal_id: String,
+    pub principal_kind: PrincipalKind,
     pub key: Arc<RegistryKey>,
+    pub public_key: Arc<PublicJwk>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Issuer,
+    Admin,
 }
 
 impl ResolvedKey {
@@ -92,6 +102,8 @@ impl ResolvedKey {
 pub struct ValidatedRegistry {
     registry: IssuerRegistry,
     keys: HashMap<String, Arc<ResolvedKey>>,
+    issuer_aggregations: HashMap<String, AggregationId>,
+    aggregation_issuers: HashMap<AggregationId, String>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -142,6 +154,8 @@ impl RegistryHandle {
 
     pub fn reload(&self) -> Result<(), RegistryError> {
         let registry = IssuerRegistry::from_file(&self.path)?;
+        self.snapshot()
+            .validate_aggregation_ids_unchanged(&registry)?;
         self.active.store(Arc::new(registry));
         Ok(())
     }
@@ -166,7 +180,8 @@ impl IssuerRegistry {
     }
 
     pub fn from_yaml(content: &str) -> Result<ValidatedRegistry, RegistryError> {
-        let yaml: serde_yaml::Value = serde_yaml::from_str(content)?;
+        let parser = serde_yaml::ParserConfig::strict();
+        let yaml: serde_yaml::Value = serde_yaml::from_str_with_config(content, &parser)?;
         let json: Value =
             serde_json::to_value(&yaml).map_err(|err| RegistryError::Schema(err.to_string()))?;
         validate_schema(&json)?;
@@ -180,13 +195,20 @@ impl IssuerRegistry {
         }
 
         let mut keys = HashMap::new();
+        let mut issuer_aggregations = HashMap::new();
+        let mut aggregation_issuers = HashMap::new();
         for issuer in &registry.issuers {
+            let aggregation_id = AggregationId(issuer.aggregation_id);
+            issuer_aggregations.insert(issuer.id.clone(), aggregation_id);
+            aggregation_issuers.insert(aggregation_id, issuer.id.clone());
             for key in &issuer.keys {
                 keys.insert(
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
                         principal_id: issuer.id.clone(),
+                        principal_kind: PrincipalKind::Issuer,
                         key: Arc::clone(key),
+                        public_key: Arc::new(validated_public_key(key)?),
                     }),
                 );
             }
@@ -197,13 +219,20 @@ impl IssuerRegistry {
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
                         principal_id: admin.id.clone(),
+                        principal_kind: PrincipalKind::Admin,
                         key: Arc::clone(key),
+                        public_key: Arc::new(validated_public_key(key)?),
                     }),
                 );
             }
         }
 
-        Ok(ValidatedRegistry { registry, keys })
+        Ok(ValidatedRegistry {
+            registry,
+            keys,
+            issuer_aggregations,
+            aggregation_issuers,
+        })
     }
 }
 
@@ -246,17 +275,14 @@ impl ValidatedRegistry {
                     && not_after.is_none_or(|value| now < value),
             )
         };
-        let enabled = self
-            .issuer(&resolved.principal_id)
-            .map(|issuer| !issuer.disabled)
-            .or_else(|| {
-                self.registry
-                    .admins
-                    .iter()
-                    .find(|admin| admin.id == resolved.principal_id)
-                    .map(|admin| !admin.disabled)
-            })
-            .unwrap_or(false);
+        let enabled = match resolved.principal_kind {
+            PrincipalKind::Issuer => self
+                .issuer(&resolved.principal_id)
+                .is_some_and(|issuer| !issuer.disabled),
+            PrincipalKind::Admin => self
+                .admin(&resolved.principal_id)
+                .is_some_and(|admin| !admin.disabled),
+        };
         if enabled && active(&resolved.key).unwrap_or(false) {
             Some(resolved)
         } else {
@@ -272,6 +298,16 @@ impl ValidatedRegistry {
         &self.registry.issuers
     }
 
+    pub fn issuer_aggregation_id(&self, issuer: &str) -> Option<AggregationId> {
+        self.issuer_aggregations.get(issuer).copied()
+    }
+
+    pub fn issuer_by_aggregation_id(&self, aggregation_id: AggregationId) -> Option<&str> {
+        self.aggregation_issuers
+            .get(&aggregation_id)
+            .map(String::as_str)
+    }
+
     pub fn admin(&self, id: &str) -> Option<&AdminEntry> {
         self.registry.admins.iter().find(|admin| admin.id == id)
     }
@@ -283,6 +319,22 @@ impl ValidatedRegistry {
 
     pub fn key_count(&self) -> usize {
         self.keys.len()
+    }
+
+    fn validate_aggregation_ids_unchanged(
+        &self,
+        next: &ValidatedRegistry,
+    ) -> Result<(), RegistryError> {
+        for (issuer, current) in &self.issuer_aggregations {
+            if let Some(next) = next.issuer_aggregations.get(issuer)
+                && next != current
+            {
+                return Err(RegistryError::Semantic(format!(
+                    "aggregation_id for issuer `{issuer}` is immutable"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -378,28 +430,7 @@ fn validate_keys<'a>(
                 key.kid
             )));
         }
-        let mut jwk_for_validation = key.jwk.clone();
-        if let Some(object) = jwk_for_validation.as_object_mut() {
-            for (field, expected) in [("kid", key.kid.as_str()), ("alg", key.alg.as_str())] {
-                if object
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .is_some_and(|actual| actual != expected)
-                {
-                    return Err(RegistryError::Semantic(format!(
-                        "key `{}` has conflicting JWK {field} metadata",
-                        key.kid
-                    )));
-                }
-            }
-            object.insert("kid".to_string(), Value::String(key.kid.clone()));
-            object.insert("alg".to_string(), Value::String(key.alg.clone()));
-        }
-        let public_key = crate::domain::models::credential::PublicJwk::try_new(
-            serde_json::to_vec(&jwk_for_validation)
-                .map_err(|err| RegistryError::Semantic(err.to_string()))?,
-        )
-        .map_err(|err| RegistryError::Semantic(format!("key `{}`: {err}", key.kid)))?;
+        let public_key = validated_public_key(key)?;
         if public_key.key_id() != key.kid || format!("{:?}", public_key.algorithm()) != key.alg {
             return Err(RegistryError::Semantic(format!(
                 "key `{}` does not match its kid or alg metadata",
@@ -414,6 +445,81 @@ fn validate_keys<'a>(
             )));
         }
     }
+    Ok(())
+}
+
+/// Build the verification key exactly once, including the registry's `kid`
+/// and `alg` metadata when the embedded public JWK intentionally omits them.
+fn validated_public_key(key: &RegistryKey) -> Result<PublicJwk, RegistryError> {
+    let mut jwk = key.jwk.clone();
+    let object = jwk
+        .as_object_mut()
+        .ok_or_else(|| RegistryError::Semantic("JWK must be an object".into()))?;
+    for (field, expected) in [("kid", key.kid.as_str()), ("alg", key.alg.as_str())] {
+        if object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|actual| actual != expected)
+        {
+            return Err(RegistryError::Semantic(format!(
+                "key `{}` has conflicting JWK {field} metadata",
+                key.kid
+            )));
+        }
+    }
+    object.insert("kid".to_string(), Value::String(key.kid.clone()));
+    object.insert("alg".to_string(), Value::String(key.alg.clone()));
+
+    validate_ec_point(&jwk)?;
+    PublicJwk::try_new(
+        serde_json::to_vec(&jwk).map_err(|err| RegistryError::Semantic(err.to_string()))?,
+    )
+    .map_err(|err| RegistryError::Semantic(format!("key `{}`: {err}", key.kid)))
+}
+
+/// `jsonwebtoken` checks JWK shape and curve names, but point membership is a
+/// cryptographic property. Parse the uncompressed SEC 1 point with AWS-LC so
+/// malformed or off-curve EC keys cannot enter a trusted snapshot.
+fn validate_ec_point(jwk: &Value) -> Result<(), RegistryError> {
+    use aws_lc_rs::agreement::{ECDH_P256, ECDH_P384, ParsedPublicKey, UnparsedPublicKey};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let object = jwk
+        .as_object()
+        .ok_or_else(|| RegistryError::Semantic("JWK must be an object".into()))?;
+    if object.get("kty").and_then(Value::as_str) != Some("EC") {
+        return Ok(());
+    }
+    let (algorithm, coordinate_len) = match object.get("crv").and_then(Value::as_str) {
+        Some("P-256") => (&ECDH_P256, 32),
+        Some("P-384") => (&ECDH_P384, 48),
+        _ => return Ok(()),
+    };
+    let coordinate = |field| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| RegistryError::Semantic(format!("EC JWK is missing {field}")))
+            .and_then(|value| {
+                URL_SAFE_NO_PAD.decode(value).map_err(|error| {
+                    RegistryError::Semantic(format!("invalid EC JWK {field}: {error}"))
+                })
+            })
+    };
+    let x = coordinate("x")?;
+    let y = coordinate("y")?;
+    if x.len() != coordinate_len || y.len() != coordinate_len {
+        return Err(RegistryError::Semantic(format!(
+            "EC JWK coordinates must be {coordinate_len} bytes for its curve"
+        )));
+    }
+    let mut point = Vec::with_capacity(1 + x.len() + y.len());
+    point.push(0x04);
+    point.extend(x);
+    point.extend(y);
+    let _: ParsedPublicKey = UnparsedPublicKey::new(algorithm, point)
+        .try_into()
+        .map_err(|_| RegistryError::Semantic("EC JWK point is not on its curve".into()))?;
     Ok(())
 }
 
@@ -521,6 +627,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_yaml_fields() {
+        let yaml = VALID.replacen("version: 1", "version: 1\nversion: 1", 1);
+        assert!(matches!(
+            IssuerRegistry::from_yaml(&yaml),
+            Err(RegistryError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_an_ec_point_that_is_not_on_its_curve() {
+        let yaml = VALID.replace(
+            "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let error = IssuerRegistry::from_yaml(&yaml).unwrap_err();
+        assert!(error.to_string().contains("point is not on its curve"));
+    }
+
+    #[test]
     fn rejects_private_jwk() {
         let yaml = VALID.replace(
             "          y: \"YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA\"",
@@ -574,6 +699,32 @@ mod tests {
         std::fs::write(file.path(), "version: invalid").unwrap();
         assert!(handle.reload().is_err());
         assert_eq!(handle.snapshot().key_count(), 3);
+    }
+
+    #[test]
+    fn reload_rejects_a_changed_issuer_aggregation_id() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), VALID).unwrap();
+        let handle = RegistryHandle::load(file.path()).unwrap();
+        let before = handle
+            .snapshot()
+            .issuer_aggregation_id("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00");
+
+        std::fs::write(
+            file.path(),
+            VALID.replace(
+                "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60",
+                "22222222-2222-4222-8222-222222222222",
+            ),
+        )
+        .unwrap();
+        assert!(handle.reload().is_err());
+        assert_eq!(
+            handle
+                .snapshot()
+                .issuer_aggregation_id("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"),
+            before
+        );
     }
 
     #[test]

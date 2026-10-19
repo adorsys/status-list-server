@@ -352,6 +352,19 @@ impl Service {
             .map(Some)
     }
 
+    /// List one page of an issuer's status lists when its public aggregation
+    /// identity was resolved outside the credential database.
+    pub async fn list_issuer_uris_by_issuer(
+        &self,
+        issuer: &Issuer,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
+    }
+
     /// Retrieve the snapshot that was active at the given Unix timestamp
     /// (historical resolution per draft-21 §8.4).
     pub async fn get_snapshot_at(

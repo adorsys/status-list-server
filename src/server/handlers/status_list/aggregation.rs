@@ -13,7 +13,7 @@ use opentelemetry::{KeyValue, global, metrics::Counter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::domain::models::credential::AggregationId;
+use crate::domain::models::credential::{AggregationId, Issuer};
 use crate::domain::models::status_list::{AGGREGATION_DEFAULT_LIMIT, AGGREGATION_MAX_LIMIT};
 use crate::server::{AppState, error::ApiError};
 use crate::utils::metrics::{InstrumentSlot, cached_instruments};
@@ -111,13 +111,26 @@ async fn aggregation_page(
 
     let page = match scope {
         None => state.service.list_uris(after.as_deref(), limit).await?,
-        Some(aggregation_id) => state
-            .service
-            .list_issuer_uris(aggregation_id, after.as_deref(), limit)
-            .await?
-            .ok_or_else(|| {
-                ApiError::not_found("aggregation_not_found", "No issuer has this aggregation ID")
-            })?,
+        Some(aggregation_id) => {
+            let registry = state.issuer_registry.snapshot();
+            if let Some(issuer) = registry.issuer_by_aggregation_id(aggregation_id) {
+                state
+                    .service
+                    .list_issuer_uris_by_issuer(&Issuer(issuer.to_owned()), after.as_deref(), limit)
+                    .await?
+            } else {
+                state
+                    .service
+                    .list_issuer_uris(aggregation_id, after.as_deref(), limit)
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::not_found(
+                            "aggregation_not_found",
+                            "No issuer has this aggregation ID",
+                        )
+                    })?
+            }
+        }
     };
     let next_cursor = page
         .next_after
