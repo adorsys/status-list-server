@@ -123,8 +123,12 @@ fn forward_only(refused: &str) -> DbErr {
     ))
 }
 
+// The read-only registry exporter enables `history` without a server SQL backend.
+// Keep these startup checks gated to their callers and unit tests.
+
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
 /// Extend this list if new transactional tables are added.
+#[cfg(any(test, feature = "sqlite", feature = "postgres", feature = "mysql"))]
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
     "status_lists",
@@ -140,6 +144,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
 ///
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
+#[cfg(any(test, feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{FromQueryResult, Statement, Value};
 
@@ -196,6 +201,7 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
 /// defaults to `ROW`, so this only fires where `STATEMENT` was set deliberately.
 ///
 /// No-op on PostgreSQL and SQLite.
+#[cfg(any(test, feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{FromQueryResult, Statement};
 
@@ -226,6 +232,7 @@ pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Re
 }
 
 /// Decision half of [`verify_binlog_format`], testable without a live server.
+#[cfg(any(test, feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) fn evaluate_binlog_format(format: &str) -> Result<(), DbErr> {
     use tracing::error;
 
@@ -249,6 +256,7 @@ pub(crate) fn evaluate_binlog_format(format: &str) -> Result<(), DbErr> {
 }
 
 /// Evaluates storage engines for required tables and returns an error if any non-InnoDB engine is found.
+#[cfg(any(test, feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) fn evaluate_table_engines<'a, I>(rows: I) -> Result<(), DbErr>
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
