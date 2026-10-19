@@ -1,0 +1,6 @@
+# Use blank issues for feature requests, documentation problems, and other topics.
+blank_issues_enabled: true
+contact_links:
+  - name: Feature request
+    about: Suggest a new feature or improvement for status-list-server.
+    url: https://github.com/adorsys/status-list-server/discussions/new?category=ideas
