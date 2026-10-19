@@ -53,6 +53,15 @@ spec:
     secretName: {{ .Values.statuslist.ingress.tls.secretName }}
   {{- end }}
 {{- if .Values.statuslist.ingress.management.enabled }}
+{{- $mgmtHost := (.Values.statuslist.ingress.management.hostname | default "" | lower) }}
+{{- if eq $mgmtHost "" }}
+{{- $mgmtHost = $ingressHost }}
+{{- end }}
+{{- $mgmtTlsHosts := $tlsHosts }}
+{{- if ne (.Values.statuslist.ingress.management.hostname | default "") "" }}
+{{- /* A separate management hostname gets its own TLS hosts and DNS record. */}}
+{{- $mgmtTlsHosts = list $mgmtHost }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -65,29 +74,42 @@ metadata:
     # Route by path with a regex so the management writes that share the
     # /api/v1/status-lists/ prefix with public reads resolve here.
     nginx.ingress.kubernetes.io/use-regex: "true"
+    {{- if and (ne $mgmtHost "localhost") (ne (.Values.statuslist.ingress.management.hostname | default "") "") }}
+    external-dns.alpha.kubernetes.io/hostname: {{ $mgmtHost }}
+    {{- end }}
     {{- if .Values.statuslist.ingress.management.annotations }}
     {{- toYaml .Values.statuslist.ingress.management.annotations | nindent 4 }}
     {{- end }}
 spec:
   ingressClassName: nginx
   rules:
-  - host: {{ .Values.statuslist.ingress.management.hostname | default $ingressHost | lower }}
+  - host: {{ $mgmtHost }}
     http:
       paths:
       - path: {{ .Values.statuslist.ingress.management.path }}
         pathType: ImplementationSpecific
         backend:
           service:
-            name: {{ include "status-list-server-chart.fullname" . }}-service
+            name: {{ include "status-list-server-chart.fullname" . }}-internal-service
             port:
               number: {{ .Values.statuslist.service.managementPort }}
-  {{- if and .Values.statuslist.ingress.tls.secretName (gt (len $tlsHosts) 0) }}
+{{- /* Resolve the TLS secret for the management Ingress:
+     - Use the dedicated management secret when explicitly set (ideal for
+       separate hostnames with their own cert).
+     - Otherwise fall back to the public TLS secret (works for wildcard
+       certs covering both hostnames). $mgmtTlsHosts already holds the
+       correct hostname(s), so the hosts: field is always right. */}}
+{{- $mgmtTlsSecret := .Values.statuslist.ingress.management.tls.secretName | default "" }}
+{{- if and (eq $mgmtTlsSecret "") .Values.statuslist.ingress.tls.secretName }}
+{{- $mgmtTlsSecret = .Values.statuslist.ingress.tls.secretName }}
+{{- end }}
+  {{- if and $mgmtTlsSecret (gt (len $mgmtTlsHosts) 0) }}
   tls:
   - hosts:
-    {{- range $tlsHosts }}
+    {{- range $mgmtTlsHosts }}
     - {{ . | quote }}
     {{- end }}
-    secretName: {{ .Values.statuslist.ingress.tls.secretName }}
+    secretName: {{ $mgmtTlsSecret }}
   {{- end }}
 {{- end }}
 {{- end }}

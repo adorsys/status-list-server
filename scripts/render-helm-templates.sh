@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# These checks render production profiles with an explicit test-only audience.
+# Keep the actual chart default unset so deployments must choose their own.
+helm() {
+  local action="$1"
+  shift
+  if [[ "$action" == template || "$action" == lint ]]; then
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 "$@"
+  else
+    command helm "$action" "$@"
+  fi
+}
 export RENDER_TEMP="${RENDER_TEMP:-/tmp}"
 CHART_DIR="deploy/helm/chart"
 mkdir -p "${RENDER_TEMP}/rendered"
@@ -635,16 +647,37 @@ if ! echo "$NP_SCOPED" | grep -E '^\s+- port: 8002\s*$' >/dev/null; then
 fi
 
 # --- Three-listener surface ---
-# The Service must expose public (http), management, and admin ports.
-SVC=$(helm template status-list-server "$CHART_DIR" 2>/dev/null | awk '/name: .*-service/{f=1} f{print} /^---$/{if(f)exit}')
-for SVC_PORT in http management admin; do
-  if ! echo "$SVC" | grep -qE "^\s+- name: ${SVC_PORT}\s*$"; then
-    echo "ERROR: Service must expose a ${SVC_PORT} port"; exit 1
-  fi
+# The public Service exposes only the http port; a separate ClusterIP internal
+# Service exposes management and admin, so an internet-facing LoadBalancer on the
+# public Service (e.g. the NLB overlay) never exposes /metrics or the management
+# API.
+helm template status-list-server "$CHART_DIR" 2>/dev/null | awk '
+  /^kind: Service$/{in_svc=1; svc=""; ports=""}
+  in_svc && /^  name: /{svc=$2}
+  in_svc && /^  - name: /{ports=ports " " $3}
+  /^---$/{ if (in_svc && svc != "") { print svc ":" ports; } in_svc=0 }
+' | while IFS= read -r line; do
+  name=${line%%:*}
+  ports=${line#*:}
+  case "$name" in
+    *-internal-service)
+      for SVC_PORT in management admin; do
+        if ! printf '%s\n' "$ports" | grep -qw "$SVC_PORT"; then
+          echo "ERROR: internal Service must expose a ${SVC_PORT} port"; exit 1
+        fi
+      done
+      ;;
+    *-service)
+      printf '%s\n' "$ports" | grep -qw "http" || { echo "ERROR: public Service must expose an http port"; exit 1; }
+      if printf '%s\n' "$ports" | grep -qwE "management|admin"; then
+        echo "ERROR: public Service must not expose management/admin"; exit 1
+      fi
+      ;;
+  esac
 done
 # The admin listener serves readiness and metrics: ServiceMonitor must scrape
 # the admin port, and the readiness probe must target it.
-if ! helm template status-list-server "$CHART_DIR" --set serviceMonitor.enabled=true 2>/dev/null | grep -E '^\s+- port: admin\s*$' | grep -A1 -q 'path: /metrics'; then
+if ! helm template status-list-server "$CHART_DIR" --set serviceMonitor.enabled=true 2>/dev/null | grep -A1 -E '^\s+- port: admin\s*$' | grep -q 'path: /metrics'; then
   echo "ERROR: ServiceMonitor must scrape the admin port at /metrics"; exit 1
 fi
 if ! helm template status-list-server "$CHART_DIR" 2>/dev/null | grep -B3 -A2 'path: /health/ready' | grep -q 'port: admin'; then
@@ -653,10 +686,27 @@ fi
 # The Ingress must NEVER reference the admin port, even when management routing
 # is enabled. The public Ingress targets the public port; the management Ingress
 # targets the management port.
-INGRESSES=$(helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null | awk '/kind: Ingress/{f=1} f{print} /^---$/{if(f)exit}')
+# Collect ALL Ingress documents from the render so both public and management
+# Ingress backends are inspected. The previous single-awk exited at the first
+# --- separator and therefore never read the management Ingress.
+INGRESSES=$(helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null \
+  | awk '
+    /^apiVersion: networking.k8s.io\/v1$/ { maybe=1; doc="" }
+    maybe { doc = doc $0 "\n" }
+    /^kind: Ingress$/ && maybe { capture=1 }
+    /^---$/ { if (capture) { print doc; capture=0; maybe=0; doc="" } }
+    END { if (capture) print doc }
+  ')
 if echo "$INGRESSES" | grep -E '^\s+number: 8002\s*$' >/dev/null; then
   echo "ERROR: Ingress must never reference the admin port (8002)"; exit 1
 fi
+# The management Ingress must route to the management port (8001), not the
+# public port (8081). Assert by extracting the management-ingress document.
+MGMT_INGRESS=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}')
+if ! echo "$MGMT_INGRESS" | grep -qE '^\s+number: 8001\s*$'; then
+  echo "ERROR: management Ingress backend must target the management port (8001)"; exit 1
+fi
+
 # Management routing on a SHARED hostname: management reuses the public host.
 if ! helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true 2>/dev/null \
     | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' | grep -q 'host: localhost'; then
@@ -666,6 +716,34 @@ fi
 if ! helm template status-list-server "$CHART_DIR" --set statuslist.ingress.management.enabled=true --set statuslist.ingress.management.hostname=mgmt.example.com 2>/dev/null \
     | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' | grep -q 'host: mgmt.example.com'; then
   echo "ERROR: management Ingress must honor a separate hostname"; exit 1
+fi
+# A separate management hostname must issue TLS for ITS OWN hostname (not the
+# public host) and carry an external-dns annotation for DNS.
+MGMT_TLS=$(helm template status-list-server "$CHART_DIR" \
+  --set statuslist.ingress.management.enabled=true \
+  --set statuslist.ingress.management.hostname=mgmt.example.com \
+  --set statuslist.ingress.tls.secretName=my-tls 2>/dev/null \
+  | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}')
+if ! echo "$MGMT_TLS" | grep -q -- '- "mgmt.example.com"'; then
+  echo "ERROR: management Ingress TLS hosts must target the management hostname"; exit 1
+fi
+if echo "$MGMT_TLS" | grep -q -- '- "localhost"'; then
+  echo "ERROR: management Ingress must not reuse the public TLS host"; exit 1
+fi
+if ! echo "$MGMT_TLS" | grep -q 'external-dns.alpha.kubernetes.io/hostname: mgmt.example.com'; then
+  echo "ERROR: management Ingress must emit an external-dns annotation for its separate hostname"; exit 1
+fi
+# The management Ingress regex path must start with "/" (ImplementationSpecific
+# paths cannot begin with a regex anchor like "^" — ingress-nginx adds the
+# leading ^ itself) and must be end-anchored so an attacker-controlled path
+# prefix cannot sneak a write to the management listener.
+MGMT_PATH=$(echo "$INGRESSES" | awk '/management-ingress/{f=1} f{print} f&&/^---$/{exit}' \
+  | grep 'path:')
+if ! echo "$MGMT_PATH" | grep -qE 'path:.*/api/v1/'; then
+  echo "ERROR: management Ingress path must start with /api/v1/ (not ^)"; exit 1
+fi
+if ! echo "$MGMT_PATH" | grep -qE '\$"?[[:space:]]*$'; then
+  echo "ERROR: management Ingress path must end with $ (anchored)"; exit 1
 fi
 
 

@@ -1,0 +1,13 @@
+{{- /*
+  NOTES.txt is displayed to the operator after every helm install/upgrade.
+*/}}
+
+{{- if and .Values.serviceMonitor.enabled .Values.statuslist.networkPolicy.enabled (eq (len .Values.statuslist.networkPolicy.adminIngress) 0) }}
+
+WARNING: ServiceMonitor is enabled but networkPolicy.adminIngress is EMPTY.
+  The NetworkPolicy omits the admin port rule when adminIngress is empty, so
+  Prometheus cannot reach /metrics on port {{ .Values.statuslist.service.adminPort }}.
+  Add at least one source selector to statuslist.networkPolicy.adminIngress
+  (e.g. the Prometheus Operator pod/namespace selector) to unblock scraping.
+
+{{- end }}

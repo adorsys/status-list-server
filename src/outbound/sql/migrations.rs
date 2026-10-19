@@ -20,15 +20,71 @@ impl MigratorTrait for Migrator {
             Box::new(add_status_list_history_version::Migration),
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
+            Box::new(credentials_key_id::Migration),
         ]
+    }
+
+    /// Drops every table without running any `down`, so it is refused with them.
+    async fn fresh<'c, C>(_db: C) -> Result<(), DbErr>
+    where
+        C: IntoSchemaManagerConnection<'c>,
+    {
+        Err(forward_only("dropping every table is refused"))
     }
 }
 
 /// Applies pending migrations; returns whether none had been applied before.
 pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, DbErr> {
-    let fresh = Migrator::get_applied_migrations(db).await?.is_empty();
-    Migrator::up(db, None).await?;
-    Ok(fresh)
+    apply_migrations::<Migrator>(db).await
+}
+
+/// [`run_migrations`] for any migrator, so tests can stand in for an earlier
+/// release with a migrator that knows only the first migrations.
+pub(crate) async fn apply_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<bool, DbErr> {
+    let applied = async {
+        let fresh = M::get_applied_migrations(db).await?.is_empty();
+        M::up(db, None).await?;
+        Ok(fresh)
+    }
+    .await;
+    match applied {
+        Ok(fresh) => Ok(fresh),
+        Err(err) => Err(name_unknown_migrations::<M>(db, err).await),
+    }
+}
+
+/// After migrating failed, names the migrations the database records that `M`
+/// does not know: what stops a rolled-back release from starting. Returns
+/// `err` unchanged when there are none or the records cannot be read, so it
+/// never stops a start that would otherwise have succeeded.
+async fn name_unknown_migrations<M: MigratorTrait>(
+    db: &sea_orm::DatabaseConnection,
+    err: DbErr,
+) -> DbErr {
+    let Ok(records) = M::get_migration_models(db).await else {
+        return err;
+    };
+    let known: Vec<String> = M::migrations()
+        .iter()
+        .map(|migration| migration.name().to_owned())
+        .collect();
+    let unknown: Vec<String> = records
+        .into_iter()
+        .map(|record| record.version)
+        .filter(|version| !known.contains(version))
+        .collect();
+    if unknown.is_empty() {
+        return err;
+    }
+    DbErr::Migration(format!(
+        "the database records migrations this release does not know: {}. A newer release \
+         migrated it, and this release cannot start until those records are deleted. Check \
+         that each is safe to leave in place, then follow \"{ROLLBACK_RUNBOOK_SECTION}\" in \
+         docs/deployment-runbook.md. ({err})",
+        unknown.join(", ")
+    ))
 }
 
 /// Recomputes every issuer's `credentials.list_count`. Used as the migration
@@ -44,6 +100,27 @@ fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatem
     if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
         stmt.engine("InnoDB");
     }
+}
+
+/// The `docs/deployment-runbook.md` section the refusals and the startup error
+/// point at.
+const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
+
+/// Every migration's `down`: the schema only moves forward. See "Migrations
+/// are forward-only" in `src/outbound/sql/README.md`.
+fn refuse_down(migration: &str) -> Result<(), DbErr> {
+    Err(forward_only(&format!(
+        "migration '{migration}' cannot be rolled back"
+    )))
+}
+
+/// The refusal every path back returns, naming what was refused.
+fn forward_only(refused: &str) -> DbErr {
+    DbErr::Migration(format!(
+        "{refused}: the schema only moves forward. To roll back a release, delete the \
+         seaql_migrations records of the migrations it does not know and keep the schema; \
+         see \"{ROLLBACK_RUNBOOK_SECTION}\" in docs/deployment-runbook.md"
+    ))
 }
 
 /// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
@@ -64,7 +141,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
 /// No-op on Postgres and SQLite. On failure the error log includes the table
 /// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
 pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement, Value};
+    use sea_orm::{FromQueryResult, Statement, Value};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -120,7 +197,7 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
 ///
 /// No-op on PostgreSQL and SQLite.
 pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
-    use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+    use sea_orm::{FromQueryResult, Statement};
 
     if db.get_database_backend() != sea_orm::DatabaseBackend::MySql {
         return Ok(());
@@ -313,57 +390,8 @@ pub(crate) mod tables {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Drop indexes first
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_list_id")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_sub")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_lists_issuer")
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            // Drop tables in reverse order to handle foreign key constraints
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await?;
-
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(Credentials::Table)
-                        .to_owned(),
-                )
-                .await?;
-            Ok(())
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -429,22 +457,14 @@ pub(crate) mod add_updated_at {
                 .to_owned();
             manager
                 .get_connection()
-                .execute(manager.get_database_backend().build(&update_stmt))
+                .execute_raw(manager.get_database_backend().build(&update_stmt))
                 .await
                 .map(|_| ())
         }
 
-        /// Removes updated_at column from status_lists table
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusLists::Table)
-                        .drop_column(StatusLists::UpdatedAt)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -480,11 +500,10 @@ pub(crate) mod add_status_list_version {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Adds the version column to the status_lists table and backfills it.
+        /// Adds the version column to the status_lists table.
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // MySQL commits the ALTER on its own, so a failed backfill leaves the
-            // column behind with the migration unrecorded; the re-run must skip it.
+            // A re-run after a rollback finds the column already there.
             if !manager.has_column("status_lists", "version").await? {
                 manager
                     .alter_table(
@@ -500,32 +519,13 @@ pub(crate) mod add_status_list_version {
                     )
                     .await?;
             }
-
-            // Backfill pre-existing rows so their concurrency guard is
-            // immediately usable: the first post-migration update expects
-            // `version = 1` and matches. `updated_at` is left untouched.
-            let update_stmt = sea_query::Query::update()
-                .table(StatusLists::Table)
-                .value(StatusLists::Version, 1)
-                .to_owned();
-            manager
-                .get_connection()
-                .execute(manager.get_database_backend().build(&update_stmt))
-                .await
-                .map(|_| ())
+            // No backfill: DEFAULT 1 fills existing rows, and a re-run must not reset versions.
+            Ok(())
         }
 
-        /// Removes the version column from the status_lists table
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusLists::Table)
-                        .drop_column(StatusLists::Version)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -576,15 +576,8 @@ pub(crate) mod add_status_list_history_version {
             Ok(())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(StatusListHistory::Table)
-                        .drop_column(StatusListHistory::Version)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -666,24 +659,8 @@ pub(crate) mod status_list_history {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_resolution")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -729,16 +706,8 @@ pub(crate) mod status_list_history_exp_index {
         }
 
         #[allow(elided_lifetimes_in_paths)]
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_status_list_history_exp")
-                        .table(StatusListHistory::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -795,15 +764,8 @@ pub(crate) mod credentials_list_count {
                 .map(|_| ())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(Credentials::Table)
-                        .drop_column(Credentials::ListCount)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -855,7 +817,7 @@ pub(crate) mod list_quota {
             let db = manager.get_connection();
             let backend = manager.get_database_backend();
             let existing = db
-                .query_one(
+                .query_one_raw(
                     backend.build(
                         Query::select()
                             .column(ListQuota::Id)
@@ -865,7 +827,7 @@ pub(crate) mod list_quota {
                 )
                 .await?;
             if existing.is_none() {
-                db.execute(
+                db.execute_raw(
                     backend.build(
                         Query::insert()
                             .into_table(ListQuota::Table)
@@ -878,10 +840,8 @@ pub(crate) mod list_quota {
             Ok(())
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_table(Table::drop().table(ListQuota::Table).to_owned())
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -943,15 +903,8 @@ pub(crate) mod status_list_allocations {
             manager.create_table(table).await
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            manager
-                .drop_table(
-                    Table::drop()
-                        .if_exists()
-                        .table(StatusListAllocations::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -1020,30 +973,8 @@ pub(crate) mod credentials_aggregation_id {
             Ok(())
         }
 
-        // `has_index` rather than `if_exists()`, which sea-query cannot render
-        // for MySQL.
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if manager.has_index("credentials", INDEX).await? {
-                manager
-                    .drop_index(
-                        Index::drop()
-                            .name(INDEX)
-                            .table(Credentials::Table)
-                            .to_owned(),
-                    )
-                    .await?;
-            }
-            if manager.has_column("credentials", "aggregation_id").await? {
-                manager
-                    .alter_table(
-                        Table::alter()
-                            .table(Credentials::Table)
-                            .drop_column(Credentials::AggregationId)
-                            .to_owned(),
-                    )
-                    .await?;
-            }
-            Ok(())
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -1051,6 +982,181 @@ pub(crate) mod credentials_aggregation_id {
     enum Credentials {
         Table,
         AggregationId,
+    }
+}
+
+/// Stores and uniquely indexes the JWK `kid` used to resolve management tokens without
+/// scanning and deserializing the complete credential registry per request.
+pub(crate) mod credentials_key_id {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Statement};
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261014_000001_credentials_key_id"
+        }
+    }
+
+    const INDEX: &str = "idx_credentials_key_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("credentials", "key_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(ColumnDef::new(Credentials::KeyId).string_len(255).null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            let backfill = match manager.get_database_backend() {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "UPDATE credentials SET key_id = CASE WHEN jsonb_typeof(public_key::jsonb -> 'kid') = 'string' AND length(public_key ->> 'kid') <= 255 THEN public_key ->> 'kid' ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::MySql => {
+                    "UPDATE credentials SET key_id = CASE WHEN JSON_TYPE(JSON_EXTRACT(public_key, '$.kid')) = 'STRING' AND CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid'))) <= 255 THEN JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::Sqlite => {
+                    "UPDATE credentials SET key_id = CASE WHEN json_type(public_key, '$.kid') = 'text' AND length(json_extract(public_key, '$.kid')) <= 255 THEN json_extract(public_key, '$.kid') ELSE NULL END WHERE key_id IS NULL"
+                }
+                backend => {
+                    return Err(DbErr::Migration(format!(
+                        "unsupported database backend for credential kid migration: {backend:?}"
+                    )));
+                }
+            };
+            manager
+                .get_connection()
+                .execute_unprepared(backfill)
+                .await?;
+
+            // Legacy credentials without a kid get an RFC 7638 SHA-256 public
+            // JWK thumbprint. Preserve every supplied ID and signing algorithm.
+            // Update JSON and its indexed copy in one statement, so retries can
+            // never leave those two representations out of sync.
+            let connection = manager.get_connection();
+            let backend = manager.get_database_backend();
+            let rows = connection
+                .query_all_raw(Statement::from_string(
+                    backend,
+                    "SELECT issuer, public_key FROM credentials WHERE key_id IS NULL",
+                ))
+                .await?;
+            let mut pending = Vec::new();
+            let mut owners = std::collections::BTreeMap::<String, Vec<String>>::new();
+            for row in rows {
+                let issuer: String = row.try_get("", "issuer")?;
+                let mut public_key: serde_json::Value = row.try_get("", "public_key")?;
+                let Some(kid) = missing_key_id(&public_key) else {
+                    continue;
+                };
+                public_key["kid"] = kid.clone().into();
+                owners.entry(kid.clone()).or_default().push(issuer.clone());
+                pending.push((issuer, public_key, kid));
+            }
+
+            // Check the complete plan before writing any generated IDs. Let the
+            // database compare existing IDs so MySQL's column collation applies.
+            let lookup = match backend {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "SELECT issuer FROM credentials WHERE key_id = $1 ORDER BY issuer"
+                }
+                _ => "SELECT issuer FROM credentials WHERE key_id = ? ORDER BY issuer",
+            };
+            let mut collisions = Vec::new();
+            for (kid, issuers) in &mut owners {
+                for row in connection
+                    .query_all_raw(Statement::from_sql_and_values(
+                        backend,
+                        lookup,
+                        [kid.clone().into()],
+                    ))
+                    .await?
+                {
+                    issuers.push(row.try_get("", "issuer")?);
+                }
+                if issuers.len() > 1 {
+                    issuers.sort();
+                    collisions.push(format!("kid {kid:?}: issuers {issuers:?}"));
+                }
+            }
+            if !collisions.is_empty() {
+                return Err(DbErr::Migration(format!(
+                    "credential key ID backfill collisions; repair these registrations before retrying: {}",
+                    collisions.join("; ")
+                )));
+            }
+
+            for (issuer, public_key, kid) in pending {
+                let update = match backend {
+                    sea_orm::DatabaseBackend::Postgres => {
+                        "UPDATE credentials SET public_key = CAST($1 AS JSONB), key_id = $2 WHERE issuer = $3 AND key_id IS NULL"
+                    }
+                    _ => {
+                        "UPDATE credentials SET public_key = ?, key_id = ? WHERE issuer = ? AND key_id IS NULL"
+                    }
+                };
+                connection
+                    .execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        update,
+                        [public_key.to_string().into(), kid.into(), issuer.into()],
+                    ))
+                    .await?;
+            }
+
+            if !manager.has_index("credentials", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .col(Credentials::KeyId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    fn missing_key_id(public_key: &serde_json::Value) -> Option<String> {
+        use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, ThumbprintHash};
+        let object = public_key.as_object()?;
+        if object.get("kid").is_some_and(|kid| !kid.is_null())
+            || ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+                .iter()
+                .any(|name| object.contains_key(*name))
+        {
+            return None;
+        }
+        let jwk: Jwk = serde_json::from_value(public_key.clone()).ok()?;
+        if matches!(
+            jwk.algorithm,
+            AlgorithmParameters::OctetKey(_) | AlgorithmParameters::Other(_)
+        ) {
+            return None;
+        }
+        jsonwebtoken::DecodingKey::from_jwk(&jwk).ok()?;
+        jwk.thumbprint(ThumbprintHash::SHA256).ok()
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        KeyId,
     }
 }
 
@@ -1090,18 +1196,8 @@ pub(crate) mod status_lists_issuer_list_id_index {
                 .await
         }
 
-        async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager.has_index("status_lists", INDEX).await? {
-                return Ok(());
-            }
-            manager
-                .drop_index(
-                    Index::drop()
-                        .name(INDEX)
-                        .table(StatusLists::Table)
-                        .to_owned(),
-                )
-                .await
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
         }
     }
 
@@ -1207,6 +1303,27 @@ mod tests {
             runbook.contains(RECOUNT_LIST_COUNT_SQL),
             "docs/troubleshooting.md must quote RECOUNT_LIST_COUNT_SQL verbatim"
         );
+    }
+
+    #[test]
+    fn refuse_down_names_a_runbook_section_that_exists() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        assert!(
+            runbook.contains(&format!("### {ROLLBACK_RUNBOOK_SECTION}")),
+            "docs/deployment-runbook.md must have the section refuse_down names"
+        );
+    }
+
+    #[test]
+    fn every_migration_has_a_row_in_the_runbook_table() {
+        let runbook = include_str!("../../../docs/deployment-runbook.md");
+        for migration in Migrator::migrations() {
+            let name = migration.name();
+            assert!(
+                runbook.contains(&format!("| `{name}` |")),
+                "docs/deployment-runbook.md must say whether {name} is safe to leave in place"
+            );
+        }
     }
 
     #[tokio::test]

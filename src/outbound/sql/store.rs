@@ -5,7 +5,8 @@ use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
-    Set, Statement, TransactionTrait, Value, sea_query::Expr,
+    Set, Statement, TransactionTrait, Value,
+    sea_query::{Expr, ExprTrait},
 };
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::warn;
@@ -730,7 +731,7 @@ impl SeaOrmStore<StatusListRecord> {
             let lock_result = status_lists::Entity::update_many()
                 .col_expr(
                     status_lists::Column::UpdatedAt,
-                    Expr::col(status_lists::Column::UpdatedAt).into(),
+                    Expr::col(status_lists::Column::UpdatedAt),
                 )
                 .filter(status_lists::Column::ListId.eq(list_id))
                 .exec(&txn)
@@ -974,7 +975,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
                 };
 
                 let count = (*db)
-                    .execute(Statement::from_sql_and_values(
+                    .execute_raw(Statement::from_sql_and_values(
                         backend,
                         sql,
                         vec![Value::from(cutoff), Value::from(BATCH_SIZE)],
@@ -1035,6 +1036,25 @@ impl SeaOrmStore<Credentials> {
                 .one(&*db)
                 .await
                 .map(|opt| opt.map(Credentials::from))
+                .map_err(find_err)
+        })
+        .await
+    }
+
+    /// Resolve a management key by its indexed `kid` copy. Return up to two
+    /// matches so callers can fail closed on duplicate kids.
+    pub async fn find_credentials_by_kid(
+        &self,
+        kid: &str,
+    ) -> Result<Vec<Credentials>, RepositoryError> {
+        time_query("find_by_kid", "credential", async {
+            let db = self.db.current();
+            credentials::Entity::find()
+                .filter(credentials::Column::KeyId.eq(kid))
+                .limit(2)
+                .all(&*db)
+                .await
+                .map(|rows| rows.into_iter().map(Credentials::from).collect())
                 .map_err(find_err)
         })
         .await

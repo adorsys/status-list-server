@@ -65,13 +65,13 @@ pub(crate) fn metrics_after(test: impl std::future::Future<Output = ()>) -> Stri
 
 /// Registers `issuer` and returns the aggregation ID it was given.
 pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> AggregationId {
+    let mut public_key: serde_json::Value =
+        serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+    public_key["kid"] = serde_json::json!(format!("test-key-{issuer}"));
     service
         .publish_credential(Credential {
             issuer: Issuer(issuer.into()),
-            public_key: PublicJwk::try_new(
-                crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
-            )
-            .unwrap(),
+            public_key: PublicJwk::try_new(serde_json::to_vec(&public_key).unwrap()).unwrap(),
         })
         .await
         .unwrap()
@@ -183,6 +183,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
         max_status_index: 100_000,
@@ -230,6 +231,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
         max_status_index: 100_000,
@@ -267,6 +269,7 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri: None,
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
         max_status_index: 100_000,
@@ -451,6 +454,7 @@ async fn build_test_app_state(
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
         aggregation_uri,
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
         max_status_index: 100_000,

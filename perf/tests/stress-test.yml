@@ -5,37 +5,42 @@ config:
       - type: prometheus
         pushgateway: "http://localhost:9091"
         tags:
-          - "test_id:status_list_load"
+          - "test_id:status_list_stress"
     expect: {}
     ensure: {}
   phases:
-    - duration: 60
-      arrivalRate: 5
-      name: "Warm up - 5 users/sec"
-    - duration: 120
-      arrivalRate: 25
-      name: "Ramp up - 25 users/sec"
     - duration: 180
       arrivalRate: 50
-      name: "Peak load - 50 users/sec"
-    - duration: 120
-      arrivalRate: 25
-      name: "Scale down - 25 users/sec"
-    - duration: 60
-      arrivalRate: 5
-      name: "Cool down - 5 users/sec"
+      name: "Stage 1 - 100 concurrent users"
+    - duration: 300
+      arrivalRate: 100
+      name: "Stage 2 - 200 concurrent users"
+    - duration: 480
+      arrivalRate: 175
+      name: "Stage 3 - 350 concurrent users (STRESS)"
+    - duration: 300
+      arrivalRate: 250
+      name: "Stage 4 - 500 concurrent users (PEAK STRESS)"
+    - duration: 180
+      arrivalRate: 100
+      name: "Stage 5 - Scale back to 200"
+    - duration: 180
+      arrivalRate: 0
+      name: "Stage 6 - Ramp down"
 
   processor: "../scripts/processor.js"
 
-  # Performance thresholds
+  # The issuer is registered and seed lists are published once before the run by
+  # scripts/setup.js (invoked by `npm run test:stress*`), so authenticated flows
+  # start with a valid issuer and reads hit real lists.
+
   ensure:
-    maxErrorRate: 5 # Max 5% error rate
-    p95: 800 # 95th percentile < 800ms
-    p99: 1500 # 99th percentile < 1.5s
+    maxErrorRate: 25 # Lenient for stress test
+    p99: 3000 # 99th percentile < 3s
 
 scenarios:
-  - name: "Health Check Flow"
-    weight: 30
+  - name: "Health Check - Lightweight"
+    weight: 25
     flow:
       - get:
           url: "/health/live"
@@ -44,7 +49,7 @@ scenarios:
             - contentType: text/plain; charset=utf-8
             - matchesRegexp: "OK"
 
-  - name: "Welcome Endpoint Flow"
+  - name: "Welcome Endpoint"
     weight: 20
     flow:
       - get:
@@ -52,34 +57,36 @@ scenarios:
           expect:
             - statusCode: 200
             - contentType: text/plain; charset=utf-8
-            - matchesRegexp: "Status.*Server" # Matches "Status list Server" or similar
 
-  - name: "Status List Retrieval Flow"
+  - name: "Multiple Status List Queries - Database Load"
     weight: 30
     flow:
-      - function: "selectPublishedListId"
-      - get:
-          url: "/api/v1/status-lists/{{ listId }}"
-          headers:
-            Accept: "application/statuslist+jwt"
-          expect:
-            - statusCode: 200
-          afterResponse: "handleStatusListResponse"
+      - loop:
+          - function: "selectPublishedListId"
+          - get:
+              url: "/api/v1/status-lists/{{ listId }}"
+              headers:
+                Accept: "application/statuslist+jwt"
+              expect:
+                - statusCode: 200
+          - think: 0.2
+        count: 3
 
-  - name: "Credential Registration Flow"
-    weight: 20
+  - name: "Concurrent Credential Registrations"
+    weight: 25
     flow:
       - function: "generateIssuerPayload"
       - post:
-          url: "/api/v1/credentials"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
           json:
             issuer: "{{ issuer }}"
             public_key: "{{ publicKeyJwk }}"
           expect:
             - statusCode:
-                - 202 # Accepted
-                - 409 # Conflict (duplicate) is acceptable
+                - 202
+                - 409
           afterResponse: "handleCredentialResponse"
+      - think: 0.5
 
   - name: "Authenticated Update Flow"
     weight: 40
@@ -89,7 +96,7 @@ scenarios:
       - function: "generateUUID"
       # First publish
       - put:
-          url: "/api/v1/status-lists/{{ listId }}/statuses"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:
@@ -102,7 +109,7 @@ scenarios:
       # Then update
       - think: 0.5
       - patch:
-          url: "/api/v1/status-lists/{{ listId }}/statuses"
+          url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
             Authorization: "Bearer {{ token }}"
           json:

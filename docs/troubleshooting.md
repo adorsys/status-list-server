@@ -600,9 +600,10 @@ material storage reachability, or configured certificate-file availability.
 ```bash
 kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
 kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
-# Replicate the probe against a running pod (or a local instance):
-curl -s -o /dev/null -w '%{http_code}\n' http://<pod-ip>:<port>/health/ready
-curl -s http://<pod-ip>:<port>/health/ready
+# Replicate the probe against a running pod (or a local instance).
+# Readiness is served on the ADMIN listener (default :8002), not the public one.
+curl -s -o /dev/null -w '%{http_code}\n' http://<pod-ip>:8002/health/ready
+curl -s http://<pod-ip>:8002/health/ready
 ```
 
 The detailed failure reasons are logged at `WARN` (`readiness check failed`) rather than
@@ -825,7 +826,8 @@ quota starts off on such a database, and a pod does not serve without it unless 
 
 No pod of an older release can start once a new pod has migrated the database: it finds a migration
 it has no file for and exits. Only pods already running can still write, which is why step 2 waits
-for them to be gone.
+for them to be gone. To start one anyway, see
+[Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations).
 
 `enable` checks every issuer against the lists that exist and the configured cap. If any issuer
 has more lists than the cap, or a `list_count` that differs from its lists, it leaves the quota off
@@ -847,7 +849,8 @@ refusing to enable the list quota
 `enable` and `recount` wait for publishes that are in flight and hold off new ones until they
 finish, so a publish is either counted by the check or refused by the enforced quota.
 
-**Rolling back** to a release that predates the quota: run `list-quota disable` first. Its pods
+**Rolling back** to a release that predates the quota: run `list-quota disable` first, then follow
+[Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations). Its pods
 publish without counting, and an enforced quota would then undercount. Rolling forward again is
 the upgrade above.
 
@@ -916,11 +919,11 @@ it cannot be larger than the page.
 
 **Fix:** Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` to `1000` or less and roll the Deployment. Issuers
 that already hold more lists keep them, and their aggregation spans several pages, but every
-further publish is refused until they are back under the cap. While any holds more than 1000,
-tokens carry no `aggregation_uri`, and pods say so at startup:
+further publish is refused until they are back under the cap. While one holds more than 1000, its
+own tokens carry no `aggregation_uri`, other issuers' tokens keep it, and pods name it at startup:
 
 ```text
-server.aggregation_uri is not advertised in tokens: 1 issuer(s) have more status lists than one aggregation page (1000); delete lists until none does, then restart:
+server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have more status lists than one aggregation page (1000); delete lists until none does, then restart:
     https://issuer.example (1003 lists)
 ```
 
@@ -982,7 +985,7 @@ For quick grep, the application emits these verbatim:
 - `server.aggregation_uri is not a valid URL: ...` / `server.aggregation_uri must be an http or https URL` / `server.aggregation_uri must use https in production` / `server.aggregation_uri must not contain credentials` / `server.aggregation_uri path '...' does not match the aggregation route '...'` / `server.aggregation_uri must not have a query or fragment`
 - `Startup aborted: the list quota is not enforced: ...`
 - `limits.max_lists_per_issuer is NOT enforced: limits.list_quota_transition is set. ...` (ERROR) / `limits.list_quota_transition is set, but the list quota is already enforced; ...` (WARN)
-- `server.aggregation_uri is not advertised in tokens: the list quota is not enforced` / `server.aggregation_uri is not advertised in tokens: N issuer(s) have more status lists than one aggregation page (1000); ...` (WARN)
+- `server.aggregation_uri is not advertised in tokens: the list quota is not enforced` / `server.aggregation_uri is not advertised in the tokens of N issuer(s) that have more status lists than one aggregation page (1000); ...` (WARN)
 - `refusing to enable the list quota` / ``the list quota is enforced; run `list-quota disable` before recounting``
 
 Platform-only (no matching application string): `ImagePullBackOff`, `ErrImagePull`,

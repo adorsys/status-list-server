@@ -7,8 +7,22 @@ serviceAccount:
 
 statuslist:
   replicaCount: 2
+  ingress:
+    management:
+      # Enable the management listener Ingress in production so issuer writes
+      # (PUT/PATCH .../statuses, POST .../allocations, POST /credentials) reach
+      # the management port (8001) instead of the public listener, which returns
+      # 404 for every write. Shared hostname: the edge routes by path regex.
+      enabled: true
+      annotations:
+        # Match the public Ingress body-size limit; without this nginx falls back
+        # to 1m and large status-list payloads are rejected with 413.
+        nginx.ingress.kubernetes.io/proxy-body-size: "10m"
   env:
     APP_ENV: "production"
+    # Issuers targeting the AWS production deployment must use this exact aud.
+    # Other deployments must override it with their own audience.
+    APP_MANAGEMENT_AUTH__AUDIENCES: "https://statuslist.eudi-adorsys.com/api/v1"
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"

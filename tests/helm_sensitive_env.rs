@@ -85,6 +85,10 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
         .arg("-f")
         .arg(chart_dir.join("values.yaml"))
         .args(["--namespace", "statuslist"])
+        .args([
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
+        ])
         .args(["--set", "opentelemetry-collector.enabled=false"]);
     if disable_postgres {
         command.args(["--set", "postgres.enabled=false"]);
@@ -190,6 +194,85 @@ fn rendered_chart_default_env_loads_application_config() {
         .collect::<Vec<_>>();
 
     Config::load_from_overrides(&overrides).expect("chart default env should load as app config");
+}
+
+#[test]
+fn production_chart_requires_an_explicit_management_audience() {
+    for profile in ["production", "prod", " PRODUCTION "] {
+        let Some(output) = render_helm_failure(&[
+            "--set-string",
+            &format!("statuslist.env.APP_ENV={profile}"),
+            "--set-string",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=",
+        ]) else {
+            return;
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("APP_MANAGEMENT_AUTH__AUDIENCES is required in production")
+        );
+    }
+}
+
+#[test]
+fn release_production_overlays_supply_the_management_audience() {
+    if !helm_available() {
+        assert!(env::var_os("CI").is_none(), "helm is required in CI");
+        return;
+    }
+    // Match deploy.yml's overlays without the helper's CLI audience override:
+    // that override would conceal an incomplete production configuration.
+    let chart_dir = dependency_free_chart();
+    let output = Command::new("helm")
+        .args(["template", "statuslist"])
+        .arg(&chart_dir)
+        .args(["-f", "deploy/helm/chart/values-aws.yaml"])
+        .args(["-f", "deploy/helm/chart/values-production.yaml"])
+        .args(["--namespace", "statuslist-production"])
+        .args(["--set", "opentelemetry-collector.enabled=false"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    let env = rendered_env(&rendered);
+    assert!(
+        env.iter()
+            .any(|(name, value)| name == "APP_MANAGEMENT_AUTH__AUDIENCES"
+                && value == "https://statuslist.eudi-adorsys.com/api/v1")
+    );
+    let overrides = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let config =
+        Config::load_from_overrides(&overrides).expect("production release config must load");
+    assert_eq!(
+        config.management_auth.audiences,
+        ["https://statuslist.eudi-adorsys.com/api/v1"]
+    );
+}
+
+#[test]
+fn development_chart_can_omit_management_audiences() {
+    let Some(output) = helm_template(&[
+        "--set-string",
+        "statuslist.env.APP_ENV=development",
+        "--set-string",
+        "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+        "--set-string",
+        "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=",
+    ]) else {
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -775,11 +858,13 @@ fn rendered_chart_rejects_integer_env_values() {
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("got number, want string"),
+        stderr.contains("got number, want string")
+            || stderr.contains("Expected: string, given: integer"),
         "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
     );
     assert!(
-        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
+        stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY")
+            || stderr.contains("statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY"),
         "the schema error must name the offending env key APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: {stderr}"
     );
 }

@@ -141,36 +141,37 @@ statuslist:
     # sets APP_SERVER__DOMAIN (the application's own public domain) when the operator does
     # not set it in statuslist.env, so changing it changes application config, not just DNS.
     externalDnsHostname: ""
-    # Management listener ingress. The management paths .../statuses and
-    # .../allocations share the /api/v1/status-lists/ prefix with public reads, so
-    # the edge must route by path (and the management paths need a regex or method
-    # match). Default OFF: management traffic is not exposed unless enabled.
+    # Management listener ingress. The management paths share /api/v1/status-lists/
+    # with public reads, so the edge routes them by regex path. Default OFF.
     management:
       # When true, render a second Ingress routing management paths to the
-      # management service port. The public and management listeners may share a
-      # hostname (the edge then routes by path); set a separate hostname below to
-      # isolate them.
+      # management port. May share the public hostname (edge routes by path) or
+      # use a separate hostname below to isolate them.
       enabled: false
       # Hostname for management traffic. Empty reuses the public ingress host.
       hostname: ""
-      # NGINX regex path for the management-only paths. The public read and the
-      # management writes share /api/v1/status-lists/, so this matches the
-      # write/allocation/credential suffixes specifically.
-      path: "/api/v1/status-lists/.+/(statuses|allocations)|/api/v1/credentials"
+      # Regex path for the management-only suffixes. `use-regex: "true"` on this
+      # Ingress treats every path as a POSIX regex; the list id stays one segment
+      # and the path is end-anchored so a longer prefix cannot match.
+      path: "/api/v1/(status-lists/[^/]+/(statuses|allocations)|credentials)$"
       # Extra NGINX annotations (e.g. auth, client-body-size) for the management Ingress.
       annotations: {}
+      tls:
+        # TLS Secret for the management Ingress when it uses a separate hostname.
+        # When left empty and a separate management hostname is configured, the
+        # management Ingress inherits the public TLS secret name, which can cause
+        # a cert name mismatch if the cert only covers the public hostname.
+        # Set this to a separate Secret (e.g. managed by cert-manager) that covers
+        # the management hostname.
+        secretName: ""
   env:
     RUST_LOG: "info"
     APP_ENV: "production"
+    # Required in production. Set a deployment-specific audience, for example
+    # https://statuslist.prod.example.com/api/v1; staging must use another value.
+    APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # Management listener: authenticated issuer writes (statuses, allocations,
-    # credentials). Separate port keeps it off the public ingress.
-    APP_SERVER__MANAGEMENT__HOST: "0.0.0.0"
-    APP_SERVER__MANAGEMENT__PORT: "8001"
-    # Admin listener: /health/ready and /metrics. Never exposed via ingress.
-    APP_SERVER__ADMIN__HOST: "0.0.0.0"
-    APP_SERVER__ADMIN__PORT: "8002"
     # Service document links (GET /). Defaults to the repository URL.
     # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
     # APP_SERVER__LINKS__PORTAL: "https://statuslist.example.com"
@@ -418,13 +419,24 @@ statuslist:
     # When ingress is empty [] (and enabled=true), ANY source can reach the PUBLIC
     # service port. Add podSelector/namespaceSelector/ipBlock entries to restrict sources.
     ingress: []
-    # Source selectors for the MANAGEMENT port. Unlike the public port, an EMPTY
-    # list here DENIES ALL management traffic (a port-only rule with no `from` is
-    # a deny), so management stays off the wire unless you explicitly allow it.
+    # Source selectors for the MANAGEMENT port. When this list is EMPTY the
+    # template omits the management port rule entirely, so NO source can reach
+    # the management listener — it is effectively denied. Populate it to open
+    # management traffic only to specific sources (e.g. your Ingress controller
+    # namespace). Do NOT leave it empty if you expose management via Ingress.
     managementIngress: []
-    # Source selectors for the ADMIN port. An EMPTY list DENIES ALL admin traffic,
-    # so /metrics and /health/ready are only reachable when you allow sources here
-    # (e.g. the Prometheus Operator namespace / scrape pod selector).
+    # Source selectors for the ADMIN port (/metrics, /health/ready). When this
+    # list is EMPTY the template omits the admin port rule, so NO source can
+    # reach the admin listener. This means Prometheus scraping is silently
+    # broken whenever serviceMonitor.enabled=true and adminIngress is empty.
+    # At minimum add a selector for the Prometheus Operator scrape pods:
+    #   adminIngress:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: monitoring
+    #       podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/name: prometheus
     adminIngress: []
     # Additional internal egress destinations. IMPORTANT: these entries are appended to the
     # DATABASE egress rule (the one scoped to the DB port), so each inherits the database

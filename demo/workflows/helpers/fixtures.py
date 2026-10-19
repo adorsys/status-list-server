@@ -2,6 +2,7 @@ import random
 import string
 import jwt
 import time
+import os
 
 # ---------------------------------------------------------------------
 # Example token issuer configurations
@@ -50,7 +51,7 @@ def get_scott_holdings_issuer():
     issuer_data = {
         "label": f"scott-holdings-{random_suffix}",
         "keypair": {
-            "alg": "RS256",
+            "alg": "PS256",
             "public_key": (
                 "-----BEGIN PUBLIC KEY-----\n"
                 "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs4Df4EUySK6d7pRQkLhM6lbgtSuKwDOnJ3IpUyiP6yY8Bl4+ksmSC3Q3xe9KgAltkQd+hVo/3bSw1Mn5Ozzcs+xXTkt7IIDpFE8wWe4sPdm1+OZ0tZb3FWJV2fM4ZsFeo6+ucaiZjmUIeq+xccMaNcPkP6xhBtlMXuvtf2PkKqov9Im8MgmrTwSMZa1AWHo0bgS5AdB9n3KKjp75CCTtLdT4/fRpehgfu9F+QHPl6YYHSKNEYzzSt+Ix0A76IYceuryQFps3iIVDRlFAqfFTjHlP3Cg7byhjee4YCqL9YwTSLyRVxYKfUU9byiDGqf9jeiXZRssVNLK99c8MxzEvfwIDAQAB\n"
@@ -84,19 +85,17 @@ def get_public_jwk(issuer: dict) -> dict:
     # PyJWT adds key_ops to RSA keys only; drop it so every key type has the same shape.
     jwk.pop("key_ops", None)
 
-    # Declares the intended algorithm for readers of the stored key. It is advisory:
-    # the server takes the algorithm from the token header and only checks that it
-    # suits the key type, so it does not bind the key to this algorithm.
-    return {**jwk, "alg": alg}
+    # Management JWTs are resolved by kid and pinned to this signing algorithm.
+    return {**jwk, "alg": alg, "kid": issuer["label"]}
 
 
-def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
+def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:
     """
     Creates a JWT using the issuer's keypair and a default payload.
 
     Args:
         issuer (dict): Issuer dictionary containing label and keypair.
-        lifespan (int): Lifetime of the token in seconds (default is 1 hour,
+        lifespan (int): Lifetime of the token in seconds (default is 5 minutes,
             the server's default maximum).
 
     Returns:
@@ -104,8 +103,9 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
     """
     current_time = int(time.time())
     payload = {
-        # The server looks up the issuer's registered key by this claim.
+        # The verified issuer must own the key named by the JWT header.
         "iss": issuer["label"],
+        "aud": os.environ.get("MANAGEMENT_AUDIENCE", "status-list-server-management"),
         "iat": current_time,
         "exp": current_time + lifespan
     }
@@ -113,5 +113,6 @@ def create_bearer_jwt_token(issuer: dict, lifespan: int = 3600) -> str:
     return jwt.encode(
         payload,
         issuer['keypair']['private_key'],
-        algorithm=issuer["keypair"]["alg"]
+        algorithm=issuer["keypair"]["alg"],
+        headers={"typ": "statuslist-management+jwt", "kid": issuer["label"]},
     )

@@ -15,6 +15,18 @@
 # Exit status is 0 when every expectation holds, 1 when any does not.
 set -euo pipefail
 
+# These checks render production profiles with an explicit test-only audience.
+# Keep the actual chart default unset so deployments must choose their own.
+helm() {
+  local action="$1"
+  shift
+  if [[ "$action" == template || "$action" == lint ]]; then
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 "$@"
+  else
+    command helm "$action" "$@"
+  fi
+}
+
 for tool in helm python3; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "::error::$tool is required by $0 but was not found on PATH."

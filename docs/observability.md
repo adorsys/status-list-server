@@ -103,14 +103,15 @@ To add PostgreSQL, ACME, and AWS services and enable their matching app features
 
 ```bash
 FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
-  docker compose --profile postgres --profile acme --profile aws \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
     --profile observability up -d --build
 ```
 
 Services provisioned for observability:
 
-- **Status List Server**: `http://localhost:8000`
-- **Prometheus Metrics**: `http://localhost:8000/metrics`
+- **Status List Server (public)**: `http://localhost:8000`
+- **Prometheus Metrics (admin listener)**: `http://localhost:8002/metrics`
 - **Prometheus UI**: `http://localhost:9090`
 - **Jaeger UI**: `http://localhost:16686`
 - **OTLP Collector**: `localhost:4317` (gRPC) / `localhost:4318` (HTTP) / `localhost:8889` (Prometheus metrics exporter)

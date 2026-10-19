@@ -94,7 +94,7 @@ struct ProfileDefinition {
     features: &'static str,
     test_features: &'static str,
     compose_profiles: &'static [&'static str],
-    compose_file: Option<&'static str>,
+    compose_files: &'static [&'static str],
 }
 
 impl FeatureProfile {
@@ -116,55 +116,55 @@ impl FeatureProfile {
                 features: "memory",
                 test_features: "",
                 compose_profiles: &[],
-                compose_file: None,
+                compose_files: &[],
             },
             Self::Postgres => ProfileDefinition {
                 features: "postgres",
                 test_features: "postgres-tests",
                 compose_profiles: &["postgres"],
-                compose_file: None,
+                compose_files: &["compose/postgres.yml"],
             },
             Self::MySql => ProfileDefinition {
                 features: "mysql",
                 test_features: "",
                 compose_profiles: &["mysql"],
-                compose_file: Some("compose/mysql.yml"),
+                compose_files: &["compose/mysql.yml"],
             },
             Self::Sqlite => ProfileDefinition {
                 features: "sqlite",
                 test_features: "",
                 compose_profiles: &[],
-                compose_file: Some("compose/sqlite.yml"),
+                compose_files: &["compose/sqlite.yml"],
             },
             Self::Aws => ProfileDefinition {
                 features: "postgres,aws",
                 test_features: "postgres-tests",
                 compose_profiles: &["postgres", "aws"],
-                compose_file: None,
+                compose_files: &["compose/postgres.yml"],
             },
             Self::Vault => ProfileDefinition {
                 features: "postgres,vault",
                 test_features: "postgres-tests",
                 compose_profiles: &["postgres"],
-                compose_file: None,
+                compose_files: &["compose/postgres.yml"],
             },
             Self::Gcp => ProfileDefinition {
                 features: "postgres,gcp",
                 test_features: "postgres-tests",
                 compose_profiles: &["postgres"],
-                compose_file: None,
+                compose_files: &["compose/postgres.yml"],
             },
             Self::Azure => ProfileDefinition {
                 features: "postgres,azure",
                 test_features: "postgres-tests",
                 compose_profiles: &["postgres"],
-                compose_file: None,
+                compose_files: &["compose/postgres.yml"],
             },
             Self::Redis => ProfileDefinition {
                 features: "postgres,redis",
                 test_features: "postgres-tests,redis-tests",
                 compose_profiles: &["postgres", "redis"],
-                compose_file: Some("compose/redis.yml"),
+                compose_files: &["compose/postgres.yml", "compose/redis.yml"],
             },
         }
     }
@@ -377,7 +377,7 @@ fn lint_specs() -> [(&'static str, CommandSpec); 4] {
 fn compose_spec(profile: FeatureProfile) -> CommandSpec {
     let definition = profile.definition();
     let mut args = vec!["compose", "-f", "docker-compose.yml"];
-    if let Some(file) = definition.compose_file {
+    for file in definition.compose_files {
         args.extend(["-f", file]);
     }
     for compose_profile in definition.compose_profiles {
@@ -599,55 +599,60 @@ mod tests {
     #[test]
     fn compose_uses_the_profile_matrix_and_never_passes_credentials() {
         let expected = [
-            (FeatureProfile::Minimal, "memory", &[][..], None),
+            (FeatureProfile::Minimal, "memory", &[][..], &[][..]),
             (
                 FeatureProfile::Postgres,
                 "postgres",
                 &["postgres"][..],
-                None,
+                &["compose/postgres.yml"][..],
             ),
             (
                 FeatureProfile::MySql,
                 "mysql",
                 &["mysql"][..],
-                Some("compose/mysql.yml"),
+                &["compose/mysql.yml"][..],
             ),
             (
                 FeatureProfile::Sqlite,
                 "sqlite",
                 &[][..],
-                Some("compose/sqlite.yml"),
+                &["compose/sqlite.yml"][..],
             ),
             (
                 FeatureProfile::Aws,
                 "postgres,aws",
                 &["postgres", "aws"][..],
-                None,
+                &["compose/postgres.yml"][..],
             ),
             (
                 FeatureProfile::Vault,
                 "postgres,vault",
                 &["postgres"][..],
-                None,
+                &["compose/postgres.yml"][..],
             ),
-            (FeatureProfile::Gcp, "postgres,gcp", &["postgres"][..], None),
+            (
+                FeatureProfile::Gcp,
+                "postgres,gcp",
+                &["postgres"][..],
+                &["compose/postgres.yml"][..],
+            ),
             (
                 FeatureProfile::Azure,
                 "postgres,azure",
                 &["postgres"][..],
-                None,
+                &["compose/postgres.yml"][..],
             ),
             (
                 FeatureProfile::Redis,
                 "postgres,redis",
                 &["postgres", "redis"][..],
-                Some("compose/redis.yml"),
+                &["compose/postgres.yml", "compose/redis.yml"][..],
             ),
         ];
-        for (profile, features, services, file) in expected {
+        for (profile, features, services, files) in expected {
             let spec = compose_spec(profile);
             let mut args = vec!["compose", "-f", "docker-compose.yml"];
-            if let Some(file) = file {
+            for file in files {
                 args.extend(["-f", file]);
             }
             for service in services {

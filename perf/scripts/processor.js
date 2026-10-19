@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 
 // Load test tokens
 let testTokens = null;
@@ -67,7 +68,7 @@ function generateIssuerPayload(context, events, done) {
   const randomStr = Math.random().toString(36).substring(2, 12);
 
   context.vars.issuer = `load-test-issuer-${timestamp}-${randomStr}`;
-  context.vars.publicKeyJwk = TEST_PUBLIC_KEY_JWK;
+  context.vars.publicKeyJwk = { ...TEST_PUBLIC_KEY_JWK, kid: context.vars.issuer };
 
   return done();
 }
@@ -82,7 +83,19 @@ function selectRandomToken(context, events, done) {
   }
 
   const randomIndex = Math.floor(Math.random() * context.vars.allTokens.length);
-  context.vars.token = context.vars.allTokens[randomIndex];
+  let token = context.vars.allTokens[randomIndex];
+  const now = Math.floor(Date.now() / 1000);
+  const claims = jwt.decode(token);
+  if (!claims || claims.exp <= now + 30) {
+    if (!testTokens.privateKey) {
+      return done(new Error('Token expired; regenerate test tokens with the current generator'));
+    }
+    token = jwt.sign({ iss: testTokens.issuerId, aud: testTokens.audience, iat: now, exp: now + 300 }, testTokens.privateKey, {
+      algorithm: 'ES256', header: { kid: testTokens.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
+    });
+    context.vars.allTokens[randomIndex] = token;
+  }
+  context.vars.token = token;
 
   return done();
 }
