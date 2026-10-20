@@ -440,7 +440,8 @@ Before the upgrade:
 During the upgrade:
 
 - The migrations add `credentials.aggregation_id` and an `(issuer, list_id)`
-  index on `status_lists`.
+  index on `status_lists`, and create `issuer_aggregations` to keep registry
+  mappings immutable across pod restarts.
 - Pods of the previous release do not serve `/api/v1/aggregation/<id>`, so a
   relying party following a token from a new pod may get a `404` from an old
   one until the rollout completes. The claim is optional, and relying parties
@@ -457,24 +458,26 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the three versions below. Rolling back to a release older than the list
+adds the four versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
 schema changes stay, which the previous release ignores, and so do the
-aggregation IDs.
+credential and registry aggregation IDs.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
 - `m20261014_000001_credentials_key_id`
+- `m20261020_000001_issuer_aggregations`
 
 Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
-**Never undo `credentials.aggregation_id`** once tokens with scoped URIs have
-been served. The server refuses its down migration; do not drop the column by
-hand either. The IDs are lost, new ones are assigned, and every URI already in
-tokens or issuer metadata returns `404`. Restoring a backup taken before it
-does the same and loses status changes too; see
+**Never undo `credentials.aggregation_id` or `issuer_aggregations`** once tokens
+with scoped URIs have been served. The server refuses their down migrations;
+do not drop the column or table by hand either. The IDs are lost, new ones are
+assigned, and every URI already in tokens or issuer metadata returns `404`.
+Restoring a backup from before either migration has the same effect and loses
+status changes too; see
 [Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
 Deleting an issuer's credential in the database and registering it again does
 the same to that issuer.
@@ -686,6 +689,7 @@ here; a test fails until it does.
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
+| `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
 
 ### Preparing existing management credentials
 
