@@ -177,6 +177,16 @@ impl CredentialRepo for SqlCredentialRepo {
             .await?;
         Ok(issuer.map(Issuer))
     }
+
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError> {
+        self.store
+            .record_registry_aggregation_ids(mappings)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[async_trait]

@@ -161,7 +161,7 @@ services:
     volumes:
       - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
       - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro
-      - ./:/etc/status-list-server:ro
+      - ./issuer-registry:/etc/status-list-server:ro
       - certdata:/etc/status-list/generated:ro
     depends_on:
       db:

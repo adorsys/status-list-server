@@ -996,6 +996,16 @@ async fn validate_registry_aggregation_ids(
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
 ) -> Result<(), crate::server::auth::issuer_registry::RegistryError> {
     use crate::server::auth::issuer_registry::RegistryError;
+    let mappings: Vec<_> = registry
+        .issuers()
+        .iter()
+        .map(|issuer| {
+            (
+                issuer.id.clone(),
+                crate::domain::models::credential::AggregationId(issuer.aggregation_id),
+            )
+        })
+        .collect();
     let mut legacy_adoptions = Vec::new();
     for issuer in registry.issuers() {
         let expected = crate::domain::models::credential::AggregationId(issuer.aggregation_id);
@@ -1037,6 +1047,21 @@ async fn validate_registry_aggregation_ids(
             legacy_adoptions.push((issuer.id.as_str(), expected));
         }
     }
+    service
+        .credential_repo()
+        .record_registry_aggregation_ids(&mappings)
+        .await
+        .map_err(|error| match error {
+            crate::domain::models::credential::CredentialError::AlreadyExists => {
+                RegistryError::Semantic(
+                    "issuer aggregation mapping conflicts with its persisted immutable history"
+                        .into(),
+                )
+            }
+            error => RegistryError::Database(format!(
+                "cannot record immutable issuer aggregation mappings: {error}"
+            )),
+        })?;
     for (issuer, expected) in legacy_adoptions {
         let repo = service.credential_repo();
         repo.assign_aggregation_id(issuer, expected)
@@ -1724,6 +1749,58 @@ mod general_tests {
             std::fs::create_dir_all(&dir).expect("create temp dir");
             let url = format!("sqlite://{}?mode=rwc", dir.join("status-list.db").display());
             (dir, url)
+        }
+
+        fn registry_yaml(aggregation_id: uuid::Uuid) -> String {
+            serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "issuer-restart",
+                    "aggregation_id": aggregation_id,
+                    "keys": [{
+                        "kid": "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50",
+                        "alg": "ES256",
+                        "jwk": {
+                            "kty": "EC", "crv": "P-256",
+                            "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                            "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"
+                        }
+                    }]
+                }],
+                "admins": []
+            }))
+            .expect("serialize registry")
+        }
+
+        #[tokio::test]
+        async fn registry_aggregation_mapping_is_immutable_after_restart() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let original = uuid::Uuid::new_v4();
+            std::fs::write(&registry_path, registry_yaml(original)).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                (
+                    "APP_MANAGEMENT_AUTH__ISSUERS_FILE",
+                    registry_path.to_str().unwrap(),
+                ),
+            ];
+            build_state(&startable.config(&overrides))
+                .await
+                .expect("first start accepts and persists the registry mapping");
+
+            std::fs::write(&registry_path, registry_yaml(uuid::Uuid::new_v4())).unwrap();
+            let error = build_state(&startable.config(&overrides))
+                .await
+                .expect_err("restart must reject a changed aggregation ID");
+            assert!(
+                error.to_string().contains("immutable history"),
+                "unexpected restart error: {error:?}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         /// In transition publishes past the cap are accepted, so an issuer's

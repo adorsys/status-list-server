@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use super::fixtures;
@@ -47,6 +47,50 @@ fn credential(issuer: &str) -> Credential {
         issuer: Issuer(issuer.to_string()),
         public_key: PublicJwk::try_new(fixtures::TEST_EC_JWK.as_bytes().to_vec()).unwrap(),
     }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn registry_aggregation_mappings_survive_database_restart() {
+    use crate::domain::ports::CredentialRepo;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("registry.db");
+    let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
+    let first_connection = Database::connect(&database_url).await.unwrap();
+    Migrator::up(&first_connection, None).await.unwrap();
+    let expected = AggregationId::generate();
+    let first_repo = SqlCredentialRepo::new(SeaOrmStore::new(Arc::new(first_connection)));
+    first_repo
+        .record_registry_aggregation_ids(&[("issuer-restart".into(), expected)])
+        .await
+        .unwrap();
+    drop(first_repo);
+
+    let restarted_connection = Database::connect(&database_url).await.unwrap();
+    let restarted_repo = SqlCredentialRepo::new(SeaOrmStore::new(Arc::new(restarted_connection)));
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("issuer-restart".into(), expected)])
+            .await
+            .is_ok()
+    );
+    let changed = AggregationId::generate();
+    assert_ne!(expected, changed);
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("issuer-restart".into(), changed)])
+            .await
+            .is_err(),
+        "a restarted server must reject a changed registry mapping"
+    );
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("another-issuer".into(), expected)])
+            .await
+            .is_err(),
+        "a restarted server must reject reusing a registry aggregation ID"
+    );
 }
 
 async fn assert_aggregation_id_round_trip(db: Arc<DatabaseConnection>, backend: &str) {

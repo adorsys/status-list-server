@@ -6,7 +6,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
     DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
     Set, Statement, TransactionTrait, Value,
-    sea_query::{Expr, ExprTrait},
+    sea_query::{Expr, ExprTrait, OnConflict},
 };
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::warn;
@@ -14,8 +14,8 @@ use tracing::warn;
 use super::error::{RepositoryError, contention_err};
 use super::list_quota::list_quota_enforced;
 use super::models::{
-    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, status_list_allocations,
-    status_list_history, status_lists,
+    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, issuer_aggregations,
+    status_list_allocations, status_list_history, status_lists,
 };
 use crate::{
     domain::models::status_list::choose_unallocated_indices, utils::metrics_db::time_query,
@@ -1134,6 +1134,57 @@ impl SeaOrmStore<Credentials> {
                 .await
                 .map_err(find_err)
         })
+        .await
+    }
+
+    /// Reserve registry mappings atomically. Concurrent pods may insert the
+    /// same mapping; rows are read back after conflict handling to reject any
+    /// attempt to change either side of the association.
+    pub async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, crate::domain::models::credential::AggregationId)],
+    ) -> Result<(), RepositoryError> {
+        time_query(
+            "record_registry_aggregation_ids",
+            "issuer_aggregation",
+            async {
+                if mappings.is_empty() {
+                    return Ok(());
+                }
+                let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+                for (issuer, aggregation_id) in mappings {
+                    let id = aggregation_id.to_string();
+                    issuer_aggregations::Entity::insert(issuer_aggregations::ActiveModel {
+                        issuer: Set(issuer.clone()),
+                        aggregation_id: Set(id.clone()),
+                    })
+                    .on_conflict(OnConflict::new().do_nothing().to_owned())
+                    .exec_without_returning(&txn)
+                    .await
+                    .map_err(map_insert_err)?;
+
+                    let by_issuer = issuer_aggregations::Entity::find_by_id(issuer)
+                        .one(&txn)
+                        .await
+                        .map_err(find_err)?;
+                    let by_id = issuer_aggregations::Entity::find()
+                        .filter(issuer_aggregations::Column::AggregationId.eq(&id))
+                        .one(&txn)
+                        .await
+                        .map_err(find_err)?;
+                    if by_issuer
+                        .as_ref()
+                        .is_some_and(|row| row.aggregation_id != id)
+                        || by_id.as_ref().is_some_and(|row| row.issuer != *issuer)
+                        || by_issuer.is_none()
+                        || by_id.is_none()
+                    {
+                        return Err(RepositoryError::DuplicateEntry);
+                    }
+                }
+                txn.commit().await.map_err(map_insert_err)
+            },
+        )
         .await
     }
 

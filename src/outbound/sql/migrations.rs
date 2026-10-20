@@ -128,6 +128,7 @@ fn forward_only(refused: &str) -> DbErr {
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
+    "issuer_aggregations",
     "status_lists",
     "status_list_history",
     "status_list_allocations",

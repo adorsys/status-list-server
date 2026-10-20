@@ -297,6 +297,13 @@ impl CredentialRepo for CachingCredentialRepo {
         }
         Ok(issuer)
     }
+
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError> {
+        self.inner.record_registry_aggregation_ids(mappings).await
+    }
 }
 
 #[cfg(feature = "redis")]
@@ -680,6 +687,13 @@ mod tests {
             self.issuer_lookups.fetch_add(1, Ordering::SeqCst);
             let known = *self.aggregation_id.lock().unwrap() == Some(aggregation_id);
             Ok(known.then(|| Issuer("issuer".into())))
+        }
+
+        async fn record_registry_aggregation_ids(
+            &self,
+            _: &[(String, AggregationId)],
+        ) -> Result<(), CredentialError> {
+            Ok(())
         }
     }
 

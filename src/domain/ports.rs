@@ -153,6 +153,14 @@ pub trait CredentialRepo: Send + Sync + 'static {
         &self,
         aggregation_id: AggregationId,
     ) -> Result<Option<Issuer>, CredentialError>;
+
+    /// Permanently reserve aggregation identifiers for statically trusted
+    /// issuers. Existing mappings are immutable; this operation is idempotent
+    /// for the same issuer and identifier and fails on either kind of conflict.
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError>;
 }
 
 /// Persistence interface for historical status list snapshots.

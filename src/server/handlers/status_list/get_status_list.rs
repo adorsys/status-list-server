@@ -1351,6 +1351,15 @@ mod tests {
                 "credential store unavailable".into(),
             ))
         }
+
+        async fn record_registry_aggregation_ids(
+            &self,
+            _: &[(String, AggregationId)],
+        ) -> Result<(), CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
     }
 
     /// A revocation check must not fail because the aggregation ID could not

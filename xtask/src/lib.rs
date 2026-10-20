@@ -246,7 +246,11 @@ fn insert_registry_item(original: &str, insertion: RegistryInsertion) -> Result<
             let keys = (start..end)
                 .find(|&i| lines[i].starts_with("    keys:"))
                 .ok_or_eyre("could not locate issuer keys in block-style YAML")?;
-            let snippet = sequence_item(&key, 6)?;
+            let key_indent = (keys + 1..end)
+                .find(|&i| lines[i].trim_start().starts_with("- "))
+                .map(|i| lines[i].len() - lines[i].trim_start().len())
+                .unwrap_or(6);
+            let snippet = sequence_item(&key, key_indent)?;
             if lines[keys].trim() == "keys: []" {
                 lines[keys] = format!("    keys:\n{snippet}");
             } else {
@@ -259,6 +263,7 @@ fn insert_registry_item(original: &str, insertion: RegistryInsertion) -> Result<
                         lines[i].starts_with("    ")
                             && !lines[i].starts_with("      ")
                             && !lines[i].trim_start().starts_with('#')
+                            && !lines[i].trim_start().starts_with("- ")
                     })
                     .unwrap_or(end);
                 lines.insert(key_end, snippet);
@@ -298,26 +303,19 @@ fn write_registry_yaml(
     Ok(())
 }
 
-#[cfg(test)]
-fn validate_registry_file(file: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(file).wrap_err("read updated issuer registry")?;
-    let _: serde_json::Value =
-        serde_saphyr::from_str(&text).wrap_err("parse updated issuer registry")?;
-    Ok(())
-}
-
-#[cfg(not(test))]
 fn validate_registry_file(file: &Path) -> Result<()> {
     let workspace = workspace_root()?;
-    let binary = workspace.join("target/debug/status-list-server");
-    let mut command = if binary.is_file() {
-        Command::new(binary)
-    } else {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command.args(["run", "--quiet", "--bin", "status-list-server", "--"]);
-        command
-    };
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.args([
+        "run",
+        "--quiet",
+        "--package",
+        "status-list-server",
+        "--bin",
+        "status-list-server",
+        "--",
+    ]);
     let status = command
         .arg("issuer-registry")
         .current_dir(workspace)
@@ -1080,6 +1078,16 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&file).unwrap(), bytes_before_invalid_update);
+
+        let mut private_registry: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        private_registry["issuers"][0]["keys"][0]["jwk"]["d"] =
+            serde_json::Value::String("private-material".into());
+        std::fs::write(&file, serde_json::to_vec(&private_registry).unwrap()).unwrap();
+        assert!(
+            validate_registry_file(&file).is_err(),
+            "the server validator must reject private JWK material"
+        );
         let _ = std::fs::remove_file(file);
     }
 }
