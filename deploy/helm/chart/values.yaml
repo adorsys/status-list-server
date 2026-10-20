@@ -974,23 +974,17 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
-      # Traces -> Grafana Tempo (OTLP gRPC) in the shared monitoring namespace.
       otlp/tempo:
         endpoint: "tempo.monitoring.svc.cluster.local:4317"
         tls:
           insecure: true
-      # Logs -> Grafana Loki (OTLP HTTP to the gateway) in the shared monitoring
-      # namespace. The gateway (port 80) routes /otlp/v1/logs to the backend.
-      # Note: the 'loki' exporter was removed from otel/opentelemetry-collector-contrib
-      # (>= 0.106), so logs use the native OTLP HTTP exporter to Loki's OTLP ingest.
-      # logs_endpoint is used (not endpoint) because otlphttp appends '/v1/logs' to
-      # 'endpoint', which would double the path (…/otlp/v1/logs/v1/logs) and 400.
+      # 'loki' exporter removed in opentelemetry-collector-contrib >= 0.106, so logs use
+      # the native OTLP HTTP exporter. logs_endpoint (not endpoint) avoids otlphttp
+      # appending '/v1/logs' and doubling the path (400).
       otlphttp/loki:
         logs_endpoint: "http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs"
-      # 'debug' is dev/troubleshooting scaffolding (prints to stdout). Metrics stay
-      # here: the /metrics ServiceMonitor scrape is the authoritative Prometheus path
-      # for SLI metrics, so OTLP metrics are intentionally NOT remote-written back
-      # into the shared kube-prometheus-stack (that would ingest identical series twice).
+      # Metrics stay on 'debug': /metrics ServiceMonitor scrape is the authoritative
+      # SLI path, so do not remote-write OTLP metrics (double ingestion).
       debug:
         verbosity: basic
     service:

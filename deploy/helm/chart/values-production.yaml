@@ -68,18 +68,13 @@ grafanaDashboard:
     grafana_dashboard: "1"
 
 # OpenTelemetry Collector: export traces to Grafana Tempo and logs to Grafana
-# Loki, both in the shared `monitoring` namespace. This block is a self-contained
+# Loki in the shared `monitoring` namespace. This block is a self-contained
 # `opentelemetry-collector.config` override (applied after values-aws.yaml by the
 # production deploy workflow) and is authoritative for the collector in production.
 #
-# Traces -> Tempo via OTLP gRPC (insecure) on 4317.
-# Logs   -> Loki via OTLP HTTP to the gateway (port 80) /loki/api/v1/push.
-# Metrics stay on the `debug` exporter: the /metrics endpoint discovered by the
-# ServiceMonitor is the authoritative Prometheus path for SLI metrics (see
-# helm/chart/values.yaml cluster note #4). Do NOT remote-write OTLP metrics back
-# into this same shared Prometheus -- the app exports the same instruments through
-# both its pull reader and its OTLP reader, so that would ingest identical series
-# twice. Metrics already reach Prometheus via the ServiceMonitor scrape.
+# Do NOT remote-write OTLP metrics: the /metrics ServiceMonitor scrape is the
+# authoritative SLI path, and the app exports the same instruments via both its
+# pull and OTLP readers, so that would ingest identical series twice.
 opentelemetry-collector:
   config:
     receivers:
@@ -101,19 +96,14 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
-      # Traces -> Grafana Tempo (OTLP gRPC) in the shared monitoring namespace.
       otlp/tempo:
         endpoint: "tempo.monitoring.svc.cluster.local:4317"
         tls:
           insecure: true
-      # Logs -> Grafana Loki (OTLP HTTP to the gateway, port 80) in the shared
-      # monitoring namespace. The gateway routes /loki/api/v1/push to the backend.
       loki:
         endpoint: "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
-      # 'debug' is dev/troubleshooting scaffolding (prints to stdout). Metrics stay
-      # here: the /metrics ServiceMonitor scrape is the authoritative Prometheus
-      # path for SLI metrics, so OTLP metrics are intentionally NOT remote-written
-      # back into the shared kube-prometheus-stack (double ingestion).
+      # Metrics stay on 'debug': /metrics ServiceMonitor scrape is the authoritative
+      # SLI path, so do not remote-write OTLP metrics (double ingestion).
       debug:
         verbosity: basic
     service:
