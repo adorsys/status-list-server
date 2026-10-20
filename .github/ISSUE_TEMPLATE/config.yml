@@ -1,4 +1,5 @@
-# Use blank issues for feature requests, documentation problems, and other topics.
+# Keep blank issues enabled for documentation problems and other topics.
+# Feature requests are redirected to Ideas discussions.
 blank_issues_enabled: true
 contact_links:
   - name: Feature request
