@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+#[cfg(feature = "sqlite")]
+use sea_orm::Database;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use super::fixtures;
