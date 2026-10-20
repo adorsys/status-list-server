@@ -119,6 +119,14 @@ The project strictly follows **Hexagonal Architecture (Ports and Adapters)**:
 | **Inbound Server**    | `src/server/`           | Web server module (`AppState`, HTTP handlers, `auth` middleware, and `ApiError` mapping via `IntoApiError`).                                           |
 | **Composition Root**  | `src/setup.rs`          | Factory functions building outbound adapters and initializing `AppState` and `Service`.                                                                |
 
+#### HTTP listeners
+
+The HTTP surface is split into three structurally separate listeners (`src/startup.rs`), each built from its own route set so a route is only reachable on the listener that owns it (a request for it on any other listener returns `404`):
+
+- **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
+- **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
+- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+
 ### Data Flow
 
 The data flow in the Status List Server is as follows:
@@ -144,7 +152,7 @@ The data flow in the Status List Server is as follows:
 - **HTTPS**: All communication with the Status List Server must use HTTPS to ensure data integrity and confidentiality.
 - **Token Signing**: Status List Tokens must be signed (e.g., using JWT or CWT) to prevent tampering.
 - **CORS**: The Status List Server supports Cross-Origin Resource Sharing (CORS) for browser-based clients.
-- **Bearer Authentication**: Management endpoints (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`) are protected by a JWT Bearer middleware (`auth`) that validates the signature against the JWK registered for the issuer and checks that the `iss` claim matches the registered issuer.
+- **Bearer Authentication**: Management endpoints (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`) are protected by a JWT Bearer middleware (`auth`). It resolves the registered public JWK by the token's `kid`, verifies the signature using the key's registered algorithm, and checks that the verified `iss` matches the key's owning issuer. It also validates the management token type, configured audience, and time claims. Missing credentials return `401 missing_token`; invalid credentials, including an unknown `kid`, return uniform `401 invalid_token` responses.
 - **Rate Limiting & Request Bounds**: The server applies layered defense-in-depth controls to prevent abuse. See [Rate Limiting & Request Bounds](#rate-limiting--request-bounds) below.
 
 ## Rate Limiting & Request Bounds
@@ -244,9 +252,9 @@ quota normally keeps every issuer within one page. Changes must preserve:
 
 1. An unpaged scoped request never gets part of an aggregation: it is complete,
    or `409 paging_required`. Sending `limit` opts in to paging.
-2. Tokens advertise `aggregation_uri` only when the quota is enforced and no
-   issuer exceeded one page at startup. This withholding applies to the whole
-   pod, not per issuer (#623).
+2. Tokens advertise `aggregation_uri` only while the quota is enforced, and
+   never for an issuer that exceeded one page at startup. The credentials
+   responses carry it only when the issuer's tokens do.
 3. A cursor only works on the aggregation that issued it, so one replayed
    elsewhere cannot skip lists.
 

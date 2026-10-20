@@ -304,6 +304,7 @@ jobs:
           APP_DATABASE_PORT: "5432"
         run: |
           helm template statuslist "$CHART_DIR" \
+            --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml

@@ -18,7 +18,10 @@ async fn publish(app: &TestServer) -> String {
     let list_id = uuid::Uuid::new_v4();
     let response = app
         .client
-        .put(app.url(&format!("/api/v1/status-lists/{list_id}/statuses")))
+        .put(format!(
+            "{}/api/v1/status-lists/{list_id}/statuses",
+            app.management_url
+        ))
         .bearer_auth(app.bearer_token())
         .json(&json!({"statuses": [{"index": 0, "status": 1}, {"index": 15, "status": 0}]}))
         .send()

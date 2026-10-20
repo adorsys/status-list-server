@@ -30,6 +30,8 @@ pub(crate) mod credentials {
         pub issuer: String,
         #[sea_orm(column_type = "Json")]
         pub public_key: PublicKey,
+        /// Indexed copy of `public_key.kid` used for management authentication.
+        pub key_id: Option<String>,
         /// Status lists published by this issuer; see `store::reserve_list_slot`.
         pub list_count: i64,
         /// Hyphenated `AggregationId`. `NULL` on rows a release that predates it
@@ -81,6 +83,7 @@ impl From<Credentials> for credentials::ActiveModel {
     fn from(creds: Credentials) -> Self {
         Self {
             issuer: Set(creds.issuer),
+            key_id: Set(creds.public_key.common.key_id.clone()),
             public_key: Set(PublicKey(creds.public_key)),
             // NotSet so a credential update never resets the counter.
             list_count: NotSet,

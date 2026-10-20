@@ -6,7 +6,9 @@ import requests
 import uuid
 
 BASE_URL = utils.get_base_url()
+MANAGEMENT_URL = utils.get_management_url()
 print(f"Using base URL: {BASE_URL}")
+print(f"Using management URL: {MANAGEMENT_URL}")
 
 # Test the health check endpoint (GET /health)
 health_endpoint = f"{BASE_URL}/health"
@@ -25,7 +27,7 @@ scott_holdings = fixtures.get_scott_holdings_issuer()
 for issuer_data in [gondwana_digital_pole, scott_holdings]:
     print("Proceeding with Issuer:", issuer_data.get("label"))
 
-    credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
+    credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
     print(f"Testing POST: {credentials_endpoint}")
 
     payload = {
@@ -42,7 +44,7 @@ for issuer_data in [gondwana_digital_pole, scott_holdings]:
     bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
     for _ in range(3):  # each issuer publishes three lists
         status_list_id = str(uuid.uuid4())
-        status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+        status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
         print(f"Testing PUT: {status_publish_endpoint}")
         print(f"{issuer_data.get('label')} publishes status list {status_list_id}")
 

@@ -1594,8 +1594,9 @@ version = "1.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.45"
+version = "0.23.46"
 criteria = "safe-to-deploy"
+notes = "Upgrade fixes RUSTSEC-2026-0346. This carries forward the existing version-specific exemption; it is not a new audit."
 
 [[exemptions.rustls-native-certs]]
 version = "0.8.4"

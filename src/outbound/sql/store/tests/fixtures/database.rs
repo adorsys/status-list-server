@@ -27,7 +27,8 @@ pub(in super::super) async fn sqlite_connection_migrated(
 /// key and returns the JWK it was seeded with.
 pub(in super::super) async fn seed_credential(db: &Arc<DatabaseConnection>, issuer: &str) -> Jwk {
     let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
-    let key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+    let mut key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
+    key.common.key_id = Some(format!("test-key-{issuer}"));
     cred_store
         .insert_one(Credentials::new(issuer.to_string(), key.clone()))
         .await

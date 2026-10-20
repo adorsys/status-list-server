@@ -23,12 +23,13 @@ alerting:
 
 scrape_configs:
   - job_name: 'status_list_server'
-    # The app runs as the compose service 'app' on port 8000, so it is scraped
+    # The app runs as the compose service 'app' on the ADMIN port 8002, which
+    # serves /metrics (and /health/ready) on a dedicated listener. It is scraped
     # by DNS name on the compose network. For local / non-dockerised
     # development (binary run on the host), point this at the host gateway
-    # instead, e.g. 'host.docker.internal:8000'.
+    # instead, e.g. 'host.docker.internal:8002'.
     static_configs:
-      - targets: ['app:8000']
+      - targets: ['app:8002']
 
   - job_name: 'pushgateway'
     static_configs:

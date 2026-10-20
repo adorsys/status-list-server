@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, BTreeSet, HashMap, btree_map},
     ops::Bound,
     sync::Arc,
 };
@@ -326,18 +326,46 @@ impl CredentialRepo for MemoryCredentials {
             .map(|(credential, _)| credential.clone()))
     }
 
+    async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError> {
+        let values = self.values.read().await;
+        let mut matching_credential = None;
+        for (credential, _) in values.by_issuer.values() {
+            if credential.public_key.key_id() == kid {
+                if matching_credential.is_some() {
+                    return Err(CredentialError::Backend(
+                        std::io::Error::other(
+                            "management key ID resolves to multiple stored credentials",
+                        )
+                        .into(),
+                    ));
+                }
+                matching_credential = Some(credential.clone());
+            }
+        }
+        Ok(matching_credential)
+    }
+
     async fn insert(
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
     ) -> Result<(), CredentialError> {
         let mut values = self.values.write().await;
-        let hash_map::Entry::Vacant(slot) = values.by_issuer.entry(credential.issuer.0.clone())
-        else {
+        if values.by_issuer.contains_key(&credential.issuer.0) {
             return Err(CredentialError::AlreadyExists);
-        };
+        }
+        let kid = credential.public_key.key_id();
+        if values
+            .by_issuer
+            .values()
+            .any(|(existing, _)| existing.public_key.key_id() == kid)
+        {
+            return Err(CredentialError::AlreadyExists);
+        }
         let issuer = credential.issuer.clone();
-        slot.insert((credential, aggregation_id));
+        values
+            .by_issuer
+            .insert(issuer.0.clone(), (credential, aggregation_id));
         values
             .issuers_by_aggregation_id
             .insert(aggregation_id, issuer);
@@ -443,6 +471,32 @@ impl crate::utils::cert_manager::storage::Storage for MemoryStorage {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn duplicate_stored_key_ids_are_backend_errors() {
+        use super::*;
+        let repo = MemoryCredentials::default();
+        let key = crate::domain::models::credential::PublicJwk::try_new(
+            crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
+        )
+        .unwrap();
+        // Simulate corrupted storage, bypassing the normal insert constraint.
+        for issuer in ["one", "two"] {
+            repo.values.write().await.by_issuer.insert(
+                issuer.into(),
+                (
+                    Credential {
+                        issuer: Issuer(issuer.into()),
+                        public_key: key.clone(),
+                    },
+                    AggregationId::generate(),
+                ),
+            );
+        }
+        assert!(matches!(
+            repo.find_by_kid("test-key").await,
+            Err(CredentialError::Backend(_))
+        ));
+    }
     use super::*;
     use crate::domain::models::credential::Issuer;
     use crate::domain::models::status_list::{Status, StatusEntry, StatusListError};

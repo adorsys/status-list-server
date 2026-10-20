@@ -22,10 +22,11 @@ use crate::outbound::sql::test_containers::postgres_helpers;
 
 const MIGRATION: &str = "m20260929_000001_credentials_aggregation_id";
 
-/// The migrations a release before issuer-scoped aggregation does not know.
-const AGGREGATION_MIGRATIONS: [&str; 2] = [
+/// Migration records removed to simulate rollback to a pre-aggregation release.
+const ROLLBACK_MIGRATIONS: [&str; 3] = [
     MIGRATION,
     "m20260929_000002_status_lists_issuer_list_id_index",
+    "m20261014_000001_credentials_key_id",
 ];
 
 /// SQL a failed MySQL run may already have committed, in migration order.
@@ -180,7 +181,7 @@ async fn assert_rollback_keeps_aggregation_ids(db: Arc<DatabaseConnection>, back
         .unwrap()
         .expect("the first lookup must assign an ID");
 
-    fixtures::forget_migrations(&db, &AGGREGATION_MIGRATIONS).await;
+    fixtures::forget_migrations(&db, &ROLLBACK_MIGRATIONS).await;
     Migrator::up(db.as_ref(), None)
         .await
         .unwrap_or_else(|e| panic!("upgrading again after a rollback on {backend}: {e}"));

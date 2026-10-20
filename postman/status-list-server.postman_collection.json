@@ -82,9 +82,9 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/health/ready",
+              "raw": "{{adminUrl}}/health/ready",
               "host": [
-                "{{baseUrl}}"
+                "{{adminUrl}}"
               ],
               "path": [
                 "health",
@@ -123,9 +123,9 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/metrics",
+              "raw": "{{adminUrl}}/metrics",
               "host": [
-                "{{baseUrl}}"
+                "{{adminUrl}}"
               ],
               "path": [
                 "metrics"
@@ -172,12 +172,12 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\"\n  }\n}"
+              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\",\n    \"kid\": \"{{issuer_id}}\",\n    \"alg\": \"ES256\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/v1/credentials",
+              "raw": "{{managementUrl}}/api/v1/credentials",
               "host": [
-                "{{baseUrl}}"
+                "{{managementUrl}}"
               ],
               "path": [
                 "api",
@@ -228,9 +228,9 @@
               "raw": "{\n  \"statuses\": [\n    { \"index\": 0, \"status\": 0 },\n    { \"index\": 1, \"status\": 1 },\n    { \"index\": 2, \"status\": 2 }\n  ]\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "raw": "{{managementUrl}}/api/v1/status-lists/{{list_id}}/statuses",
               "host": [
-                "{{baseUrl}}"
+                "{{managementUrl}}"
               ],
               "path": [
                 "api",
@@ -482,9 +482,9 @@
               "raw": "{\n  \"statuses\": [\n    { \"index\": 1, \"status\": 2 }\n  ]\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "raw": "{{managementUrl}}/api/v1/status-lists/{{list_id}}/statuses",
               "host": [
-                "{{baseUrl}}"
+                "{{managementUrl}}"
               ],
               "path": [
                 "api",
@@ -683,9 +683,9 @@
               "raw": "{\n  \"statuses\": [\n    { \"index\": 0, \"status\": 0 }\n  ]\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/v1/status-lists/{{list_id}}/statuses",
+              "raw": "{{managementUrl}}/api/v1/status-lists/{{list_id}}/statuses",
               "host": [
-                "{{baseUrl}}"
+                "{{managementUrl}}"
               ],
               "path": [
                 "api",
@@ -773,6 +773,14 @@
     {
       "key": "baseUrl",
       "value": "http://localhost:8000"
+    },
+    {
+      "key": "managementUrl",
+      "value": "http://localhost:8001"
+    },
+    {
+      "key": "adminUrl",
+      "value": "http://localhost:8002"
     },
     {
       "key": "list_id",

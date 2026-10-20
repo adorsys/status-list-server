@@ -7,7 +7,9 @@ import uuid
 import jwt
 
 BASE_URL = utils.get_base_url()
+MANAGEMENT_URL = utils.get_management_url()
 print(f"Using base URL: {BASE_URL}")
+print(f"Using management URL: {MANAGEMENT_URL}")
 
 # Test the health check endpoint (GET /health)
 health_endpoint = f"{BASE_URL}/health"
@@ -23,7 +25,7 @@ print("Health check successful! Server is running.")
 issuer_data = fixtures.get_gondwana_digital_pole_issuer()
 print("Proceeding with Issuer:", issuer_data.get("label"))
 
-credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
+credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
 print(f"Testing POST: {credentials_endpoint}")
 
 payload = {
@@ -44,7 +46,7 @@ tc.assertEqual("credentials_already_exist", response.json().get("error"))
 status_list_id = str(uuid.uuid4())
 print("Publishing status list:", status_list_id)
 
-status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PUT: {status_publish_endpoint}")
 
 bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
@@ -71,7 +73,7 @@ tc.assertEqual(response.status_code, 409)
 tc.assertEqual("status_list_already_exists", response.json().get("error"))
 
 # Update token statuses given a status list (PATCH /api/v1/status-lists/{status_list_id}/statuses)
-status_update_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_update_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PATCH: {status_update_endpoint}")
 print("Updating status list:", status_list_id)
 

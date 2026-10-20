@@ -6,7 +6,9 @@ import requests
 import uuid
 
 BASE_URL = utils.get_base_url()
+MANAGEMENT_URL = utils.get_management_url()
 print(f"Using base URL: {BASE_URL}")
+print(f"Using management URL: {MANAGEMENT_URL}")
 
 # Test the health check endpoint (GET /health)
 health_endpoint = f"{BASE_URL}/health"
@@ -25,7 +27,7 @@ scott_holdings = fixtures.get_scott_holdings_issuer()
 for issuer_data in [gondwana_digital_pole, scott_holdings]:
     print("Proceeding with Issuer:", issuer_data.get("label"))
 
-    credentials_endpoint = f"{BASE_URL}/api/v1/credentials"
+    credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
     print(f"Testing POST: {credentials_endpoint}")
 
     payload = {
@@ -42,7 +44,7 @@ issuer_data = gondwana_digital_pole
 bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
 status_list_id = str(uuid.uuid4())
 
-status_publish_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PUT: {status_publish_endpoint}")
 
 response = requests.put(
@@ -55,7 +57,7 @@ tc.assertEqual(response.status_code, 201, "Failed to publish token statuses")
 print(f"Issuer A published status list {status_list_id}")
 
 # Issuer B attempts to update Issuer A's list and is refused
-status_update_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_update_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PATCH: {status_update_endpoint}")
 
 issuer_data = scott_holdings
@@ -72,7 +74,7 @@ tc.assertEqual("issuer_mismatch", response.json().get("error"))
 print(f"Issuer B was prevented from updating status list {status_list_id}")
 
 # An unauthenticated client is refused on the update endpoint
-status_update_endpoint = f"{BASE_URL}/api/v1/status-lists/{status_list_id}/statuses"
+status_update_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
 print(f"Testing PATCH: {status_update_endpoint}")
 
 response = requests.patch(
@@ -81,5 +83,5 @@ response = requests.patch(
 )
 
 tc.assertEqual(response.status_code, 401, "Authentication should be required on the update endpoint")
-tc.assertEqual("invalid_auth_header", response.json().get("error"))
+tc.assertEqual("missing_token", response.json().get("error"))
 print(f"The unauthenticated client was prevented from updating status list {status_list_id}")
