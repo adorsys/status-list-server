@@ -113,15 +113,13 @@ For a zero-downtime rotation:
 1. Add the new public key while retaining the old key:
    `cargo xtask issuer add-key --file issuers.yaml --issuer <issuer-id> --jwk '<public-jwk-json>' --alg ES256`.
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml status-list-server issuer-registry`.
-3. Publish the updated ConfigMap and wait for Kubernetes to propagate it to every pod. Compute `shasum -a 256 issuers.yaml` and compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
+3. Publish the updated ConfigMap and wait for Kubernetes to propagate it to every pod. Hash the ConfigMap data Kubernetes serves with `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`, then compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
 5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the ConfigMap. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
 To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Keep the issuer and its aggregation ID in the registry while published tokens may still reference its aggregation URL: removing a registry-only issuer can make that URL return 404 even though its lists remain public. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the ConfigMap if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the ConfigMap and use `kubectl rollout restart` so new pods mount it, then verify the fingerprint and rejection on every pod.
 
-When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server rejects a registry file whose mapping conflicts with an existing database credential. The YAML parser used for this trust file is `noyalib`, selected for its strict duplicate-key rejection. The shared file watcher also polls certificates and database secret files as a fallback to native notifications.
-
-For a registry-only issuer with no database credential, the reviewed registry history is the durable record of its identifier. Never edit or reuse its `aggregation_id` when preparing a new deployment: a restarted pod cannot reconstruct mappings that no longer appear in the current file.
+When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
 ## Redis Status-List Cache
 

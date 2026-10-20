@@ -120,6 +120,24 @@ async fn assert_migration_and_backfill(
 
     let store = SeaOrmStore::<Credentials>::new(db);
     let repo = SqlCredentialRepo::new(store.clone());
+    let registry_id = AggregationId::generate();
+    assert_eq!(
+        repo.find_stored_aggregation_id("issuer-before")
+            .await
+            .unwrap(),
+        Some(None),
+        "the registry validation lookup must preserve a legacy NULL on {backend}"
+    );
+    repo.assign_aggregation_id("issuer-before", registry_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.find_stored_aggregation_id("issuer-before")
+            .await
+            .unwrap(),
+        Some(Some(registry_id)),
+        "the accepted registry ID must be adopted on {backend}"
+    );
     let assigned = AggregationId::generate();
     repo.insert(credential("issuer-current"), assigned)
         .await

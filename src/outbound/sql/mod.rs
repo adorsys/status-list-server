@@ -138,6 +138,35 @@ impl CredentialRepo for SqlCredentialRepo {
             .transpose()
     }
 
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+        self.store
+            .find_aggregation_id(issuer)
+            .await?
+            .map(|value| {
+                value
+                    .map(|id| {
+                        id.parse()
+                            .map_err(|error| CredentialError::Backend(Box::new(error)))
+                    })
+                    .transpose()
+            })
+            .transpose()
+    }
+
+    async fn assign_aggregation_id(
+        &self,
+        issuer: &str,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
+        self.store
+            .assign_aggregation_id(issuer, &aggregation_id.to_string())
+            .await?;
+        Ok(())
+    }
+
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,

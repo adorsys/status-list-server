@@ -1193,10 +1193,6 @@ criteria = "safe-to-deploy"
 version = "2.1.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.noyalib]]
-version = "0.0.58"
-criteria = "safe-to-run"
-
 [[exemptions.nu-ansi-term]]
 version = "0.50.3"
 criteria = "safe-to-deploy"
@@ -1584,10 +1580,6 @@ criteria = "safe-to-deploy"
 [[exemptions.rend]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
-
-[[exemptions.reqwest]]
-version = "0.12.28"
-criteria = "safe-to-run"
 
 [[exemptions.reqwest]]
 version = "0.13.4"

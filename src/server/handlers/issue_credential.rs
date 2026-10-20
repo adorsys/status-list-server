@@ -230,7 +230,7 @@ mod tests {
                 .unwrap(),
         );
         let aggregation_id = uuid::Uuid::new_v4();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "static-issuer",

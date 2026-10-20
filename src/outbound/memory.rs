@@ -387,6 +387,27 @@ impl CredentialRepo for MemoryCredentials {
         Ok(values.by_issuer.get(issuer).map(|(_, id)| *id))
     }
 
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+        Ok(self
+            .values
+            .read()
+            .await
+            .by_issuer
+            .get(issuer)
+            .map(|(_, id)| Some(*id)))
+    }
+
+    async fn assign_aggregation_id(
+        &self,
+        _issuer: &str,
+        _aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
+        Ok(())
+    }
+
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,

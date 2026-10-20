@@ -1195,7 +1195,7 @@ mod tests {
         let mut app_state = test_app_state(None).await;
         app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
         let aggregation_id = register_issuer(&app_state.service, "issuer1").await.0;
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "issuer1",
@@ -1319,6 +1319,25 @@ mod tests {
             &self,
             _: &str,
         ) -> Result<Option<AggregationId>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn find_stored_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn assign_aggregation_id(
+            &self,
+            _: &str,
+            _: AggregationId,
+        ) -> Result<(), CredentialError> {
             Err(CredentialError::Backend(
                 "credential store unavailable".into(),
             ))

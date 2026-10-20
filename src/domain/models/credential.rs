@@ -4,21 +4,64 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::{fmt, str::FromStr, sync::Arc};
 
 /// Validated public key and principal data supplied by a trust source.
+///
+/// The principal is carried as a typed [`Principal`] so an issuer is guaranteed
+/// to resolve to its immutable `aggregation_id` (the value that determines its
+/// public aggregation URI) while an admin carries none.
 #[derive(Clone, Debug)]
 pub struct ResolvedKey {
-    pub principal_id: String,
-    pub principal_kind: PrincipalKind,
-    pub aggregation_id: Option<AggregationId>,
+    pub principal: Principal,
     pub public_key: Arc<PublicJwk>,
     pub enabled: bool,
     pub not_before: Option<time::OffsetDateTime>,
     pub not_after: Option<time::OffsetDateTime>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrincipalKind {
-    Issuer,
-    Admin,
+/// The operator-trusted identity a resolved key belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Principal {
+    /// A status-list issuer. The aggregation ID is immutable for the lifetime
+    /// of the issuer so in-flight requests and published URIs stay stable.
+    Issuer {
+        id: String,
+        aggregation_id: AggregationId,
+    },
+    /// A management admin principal, which authenticates with no aggregation.
+    Admin { id: String },
+}
+
+impl Principal {
+    /// The principal identifier, shared by both variants.
+    pub fn id(&self) -> &str {
+        match self {
+            Principal::Issuer { id, .. } | Principal::Admin { id } => id,
+        }
+    }
+
+    /// The aggregation ID for an issuer principal.
+    pub fn aggregation_id(&self) -> Option<AggregationId> {
+        match self {
+            Principal::Issuer { aggregation_id, .. } => Some(*aggregation_id),
+            Principal::Admin { .. } => None,
+        }
+    }
+}
+
+/// Why a key could not be used to authenticate a request.
+///
+/// The response to a client is identical for every variant; the discriminant
+/// exists so operators can log the real reason instead of a generic "unknown
+/// kid".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum KeyResolveError {
+    #[error("unknown kid")]
+    UnknownKid,
+    #[error("principal is disabled")]
+    PrincipalDisabled,
+    #[error("key is not valid yet")]
+    NotYetValid,
+    #[error("key has expired")]
+    Expired,
 }
 
 use jsonwebtoken::{

@@ -258,6 +258,27 @@ impl CredentialRepo for CachingCredentialRepo {
         Ok(aggregation_id)
     }
 
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+        self.inner.find_stored_aggregation_id(issuer).await
+    }
+
+    async fn assign_aggregation_id(
+        &self,
+        issuer: &str,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
+        self.inner
+            .assign_aggregation_id(issuer, aggregation_id)
+            .await?;
+        self.aggregation_ids
+            .insert(issuer.to_string(), aggregation_id)
+            .await;
+        Ok(())
+    }
+
     /// A miss is not kept, so random IDs sent to the public endpoint can't fill
     /// the cache.
     async fn find_issuer_by_aggregation_id(
@@ -634,6 +655,22 @@ mod tests {
         ) -> Result<Option<AggregationId>, CredentialError> {
             self.aggregation_id_lookups.fetch_add(1, Ordering::SeqCst);
             Ok(*self.aggregation_id.lock().unwrap())
+        }
+
+        async fn find_stored_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+            Ok(self.aggregation_id.lock().unwrap().map(Some))
+        }
+
+        async fn assign_aggregation_id(
+            &self,
+            _: &str,
+            aggregation_id: AggregationId,
+        ) -> Result<(), CredentialError> {
+            *self.aggregation_id.lock().unwrap() = Some(aggregation_id);
+            Ok(())
         }
 
         async fn find_issuer_by_aggregation_id(

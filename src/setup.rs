@@ -859,7 +859,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
     }
 
-    validate_registry_aggregation_ids(&service, &issuer_registry.snapshot()).await?;
+    issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
+    let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
+    validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
+        .await?;
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
     tracing::info!(
         fingerprint = %issuer_registry.snapshot().fingerprint(),
@@ -925,37 +928,63 @@ pub(crate) fn spawn_issuer_registry_watcher(
         .spawn_with_initial_reconcile("issuer_registry", move || {
             let registry_handle = registry_handle.clone();
             let service = service.clone();
+            let retry_interval = poll_interval;
             async move {
-                let result = async {
-                    let candidate =
-                        crate::server::auth::issuer_registry::IssuerRegistry::from_file(
-                            registry_handle.path(),
-                        )?;
-                    validate_registry_aggregation_ids(&service, &candidate).await?;
-                    registry_handle.replace(candidate)
-                }
-                .await;
-                if let Err(error) = result {
-                    registry_handle.record_reload_failure();
-                    crate::utils::metrics::record_rotation("issuer_registry", false);
-                    crate::utils::metrics::record_issuer_registry_reload_failure();
-                    tracing::error!(
-                        event = "issuer_registry_reload_failed",
-                        path = %registry_handle.path().display(),
-                        error = %error,
-                        "keeping last-known-good issuer registry"
-                    );
-                } else {
-                    crate::utils::metrics::record_rotation("issuer_registry", true);
-                    crate::utils::metrics::set_issuer_registry_keys(
-                        registry_handle.snapshot().key_count(),
-                    );
-                    warn_missing_registry_issuers(&service, &registry_handle.snapshot()).await;
-                    tracing::info!(
-                        event = "issuer_registry_reloaded",
-                        fingerprint = %registry_handle.snapshot().fingerprint(),
-                        "issuer registry reloaded"
-                    );
+                loop {
+                    let result = async {
+                        let candidate =
+                            crate::server::auth::issuer_registry::IssuerRegistry::from_file(
+                                registry_handle.path(),
+                            )?;
+                        registry_handle.validate_candidate(&candidate)?;
+                        let active = registry_handle.snapshot();
+                        validate_registry_aggregation_ids(&service, &active, &candidate).await?;
+                        registry_handle.replace(candidate)
+                    }
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            crate::utils::metrics::record_rotation("issuer_registry", true);
+                            crate::utils::metrics::set_issuer_registry_keys(
+                                registry_handle.snapshot().key_count(),
+                            );
+                            warn_missing_registry_issuers(&service, &registry_handle.snapshot())
+                                .await;
+                            tracing::info!(
+                                event = "issuer_registry_reloaded",
+                                fingerprint = %registry_handle.snapshot().fingerprint(),
+                                "issuer registry reloaded"
+                            );
+                            break;
+                        }
+                        Err(
+                            error
+                            @ crate::server::auth::issuer_registry::RegistryError::Database(_),
+                        ) => {
+                            registry_handle.record_reload_failure();
+                            crate::utils::metrics::record_rotation("issuer_registry", false);
+                            crate::utils::metrics::record_issuer_registry_reload_failure();
+                            tracing::error!(
+                                event = "issuer_registry_reload_failed",
+                                path = %registry_handle.path().display(),
+                                error = %error,
+                                "issuer registry database check failed; retrying"
+                            );
+                            tokio::time::sleep(retry_interval).await;
+                        }
+                        Err(error) => {
+                            registry_handle.record_reload_failure();
+                            crate::utils::metrics::record_rotation("issuer_registry", false);
+                            crate::utils::metrics::record_issuer_registry_reload_failure();
+                            tracing::error!(
+                                event = "issuer_registry_reload_failed",
+                                path = %registry_handle.path().display(),
+                                error = %error,
+                                "keeping last-known-good issuer registry"
+                            );
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -963,25 +992,31 @@ pub(crate) fn spawn_issuer_registry_watcher(
 
 async fn validate_registry_aggregation_ids(
     service: &Service,
+    active: &crate::server::auth::issuer_registry::ValidatedRegistry,
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
 ) -> Result<(), crate::server::auth::issuer_registry::RegistryError> {
     use crate::server::auth::issuer_registry::RegistryError;
+    let mut legacy_adoptions = Vec::new();
     for issuer in registry.issuers() {
         let expected = crate::domain::models::credential::AggregationId(issuer.aggregation_id);
+        if active.issuer_aggregation_id(&issuer.id) == Some(expected) {
+            continue;
+        }
         let stored = service
             .credential_repo()
-            .find_aggregation_id(&issuer.id)
+            .find_stored_aggregation_id(&issuer.id)
             .await
             .map_err(|error| {
-                RegistryError::Semantic(format!(
+                RegistryError::Database(format!(
                     "cannot verify aggregation_id for issuer `{}`: {error}",
                     issuer.id
                 ))
             })?;
-        if stored.is_some_and(|stored| stored != expected) {
+        if stored.flatten().is_some_and(|stored| stored != expected) {
             return Err(RegistryError::Semantic(format!(
-                "aggregation_id for issuer `{}` differs from its existing credential",
-                issuer.id
+                "aggregation_id for issuer `{}` differs from its existing credential (stored: {})",
+                issuer.id,
+                stored.flatten().expect("checked above")
             )));
         }
         let owner = service
@@ -989,13 +1024,42 @@ async fn validate_registry_aggregation_ids(
             .find_issuer_by_aggregation_id(expected)
             .await
             .map_err(|error| {
-                RegistryError::Semantic(format!(
+                RegistryError::Database(format!(
                     "cannot verify owner of aggregation_id `{expected}`: {error}"
                 ))
             })?;
         if owner.is_some_and(|owner| owner.0 != issuer.id) {
             return Err(RegistryError::Semantic(format!(
                 "aggregation_id `{expected}` belongs to another database issuer"
+            )));
+        }
+        if stored == Some(None) {
+            legacy_adoptions.push((issuer.id.as_str(), expected));
+        }
+    }
+    for (issuer, expected) in legacy_adoptions {
+        let repo = service.credential_repo();
+        repo.assign_aggregation_id(issuer, expected)
+            .await
+            .map_err(|error| {
+                RegistryError::Database(format!(
+                    "cannot adopt aggregation_id `{expected}` for legacy issuer `{issuer}`: {error}"
+                ))
+            })?;
+        let stored = repo
+            .find_stored_aggregation_id(issuer)
+            .await
+            .map_err(|error| {
+                RegistryError::Database(format!(
+                    "cannot verify adopted aggregation_id for legacy issuer `{issuer}`: {error}"
+                ))
+            })?;
+        if stored.flatten() != Some(expected) {
+            return Err(RegistryError::Semantic(format!(
+                "aggregation_id for issuer `{issuer}` differs from its existing credential (stored: {})",
+                stored
+                    .flatten()
+                    .map_or_else(|| "NULL".to_owned(), |id| id.to_string())
             )));
         }
     }
@@ -1455,7 +1519,7 @@ mod general_tests {
         let existing = register_issuer(&state.service, "issuer1").await;
         let different = crate::domain::models::credential::AggregationId::generate();
         assert_ne!(existing, different);
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "issuer1",
@@ -1476,9 +1540,13 @@ mod general_tests {
         let candidate =
             crate::server::auth::issuer_registry::IssuerRegistry::from_yaml(&registry).unwrap();
         assert!(
-            validate_registry_aggregation_ids(&state.service, &candidate)
-                .await
-                .is_err()
+            validate_registry_aggregation_ids(
+                &state.service,
+                &crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot(),
+                &candidate,
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -1490,7 +1558,7 @@ mod general_tests {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("issuers.yaml");
         let registry_yaml = |aggregation_id| {
-            noyalib::to_string(&serde_json::json!({
+            serde_saphyr::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "issuer1",

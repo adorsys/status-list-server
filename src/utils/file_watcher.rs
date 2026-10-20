@@ -396,6 +396,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn change_between_load_and_watcher_start_is_reconciled_without_a_second_edit() {
+        let dir = TempDir::new();
+        let path = dir.path.join("issuers.yaml");
+        std::fs::write(&path, "trusted-key").expect("write initial registry");
+        let revoked = Arc::new(AtomicUsize::new(0));
+        let callback_path = path.clone();
+        let callback_revoked = revoked.clone();
+
+        // Simulate a revocation after the startup load but before watcher tasks
+        // get their first poll or debounce baseline.
+        FileWatcher::new(vec![path.clone()], Duration::from_millis(10))
+            .spawn_with_initial_reconcile("issuer_registry_startup_race", move || {
+                let path = callback_path.clone();
+                let revoked = callback_revoked.clone();
+                async move {
+                    let content = tokio::fs::read_to_string(path).await;
+                    if content.as_deref().unwrap_or_default() == "empty-registry" {
+                        revoked.store(1, Ordering::SeqCst);
+                    }
+                }
+            });
+        std::fs::write(&path, "empty-registry").expect("revoke key during startup");
+
+        timeout(Duration::from_secs(2), async {
+            while revoked.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup revocation was not reconciled without another edit");
+    }
+
+    #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
         let dir = TempDir::new();
         let path = dir.path.join("secret");

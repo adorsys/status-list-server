@@ -18,7 +18,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::domain::models::credential::{AggregationId, PrincipalKind, PublicJwk, ResolvedKey};
+use crate::domain::models::credential::{
+    AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
+};
 use crate::domain::ports::{IssuerDirectory, IssuerKeyResolver};
 
 const REGISTRY_SCHEMA: &str = include_str!("../../../docs/schemas/issuers.v1.schema.json");
@@ -32,11 +34,13 @@ pub enum RegistryError {
         source: std::io::Error,
     },
     #[error("failed to parse issuer registry YAML: {0}")]
-    Parse(#[from] noyalib::Error),
+    Parse(#[from] serde_saphyr::Error),
     #[error("issuer registry schema validation failed: {0}")]
     Schema(String),
     #[error("issuer registry semantic validation failed: {0}")]
     Semantic(String),
+    #[error("issuer registry database check failed: {0}")]
+    Database(String),
     #[error("issuer registry schema is invalid: {0}")]
     SchemaDefinition(String),
 }
@@ -156,7 +160,7 @@ impl RegistryHandle {
         self.reload_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn resolve_with_reason(&self, kid: &str) -> Result<Arc<ResolvedKey>, &'static str> {
+    pub fn resolve_with_reason(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         let now = time::OffsetDateTime::now_utc();
         self.snapshot().resolve_with_reason_at(kid, now)
     }
@@ -173,7 +177,22 @@ impl RegistryHandle {
     /// Apply a registry only after external consistency checks have succeeded.
     pub fn replace(&self, registry: ValidatedRegistry) -> Result<(), RegistryError> {
         let registry = Arc::new(registry);
+        self.validate_candidate(&registry)?;
         let mut history = self
+            .aggregation_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history
+            .by_issuer
+            .extend(registry.issuer_aggregations.clone());
+        history.by_id.extend(registry.aggregation_issuers.clone());
+        self.active.store(registry);
+        Ok(())
+    }
+
+    /// Check immutable aggregation history before making external adoption writes.
+    pub fn validate_candidate(&self, registry: &ValidatedRegistry) -> Result<(), RegistryError> {
+        let history = self
             .aggregation_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -199,11 +218,6 @@ impl RegistryHandle {
                 )));
             }
         }
-        history
-            .by_issuer
-            .extend(registry.issuer_aggregations.clone());
-        history.by_id.extend(registry.aggregation_issuers.clone());
-        self.active.store(registry);
         Ok(())
     }
 
@@ -213,7 +227,7 @@ impl RegistryHandle {
 }
 
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, &'static str> {
+    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         self.resolve_with_reason(kid)
     }
 }
@@ -241,12 +255,10 @@ impl IssuerRegistry {
     }
 
     pub fn from_yaml(content: &str) -> Result<ValidatedRegistry, RegistryError> {
-        let parser = noyalib::ParserConfig::strict();
-        let yaml: noyalib::Value = noyalib::from_str_with_config(content, &parser)?;
-        let json: Value =
-            serde_json::to_value(&yaml).map_err(|err| RegistryError::Schema(err.to_string()))?;
+        let json: Value = serde_saphyr::from_str(content)?;
         validate_schema(&json)?;
-        let registry: Self = noyalib::from_value(&yaml)?;
+        let registry: Self =
+            serde_json::from_value(json).map_err(|err| RegistryError::Schema(err.to_string()))?;
         validate_semantics(&registry)?;
         let now = time::OffsetDateTime::now_utc();
         for issuer in &registry.issuers {
@@ -266,9 +278,10 @@ impl IssuerRegistry {
                 keys.insert(
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
-                        principal_id: issuer.id.clone(),
-                        principal_kind: PrincipalKind::Issuer,
-                        aggregation_id: Some(aggregation_id),
+                        principal: Principal::Issuer {
+                            id: issuer.id.clone(),
+                            aggregation_id,
+                        },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !issuer.disabled,
                         not_before: parsed_window(key.not_before.as_deref()),
@@ -282,9 +295,9 @@ impl IssuerRegistry {
                 keys.insert(
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
-                        principal_id: admin.id.clone(),
-                        principal_kind: PrincipalKind::Admin,
-                        aggregation_id: None,
+                        principal: Principal::Admin {
+                            id: admin.id.clone(),
+                        },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !admin.disabled,
                         not_before: parsed_window(key.not_before.as_deref()),
@@ -323,16 +336,16 @@ impl ValidatedRegistry {
         &self,
         kid: &str,
         now: time::OffsetDateTime,
-    ) -> Result<Arc<ResolvedKey>, &'static str> {
-        let resolved = self.resolve(kid).ok_or("unknown kid")?;
+    ) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+        let resolved = self.resolve(kid).ok_or(KeyResolveError::UnknownKid)?;
         if !resolved.enabled {
-            return Err("principal is disabled");
+            return Err(KeyResolveError::PrincipalDisabled);
         }
         if resolved.not_before.is_some_and(|start| now < start) {
-            return Err("key is not valid yet");
+            return Err(KeyResolveError::NotYetValid);
         }
         if resolved.not_after.is_some_and(|end| now >= end) {
-            return Err("key has expired");
+            return Err(KeyResolveError::Expired);
         }
         Ok(resolved)
     }
@@ -651,7 +664,8 @@ mod tests {
             registry
                 .resolve("QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M")
                 .unwrap()
-                .principal_id,
+                .principal
+                .id(),
             "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
         );
     }
@@ -773,9 +787,9 @@ mod tests {
         std::fs::write(file.path(), VALID).unwrap();
         let handle = RegistryHandle::load(file.path()).unwrap();
 
-        let mut removed: noyalib::Value = noyalib::from_str(VALID).unwrap();
-        removed["issuers"] = noyalib::Value::Sequence(Vec::new());
-        std::fs::write(file.path(), noyalib::to_string(&removed).unwrap()).unwrap();
+        let mut removed: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        removed["issuers"] = serde_json::Value::Array(Vec::new());
+        std::fs::write(file.path(), serde_saphyr::to_string(&removed).unwrap()).unwrap();
         handle.reload().unwrap();
         assert!(handle.snapshot().issuers().is_empty());
 
@@ -795,14 +809,14 @@ mod tests {
         std::fs::write(file.path(), VALID).unwrap();
         let handle = RegistryHandle::load(file.path()).unwrap();
 
-        let mut removed: noyalib::Value = noyalib::from_str(VALID).unwrap();
-        removed["issuers"] = noyalib::Value::Sequence(Vec::new());
-        std::fs::write(file.path(), noyalib::to_string(&removed).unwrap()).unwrap();
+        let mut removed: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        removed["issuers"] = serde_json::Value::Array(Vec::new());
+        std::fs::write(file.path(), serde_saphyr::to_string(&removed).unwrap()).unwrap();
         handle.reload().unwrap();
 
-        let mut readded: noyalib::Value = noyalib::from_str(VALID).unwrap();
-        readded["issuers"][0]["id"] = noyalib::Value::String("different-issuer".into());
-        std::fs::write(file.path(), noyalib::to_string(&readded).unwrap()).unwrap();
+        let mut readded: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        readded["issuers"][0]["id"] = serde_json::Value::String("different-issuer".into());
+        std::fs::write(file.path(), serde_saphyr::to_string(&readded).unwrap()).unwrap();
         let error = handle.reload().unwrap_err();
         assert!(
             error.to_string().contains("issuer for aggregation_id")

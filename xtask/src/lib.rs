@@ -121,24 +121,18 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
         } => {
             let mut root = load_registry_yaml(&file)?;
             let key = registry_key(&jwk, &alg)?;
-            let mut issuer = noyalib::Mapping::from_iter([
-                (
-                    "id".into(),
-                    noyalib::Value::String(uuid::Uuid::new_v4().to_string()),
-                ),
-                (
-                    "aggregation_id".into(),
-                    noyalib::Value::String(uuid::Uuid::new_v4().to_string()),
-                ),
-                ("tier".into(), noyalib::Value::String(tier)),
-                ("keys".into(), noyalib::Value::Sequence(vec![key])),
-            ]);
+            let mut issuer = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "aggregation_id": uuid::Uuid::new_v4().to_string(),
+                "tier": tier,
+                "keys": [key],
+            });
             if let Some(display_name) = display_name {
-                issuer.insert("display_name", display_name.into());
+                issuer["display_name"] = serde_json::Value::String(display_name);
             }
-            let item = noyalib::Value::Mapping(issuer);
+            let item = issuer;
             root.get_mut("issuers")
-                .and_then(noyalib::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?
                 .push(item.clone());
             write_registry_yaml(&file, root, RegistryInsertion::Issuer(item))
@@ -153,12 +147,12 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
             let key = registry_key(&jwk, &alg)?;
             let issuers = root
                 .get_mut("issuers")
-                .and_then(noyalib::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?;
             let issuer_index = issuers
                 .iter()
                 .position(|entry| {
-                    entry.get("id").and_then(noyalib::Value::as_str) == Some(issuer.as_str())
+                    entry.get("id").and_then(serde_json::Value::as_str) == Some(issuer.as_str())
                 })
                 .ok_or_eyre("issuer not found")?;
             let entry = issuers
@@ -166,7 +160,7 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
                 .ok_or_eyre("issuer not found")?;
             entry
                 .get_mut("keys")
-                .and_then(noyalib::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("issuer keys must be a sequence")?
                 .push(key.clone());
             write_registry_yaml(&file, root, RegistryInsertion::Key { issuer_index, key })
@@ -174,13 +168,12 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
     }
 }
 
-fn load_registry_yaml(file: &Path) -> Result<noyalib::Value> {
+fn load_registry_yaml(file: &Path) -> Result<serde_json::Value> {
     let text = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
-    noyalib::from_str_with_config(&text, &noyalib::ParserConfig::strict())
-        .wrap_err("parse issuer registry")
+    serde_saphyr::from_str(&text).wrap_err("parse issuer registry")
 }
 
-fn registry_key(raw_jwk: &str, alg: &str) -> Result<noyalib::Value> {
+fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_json::Value> {
     let json: serde_json::Value =
         serde_json::from_str(raw_jwk).wrap_err("parse public JWK JSON")?;
     let jwk: jsonwebtoken::jwk::Jwk =
@@ -188,23 +181,19 @@ fn registry_key(raw_jwk: &str, alg: &str) -> Result<noyalib::Value> {
     let kid = jwk
         .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
         .wrap_err("compute JWK thumbprint")?;
-    let mut map = noyalib::Mapping::new();
-    map.insert("kid", kid.into());
-    map.insert("alg", alg.into());
-    map.insert("jwk", noyalib::to_value(&json)?);
-    Ok(noyalib::Value::Mapping(map))
+    Ok(serde_json::json!({"kid": kid, "alg": alg, "jwk": json}))
 }
 
 enum RegistryInsertion {
-    Issuer(noyalib::Value),
+    Issuer(serde_json::Value),
     Key {
         issuer_index: usize,
-        key: noyalib::Value,
+        key: serde_json::Value,
     },
 }
 
-fn sequence_item(value: &noyalib::Value, indent: usize) -> Result<String> {
-    let yaml = noyalib::to_string(value)?;
+fn sequence_item(value: &serde_json::Value, indent: usize) -> Result<String> {
+    let yaml = serde_saphyr::to_string(value)?;
     let mut lines = yaml.lines();
     let first = lines.next().ok_or_eyre("empty YAML item")?;
     let mut rendered = format!("{}- {first}\n", " ".repeat(indent));
@@ -281,24 +270,23 @@ fn insert_registry_item(original: &str, insertion: RegistryInsertion) -> Result<
 
 fn write_registry_yaml(
     file: &Path,
-    value: noyalib::Value,
+    value: serde_json::Value,
     insertion: RegistryInsertion,
 ) -> Result<()> {
     let original = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
     let content = insert_registry_item(&original, insertion)?;
-    let actual: noyalib::Value =
-        noyalib::from_str(&content).wrap_err("parse edited issuer registry")?;
+    let actual: serde_json::Value =
+        serde_saphyr::from_str(&content).wrap_err("parse edited issuer registry")?;
     ensure!(
         actual == value,
         "edited registry differs from validated candidate"
     );
-    status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(&content)
-        .wrap_err("validate updated issuer registry")?;
     let parent = file.parent().unwrap_or_else(|| Path::new("."));
     let mut temporary =
         tempfile::NamedTempFile::new_in(parent).wrap_err("create temporary issuer registry")?;
     std::io::Write::write_all(&mut temporary, content.as_bytes())
         .wrap_err("write temporary issuer registry")?;
+    validate_registry_file(temporary.path())?;
     temporary
         .as_file()
         .set_permissions(std::fs::metadata(file)?.permissions())?;
@@ -307,6 +295,39 @@ fn write_registry_yaml(
         .map_err(|error| error.error)
         .wrap_err("replace issuer registry atomically")?;
     println!("updated {}", file.display());
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_registry_file(file: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(file).wrap_err("read updated issuer registry")?;
+    let _: serde_json::Value =
+        serde_saphyr::from_str(&text).wrap_err("parse updated issuer registry")?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn validate_registry_file(file: &Path) -> Result<()> {
+    let workspace = workspace_root()?;
+    let binary = workspace.join("target/debug/status-list-server");
+    let mut command = if binary.is_file() {
+        Command::new(binary)
+    } else {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut command = Command::new(cargo);
+        command.args(["run", "--quiet", "--bin", "status-list-server", "--"]);
+        command
+    };
+    let status = command
+        .arg("issuer-registry")
+        .current_dir(workspace)
+        .env("APP_MANAGEMENT_AUTH__ISSUERS_FILE", file)
+        .status()
+        .wrap_err("run status-list-server issuer-registry validator")?;
+    ensure!(
+        status.success(),
+        "updated issuer registry failed validation"
+    );
     Ok(())
 }
 
@@ -1016,10 +1037,9 @@ mod tests {
             tier: "standard".into(),
         })
         .unwrap();
-        let validated =
-            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
-                .unwrap();
-        assert_eq!(validated.key_count(), 1);
+        let validated: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(validated["issuers"][0]["keys"].as_array().unwrap().len(), 1);
         assert!(
             std::fs::read_to_string(&file)
                 .unwrap()
@@ -1028,23 +1048,24 @@ mod tests {
         let rotated_jwk = r#"{"kty":"EC","crv":"P-256","x":"qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY","y":"BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"}"#;
         issuer_command(IssuerTask::AddKey {
             file: file.clone(),
-            issuer: validated.issuers()[0].id.clone(),
+            issuer: validated["issuers"][0]["id"].as_str().unwrap().to_owned(),
             jwk: rotated_jwk.into(),
             alg: "ES256".into(),
         })
         .unwrap();
-        assert_eq!(
-            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
-                .unwrap()
-                .key_count(),
-            2
-        );
+        let rotated: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(rotated["issuers"][0]["keys"].as_array().unwrap().len(), 2);
         assert!(
             std::fs::read_to_string(&file)
                 .unwrap()
                 .starts_with("# Operator notes must survive CLI edits.")
         );
-        let issuer_id = validated.issuers()[0].id.parse::<uuid::Uuid>().unwrap();
+        let issuer_id = validated["issuers"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<uuid::Uuid>()
+            .unwrap();
         assert_eq!(issuer_id.get_version(), Some(uuid::Version::Random));
         let bytes_before_invalid_update = std::fs::read(&file).unwrap();
 
@@ -1052,7 +1073,7 @@ mod tests {
         assert!(
             issuer_command(IssuerTask::AddKey {
                 file: file.clone(),
-                issuer: validated.issuers()[0].id.clone(),
+                issuer: validated["issuers"][0]["id"].as_str().unwrap().to_owned(),
                 jwk: private_jwk,
                 alg: "ES256".into(),
             })

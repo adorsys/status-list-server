@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::models::credential::PrincipalKind;
+use crate::domain::models::credential::Principal;
 #[cfg(test)]
 use crate::domain::models::credential::PublicJwk;
 use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
@@ -236,14 +236,16 @@ pub async fn auth(
         .issuer_key_resolver
         .resolve(&kid)
         .map_err(|reason| invalid_auth(Some(&kid), None, reason))?;
-    if resolved.principal_kind != PrincipalKind::Issuer {
-        return Err(invalid_auth(
-            Some(&kid),
-            Some(&resolved.principal_id),
-            "admin keys cannot authenticate issuer management requests",
-        ));
-    }
-    let registered_issuer = resolved.principal_id.as_str();
+    let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
+        Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
+        Principal::Admin { id } => {
+            return Err(invalid_auth(
+                Some(&kid),
+                Some(id),
+                "admin keys cannot authenticate issuer management requests",
+            ));
+        }
+    };
     let registered_kid = resolved.public_key.key_id();
     let registered_alg = resolved.public_key.algorithm();
     if registered_kid != kid || registered_alg != header.alg {
@@ -294,14 +296,12 @@ pub async fn auth(
         )
         .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
-    let authenticated_issuer = Issuer(resolved.principal_id.clone());
+    let authenticated_issuer = Issuer(registered_issuer.to_owned());
     request
         .extensions_mut()
         .insert(AuthenticatedIssuer::with_aggregation_id(
             authenticated_issuer,
-            resolved
-                .aggregation_id
-                .expect("issuer keys have an aggregation ID"),
+            registered_aggregation_id,
         ));
     crate::utils::metrics::record_management_auth_request(
         Some(registered_issuer),
@@ -528,7 +528,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -553,7 +553,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("issuers.yaml");
         let public_key = test_public_jwk();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -597,7 +597,7 @@ mod tests {
         let file = directory.path().join("issuers.yaml");
         let aggregation_id = uuid::Uuid::new_v4();
         let public_key = test_public_jwk();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -658,7 +658,7 @@ mod tests {
         let jwk = jwk.as_object_mut().unwrap();
         jwk.remove("kid");
         jwk.remove("alg");
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -689,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn admin_key_cannot_authenticate_an_issuer_management_request() {
         let key = test_public_jwk();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [],
             "admins": [{
@@ -731,7 +731,7 @@ mod tests {
                 })
             })
             .collect();
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": issuer,
@@ -973,7 +973,7 @@ mod tests {
             .unwrap();
         let own_public = test_public_jwk();
         set_registry(&mut state, "test-issuer", std::slice::from_ref(&own_public));
-        let registry = noyalib::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [
                 {"id": "test-issuer", "aggregation_id": uuid::Uuid::new_v4(), "keys": [{"kid": own_public.key_id(), "alg": format!("{:?}", own_public.algorithm()), "jwk": own_public.jwk()}]},
@@ -1026,7 +1026,7 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            noyalib::to_string(&serde_json::json!({
+            serde_saphyr::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
@@ -1130,7 +1130,7 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            noyalib::to_string(&serde_json::json!({
+            serde_saphyr::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
@@ -1247,7 +1247,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .retain(|field, _| field != "kid" && field != "alg");
-        let duplicate_kid_registry = noyalib::to_string(&serde_json::json!({
+        let duplicate_kid_registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -1304,7 +1304,7 @@ mod tests {
             let file = directory.path().join("issuers.yaml");
             std::fs::write(
                 &file,
-                noyalib::to_string(&serde_json::json!({
+                serde_saphyr::to_string(&serde_json::json!({
                     "version": 1,
                     "issuers": [{
                         "id": "test-issuer",
@@ -1333,7 +1333,7 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .retain(|field, _| field != "kid" && field != "alg");
-            let duplicate_kid_registry = noyalib::to_string(&serde_json::json!({
+            let duplicate_kid_registry = serde_saphyr::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
