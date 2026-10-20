@@ -466,7 +466,7 @@
           "type": "object",
           "title": "Operator-managed issuer registry",
           "properties": {
-            "path": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "pattern": "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Registry file inside its dedicated mount directory" },
             "configMap": {
               "type": "object",
               "properties": {

@@ -399,6 +399,20 @@ type BuildStateResult = (AppState, Arc<CertManager>);
 type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
+    // Validate operator input before connecting to the database or running migrations.
+    #[cfg_attr(
+        not(any(feature = "memory", feature = "history")),
+        allow(unused_variables)
+    )]
+    let issuer_registry = Arc::new(match config.management_auth.issuers_file.as_deref() {
+        Some(path) if !path.is_empty() => {
+            crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+        }
+        _ => {
+            tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
+            crate::server::auth::issuer_registry::RegistryHandle::empty()
+        }
+    });
     // Hoisted DB handle captured from the backend branches below so the
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
@@ -406,10 +420,16 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
     // Some feature profiles have only the in-memory backend; in those profiles
     // the database match below diverges before these values are consumed.
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(any(feature = "memory", feature = "history")),
+        allow(unused_variables)
+    )]
     let aggregation_withheld_from: HashSet<Issuer>;
     // Why all tokens must leave out `aggregation_uri`, when they must.
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(any(feature = "memory", feature = "history")),
+        allow(unused_variables)
+    )]
     let aggregation_withheld: Option<String>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
@@ -592,7 +612,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     };
 
     #[cfg(not(feature = "acme"))]
-    #[allow(unreachable_code)]
+    #[cfg_attr(
+        not(any(feature = "memory", feature = "history")),
+        allow(unreachable_code)
+    )]
     let (cert_provider, _cert_manager_opt): (Arc<dyn CertificateProvider>, Option<()>) = {
         use crate::outbound::cert::{InlineCertificateProvider, ReloadingCertificateProvider};
 
@@ -836,10 +859,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
     }
 
-    let issuer_registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::load(
-        &config.management_auth.issuers_file,
-    )?);
+    validate_registry_aggregation_ids(&service, &issuer_registry.snapshot()).await?;
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
+    tracing::info!(
+        fingerprint = %issuer_registry.snapshot().fingerprint(),
+        "issuer registry loaded"
+    );
     warn_missing_registry_issuers(&service, &issuer_registry.snapshot()).await;
     let state = AppState {
         service,
@@ -854,7 +879,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
-        issuer_registry,
+        issuer_key_resolver: issuer_registry.clone(),
+        issuer_registry: issuer_registry.clone(),
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
             portal: config.server.links.portal.clone(),
@@ -865,12 +891,19 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         readiness,
     };
 
-    spawn_issuer_registry_watcher(
-        state.issuer_registry.clone(),
-        state.service.clone(),
-        config.management_auth.issuers_file.clone().into(),
-        Duration::from_secs(config.watcher.poll_interval_secs),
-    );
+    if let Some(path) = config
+        .management_auth
+        .issuers_file
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    {
+        spawn_issuer_registry_watcher(
+            issuer_registry.clone(),
+            state.service.clone(),
+            path.into(),
+            Duration::from_secs(config.watcher.poll_interval_secs),
+        );
+    }
 
     #[cfg(feature = "acme")]
     {
@@ -893,7 +926,17 @@ pub(crate) fn spawn_issuer_registry_watcher(
             let registry_handle = registry_handle.clone();
             let service = service.clone();
             async move {
-                if let Err(error) = registry_handle.reload() {
+                let result = async {
+                    let candidate =
+                        crate::server::auth::issuer_registry::IssuerRegistry::from_file(
+                            registry_handle.path(),
+                        )?;
+                    validate_registry_aggregation_ids(&service, &candidate).await?;
+                    registry_handle.replace(candidate)
+                }
+                .await;
+                if let Err(error) = result {
+                    registry_handle.record_reload_failure();
                     crate::utils::metrics::record_rotation("issuer_registry", false);
                     crate::utils::metrics::record_issuer_registry_reload_failure();
                     tracing::error!(
@@ -910,11 +953,53 @@ pub(crate) fn spawn_issuer_registry_watcher(
                     warn_missing_registry_issuers(&service, &registry_handle.snapshot()).await;
                     tracing::info!(
                         event = "issuer_registry_reloaded",
+                        fingerprint = %registry_handle.snapshot().fingerprint(),
                         "issuer registry reloaded"
                     );
                 }
             }
         });
+}
+
+async fn validate_registry_aggregation_ids(
+    service: &Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+) -> Result<(), crate::server::auth::issuer_registry::RegistryError> {
+    use crate::server::auth::issuer_registry::RegistryError;
+    for issuer in registry.issuers() {
+        let expected = crate::domain::models::credential::AggregationId(issuer.aggregation_id);
+        let stored = service
+            .credential_repo()
+            .find_aggregation_id(&issuer.id)
+            .await
+            .map_err(|error| {
+                RegistryError::Semantic(format!(
+                    "cannot verify aggregation_id for issuer `{}`: {error}",
+                    issuer.id
+                ))
+            })?;
+        if stored.is_some_and(|stored| stored != expected) {
+            return Err(RegistryError::Semantic(format!(
+                "aggregation_id for issuer `{}` differs from its existing credential",
+                issuer.id
+            )));
+        }
+        let owner = service
+            .credential_repo()
+            .find_issuer_by_aggregation_id(expected)
+            .await
+            .map_err(|error| {
+                RegistryError::Semantic(format!(
+                    "cannot verify owner of aggregation_id `{expected}`: {error}"
+                ))
+            })?;
+        if owner.is_some_and(|owner| owner.0 != issuer.id) {
+            return Err(RegistryError::Semantic(format!(
+                "aggregation_id `{expected}` belongs to another database issuer"
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn warn_missing_registry_issuers(
@@ -1362,6 +1447,90 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn existing_issuer_cannot_change_aggregation_id_in_registry() {
+        use crate::test_utils::{register_issuer, test_app_state};
+        let state = test_app_state(None).await;
+        let existing = register_issuer(&state.service, "issuer1").await;
+        let different = crate::domain::models::credential::AggregationId::generate();
+        assert_ne!(existing, different);
+        let registry = noyalib::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "issuer1",
+                "aggregation_id": different.0,
+                "keys": [{
+                    "kid": "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50",
+                    "alg": "ES256",
+                    "jwk": {
+                        "kty": "EC", "crv": "P-256",
+                        "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                        "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"
+                    }
+                }]
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        let candidate =
+            crate::server::auth::issuer_registry::IssuerRegistry::from_yaml(&registry).unwrap();
+        assert!(
+            validate_registry_aggregation_ids(&state.service, &candidate)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_existing_mapping_when_stored_id_disagrees() {
+        use crate::test_utils::{register_issuer, test_app_state};
+        let state = test_app_state(None).await;
+        let existing = register_issuer(&state.service, "issuer1").await;
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("issuers.yaml");
+        let registry_yaml = |aggregation_id| {
+            noyalib::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "issuer1",
+                    "aggregation_id": aggregation_id,
+                    "keys": [{
+                        "kid": "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50",
+                        "alg": "ES256",
+                        "jwk": {
+                            "kty": "EC", "crv": "P-256",
+                            "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                            "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"
+                        }
+                    }]
+                }],
+                "admins": []
+            }))
+            .unwrap()
+        };
+        std::fs::write(&file, registry_yaml(existing.0)).unwrap();
+        let registry =
+            Arc::new(crate::server::auth::issuer_registry::RegistryHandle::load(&file).unwrap());
+        spawn_issuer_registry_watcher(
+            registry.clone(),
+            state.service,
+            file.clone(),
+            Duration::from_secs(1),
+        );
+        std::fs::write(&file, registry_yaml(uuid::Uuid::new_v4())).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while registry.reload_failure_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("changed aggregation ID was not rejected");
+        assert_eq!(
+            registry.snapshot().issuer_aggregation_id("issuer1"),
+            Some(existing)
+        );
+    }
 
     #[test]
     fn aggregation_uri_is_withheld_for_a_reason() {

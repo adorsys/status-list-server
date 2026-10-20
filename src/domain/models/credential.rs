@@ -1,7 +1,25 @@
 //! Credential domain model, error types, and core domain business operations.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use std::{fmt, str::FromStr};
+use std::{fmt, str::FromStr, sync::Arc};
+
+/// Validated public key and principal data supplied by a trust source.
+#[derive(Clone, Debug)]
+pub struct ResolvedKey {
+    pub principal_id: String,
+    pub principal_kind: PrincipalKind,
+    pub aggregation_id: Option<AggregationId>,
+    pub public_key: Arc<PublicJwk>,
+    pub enabled: bool,
+    pub not_before: Option<time::OffsetDateTime>,
+    pub not_after: Option<time::OffsetDateTime>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Issuer,
+    Admin,
+}
 
 use jsonwebtoken::{
     Algorithm,

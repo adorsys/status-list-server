@@ -194,8 +194,8 @@ impl LimitsConfig {
 /// JWT validation policy for protected management endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagementAuthConfig {
-    /// Path to the mandatory operator-managed YAML issuer registry.
-    pub issuers_file: String,
+    /// Path to the operator-managed YAML issuer registry.
+    pub issuers_file: Option<String>,
     /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
     pub leeway_secs: u64,
     /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
@@ -207,6 +207,11 @@ pub struct ManagementAuthConfig {
 
 impl ManagementAuthConfig {
     fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
+        if environment.is_production() && self.issuers_file.as_deref().is_none_or(str::is_empty) {
+            return Err(ConfigError::Message(
+                "management_auth.issuers_file is required in production".to_string(),
+            ));
+        }
         if self.max_token_lifetime_secs == 0 {
             return Err(ConfigError::Message(
                 "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
@@ -1839,7 +1844,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.leeway_secs", 60)?
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
-        .set_default("management_auth.issuers_file", "issuers.yaml")?
+        .set_default("management_auth.issuers_file", Option::<String>::None)?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
@@ -1861,6 +1866,18 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issuer_registry_path_is_required_only_in_production() {
+        let policy = ManagementAuthConfig {
+            issuers_file: None,
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["management".into()],
+        };
+        assert!(policy.validate(TelemetryEnvironment::Development).is_ok());
+        assert!(policy.validate(TelemetryEnvironment::Production).is_err());
+    }
     use secrecy::ExposeSecret;
     use std::path::{Path, PathBuf};
 
@@ -2838,6 +2855,10 @@ mod tests {
         ];
         if classify_app_env(environment).is_production() {
             overrides.push(("management_auth.audiences", "status-list-server-management"));
+            overrides.push((
+                "management_auth.issuers_file",
+                "/etc/status-list-server/issuers.yaml",
+            ));
         }
         Config::load_from_overrides(&overrides).map(|config| {
             config

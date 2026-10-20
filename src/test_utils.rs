@@ -179,6 +179,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
         cert_provider,
     ));
 
+    let registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty());
     AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
@@ -192,7 +193,8 @@ pub(crate) async fn test_app_state_with_cert_provider(
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -228,6 +230,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         }),
     ));
 
+    let registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty());
     AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
@@ -241,7 +244,8 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -267,6 +271,7 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         }),
     ));
 
+    let registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty());
     AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
@@ -280,7 +285,8 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -453,6 +459,7 @@ async fn build_test_app_state(
         cert_provider,
     ));
 
+    let registry = Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty());
     AppState {
         service,
         public_base_url: "https://example.com/api/v1".to_string(),
@@ -466,7 +473,8 @@ async fn build_test_app_state(
         max_lists_per_issuer: 1_000,
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
-        issuer_registry: Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,

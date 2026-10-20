@@ -137,7 +137,7 @@ publicKeyJwk.kid = header.kid;
 publicKeyJwk.alg = header.alg;
 
 if (registryFile) {
-  fs.writeFileSync(registryFile, JSON.stringify({
+  const registryContent = JSON.stringify({
     version: 1,
     issuers: [{
       id: issuerId,
@@ -147,7 +147,10 @@ if (registryFile) {
       keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
     }],
     admins: [],
-  }, null, 2));
+  }, null, 2);
+  const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryRegistry, registryContent);
+  fs.renameSync(temporaryRegistry, registryFile);
 }
 
 function visitItems(items, visitor) {
@@ -228,13 +231,25 @@ else
 fi
 
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
-# The server watches this file and atomically reloads the newly generated key.
-# Give the watcher a chance to validate and publish the snapshot before Newman
-# sends the first authenticated request.
-if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
-  sleep 2
-fi
 wait_for_api
+if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
+  # Wait for the generated key to authenticate, rather than guessing how long
+  # the file watcher will take on this runner.
+  token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="token").value)' "$environment_artifact")"
+  if [[ -n "$MANAGEMENT_URL" ]]; then
+    probe_url="${MANAGEMENT_URL%/}"
+  else
+    probe_url="$(_sibling_url "$API_ENDPOINT" 8001)"
+  fi
+  deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
+  until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "$probe_url/api/v1/credentials" 2>/dev/null || true)" == "200" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for generated issuer key to authenticate" >&2
+      exit 14
+    fi
+    sleep 1
+  done
+fi
 
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then

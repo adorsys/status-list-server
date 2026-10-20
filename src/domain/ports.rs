@@ -2,7 +2,20 @@
 
 use std::{fmt, sync::Arc};
 
-use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
+use crate::domain::models::credential::{
+    AggregationId, Credential, CredentialError, Issuer, ResolvedKey,
+};
+
+/// Resolve a trusted signing key without exposing the backing trust source to authentication.
+pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
+    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, &'static str>;
+}
+
+/// Public aggregation mappings supplied by the active issuer source.
+pub trait IssuerDirectory: Send + Sync + fmt::Debug {
+    fn issuer_aggregation_id(&self, issuer: &str) -> Option<AggregationId>;
+    fn issuer_by_aggregation_id(&self, aggregation_id: AggregationId) -> Option<String>;
+}
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };

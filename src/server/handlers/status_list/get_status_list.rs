@@ -1191,12 +1191,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_token_uses_the_static_registry_aggregation_id() {
+    async fn test_token_preserves_the_existing_aggregation_id_in_the_registry() {
         let mut app_state = test_app_state(None).await;
         app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
-        register_issuer(&app_state.service, "issuer1").await;
-        let aggregation_id = uuid::Uuid::new_v4();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let aggregation_id = register_issuer(&app_state.service, "issuer1").await.0;
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "issuer1",
@@ -1214,9 +1213,9 @@ mod tests {
             "admins": []
         }))
         .unwrap();
-        app_state.issuer_registry = Arc::new(
+        app_state.set_issuer_registry(Arc::new(
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
-        );
+        ));
 
         assert_eq!(
             served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,

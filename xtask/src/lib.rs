@@ -121,26 +121,27 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
         } => {
             let mut root = load_registry_yaml(&file)?;
             let key = registry_key(&jwk, &alg)?;
-            let mut issuer = serde_yaml::Mapping::from_iter([
+            let mut issuer = noyalib::Mapping::from_iter([
                 (
                     "id".into(),
-                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
+                    noyalib::Value::String(uuid::Uuid::new_v4().to_string()),
                 ),
                 (
                     "aggregation_id".into(),
-                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
+                    noyalib::Value::String(uuid::Uuid::new_v4().to_string()),
                 ),
-                ("tier".into(), serde_yaml::Value::String(tier)),
-                ("keys".into(), serde_yaml::Value::Sequence(vec![key])),
+                ("tier".into(), noyalib::Value::String(tier)),
+                ("keys".into(), noyalib::Value::Sequence(vec![key])),
             ]);
             if let Some(display_name) = display_name {
                 issuer.insert("display_name", display_name.into());
             }
+            let item = noyalib::Value::Mapping(issuer);
             root.get_mut("issuers")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(noyalib::Value::as_sequence_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?
-                .push(serde_yaml::Value::Mapping(issuer));
-            write_registry_yaml(&file, root)
+                .push(item.clone());
+            write_registry_yaml(&file, root, RegistryInsertion::Issuer(item))
         }
         IssuerTask::AddKey {
             file,
@@ -152,30 +153,34 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
             let key = registry_key(&jwk, &alg)?;
             let issuers = root
                 .get_mut("issuers")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(noyalib::Value::as_sequence_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?;
-            let entry = issuers
-                .iter_mut()
-                .find(|entry| {
-                    entry.get("id").and_then(serde_yaml::Value::as_str) == Some(issuer.as_str())
+            let issuer_index = issuers
+                .iter()
+                .position(|entry| {
+                    entry.get("id").and_then(noyalib::Value::as_str) == Some(issuer.as_str())
                 })
+                .ok_or_eyre("issuer not found")?;
+            let entry = issuers
+                .get_mut(issuer_index)
                 .ok_or_eyre("issuer not found")?;
             entry
                 .get_mut("keys")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(noyalib::Value::as_sequence_mut)
                 .ok_or_eyre("issuer keys must be a sequence")?
-                .push(key);
-            write_registry_yaml(&file, root)
+                .push(key.clone());
+            write_registry_yaml(&file, root, RegistryInsertion::Key { issuer_index, key })
         }
     }
 }
 
-fn load_registry_yaml(file: &Path) -> Result<serde_yaml::Value> {
+fn load_registry_yaml(file: &Path) -> Result<noyalib::Value> {
     let text = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
-    serde_yaml::from_str(&text).wrap_err("parse issuer registry")
+    noyalib::from_str_with_config(&text, &noyalib::ParserConfig::strict())
+        .wrap_err("parse issuer registry")
 }
 
-fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_yaml::Value> {
+fn registry_key(raw_jwk: &str, alg: &str) -> Result<noyalib::Value> {
     let json: serde_json::Value =
         serde_json::from_str(raw_jwk).wrap_err("parse public JWK JSON")?;
     let jwk: jsonwebtoken::jwk::Jwk =
@@ -183,18 +188,124 @@ fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_yaml::Value> {
     let kid = jwk
         .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
         .wrap_err("compute JWK thumbprint")?;
-    let mut map = serde_yaml::Mapping::new();
+    let mut map = noyalib::Mapping::new();
     map.insert("kid", kid.into());
     map.insert("alg", alg.into());
-    map.insert("jwk", serde_yaml::to_value(&json)?);
-    Ok(serde_yaml::Value::Mapping(map))
+    map.insert("jwk", noyalib::to_value(&json)?);
+    Ok(noyalib::Value::Mapping(map))
 }
 
-fn write_registry_yaml(file: &Path, value: serde_yaml::Value) -> Result<()> {
-    let content = serde_yaml::to_string(&value)?;
+enum RegistryInsertion {
+    Issuer(noyalib::Value),
+    Key {
+        issuer_index: usize,
+        key: noyalib::Value,
+    },
+}
+
+fn sequence_item(value: &noyalib::Value, indent: usize) -> Result<String> {
+    let yaml = noyalib::to_string(value)?;
+    let mut lines = yaml.lines();
+    let first = lines.next().ok_or_eyre("empty YAML item")?;
+    let mut rendered = format!("{}- {first}\n", " ".repeat(indent));
+    for line in lines {
+        rendered.push_str(&format!("{}  {line}\n", " ".repeat(indent)));
+    }
+    Ok(rendered)
+}
+
+fn insert_registry_item(original: &str, insertion: RegistryInsertion) -> Result<String> {
+    let mut lines: Vec<String> = original.lines().map(|line| format!("{line}\n")).collect();
+    let issuers = lines
+        .iter()
+        .position(|line| line.starts_with("issuers:"))
+        .ok_or_eyre("expected block-style issuers section; paste the generated entry manually")?;
+    let section_end = (issuers + 1..lines.len())
+        .find(|&i| {
+            let line = lines[i].as_str();
+            !line.trim().is_empty() && !line.starts_with([' ', '#'])
+        })
+        .unwrap_or(lines.len());
+    match insertion {
+        RegistryInsertion::Issuer(item) => {
+            let snippet = sequence_item(&item, 2)?;
+            if lines[issuers].trim_end() == "issuers: []" {
+                lines[issuers] = format!("issuers:\n{snippet}");
+            } else {
+                ensure!(
+                    lines[issuers].trim_end() == "issuers:",
+                    "expected block-style issuers section; paste the generated entry manually"
+                );
+                lines.insert(section_end, snippet);
+            }
+        }
+        RegistryInsertion::Key { issuer_index, key } => {
+            ensure!(
+                lines[issuers].trim_end() == "issuers:",
+                "expected block-style issuers section; paste the generated entry manually"
+            );
+            let issuer_starts: Vec<usize> = (issuers + 1..section_end)
+                .filter(|&i| lines[i].starts_with("  - "))
+                .collect();
+            let start = *issuer_starts
+                .get(issuer_index)
+                .ok_or_eyre("could not locate issuer in block-style YAML")?;
+            let end = issuer_starts
+                .get(issuer_index + 1)
+                .copied()
+                .unwrap_or(section_end);
+            let keys = (start..end)
+                .find(|&i| lines[i].starts_with("    keys:"))
+                .ok_or_eyre("could not locate issuer keys in block-style YAML")?;
+            let snippet = sequence_item(&key, 6)?;
+            if lines[keys].trim() == "keys: []" {
+                lines[keys] = format!("    keys:\n{snippet}");
+            } else {
+                ensure!(
+                    lines[keys].trim() == "keys:",
+                    "expected block-style issuer keys; paste the generated key manually"
+                );
+                let key_end = (keys + 1..end)
+                    .find(|&i| {
+                        lines[i].starts_with("    ")
+                            && !lines[i].starts_with("      ")
+                            && !lines[i].trim_start().starts_with('#')
+                    })
+                    .unwrap_or(end);
+                lines.insert(key_end, snippet);
+            }
+        }
+    }
+    Ok(lines.concat())
+}
+
+fn write_registry_yaml(
+    file: &Path,
+    value: noyalib::Value,
+    insertion: RegistryInsertion,
+) -> Result<()> {
+    let original = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
+    let content = insert_registry_item(&original, insertion)?;
+    let actual: noyalib::Value =
+        noyalib::from_str(&content).wrap_err("parse edited issuer registry")?;
+    ensure!(
+        actual == value,
+        "edited registry differs from validated candidate"
+    );
     status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(&content)
         .wrap_err("validate updated issuer registry")?;
-    std::fs::write(file, content).wrap_err("write issuer registry")?;
+    let parent = file.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).wrap_err("create temporary issuer registry")?;
+    std::io::Write::write_all(&mut temporary, content.as_bytes())
+        .wrap_err("write temporary issuer registry")?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::metadata(file)?.permissions())?;
+    temporary
+        .persist(file)
+        .map_err(|error| error.error)
+        .wrap_err("replace issuer registry atomically")?;
     println!("updated {}", file.display());
     Ok(())
 }
@@ -892,7 +1003,8 @@ mod tests {
             "issuer-registry-xtask-{}.yaml",
             uuid::Uuid::new_v4()
         ));
-        let initial = "version: 1\nissuers: []\nadmins: []\n";
+        let initial =
+            "# Operator notes must survive CLI edits.\nversion: 1\nissuers: []\nadmins: []\n";
         std::fs::write(&file, initial).unwrap();
         let public_jwk = r#"{"kty":"EC","crv":"P-256","x":"chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY","y":"YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"}"#;
 
@@ -908,6 +1020,30 @@ mod tests {
             status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
                 .unwrap();
         assert_eq!(validated.key_count(), 1);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("# Operator notes must survive CLI edits.")
+        );
+        let rotated_jwk = r#"{"kty":"EC","crv":"P-256","x":"qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY","y":"BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"}"#;
+        issuer_command(IssuerTask::AddKey {
+            file: file.clone(),
+            issuer: validated.issuers()[0].id.clone(),
+            jwk: rotated_jwk.into(),
+            alg: "ES256".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
+                .unwrap()
+                .key_count(),
+            2
+        );
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("# Operator notes must survive CLI edits.")
+        );
         let issuer_id = validated.issuers()[0].id.parse::<uuid::Uuid>().unwrap();
         assert_eq!(issuer_id.get_version(), Some(uuid::Version::Random));
         let bytes_before_invalid_update = std::fs::read(&file).unwrap();

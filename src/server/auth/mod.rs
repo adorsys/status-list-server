@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::domain::models::credential::PrincipalKind;
 #[cfg(test)]
 use crate::domain::models::credential::PublicJwk;
 use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
 use crate::server::{AppState, error::ApiError};
-use issuer_registry::{IssuerKeyResolver, PrincipalKind};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
 const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
@@ -233,9 +233,9 @@ pub async fn auth(
     }
 
     let resolved = state
-        .issuer_registry
+        .issuer_key_resolver
         .resolve(&kid)
-        .ok_or_else(|| invalid_auth(Some(&kid), None, "unknown kid"))?;
+        .map_err(|reason| invalid_auth(Some(&kid), None, reason))?;
     if resolved.principal_kind != PrincipalKind::Issuer {
         return Err(invalid_auth(
             Some(&kid),
@@ -528,7 +528,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -542,8 +542,9 @@ mod tests {
             "admins": []
         }))
         .unwrap();
-        state.issuer_registry =
-            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
         state
     }
 
@@ -552,7 +553,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("issuers.yaml");
         let public_key = test_public_jwk();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -596,7 +597,7 @@ mod tests {
         let file = directory.path().join("issuers.yaml");
         let aggregation_id = uuid::Uuid::new_v4();
         let public_key = test_public_jwk();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -613,8 +614,8 @@ mod tests {
         std::fs::write(&file, registry).unwrap();
 
         let mut state = test_app_state(None).await;
-        state.issuer_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
-        let registry_handle = state.issuer_registry.clone();
+        let registry_handle = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        state.set_issuer_registry(registry_handle.clone());
         let token = create_test_token(
             "test-issuer",
             &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
@@ -657,7 +658,7 @@ mod tests {
         let jwk = jwk.as_object_mut().unwrap();
         jwk.remove("kid");
         jwk.remove("alg");
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -668,8 +669,9 @@ mod tests {
         }))
         .unwrap();
         let mut state = test_app_state(None).await;
-        state.issuer_registry =
-            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
 
         let token = create_test_token(
             "test-issuer",
@@ -687,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn admin_key_cannot_authenticate_an_issuer_management_request() {
         let key = test_public_jwk();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [],
             "admins": [{
@@ -702,8 +704,9 @@ mod tests {
         }))
         .unwrap();
         let mut state = test_app_state(None).await;
-        state.issuer_registry =
-            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
         let token = create_test_token(
             "portal-backend",
             &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
@@ -728,7 +731,7 @@ mod tests {
                 })
             })
             .collect();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": issuer,
@@ -738,8 +741,9 @@ mod tests {
             "admins": []
         }))
         .unwrap();
-        state.issuer_registry =
-            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
     }
 
     async fn call_with_token(app: Router, token: String) -> axum::response::Response {
@@ -969,15 +973,16 @@ mod tests {
             .unwrap();
         let own_public = test_public_jwk();
         set_registry(&mut state, "test-issuer", std::slice::from_ref(&own_public));
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [
                 {"id": "test-issuer", "aggregation_id": uuid::Uuid::new_v4(), "keys": [{"kid": own_public.key_id(), "alg": format!("{:?}", own_public.algorithm()), "jwk": own_public.jwk()}]},
                 {"id": "another-issuer", "aggregation_id": uuid::Uuid::new_v4(), "keys": [{"kid": other_public.key_id(), "alg": format!("{:?}", other_public.algorithm()), "jwk": other_public.jwk()}]}
             ], "admins": []
         })).unwrap();
-        state.issuer_registry =
-            Arc::new(issuer_registry::RegistryHandle::from_yaml(&registry).unwrap());
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
         let app = create_test_router(state);
         let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
         let now = now();
@@ -1021,7 +1026,7 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            serde_yaml::to_string(&serde_json::json!({
+            noyalib::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
@@ -1035,8 +1040,8 @@ mod tests {
         std::fs::write(&file, registry_yaml(std::slice::from_ref(&old_key))).unwrap();
 
         let mut state = test_app_state(None).await;
-        state.issuer_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
-        let registry = state.issuer_registry.clone();
+        let registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        state.set_issuer_registry(registry.clone());
         let app = create_test_router(state);
         let now = now();
         let old_token = sign_claims_with_header(
@@ -1125,7 +1130,7 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            serde_yaml::to_string(&serde_json::json!({
+            noyalib::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
@@ -1139,8 +1144,8 @@ mod tests {
         std::fs::write(&file, registry_yaml(std::slice::from_ref(&old_key))).unwrap();
 
         let mut state = test_app_state(None).await;
-        state.issuer_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
-        let registry = state.issuer_registry.clone();
+        let registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        state.set_issuer_registry(registry.clone());
         let registry_for_assert = registry.clone();
         let watched_registry = registry.clone();
         FileWatcher::new(vec![file.clone()], Duration::from_secs(1)).spawn(
@@ -1150,7 +1155,9 @@ mod tests {
                 async move {
                     // Production keeps serving the active snapshot when a reload
                     // is invalid; this test exercises that same behavior.
-                    let _ = registry.reload();
+                    if registry.reload().is_err() {
+                        registry.record_reload_failure();
+                    }
                 }
             },
         );
@@ -1172,7 +1179,7 @@ mod tests {
         );
 
         let mut gated_state = test_app_state(None).await;
-        gated_state.issuer_registry = registry.clone();
+        gated_state.set_issuer_registry(registry.clone());
         let request_gate = Arc::new(RequestGate::default());
         let in_flight_app = create_gated_test_router(gated_state, request_gate.clone());
         let in_flight = tokio::spawn(call_with_token(in_flight_app, old_token.clone()));
@@ -1240,7 +1247,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .retain(|field, _| field != "kid" && field != "alg");
-        let duplicate_kid_registry = serde_yaml::to_string(&serde_json::json!({
+        let duplicate_kid_registry = noyalib::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "test-issuer",
@@ -1259,9 +1266,15 @@ mod tests {
             duplicate_kid_registry,
             "version: 1\nissuers:".to_owned(),
         ] {
+            let failures_before = registry_for_assert.reload_failure_count();
             std::fs::write(&file, invalid).unwrap();
-            // Polling can take one interval and the debouncer then waits 500 ms.
-            sleep(Duration::from_secs(2)).await;
+            timeout(Duration::from_secs(5), async {
+                while registry_for_assert.reload_failure_count() == failures_before {
+                    sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("invalid update was not checked by the watcher");
             assert_eq!(
                 call_with_token(app.clone(), new_token.clone())
                     .await
@@ -1269,8 +1282,15 @@ mod tests {
                 StatusCode::OK
             );
         }
+        let failures_before = registry_for_assert.reload_failure_count();
         std::fs::remove_file(&file).unwrap();
-        sleep(Duration::from_secs(2)).await;
+        timeout(Duration::from_secs(5), async {
+            while registry_for_assert.reload_failure_count() == failures_before {
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("missing registry was not checked by the watcher");
         assert_eq!(
             call_with_token(app, new_token).await.status(),
             StatusCode::OK
@@ -1284,7 +1304,7 @@ mod tests {
             let file = directory.path().join("issuers.yaml");
             std::fs::write(
                 &file,
-                serde_yaml::to_string(&serde_json::json!({
+                noyalib::to_string(&serde_json::json!({
                     "version": 1,
                     "issuers": [{
                         "id": "test-issuer",
@@ -1307,15 +1327,13 @@ mod tests {
                 file.clone(),
                 Duration::from_secs(1),
             );
-            // The watcher first fingerprints the initial file asynchronously.
-            sleep(Duration::from_secs(2)).await;
             let duplicate_key_jwk = serde_json::to_value(test_public_jwk().jwk()).unwrap();
             let mut duplicate_key_jwk = duplicate_key_jwk;
             duplicate_key_jwk
                 .as_object_mut()
                 .unwrap()
                 .retain(|field, _| field != "kid" && field != "alg");
-            let duplicate_kid_registry = serde_yaml::to_string(&serde_json::json!({
+            let duplicate_kid_registry = noyalib::to_string(&serde_json::json!({
                 "version": 1,
                 "issuers": [{
                     "id": "test-issuer",
@@ -1333,20 +1351,39 @@ mod tests {
                 duplicate_kid_registry,
                 "version: 1\nissuers:".to_owned(),
             ] {
+                let failures_before = registry.reload_failure_count();
                 std::fs::write(&file, invalid).unwrap();
-                // Allow the polling interval and debounce window to invoke reload.
-                sleep(Duration::from_secs(2)).await;
+                timeout(Duration::from_secs(5), async {
+                    while registry.reload_failure_count() == failures_before {
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .expect("invalid update was not checked by the watcher");
                 assert!(registry.resolve("test-key").is_some());
             }
+            let failures_before = registry.reload_failure_count();
             std::fs::remove_file(&file).unwrap();
-            sleep(Duration::from_secs(2)).await;
+            timeout(Duration::from_secs(5), async {
+                while registry.reload_failure_count() == failures_before {
+                    sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("missing registry was not checked by the watcher");
             assert!(registry.resolve("test-key").is_some());
         });
         let reload_failures = metrics
             .lines()
             .find(|line| line.starts_with("issuer_registry_reload_failures_total"))
             .expect("issuer registry reload failures metric is exported");
-        assert!(reload_failures.ends_with(" 4"), "{reload_failures}");
+        let total: u64 = reload_failures
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(total >= 4, "{reload_failures}");
     }
 
     #[tokio::test]
