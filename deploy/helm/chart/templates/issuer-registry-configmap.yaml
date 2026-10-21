@@ -11,5 +11,5 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
 data:
   {{ .Values.statuslist.issuerRegistry.configMap.key }}: |
-{{ .Values.statuslist.issuerRegistry.configMap.content | nindent 4 }}
+{{ .Values.statuslist.issuerRegistry.configMap.content | indent 4 }}
 {{- end }}

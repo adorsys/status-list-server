@@ -1158,7 +1158,11 @@ impl SeaOrmStore<Credentials> {
                         issuer: Set(issuer.clone()),
                         aggregation_id: Set(id.clone()),
                     })
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
+                    .on_conflict(
+                        OnConflict::column(issuer_aggregations::Column::Issuer)
+                            .do_nothing_on([issuer_aggregations::Column::Issuer])
+                            .to_owned(),
+                    )
                     .exec_without_returning(&txn)
                     .await
                     .map_err(map_insert_err)?;

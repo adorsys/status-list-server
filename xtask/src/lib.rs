@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand, ValueEnum};
-use color_eyre::eyre::{OptionExt, Result, WrapErr, ensure};
+use color_eyre::eyre::{OptionExt, Result, WrapErr, bail, ensure};
+use sha2::{Digest, Sha256};
 
 /// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
@@ -176,12 +179,38 @@ fn load_registry_yaml(file: &Path) -> Result<serde_json::Value> {
 fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_json::Value> {
     let json: serde_json::Value =
         serde_json::from_str(raw_jwk).wrap_err("parse public JWK JSON")?;
-    let jwk: jsonwebtoken::jwk::Jwk =
-        serde_json::from_value(json.clone()).wrap_err("validate public JWK")?;
-    let kid = jwk
-        .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
-        .wrap_err("compute JWK thumbprint")?;
+    let kid = jwk_thumbprint(&json).wrap_err("compute JWK thumbprint")?;
     Ok(serde_json::json!({"kid": kid, "alg": alg, "jwk": json}))
+}
+
+fn jwk_thumbprint(jwk: &serde_json::Value) -> Result<String> {
+    let member = |name| {
+        jwk.get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_eyre(format!("JWK must contain a string `{name}` member"))
+    };
+    let kty = member("kty")?;
+    let mut canonical = BTreeMap::from([("kty", kty)]);
+
+    match kty {
+        "EC" => {
+            canonical.insert("crv", member("crv")?);
+            canonical.insert("x", member("x")?);
+            canonical.insert("y", member("y")?);
+        }
+        "RSA" => {
+            canonical.insert("e", member("e")?);
+            canonical.insert("n", member("n")?);
+        }
+        "OKP" => {
+            canonical.insert("crv", member("crv")?);
+            canonical.insert("x", member("x")?);
+        }
+        _ => bail!("unsupported JWK kty `{kty}`"),
+    }
+
+    let canonical = serde_json::to_vec(&canonical).wrap_err("serialize JWK thumbprint input")?;
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical)))
 }
 
 enum RegistryInsertion {
@@ -690,6 +719,49 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("cargo xtask").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn jwk_thumbprint_uses_rfc_7638_public_members() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                    "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA",
+                    "use": "sig",
+                    "kid": "ignored",
+                }),
+                "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50",
+            ),
+            (
+                serde_json::json!({
+                    "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiY2g",
+                    "e": "AQAB",
+                    "kty": "RSA",
+                }),
+                "c4pTaQEwUhKut1DxqKsVqtcyJp-F37dxwnbGp3FXiHw",
+            ),
+            (
+                serde_json::json!({
+                    "x": "11qYAYLef1q3gZ0v1L3pDa3mQwGwR6q5H0xW9zX5YbM",
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                }),
+                "2Sy1cth_ZvIuKlHFA3AbIDpW7AbIzEWdmixu9ekxpLM",
+            ),
+        ];
+
+        for (jwk, expected) in cases {
+            assert_eq!(jwk_thumbprint(&jwk).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn jwk_thumbprint_rejects_incomplete_and_unsupported_keys() {
+        assert!(jwk_thumbprint(&serde_json::json!({"kty": "EC", "crv": "P-256"})).is_err());
+        assert!(jwk_thumbprint(&serde_json::json!({"kty": "oct", "k": "secret"})).is_err());
     }
 
     #[test]

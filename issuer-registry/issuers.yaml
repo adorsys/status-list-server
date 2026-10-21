@@ -1,3 +1,5 @@
+# Development registry. Add explicitly approved issuer keys before using
+# management endpoints; an empty registry trusts no issuers.
 version: 1
 issuers: []
 admins: []

@@ -175,6 +175,30 @@ fn rendered_env(rendered: &str) -> Vec<(String, String)> {
 }
 
 #[test]
+fn issuer_registry_config_map_preserves_the_supplied_file_bytes() {
+    let source = "version: 1\nissuers: []\nadmins: []";
+    let content = format!("statuslist.issuerRegistry.configMap.content={source}");
+    let Some(rendered) = render_helm(&[
+        "--set",
+        "statuslist.issuerRegistry.configMap.create=true",
+        "--set-string",
+        &content,
+    ]) else {
+        return;
+    };
+
+    let rendered_content = rendered
+        .lines()
+        .skip_while(|line| line.trim() != "issuers.yaml: |")
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| &line[4..])
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(rendered_content, source);
+}
+
+#[test]
 fn rendered_chart_default_env_loads_application_config() {
     let Some(rendered) = helm_template_chart_defaults(&[]).map(|output| {
         assert!(

@@ -996,16 +996,7 @@ async fn validate_registry_aggregation_ids(
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
 ) -> Result<(), crate::server::auth::issuer_registry::RegistryError> {
     use crate::server::auth::issuer_registry::RegistryError;
-    let mappings: Vec<_> = registry
-        .issuers()
-        .iter()
-        .map(|issuer| {
-            (
-                issuer.id.clone(),
-                crate::domain::models::credential::AggregationId(issuer.aggregation_id),
-            )
-        })
-        .collect();
+    let mut mappings = Vec::new();
     let mut legacy_adoptions = Vec::new();
     for issuer in registry.issuers() {
         let expected = crate::domain::models::credential::AggregationId(issuer.aggregation_id);
@@ -1043,25 +1034,28 @@ async fn validate_registry_aggregation_ids(
                 "aggregation_id `{expected}` belongs to another database issuer"
             )));
         }
+        mappings.push((issuer.id.clone(), expected));
         if stored == Some(None) {
             legacy_adoptions.push((issuer.id.as_str(), expected));
         }
     }
-    service
-        .credential_repo()
-        .record_registry_aggregation_ids(&mappings)
-        .await
-        .map_err(|error| match error {
-            crate::domain::models::credential::CredentialError::AlreadyExists => {
-                RegistryError::Semantic(
-                    "issuer aggregation mapping conflicts with its persisted immutable history"
-                        .into(),
-                )
-            }
-            error => RegistryError::Database(format!(
-                "cannot record immutable issuer aggregation mappings: {error}"
-            )),
-        })?;
+    if !mappings.is_empty() {
+        service
+            .credential_repo()
+            .record_registry_aggregation_ids(&mappings)
+            .await
+            .map_err(|error| match error {
+                crate::domain::models::credential::CredentialError::AlreadyExists => {
+                    RegistryError::Semantic(
+                        "issuer aggregation mapping conflicts with its persisted immutable history"
+                            .into(),
+                    )
+                }
+                error => RegistryError::Database(format!(
+                    "cannot record immutable issuer aggregation mappings: {error}"
+                )),
+            })?;
+    }
     for (issuer, expected) in legacy_adoptions {
         let repo = service.credential_repo();
         repo.assign_aggregation_id(issuer, expected)
@@ -1536,6 +1530,93 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    use crate::{
+        domain::models::credential::{AggregationId, Credential, CredentialError},
+        test_utils::test_app_state,
+    };
+
+    #[derive(Debug)]
+    struct UnavailableCredentials;
+
+    fn unavailable<T>() -> Result<T, CredentialError> {
+        Err(CredentialError::Backend(
+            "credential store unavailable".into(),
+        ))
+    }
+
+    #[async_trait::async_trait]
+    impl CredentialRepo for UnavailableCredentials {
+        async fn find(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            unavailable()
+        }
+
+        async fn find_by_kid(&self, _: &str) -> Result<Option<Credential>, CredentialError> {
+            unavailable()
+        }
+
+        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+            unavailable()
+        }
+
+        async fn find_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<AggregationId>, CredentialError> {
+            unavailable()
+        }
+
+        async fn find_stored_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+            unavailable()
+        }
+
+        async fn assign_aggregation_id(
+            &self,
+            _: &str,
+            _: AggregationId,
+        ) -> Result<(), CredentialError> {
+            unavailable()
+        }
+
+        async fn find_issuer_by_aggregation_id(
+            &self,
+            _: AggregationId,
+        ) -> Result<Option<Issuer>, CredentialError> {
+            unavailable()
+        }
+
+        async fn record_registry_aggregation_ids(
+            &self,
+            _: &[(String, AggregationId)],
+        ) -> Result<(), CredentialError> {
+            unavailable()
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_registry_mappings_do_not_require_the_database() {
+        let registry = crate::server::auth::issuer_registry::IssuerRegistry::from_yaml(
+            include_str!("../docs/schemas/issuers.v1.example.yaml"),
+        )
+        .unwrap();
+        let mut state = test_app_state(None).await;
+        let service = &state.service;
+        state.service = Arc::new(Service::from_arcs(
+            service.status_list_repo.clone(),
+            Arc::new(UnavailableCredentials),
+            service.status_list_cache.clone(),
+            service.snapshot_repo.clone(),
+            service.cert_provider.clone(),
+        ));
+
+        assert!(
+            validate_registry_aggregation_ids(&state.service, &registry, &registry)
+                .await
+                .is_ok()
+        );
+    }
 
     #[tokio::test]
     async fn existing_issuer_cannot_change_aggregation_id_in_registry() {

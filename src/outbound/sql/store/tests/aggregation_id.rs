@@ -98,6 +98,28 @@ async fn registry_aggregation_mappings_survive_database_restart() {
 async fn assert_aggregation_id_round_trip(db: Arc<DatabaseConnection>, backend: &str) {
     let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
     let aggregation_id = AggregationId::generate();
+    let registry_id = AggregationId::generate();
+    repo.record_registry_aggregation_ids(&[("registry-issuer".into(), registry_id)])
+        .await
+        .unwrap_or_else(|e| panic!("recording a registry mapping on {backend}: {e}"));
+    repo.record_registry_aggregation_ids(&[("registry-issuer".into(), registry_id)])
+        .await
+        .unwrap_or_else(|e| panic!("reloading an unchanged registry mapping on {backend}: {e}"));
+    assert!(
+        repo.record_registry_aggregation_ids(&[(
+            "registry-issuer".into(),
+            AggregationId::generate(),
+        )])
+        .await
+        .is_err(),
+        "an issuer cannot change its registry ID on {backend}"
+    );
+    assert!(
+        repo.record_registry_aggregation_ids(&[("different-issuer".into(), registry_id)])
+            .await
+            .is_err(),
+        "a registry ID cannot change issuers on {backend}"
+    );
     repo.insert(credential("issuer-agg"), aggregation_id)
         .await
         .unwrap();
