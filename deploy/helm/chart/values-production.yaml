@@ -7,6 +7,15 @@ serviceAccount:
 
 statuslist:
   replicaCount: 2
+  issuerRegistry:
+    # The issuer trust registry is required in production: the server refuses to
+    # start without a configured registry file. Operators supply and maintain
+    # the issuers.yaml ConfigMap this mounts; it is never committed to the
+    # repository. Rotate or revoke keys by updating the ConfigMap (see
+    # docs/deployment-runbook.md).
+    volume:
+      configMap:
+        name: status-list-server-issuers
   ingress:
     management:
       # Enable the management listener Ingress in production so issuer writes

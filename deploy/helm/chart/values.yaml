@@ -264,8 +264,8 @@ statuslist:
     # the directory containing it is mounted from `volume`. Provide any volume
     # source that makes the file named in `path` available, for example
     # configMap: {name: issuers}, secret: {secretName: issuers}, or csi: {...}.
-    # Required when the chart is enabled: the chart fails to render without a
-    # volume, so a deployment cannot silently start with no trusted issuers.
+    # When `volume` is empty the chart mounts no registry: the server warns and
+    # trusts no issuers (the development default).
     path: /etc/status-list-server/issuers.yaml
     volume: {}
   aws:
