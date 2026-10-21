@@ -204,11 +204,22 @@ pub struct ManagementAuthConfig {
 }
 
 impl ManagementAuthConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
         if self.max_token_lifetime_secs == 0 {
             return Err(ConfigError::Message(
                 "management_auth.max_token_lifetime_secs must be greater than 0".to_string(),
             ));
+        }
+
+        if self.audiences.is_empty() {
+            if environment.is_production() {
+                return Err(ConfigError::Message(
+                    "management_auth.audiences must not be empty in production".to_string(),
+                ));
+            }
+            tracing::warn!(
+                "management_auth.audiences is empty; audience validation is disabled in development"
+            );
         }
 
         Ok(())
@@ -289,17 +300,87 @@ where
     }
 }
 
+/// Repository URL advertised as the service document's `links.documentation`.
+pub const REPOSITORY_URL: &str = "https://github.com/adorsys/status-list-server";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
     pub domain: String,
     pub port: u16,
+    pub management: ListenerConfig,
+    pub admin: ListenerConfig,
+    pub links: LinksConfig,
     pub cert: CertConfig,
     pub enable_metrics: bool,
     pub aggregation_uri: Option<String>,
     /// Defaults to `https://{domain}/api/v1` when unset.
     #[serde(default)]
     pub public_base_url: Option<String>,
+}
+
+/// A single TCP listener binding (host + port).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListenerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Links exposed in the service document returned by `GET /`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinksConfig {
+    pub documentation: String,
+    /// Optional portal link; omitted from the service document when unset or
+    /// empty. An empty `APP_SERVER__LINKS__PORTAL` is treated as absent so
+    /// that the service document never emits `"portal": ""` (which would
+    /// violate the OpenAPI `format: uri` contract).
+    #[serde(default, deserialize_with = "deserialize_optional_uri_string")]
+    pub portal: Option<String>,
+}
+
+impl ServerConfig {
+    /// Whether the configured public, management, and admin listeners resolve to
+    /// the same host:port, which would make the network boundary meaningless.
+    ///
+    /// Returns `Some((name_a, name_b))` identifying the two clashing listeners,
+    /// or `None` when all three are distinct.
+    ///
+    /// Two listeners both on port 0 are NOT treated as a conflict: the OS
+    /// assigns each its own ephemeral port at bind time.
+    pub fn duplicate_listener_pair(&self) -> Option<(&'static str, &'static str)> {
+        let listeners: &[(&'static str, &str, u16)] = &[
+            ("server.host:server.port", &self.host, self.port),
+            (
+                "server.management.host:server.management.port",
+                &self.management.host,
+                self.management.port,
+            ),
+            (
+                "server.admin.host:server.admin.port",
+                &self.admin.host,
+                self.admin.port,
+            ),
+        ];
+        for (i, (name_a, host_a, port_a)) in listeners.iter().enumerate() {
+            for (name_b, host_b, port_b) in listeners.iter().skip(i + 1) {
+                // Port 0 means "let the OS pick an ephemeral port"; two listeners
+                // both on 0 get distinct ports and must not be flagged.
+                if *port_a == 0 && *port_b == 0 {
+                    continue;
+                }
+                if port_a == port_b && hosts_resolve_equal(host_a, host_b) {
+                    return Some((name_a, name_b));
+                }
+            }
+        }
+        None
+    }
+
+    /// True when two listeners resolve to the same host and port, which would
+    /// collapse the public/management/admin boundary. Used by tests.
+    pub fn has_duplicate_listener(&self) -> bool {
+        self.duplicate_listener_pair().is_some()
+    }
 }
 
 impl ServerConfig {
@@ -327,7 +408,7 @@ impl ServerConfig {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
             None => format!(
-                "https://{}{PUBLIC_API_PATH_PREFIX}",
+                "https://{}{API_V1_PREFIX}",
                 url_authority_host(&self.domain)
             ),
         }
@@ -342,6 +423,47 @@ fn url_authority_host(domain: &str) -> String {
     } else {
         domain.to_string()
     }
+}
+
+/// Whether two listener host strings resolve to the same interface: equal
+/// hostnames (case-insensitive), equal IP literals, a hostname that resolves
+/// to the same IP, or a wildcard bind (`0.0.0.0` / `::`) covering the other
+/// host's address family. Used to reject ambiguous public/management/admin
+/// bindings at startup.
+fn hosts_resolve_equal(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let ips_a = host_bind_ips(a);
+    let ips_b = host_bind_ips(b);
+    if ips_a.is_empty() || ips_b.is_empty() {
+        return false;
+    }
+    let wildcard_a = ips_a.iter().any(|ip| ip.is_unspecified());
+    let wildcard_b = ips_b.iter().any(|ip| ip.is_unspecified());
+    if wildcard_a || wildcard_b {
+        // A wildcard bind (0.0.0.0 / ::) covers every interface of its address
+        // family, so it collides with any other host in the same family.
+        return ips_a
+            .iter()
+            .any(|a| ips_b.iter().any(|b| a.is_ipv4() == b.is_ipv4()));
+    }
+    ips_a.iter().any(|ip_a| ips_b.contains(ip_a))
+}
+
+/// Resolve a listener host string to the set of IP addresses it can bind: an
+/// IP literal yields itself, a hostname is resolved via the system resolver
+/// (e.g. `localhost` -> `127.0.0.1` / `::1`). Unresolvable strings yield no
+/// addresses.
+fn host_bind_ips(host: &str) -> Vec<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    (host, 0u16)
+        .to_socket_addrs()
+        .map(|addrs| addrs.map(|a| a.ip()).collect())
+        .unwrap_or_default()
 }
 
 /// Validates `server.domain`: a bare host name or IP address with no scheme,
@@ -371,13 +493,17 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// API path prefix under which the status-list routes are mounted. The published
-/// `sub` URI is built as `{public_base_url}/status-lists/{list_id}`, so by default
-/// `public_base_url` carries this prefix for it to resolve. Operators running
-/// behind a proxy with a different path prefix may set a custom
-/// `server.public_base_url` whose path differs; the router mounts the same
-/// prefix so the two cannot drift.
-pub const PUBLIC_API_PATH_PREFIX: &str = "/api/v1";
+/// API path prefix shared by all versioned routes (`/api/v1`). Both the public
+/// and management listeners mount their routes under this prefix; the name
+/// reflects the version rather than the listener so it is not confused with the
+/// "public" listener specifically.
+///
+/// The published `sub` URI is built as `{public_base_url}/status-lists/{list_id}`,
+/// so by default `public_base_url` carries this prefix for it to resolve.
+/// Operators running behind a proxy with a different path prefix may set a
+/// custom `server.public_base_url` whose path differs; the router mounts the
+/// same prefix so the two cannot drift.
+pub const API_V1_PREFIX: &str = "/api/v1";
 
 /// Validates `server.public_base_url`: an absolute `https` URL with a host, no
 /// userinfo, query, or fragment, and no trailing slash. The path is not
@@ -889,6 +1015,25 @@ pub struct DatabaseConfig {
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Serde deserializer for `Option<String>` URI fields that treats an empty (or
+/// whitespace-only) string the same as `None`. This prevents an unset env var
+/// (which the config crate maps to `""`) from producing `"portal": ""`  in the
+/// service document, violating the OpenAPI `format: uri` contract.
+fn deserialize_optional_uri_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    Ok(raw.and_then(|s| {
+        let trimmed = s.trim().to_owned();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }))
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -1550,13 +1695,31 @@ impl Config {
             validate_database_query(query)?;
         }
         validate_server_domain(&config.server.domain)?;
+        if let Some((name_a, name_b)) = config.server.duplicate_listener_pair() {
+            return Err(ConfigError::Message(format!(
+                "Duplicate listener: {name_a} and {name_b} resolve to the same host:port, which \
+                 would collapse the public/management/admin network boundary. Give each listener \
+                 a distinct port (or host)."
+            )));
+        }
+
         // Validate the *resolved* base URL — whether explicitly set or derived
         // from `server.domain` — so a broken fallback is caught at startup too.
         // The raw (un-normalized) value is inspected so the trailing-slash rule
         // sees the operator's actual input.
         validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
+        // Validate the optional portal link: it must be an absolute URI when set.
+        if let Some(portal) = trim_non_empty(config.server.links.portal.as_deref()) {
+            url::Url::parse(portal).map_err(|err| {
+                ConfigError::Message(format!(
+                    "Invalid server.links.portal: not a valid URI ({err})"
+                ))
+            })?;
+        }
         config.cache.validate(config.telemetry.environment)?;
-        config.management_auth.validate()?;
+        config
+            .management_auth
+            .validate(config.telemetry.environment)?;
         config.status_list.validate()?;
         config.limits.validate()?;
         config
@@ -1591,6 +1754,12 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.host", "localhost")?
         .set_default("server.domain", "localhost")?
         .set_default("server.port", 8000)?
+        .set_default("server.management.host", "localhost")?
+        .set_default("server.management.port", 8001)?
+        .set_default("server.admin.host", "localhost")?
+        .set_default("server.admin.port", 8002)?
+        .set_default("server.links.documentation", REPOSITORY_URL)?
+        .set_default("server.links.portal", Option::<String>::None)?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
@@ -1666,7 +1835,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("status_list.token_ttl_secs", 300)?
         .set_default("status_list.snapshot_retention_secs", 7776000)?
         .set_default("management_auth.leeway_secs", 60)?
-        .set_default("management_auth.max_token_lifetime_secs", 3600)?
+        .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
@@ -1725,6 +1894,13 @@ mod tests {
 
         assert_eq!(config.server.host, "localhost");
         assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.management.host, "localhost");
+        assert_eq!(config.server.management.port, 8001);
+        assert_eq!(config.server.admin.host, "localhost");
+        assert_eq!(config.server.admin.port, 8002);
+        assert_eq!(config.server.links.documentation, REPOSITORY_URL);
+        assert_eq!(config.server.links.portal, None);
+        assert!(!config.server.has_duplicate_listener());
         assert_eq!(config.server.cert.email, "admin@example.com");
         assert_eq!(
             config.server.cert.acme_directory_url,
@@ -1739,7 +1915,7 @@ mod tests {
         assert_eq!(config.status_list.token_exp_secs, 900);
         assert_eq!(config.status_list.token_ttl_secs, 300);
         assert_eq!(config.management_auth.leeway_secs, 60);
-        assert_eq!(config.management_auth.max_token_lifetime_secs, 3600);
+        assert_eq!(config.management_auth.max_token_lifetime_secs, 300);
         assert!(config.management_auth.audiences.is_empty());
         assert_eq!(config.server.cert.renewal_cron_schedule, "0 0 0 * * *");
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
@@ -2441,6 +2617,12 @@ mod tests {
                 .expect("empty audience env value should load");
         assert!(empty_audiences.management_auth.audiences.is_empty());
 
+        let production_empty_audiences = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("APP_MANAGEMENT_AUTH__AUDIENCES", ""),
+        ]);
+        assert!(production_empty_audiences.is_err());
+
         let trimmed_audiences = Config::load_from_overrides(&[(
             "APP_MANAGEMENT_AUTH__AUDIENCES",
             "status-list-server-management, internal-management, ",
@@ -2452,6 +2634,86 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_duplicate_listeners_are_rejected() {
+        // Defaults (8000/8001/8002) are distinct and load fine.
+        assert!(Config::load_from_overrides(&[]).is_ok());
+
+        // Management colliding with the public port must fail startup.
+        let mgmt_collides = Config::load_from_overrides(&[("server.management.port", "8000")]);
+        let err = mgmt_collides
+            .expect_err("management on the public port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // Admin colliding with management must fail startup.
+        let admin_collides = Config::load_from_overrides(&[("server.admin.port", "8001")]);
+        let err = admin_collides
+            .expect_err("admin on the management port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // Same port on different hosts is a valid, distinct listener (the
+        // wildcard and loopback are in different address families, so binding
+        // 0.0.0.0 and [::1] on the same port does not collide).
+        assert!(
+            Config::load_from_overrides(&[
+                ("server.host", "0.0.0.0"),
+                ("server.management.host", "::1"),
+                ("server.management.port", "8000"),
+            ])
+            .is_ok()
+        );
+
+        // A wildcard bind (0.0.0.0) covers the loopback of its own family, so
+        // 0.0.0.0 and 127.0.0.1 on the same port must be rejected.
+        let wildcard_loopback = Config::load_from_overrides(&[
+            ("server.host", "0.0.0.0"),
+            ("server.management.host", "127.0.0.1"),
+            ("server.management.port", "8000"),
+        ]);
+        let err = wildcard_loopback
+            .expect_err("a wildcard bind and a loopback bind on the same port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+
+        // `localhost` and the loopback literal resolve to the same address, so
+        // they must be rejected on the same port.
+        let localhost_loopback = Config::load_from_overrides(&[
+            ("server.host", "localhost"),
+            ("server.management.host", "127.0.0.1"),
+            ("server.management.port", "8000"),
+        ]);
+        let err = localhost_loopback
+            .expect_err("localhost and 127.0.0.1 on the same port must be rejected")
+            .to_string();
+        assert!(err.contains("Duplicate listener"), "{err}");
+    }
+
+    #[test]
+    fn test_links_config_loads_and_defaults() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(config.server.links.documentation, REPOSITORY_URL);
+        assert_eq!(config.server.links.portal, None);
+
+        let overridden = Config::load_from_overrides(&[
+            (
+                "server.links.documentation",
+                "https://docs.example.com/status-list",
+            ),
+            ("server.links.portal", "https://portal.example.com"),
+        ])
+        .unwrap();
+        assert_eq!(
+            overridden.server.links.documentation,
+            "https://docs.example.com/status-list"
+        );
+        assert_eq!(
+            overridden.server.links.portal.as_deref(),
+            Some("https://portal.example.com")
         );
     }
 
@@ -2567,11 +2829,14 @@ mod tests {
     }
 
     fn aggregation_uri_in(environment: &str, uri: &str) -> Result<Option<Url>, ConfigError> {
-        Config::load_from_overrides(&[
+        let mut overrides = vec![
             ("telemetry.environment", environment),
             ("server.aggregation_uri", uri),
-        ])
-        .map(|config| {
+        ];
+        if classify_app_env(environment).is_production() {
+            overrides.push(("management_auth.audiences", "status-list-server-management"));
+        }
+        Config::load_from_overrides(&overrides).map(|config| {
             config
                 .server
                 .aggregation_uri(config.telemetry.environment)

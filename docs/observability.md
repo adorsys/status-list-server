@@ -110,8 +110,8 @@ FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
 
 Services provisioned for observability:
 
-- **Status List Server**: `http://localhost:8000`
-- **Prometheus Metrics**: `http://localhost:8000/metrics`
+- **Status List Server (public)**: `http://localhost:8000`
+- **Prometheus Metrics (admin listener)**: `http://localhost:8002/metrics`
 - **Prometheus UI**: `http://localhost:9090`
 - **Jaeger UI**: `http://localhost:16686`
 - **OTLP Collector**: `localhost:4317` (gRPC) / `localhost:4318` (HTTP) / `localhost:8889` (Prometheus metrics exporter)

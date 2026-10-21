@@ -36,7 +36,7 @@ rate(process_cpu_seconds_total[1m])
 
 ```bash
 # Local stack: inspect live latency distribution
-curl -s http://localhost:8000/metrics | grep http_server_duration_seconds_bucket
+curl -s http://localhost:8002/metrics | grep http_server_duration_seconds_bucket
 ```
 
 ## Mitigation

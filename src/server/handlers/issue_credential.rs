@@ -1,5 +1,4 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use jsonwebtoken::jwk::Jwk;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,7 +6,7 @@ use crate::{
     server::{
         AppState,
         auth::{AuthenticatedIssuer, errors::AuthenticationError},
-        error::ApiError,
+        error::{ApiError, IntoApiError},
     },
 };
 
@@ -15,7 +14,7 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialsRequest {
     pub issuer: String,
-    pub public_key: Jwk,
+    pub public_key: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Response body for a registration. The issuer cannot derive its aggregation
@@ -62,8 +61,9 @@ pub async fn credential_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let public_key_bytes = serde_json::to_vec(&payload.public_key)
         .map_err(|e| ApiError::bad_request("invalid_public_jwk", e.to_string()))?;
+    let issuer = Issuer(payload.issuer);
     let credential = Credential {
-        issuer: Issuer(payload.issuer),
+        issuer: issuer.clone(),
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
     let aggregation_id = state.service.publish_credential(credential).await?;
@@ -72,7 +72,7 @@ pub async fn credential_handler(
         Json(CredentialsResponse {
             status: "Credentials stored successfully".to_string(),
             aggregation_id,
-            aggregation_uri: state.aggregation_uri_for(aggregation_id),
+            aggregation_uri: state.aggregation_uri_for(&issuer, aggregation_id),
         }),
     )
         .into_response())
@@ -91,18 +91,22 @@ pub async fn get_credential(
         .service
         .find_aggregation_id(&issuer)
         .await?
-        .ok_or_else(|| ApiError::not_found("issuer_not_found", "Issuer is not registered"))?;
+        .ok_or_else(|| {
+            tracing::warn!(iss = %issuer.0, "Credential disappeared after authentication");
+            AuthenticationError::InvalidToken.into_api_error()
+        })?;
+    let aggregation_uri = state.aggregation_uri_for(&issuer, aggregation_id);
     Ok(Json(RegistrationResponse {
         issuer: issuer.0,
         aggregation_id,
-        aggregation_uri: state.aggregation_uri_for(aggregation_id),
+        aggregation_uri,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{authenticated_issuer, test_app_state};
+    use crate::test_utils::{authenticated_issuer, register_issuer, test_app_state};
     use axum::{
         Router,
         body::Body,
@@ -110,7 +114,7 @@ mod tests {
         http::{Method, header},
         routing::post,
     };
-    use jsonwebtoken::jwk::Jwk;
+    use std::{collections::HashSet, sync::Arc};
     use tower::ServiceExt;
 
     fn create_test_router(app_state: AppState) -> Router {
@@ -119,11 +123,13 @@ mod tests {
             .with_state(app_state)
     }
 
-    fn test_jwk() -> Jwk {
+    fn test_jwk() -> serde_json::Map<String, serde_json::Value> {
         serde_json::from_str(
             r#"{
                 "kty": "EC",
                 "crv": "P-256",
+                "kid": "test-key",
+                "alg": "ES256",
                 "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
                 "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
             }
@@ -210,13 +216,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_credential_for_an_unknown_issuer_is_not_found() {
+    async fn test_credentials_withhold_the_aggregation_uri_per_issuer() {
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = Some(
+            "https://statuslist.example.com/api/v1/aggregation"
+                .parse()
+                .unwrap(),
+        );
+        app_state.aggregation_withheld_from =
+            Arc::new(HashSet::from([Issuer::from("test_issuer")]));
+        let withheld = register(app_state.clone()).await;
+        assert_eq!(withheld.aggregation_uri, None);
+        let Json(registration) = get_credential(
+            State(app_state.clone()),
+            authenticated_issuer("test_issuer"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(registration.aggregation_id, withheld.aggregation_id);
+        assert_eq!(registration.aggregation_uri, None);
+
+        let other_id = register_issuer(&app_state.service, "other_issuer").await;
+        let Json(other) = get_credential(State(app_state), authenticated_issuer("other_issuer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            other.aggregation_uri,
+            Some(format!(
+                "https://statuslist.example.com/api/v1/aggregation/{other_id}"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credential_for_an_unknown_issuer_is_invalid_token() {
         let app_state = test_app_state(None).await;
         let err = get_credential(State(app_state), authenticated_issuer("nobody"))
             .await
             .unwrap_err();
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
-        assert_eq!(err.error, "issuer_not_found");
+        let response = err.into_response();
+        let expected = AuthenticationError::InvalidToken.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), expected.status());
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            expected.headers()[header::WWW_AUTHENTICATE]
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            axum::body::to_bytes(expected.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -238,5 +291,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_registration_rejects_private_jwk_member() {
+        let app_state = test_app_state(None).await;
+        let mut public_key = test_jwk();
+        public_key.insert("d".to_string(), serde_json::json!("private-material"));
+        let response = create_test_router(app_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"issuer": "private-key-issuer", "public_key": public_key})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            app_state
+                .service
+                .find_credential("private-key-issuer")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registration_rejects_duplicate_kid_across_issuers() {
+        let app_state = test_app_state(None).await;
+        register(app_state.clone()).await;
+        let response = create_test_router(app_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/issue-credential")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"issuer": "other-issuer", "public_key": test_jwk()})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            app_state
+                .service
+                .find_credential_by_kid("test-key")
+                .await
+                .unwrap()
+                .unwrap()
+                .issuer,
+            Issuer("test_issuer".into())
+        );
     }
 }

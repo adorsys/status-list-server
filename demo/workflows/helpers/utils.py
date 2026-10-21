@@ -46,6 +46,30 @@ def get_base_url():
     return f"http://localhost:{port}"
 
 
+def get_management_url():
+    """
+    Discovers the management base URL from the APP_SERVER__MANAGEMENT__PORT.
+
+    The management listener is where authenticated issuer writes and credential
+    registration live (public reads are separate). The port is read from the
+    environment first, then a .env file at the project root, mirroring how the
+    server resolves it. Without either it defaults to port 8001. The host is
+    always localhost: the server's bind address (e.g. 0.0.0.0) is not something
+    the demo should connect to.
+
+    Returns:
+        str: The determined management base URL (e.g., "http://localhost:8001").
+    """
+    project_root = Path(__file__).resolve().parents[3]
+    port = (
+        os.environ.get("APP_SERVER__MANAGEMENT__PORT")
+        or dotenv_values(project_root / ".env").get("APP_SERVER__MANAGEMENT__PORT")
+        or 8001
+    )
+
+    return f"http://localhost:{port}"
+
+
 def decode_cwt_status_list(cwt_data: bytes) -> dict:
     """
     Decodes the `status_list` claim from a status list CWT.

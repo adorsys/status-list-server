@@ -51,6 +51,9 @@ impl CertificateProvider for FixtureCertificate {
 fn fixture_config() -> Config {
     serde_json::from_value(json!({
         "server": {"host": "127.0.0.1", "port": 0, "domain": "localhost",
+            "management": {"host": "127.0.0.1", "port": 0},
+            "admin": {"host": "127.0.0.1", "port": 0},
+            "links": {"documentation": "https://github.com/adorsys/status-list-server"},
             "enable_metrics": false, "cert": {"email": "test@example.com",
                 "acme_directory_url": "https://acme.invalid/directory",
                 "signing_key_cache_ttl": 0, "renewal_cron_schedule": "0 0 0 * * *", "store": {}}},
@@ -66,7 +69,7 @@ fn fixture_config() -> Config {
         "cache": {"backend": "memory", "ttl": 300, "max_capacity": 100},
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
-        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 3600, "audiences": []},
+        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": []},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
@@ -105,6 +108,7 @@ fn fixture_state(config: &Config) -> AppState {
             .server
             .aggregation_uri(config.telemetry.environment)
             .unwrap(),
+        aggregation_withheld_from: Default::default(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
         max_status_index: config.limits.max_status_index,
@@ -113,14 +117,20 @@ fn fixture_state(config: &Config) -> AppState {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        links: status_list_server::server::ServiceLinks {
+            documentation: status_list_server::config::REPOSITORY_URL.to_string(),
+            portal: None,
+        },
         token_bytes_cache: TokenBytesCache::new(config.token_bytes_cache.max_capacity),
         readiness: Readiness::default(),
     }
 }
 const ISSUER: &str = "conformance-issuer";
+const KEY_ID: &str = "conformance-key";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
+    pub(super) management_url: String,
     pub(super) client: reqwest::Client,
     pub(super) aggregation_id: String,
 }
@@ -132,7 +142,7 @@ impl TestServer {
         config.server.aggregation_uri = aggregation_uri;
         // HttpServer::new owns binding. Retry if another parallel test/process
         // acquires the OS-selected port between releasing it and server startup.
-        let (base_url, server) = {
+        let (base_url, management_url, server) = {
             let mut started = None;
             for attempt in 0..10 {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -145,7 +155,8 @@ impl TestServer {
                     .await
                 {
                     Ok(server) => {
-                        started = Some((base_url, server));
+                        let management_url = format!("http://{}", server.management_addr());
+                        started = Some((base_url, management_url, server));
                         break;
                     }
                     Err(error)
@@ -164,7 +175,13 @@ impl TestServer {
             started.expect("server bound within retry limit")
         };
         // Each #[tokio::test] owns its runtime; shutdown drops its server tasks.
-        tokio::spawn(server.run());
+        // Hold the sender alive for the server task's lifetime so the graceful
+        // shutdown future never resolves mid-test; teardown happens on runtime drop.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let _shutdown_tx = shutdown_tx;
+            server.run(shutdown_rx).await
+        });
         let client = reqwest::Client::builder()
             .no_proxy()
             .no_gzip()
@@ -177,6 +194,7 @@ impl TestServer {
             .unwrap();
         let mut app = Self {
             base_url,
+            management_url,
             client,
             aggregation_id: String::new(),
         };
@@ -184,9 +202,9 @@ impl TestServer {
         let public = key.public_key_bytes();
         let response = app
             .client
-            .post(app.url("/api/v1/credentials"))
+            .post(format!("{}/api/v1/credentials", app.management_url))
             .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256",
+                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
                 "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
                 "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
             }}))
@@ -202,8 +220,11 @@ impl TestServer {
 
     pub(super) fn bearer_token(&self) -> String {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(KEY_ID.to_owned());
+        header.typ = Some("statuslist-management+jwt".to_owned());
         jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
+            &header,
             &json!({"iss": ISSUER, "iat": now, "exp": now + 300}),
             &jsonwebtoken::EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap(),
         )

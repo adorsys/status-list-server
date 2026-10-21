@@ -20,6 +20,18 @@ pub(super) async fn assert_credentials_round_trip(db: Arc<DatabaseConnection>, i
     assert_eq!(found.issuer, issuer);
     assert_eq!(found.public_key, public_key);
 
+    let matches = store.find_credentials_by_kid("test-key").await.unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].issuer, issuer);
+    assert_eq!(matches[0].public_key, public_key);
+    assert!(
+        store
+            .find_credentials_by_kid("unknown-key")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     let deleted = store.delete_by(issuer).await.unwrap();
     assert!(deleted);
 
@@ -51,6 +63,18 @@ pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
     assert!(
         matches!(dup_cred, Err(RepositoryError::DuplicateEntry)),
         "duplicate credential insert must map to DuplicateEntry, got {dup_cred:?}"
+    );
+
+    // A different issuer cannot make the registered kid ambiguous either.
+    let dup_kid = cred_store
+        .insert_one(Credentials::new(
+            format!("{issuer}-other"),
+            serde_json::from_str(fixtures::TEST_EC_JWK).unwrap(),
+        ))
+        .await;
+    assert!(
+        matches!(dup_kid, Err(RepositoryError::DuplicateEntry)),
+        "duplicate kid must map to DuplicateEntry, got {dup_kid:?}"
     );
 
     // Duplicate status list (same list_id primary key).

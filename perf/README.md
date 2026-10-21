@@ -13,7 +13,12 @@ This suite contains four tests exercising the StatusList Server:
 3. Spike test
 4. Authentication test
 
-Each test targets `http://localhost:8000` by default.
+Each test targets `http://localhost:8000` by default. Public reads (health,
+welcome, status-list retrieval) hit that target. Management writes (credential
+registration and status-list publishes/updates) go to the management listener at
+`http://localhost:8001` by default. Override the write destination with
+`MANAGEMENT_TARGET` (e.g. `MANAGEMENT_TARGET=https://mgmt.example.com npm run
+test:load`) for a deployment with a separate management hostname.
 
 ## Prerequisites
 
@@ -35,6 +40,12 @@ npm install
 npm run generate-tokens
 ```
 
+Set `MANAGEMENT_AUDIENCE` to an audience accepted by the target deployment
+before generating tokens (local default: `status-list-server-management`).
+Management tokens expire after 300 seconds; workers refresh them during longer
+runs. The ignored `scripts/test-tokens.json` contains the ephemeral private key
+and is written with owner-only permissions. Regenerate it for each run.
+
 `generate-tokens` writes a single, git-ignored `scripts/test-tokens.json`
 containing the issuer ID, the public JWK and a set of signed JWTs. The run and
 setup scripts read everything they need from this file, so the key always
@@ -45,10 +56,9 @@ matches the signed JWTs it was generated with.
 Before each test, `scripts/setup.js` runs automatically (via the `npm run
 test:*` scripts). It registers the test issuer from `test-tokens.json` and
 publishes a set of seed status lists, writing their IDs to
-`scripts/seed-lists.json` (git-ignored). This is what makes the authenticated
-flows work on a fresh server — without registration the token's `iss` is
-unknown and every authenticated request returns `401 issuer_not_found` — and it
-gives the read scenarios real list IDs to query.
+`scripts/seed-lists.json` (git-ignored). Registration lets the server resolve the
+token's `kid` to its public key; without it, authenticated requests return
+`401 invalid_token`. The seed lists give the read scenarios real list IDs to query.
 
 Setup runs as a separate Node script rather than an Artillery `before:` hook,
 which does not execute processor `function:` steps.

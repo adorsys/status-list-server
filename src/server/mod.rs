@@ -7,8 +7,10 @@ pub mod handlers;
 pub mod health;
 pub mod rate_limit;
 
-use crate::domain::models::credential::AggregationId;
+use crate::domain::models::credential::{AggregationId, Issuer};
 use crate::domain::service::{Service, StatusListPolicy};
+use axum::{Json, extract::State};
+use std::collections::HashSet;
 use std::sync::Arc;
 use url::Url;
 
@@ -24,7 +26,7 @@ impl Default for ManagementAuthConfig {
     fn default() -> Self {
         Self {
             leeway_secs: 60,
-            max_token_lifetime_secs: 3600,
+            max_token_lifetime_secs: 300,
             audiences: Vec::new(),
         }
     }
@@ -40,6 +42,21 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
     }
 }
 
+/// Links exposed in the `GET /` service document.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceLinks {
+    pub documentation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portal: Option<String>,
+}
+
+/// The minimal `application/json` service document returned by `GET /`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServiceDocument {
+    pub service: &'static str,
+    pub links: ServiceLinks,
+}
+
 /// Shared application state injected into web handlers.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -52,6 +69,8 @@ pub struct AppState {
     /// The aggregation endpoint's URL. Tokens and registrations advertise it
     /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
     pub aggregation_uri: Option<Url>,
+    /// Issuers that were over one aggregation page at startup.
+    pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
@@ -60,6 +79,8 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Links exposed in the `GET /` service document.
+    pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
@@ -68,8 +89,15 @@ pub struct AppState {
 
 impl AppState {
     /// The issuer's aggregation URI, or `None` when aggregation is not
-    /// configured.
-    pub fn aggregation_uri_for(&self, aggregation_id: AggregationId) -> Option<String> {
+    /// configured or is withheld from the issuer.
+    pub fn aggregation_uri_for(
+        &self,
+        issuer: &Issuer,
+        aggregation_id: AggregationId,
+    ) -> Option<String> {
+        if self.aggregation_withheld_from.contains(issuer) {
+            return None;
+        }
         let mut uri = self.aggregation_uri.clone()?;
         uri.path_segments_mut()
             .ok()?
@@ -86,4 +114,15 @@ impl AppState {
             max_lists_per_issuer: self.max_lists_per_issuer,
         }
     }
+}
+
+/// `GET /` service document: a minimal `application/json` body naming the
+/// service and its documentation (and portal when configured). No version and
+/// no HTML, so a proxy/ingress health-checking the root sees a stable JSON
+/// contract.
+pub async fn service_document(State(state): State<AppState>) -> Json<ServiceDocument> {
+    Json(ServiceDocument {
+        service: "Status List Server",
+        links: state.links,
+    })
 }

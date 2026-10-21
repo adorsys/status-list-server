@@ -5,11 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 API_ENDPOINT="${API_ENDPOINT:-http://localhost:8000}"
+# When the management and admin listeners are on separate hostnames (or separate
+# ingress paths) override these directly; otherwise they default to the sibling
+# port on the same host as API_ENDPOINT.
+MANAGEMENT_URL="${MANAGEMENT_URL:-}"
+ADMIN_URL="${ADMIN_URL:-}"
 POSTMAN_COLLECTION="${POSTMAN_COLLECTION:-postman/status-list-server.postman_collection.json}"
 POSTMAN_ENVIRONMENT="${POSTMAN_ENVIRONMENT:-postman/status-list-server.postman_environment.json}"
 NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
 NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
+MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
 tmp_dir=""
@@ -85,13 +91,19 @@ generate_postman_artifacts() {
   local collection_out="$1"
   local environment_out="$2"
 
-  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" <<'NODE'
+  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 
-const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl] = process.argv.slice(2);
+const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience] = process.argv.slice(2);
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
+
+function siblingUrl(baseUrl, port) {
+  const url = new URL(baseUrl);
+  url.port = port;
+  return url.toString().replace(/\/$/, '');
+}
 
 const now = Math.floor(Date.now() / 1000);
 const issuerId = `newman-issuer-${Date.now()}`;
@@ -111,8 +123,8 @@ function base64url(input) {
     .replace(/\//g, '_');
 }
 
-const header = { alg: 'ES256', typ: 'JWT', kid: issuerId };
-const payload = { iss: issuerId, iat: now, exp: now + 3600 };
+const header = { alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuerId };
+const payload = { iss: issuerId, aud: audience, iat: now, exp: now + 300 };
 const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
 const signature = crypto.sign('sha256', Buffer.from(signingInput), {
   key: privateKey,
@@ -120,6 +132,8 @@ const signature = crypto.sign('sha256', Buffer.from(signingInput), {
 });
 const token = `${signingInput}.${base64url(signature)}`;
 const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
+publicKeyJwk.kid = header.kid;
+publicKeyJwk.alg = header.alg;
 
 function visitItems(items, visitor) {
   for (const item of items || []) {
@@ -139,6 +153,8 @@ visitItems(collection.item, (item) => {
 
 const values = new Map([
   ['baseUrl', baseUrl],
+  ['managementUrl', mgmtUrl],
+  ['adminUrl', adminUrl],
   ['list_id', listId],
   ['issuer_id', issuerId],
   ['token', token],
@@ -172,8 +188,34 @@ environment_artifact="$tmp_dir/status-list-server.postman_environment.json"
 collection_mount="/etc/newman/status-list-server.postman_collection.json"
 environment_mount="/etc/newman/status-list-server.postman_environment.json"
 
+# Resolve management/admin URLs: use the override when set, otherwise fall back
+# to the sibling-port URLs derived from API_ENDPOINT. The fallback keeps
+# existing single-host setups working out of the box.
+_sibling_url() {
+  # Replace the port in the URL (or append it if no port is present).
+  local url="$1" port="$2"
+  # Strip trailing slash, then replace :PORT or append :PORT.
+  url="${url%/}"
+  if [[ "$url" =~ :[0-9]+$ ]]; then
+    printf '%s\n' "${url%:*}:${port}"
+  else
+    printf '%s\n' "${url}:${port}"
+  fi
+}
+if [[ -z "$MANAGEMENT_URL" ]]; then
+  RESOLVED_MANAGEMENT_URL="$(_sibling_url "$COLLECTION_ENDPOINT" 8001)"
+else
+  RESOLVED_MANAGEMENT_URL="$(endpoint_for_container "$MANAGEMENT_URL")"
+fi
+if [[ -z "$ADMIN_URL" ]]; then
+  RESOLVED_ADMIN_URL="$(_sibling_url "$COLLECTION_ENDPOINT" 8002)"
+else
+  RESOLVED_ADMIN_URL="$(endpoint_for_container "$ADMIN_URL")"
+fi
+
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 wait_for_api
+
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
   "$NEWMAN_COMMAND" run "$collection_artifact" \

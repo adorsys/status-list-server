@@ -20,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(add_status_list_history_version::Migration),
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
+            Box::new(credentials_key_id::Migration),
         ]
     }
 
@@ -981,6 +982,181 @@ pub(crate) mod credentials_aggregation_id {
     enum Credentials {
         Table,
         AggregationId,
+    }
+}
+
+/// Stores and uniquely indexes the JWK `kid` used to resolve management tokens without
+/// scanning and deserializing the complete credential registry per request.
+pub(crate) mod credentials_key_id {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Statement};
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261014_000001_credentials_key_id"
+        }
+    }
+
+    const INDEX: &str = "idx_credentials_key_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("credentials", "key_id").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Credentials::Table)
+                            .add_column(ColumnDef::new(Credentials::KeyId).string_len(255).null())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            let backfill = match manager.get_database_backend() {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "UPDATE credentials SET key_id = CASE WHEN jsonb_typeof(public_key::jsonb -> 'kid') = 'string' AND length(public_key ->> 'kid') <= 255 THEN public_key ->> 'kid' ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::MySql => {
+                    "UPDATE credentials SET key_id = CASE WHEN JSON_TYPE(JSON_EXTRACT(public_key, '$.kid')) = 'STRING' AND CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid'))) <= 255 THEN JSON_UNQUOTE(JSON_EXTRACT(public_key, '$.kid')) ELSE NULL END WHERE key_id IS NULL"
+                }
+                sea_orm::DatabaseBackend::Sqlite => {
+                    "UPDATE credentials SET key_id = CASE WHEN json_type(public_key, '$.kid') = 'text' AND length(json_extract(public_key, '$.kid')) <= 255 THEN json_extract(public_key, '$.kid') ELSE NULL END WHERE key_id IS NULL"
+                }
+                backend => {
+                    return Err(DbErr::Migration(format!(
+                        "unsupported database backend for credential kid migration: {backend:?}"
+                    )));
+                }
+            };
+            manager
+                .get_connection()
+                .execute_unprepared(backfill)
+                .await?;
+
+            // Legacy credentials without a kid get an RFC 7638 SHA-256 public
+            // JWK thumbprint. Preserve every supplied ID and signing algorithm.
+            // Update JSON and its indexed copy in one statement, so retries can
+            // never leave those two representations out of sync.
+            let connection = manager.get_connection();
+            let backend = manager.get_database_backend();
+            let rows = connection
+                .query_all_raw(Statement::from_string(
+                    backend,
+                    "SELECT issuer, public_key FROM credentials WHERE key_id IS NULL",
+                ))
+                .await?;
+            let mut pending = Vec::new();
+            let mut owners = std::collections::BTreeMap::<String, Vec<String>>::new();
+            for row in rows {
+                let issuer: String = row.try_get("", "issuer")?;
+                let mut public_key: serde_json::Value = row.try_get("", "public_key")?;
+                let Some(kid) = missing_key_id(&public_key) else {
+                    continue;
+                };
+                public_key["kid"] = kid.clone().into();
+                owners.entry(kid.clone()).or_default().push(issuer.clone());
+                pending.push((issuer, public_key, kid));
+            }
+
+            // Check the complete plan before writing any generated IDs. Let the
+            // database compare existing IDs so MySQL's column collation applies.
+            let lookup = match backend {
+                sea_orm::DatabaseBackend::Postgres => {
+                    "SELECT issuer FROM credentials WHERE key_id = $1 ORDER BY issuer"
+                }
+                _ => "SELECT issuer FROM credentials WHERE key_id = ? ORDER BY issuer",
+            };
+            let mut collisions = Vec::new();
+            for (kid, issuers) in &mut owners {
+                for row in connection
+                    .query_all_raw(Statement::from_sql_and_values(
+                        backend,
+                        lookup,
+                        [kid.clone().into()],
+                    ))
+                    .await?
+                {
+                    issuers.push(row.try_get("", "issuer")?);
+                }
+                if issuers.len() > 1 {
+                    issuers.sort();
+                    collisions.push(format!("kid {kid:?}: issuers {issuers:?}"));
+                }
+            }
+            if !collisions.is_empty() {
+                return Err(DbErr::Migration(format!(
+                    "credential key ID backfill collisions; repair these registrations before retrying: {}",
+                    collisions.join("; ")
+                )));
+            }
+
+            for (issuer, public_key, kid) in pending {
+                let update = match backend {
+                    sea_orm::DatabaseBackend::Postgres => {
+                        "UPDATE credentials SET public_key = CAST($1 AS JSONB), key_id = $2 WHERE issuer = $3 AND key_id IS NULL"
+                    }
+                    _ => {
+                        "UPDATE credentials SET public_key = ?, key_id = ? WHERE issuer = ? AND key_id IS NULL"
+                    }
+                };
+                connection
+                    .execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        update,
+                        [public_key.to_string().into(), kid.into(), issuer.into()],
+                    ))
+                    .await?;
+            }
+
+            if !manager.has_index("credentials", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(Credentials::Table)
+                            .col(Credentials::KeyId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    fn missing_key_id(public_key: &serde_json::Value) -> Option<String> {
+        use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, ThumbprintHash};
+        let object = public_key.as_object()?;
+        if object.get("kid").is_some_and(|kid| !kid.is_null())
+            || ["d", "p", "q", "dp", "dq", "qi", "oth", "k"]
+                .iter()
+                .any(|name| object.contains_key(*name))
+        {
+            return None;
+        }
+        let jwk: Jwk = serde_json::from_value(public_key.clone()).ok()?;
+        if matches!(
+            jwk.algorithm,
+            AlgorithmParameters::OctetKey(_) | AlgorithmParameters::Other(_)
+        ) {
+            return None;
+        }
+        jsonwebtoken::DecodingKey::from_jwk(&jwk).ok()?;
+        jwk.thumbprint(ThumbprintHash::SHA256).ok()
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
+        Table,
+        KeyId,
     }
 }
 

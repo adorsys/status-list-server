@@ -3,7 +3,8 @@
 // Runs once before an Artillery test and does two things against the live
 // server:
 //   1. Registers the test issuer (from scripts/test-tokens.json) so the
-//      authenticated flows never hit `issuer_not_found` — this used to be done
+//      token's `kid` resolves to its registered public key. Otherwise authenticated
+//      requests return `401 invalid_token`. This used to be done
 //      with an Artillery `before:` hook, but that hook does not execute
 //      processor `function:` steps, so the registration silently never ran and
 //      every authenticated request returned 401.
@@ -15,25 +16,33 @@
 // success, and re-publishing seed lists simply replaces the previous set.
 
 const http = require('http');
+const https = require('https');
+const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const scriptsDir = __dirname;
 const seedFile = path.join(scriptsDir, 'seed-lists.json');
-const DEFAULT_TARGET = process.env.TEST_TARGET || 'http://localhost:8000';
+// Writes (credential registration, seed status-list publishing) go to the
+// management listener at :8001 by default, matching the MANAGEMENT_TARGET
+// default the npm test:* scripts pass to Artillery. Override with
+// MANAGEMENT_TARGET for a separate management host.
+const MANAGEMENT_TARGET = process.env.MANAGEMENT_TARGET || 'http://localhost:8001';
 const SEED_LISTS = Number(process.env.SEED_LISTS || 50);
 
 function parseTarget(target) {
   const url = new URL(target);
-  return { host: url.hostname, port: url.port || '80', target };
+  const isHttps = url.protocol === 'https:';
+  return { host: url.hostname, port: url.port || (isHttps ? '443' : '80'), isHttps };
 }
 
 function request(targetUrl, { method, path: pathname, headers = {}, body }) {
-  const { host, port } = parseTarget(targetUrl);
+  const { host, port, isHttps } = parseTarget(targetUrl);
   const payload = body !== undefined ? JSON.stringify(body) : undefined;
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const client = isHttps ? https : http;
+    const req = client.request(
       {
         host,
         port,
@@ -68,7 +77,7 @@ function loadTestData() {
 }
 
 function registerIssuer(data) {
-  return request(DEFAULT_TARGET, {
+  return request(MANAGEMENT_TARGET, {
     method: 'POST',
     path: '/api/v1/credentials',
     body: { issuer: data.issuerId, public_key: data.publicKeyJwk }
@@ -82,11 +91,17 @@ function registerIssuer(data) {
 }
 
 async function seedStatusLists(data) {
-  const token = data.tokens[0];
+  let token = data.tokens[0];
+  const now = Math.floor(Date.now() / 1000);
+  if (data.privateKey) {
+    token = jwt.sign({ iss: data.issuerId, aud: data.audience, iat: now, exp: now + 300 }, data.privateKey, {
+      algorithm: 'ES256', header: { kid: data.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
+    });
+  }
   const created = [];
   for (let i = 0; i < SEED_LISTS; i++) {
     const listId = crypto.randomUUID();
-    const { statusCode, body } = await request(DEFAULT_TARGET, {
+    const { statusCode, body } = await request(MANAGEMENT_TARGET, {
       method: 'PUT',
       path: `/api/v1/status-lists/${listId}/statuses`,
       headers: { Authorization: `Bearer ${token}` },
