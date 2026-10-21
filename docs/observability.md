@@ -76,7 +76,7 @@ logs → Loki, metrics → debug) are preserved.
 
 Only when you need different pipeline wiring should you override the
 `opentelemetry-collector.config` block in your environment-specific values — for example, to
-add a Prometheus exporter or route metrics elsewhere. If you do, keep the `batch` / 
+add a Prometheus exporter or route metrics elsewhere. If you do, keep the `batch` /
 `memory_limiter` processors and the existing `otlp/tempo` and `otlphttp/loki` exporters, and
 only change what your deployment actually requires:
 
