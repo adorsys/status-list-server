@@ -13,7 +13,7 @@ The Status List Server is an HTTP service that publishes and manages status list
 ## Key Highlights
 
 - **Standard Compliance**: Implements OAuth Token Status List with JWT and CWT formats, gzip compression on JWT responses, and optional historical status resolution (`?time=`). See the [Compliance Matrix](docs/compliance_matrix.md) for detailed spec alignment.
-- **Zero-Infrastructure Local Mode**: Runs in-memory out of the box with zero external dependencies, allowing local development and testing in seconds.
+- **In-Memory Local Mode**: Runs with checked-in development signing material, without a database or cloud services.
 - **Pluggable Persistence**: Supports SQL databases (PostgreSQL, MySQL, SQLite) as well as an in-memory repository for development. See [Database Backends](docs/database-backends.md).
 - **Pluggable Status-List Cache**: Select an in-memory or Redis cache backend at runtime for local or multi-replica deployments.
 - **Cloud Secret Management**: Fetches server signing keys from AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault or loads them statically from local files. See [Secret Backends](docs/secrets-backends.md).
@@ -25,13 +25,17 @@ The Status List Server is an HTTP service that publishes and manages status list
 
 ### Option 1: Native Cargo Run (Fastest)
 
-Run the server locally with default in-memory storage and certificate loading:
+Run the server locally with in-memory storage and the checked-in development signing certificate and key:
 
 ```bash
 git clone https://github.com/adorsys/status-list-server.git
 cd status-list-server
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/certs/dev.crt \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
 cargo run
 ```
+
+These files are public test fixtures for local development only.
 
 The server binds to `http://localhost:8000` with no database or cloud configuration required.
 
@@ -131,7 +135,7 @@ The server reads configuration from environment variables (or an optional `.env`
 
 - **Prefix**: All application settings are prefixed with `APP_`.
 - **Hierarchy**: Nested settings use a double underscore (`__`) as a delimiter. For example, `APP_SERVER__PORT=8000` sets the server port, and `APP_DATABASE__BACKEND=postgres` selects the database driver.
-- **Defaults**: Every setting includes a default value. The server starts in zero-infrastructure in-memory mode without any custom variables.
+- **Defaults**: The default database backend is in-memory. Native runs must configure a signing certificate and key, as shown in the [quick start](#quick-start).
 
 Refer to [`.env.template`](.env.template) for the complete configuration dictionary, data types, and default values. For backend-specific configuration, see [Database Backends](docs/database-backends.md), [Secret Backends](docs/secrets-backends.md), and [DNS Providers](docs/dns-providers.md).
 
