@@ -3,6 +3,15 @@ global:
   # statuslist.<domain> and the default TLS host becomes *.<domain>.
   # Leave empty for provider-neutral defaults.
   domain: ""
+  # Backends the bundled OpenTelemetry collector exports to. The defaults assume
+  # Tempo and Loki run in a "monitoring" namespace (kube-prometheus-stack layout).
+  observability:
+    tempo:
+      # OTLP/gRPC endpoint (host:port, no scheme) for traces.
+      endpoint: "tempo.monitoring.svc.cluster.local:4317"
+    loki:
+      # Full OTLP/HTTP logs URL, including the /otlp/v1/logs path.
+      logsEndpoint: "http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs"
 
 # Optional annotations merged onto the Pod template metadata (top-level, distinct from
 # statuslist.podLabels which are merged into the pod LABELS). Consumed by deployment.yaml.
@@ -974,15 +983,18 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
+      # Tempo and Loki endpoints come from global.observability.* (see the top of this
+      # file) so the chart works when the observability stack is not in the
+      # "monitoring" namespace.
       otlp/tempo:
-        endpoint: "tempo.monitoring.svc.cluster.local:4317"
+        endpoint: '{{ .Values.global.observability.tempo.endpoint }}'
         tls:
           insecure: true
       # 'loki' exporter removed in opentelemetry-collector-contrib >= 0.106, so logs use
       # the native OTLP HTTP exporter. logs_endpoint (not endpoint) avoids otlphttp
       # appending '/v1/logs' and doubling the path (400).
       otlphttp/loki:
-        logs_endpoint: "http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs"
+        logs_endpoint: '{{ .Values.global.observability.loki.logsEndpoint }}'
       # Metrics stay on 'debug': /metrics ServiceMonitor scrape is the authoritative
       # SLI path, so do not remote-write OTLP metrics (double ingestion).
       debug:
