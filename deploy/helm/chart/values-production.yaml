@@ -67,60 +67,6 @@ grafanaDashboard:
     release: kube-prometheus-stack
     grafana_dashboard: "1"
 
-# OpenTelemetry Collector: export traces to Grafana Tempo and logs to Grafana
-# Loki in the shared `monitoring` namespace. This block is a self-contained
-# `opentelemetry-collector.config` override (applied after values-aws.yaml by the
-# production deploy workflow) and is authoritative for the collector in production.
-#
-# Do NOT remote-write OTLP metrics: the /metrics ServiceMonitor scrape is the
-# authoritative SLI path, and the app exports the same instruments via both its
-# pull and OTLP readers, so that would ingest identical series twice.
-opentelemetry-collector:
-  config:
-    receivers:
-      jaeger: null
-      zipkin: null
-      prometheus: null
-      otlp:
-        protocols:
-          grpc:
-            endpoint: ${env:MY_POD_IP}:4317
-          http:
-            endpoint: ${env:MY_POD_IP}:4318
-    processors:
-      memory_limiter:
-        check_interval: 1s
-        limit_percentage: 75
-        spike_limit_percentage: 15
-      batch:
-        timeout: 5s
-        send_batch_size: 1024
-    exporters:
-      otlp/tempo:
-        endpoint: "tempo.monitoring.svc.cluster.local:4317"
-        tls:
-          insecure: true
-      loki:
-        endpoint: "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
-      # Metrics stay on 'debug': /metrics ServiceMonitor scrape is the authoritative
-      # SLI path, so do not remote-write OTLP metrics (double ingestion).
-      debug:
-        verbosity: basic
-    service:
-      pipelines:
-        traces:
-          receivers: [otlp]
-          processors: [memory_limiter, batch]
-          exporters: [otlp/tempo]
-        metrics:
-          receivers: [otlp]
-          processors: [memory_limiter, batch]
-          exporters: [debug]
-        logs:
-          receivers: [otlp]
-          processors: [memory_limiter, batch]
-          exporters: [loki]
-
 # Alert routing via kube-prometheus-stack's Alertmanager (AlertmanagerConfig CRD).
 # Enable this block and set alerting.platform + credentials to receive SLO alert
 # notifications. In production, always use existingSecret so no webhook URL is
