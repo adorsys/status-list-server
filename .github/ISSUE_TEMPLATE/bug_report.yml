@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a problem with status-list-server.
+labels: [bug]
+body:
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: A concise description of what you are experiencing.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: A concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Steps or a small example that reproduces the problem, if available.
+      placeholder: |
+        1. Start the server with...
+        2. Run this command or send this request...
+        3. See the error...
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the details you know; leave anything else blank.
+      value: |
+        - Version, commit, or image tag:
+        - OS and architecture:
+        - Deployment mode (local binary, Docker, Kubernetes, other):
+        - Cargo features or build profile (if known):
+        - Backend or provider (if relevant):
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Relevant links, logs, or screenshots. Remove credentials and personal data before sharing.
