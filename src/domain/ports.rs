@@ -2,7 +2,20 @@
 
 use std::{fmt, sync::Arc};
 
-use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
+use crate::domain::models::credential::{
+    AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
+};
+
+/// Resolve a trusted signing key without exposing the backing trust source to authentication.
+pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
+    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
+}
+
+/// Public aggregation mappings supplied by the active issuer source.
+pub trait IssuerDirectory: Send + Sync + fmt::Debug {
+    fn issuer_aggregation_id(&self, issuer: &str) -> Option<AggregationId>;
+    fn issuer_by_aggregation_id(&self, aggregation_id: AggregationId) -> Option<String>;
+}
 use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
@@ -121,11 +134,33 @@ pub trait CredentialRepo: Send + Sync + 'static {
         issuer: &str,
     ) -> Result<Option<AggregationId>, CredentialError>;
 
+    /// Read a stored aggregation ID without assigning one to legacy rows.
+    /// `Some(None)` represents a credential created before aggregation IDs.
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError>;
+
+    /// Set the aggregation ID for a legacy credential only when it is still NULL.
+    async fn assign_aggregation_id(
+        &self,
+        issuer: &str,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError>;
+
     /// The issuer an aggregation ID belongs to.
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
     ) -> Result<Option<Issuer>, CredentialError>;
+
+    /// Permanently reserve aggregation identifiers for statically trusted
+    /// issuers. Existing mappings are immutable; this operation is idempotent
+    /// for the same issuer and identifier and fails on either kind of conflict.
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError>;
 }
 
 /// Persistence interface for historical status list snapshots.

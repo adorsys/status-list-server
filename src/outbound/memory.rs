@@ -316,6 +316,8 @@ impl StatusListCache for MemoryStatusListCache {
 struct CredentialStore {
     by_issuer: HashMap<String, (Credential, AggregationId)>,
     issuers_by_aggregation_id: HashMap<AggregationId, Issuer>,
+    registry_by_issuer: HashMap<String, AggregationId>,
+    registry_issuers_by_aggregation_id: HashMap<AggregationId, String>,
 }
 
 #[derive(Clone, Default)]
@@ -387,6 +389,27 @@ impl CredentialRepo for MemoryCredentials {
         Ok(values.by_issuer.get(issuer).map(|(_, id)| *id))
     }
 
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+        Ok(self
+            .values
+            .read()
+            .await
+            .by_issuer
+            .get(issuer)
+            .map(|(_, id)| Some(*id)))
+    }
+
+    async fn assign_aggregation_id(
+        &self,
+        _issuer: &str,
+        _aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
+        Ok(())
+    }
+
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
@@ -396,6 +419,35 @@ impl CredentialRepo for MemoryCredentials {
             .issuers_by_aggregation_id
             .get(&aggregation_id)
             .cloned())
+    }
+
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError> {
+        let mut values = self.values.write().await;
+        for (issuer, aggregation_id) in mappings {
+            if values
+                .registry_by_issuer
+                .get(issuer)
+                .is_some_and(|existing| existing != aggregation_id)
+                || values
+                    .registry_issuers_by_aggregation_id
+                    .get(aggregation_id)
+                    .is_some_and(|existing| existing != issuer)
+            {
+                return Err(CredentialError::AlreadyExists);
+            }
+        }
+        for (issuer, aggregation_id) in mappings {
+            values
+                .registry_by_issuer
+                .insert(issuer.clone(), *aggregation_id);
+            values
+                .registry_issuers_by_aggregation_id
+                .insert(*aggregation_id, issuer.clone());
+        }
+        Ok(())
     }
 }
 

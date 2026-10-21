@@ -24,9 +24,11 @@ from statuslist.podLabels, which are merged into the pod template LABELS).
 {{- if eq (trim (toString .Values.statuslist.issuerRegistry.path)) "" }}
 {{- fail "statuslist.issuerRegistry.path is required" }}
 {{- end }}
-{{- if eq (trim (toString .Values.statuslist.issuerRegistry.configMap.name)) "" }}
-{{- fail "statuslist.issuerRegistry.configMap.name is required" }}
+{{- if not (regexMatch "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$" .Values.statuslist.issuerRegistry.path) }}
+{{- fail "statuslist.issuerRegistry.path must be a file inside /etc/status-list-server" }}
 {{- end }}
+{{- $registryVolume := .Values.statuslist.issuerRegistry.volume | default dict }}
+{{- $registryMounted := gt (len $registryVolume) 0 }}
 {{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
 {{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
 {{- $audiences := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES | default "")) "" }}
@@ -273,10 +275,12 @@ spec:
             {{- $_ := set $env "APP_DATABASE__PORT" (include "status-list-server-chart.dbPort" .) }}
             {{- $_ := set $env "APP_DATABASE__USERNAME" (include "status-list-server-chart.dbUsername" .) }}
             {{- $_ := set $env "APP_DATABASE__NAME" (include "status-list-server-chart.dbName" .) }}
-            {{- if hasKey $env "APP_MANAGEMENT_AUTH__ISSUERS_FILE" }}
-              {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__ISSUERS_FILE must not override statuslist.issuerRegistry.path" }}
+            {{- if $registryMounted }}
+              {{- if hasKey $env "APP_MANAGEMENT_AUTH__ISSUERS_FILE" }}
+                {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__ISSUERS_FILE must not override statuslist.issuerRegistry.path" }}
+              {{- end }}
+              {{- $_ := set $env "APP_MANAGEMENT_AUTH__ISSUERS_FILE" .Values.statuslist.issuerRegistry.path }}
             {{- end }}
-            {{- $_ := set $env "APP_MANAGEMENT_AUTH__ISSUERS_FILE" .Values.statuslist.issuerRegistry.path }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $env $name }}
                 {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
@@ -352,9 +356,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+          {{- if $registryMounted }}
             - name: issuer-registry
               mountPath: {{ dir .Values.statuslist.issuerRegistry.path | quote }}
               readOnly: true
+          {{- end }}
           {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
@@ -368,12 +374,10 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $registryMounted }}
         - name: issuer-registry
-          configMap:
-            name: {{ .Values.statuslist.issuerRegistry.configMap.name | quote }}
-            items:
-              - key: {{ .Values.statuslist.issuerRegistry.configMap.key | quote }}
-                path: {{ base .Values.statuslist.issuerRegistry.path | quote }}
+{{- toYaml $registryVolume | nindent 10 }}
+        {{- end }}
       {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:

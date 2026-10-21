@@ -66,8 +66,32 @@ impl FileWatcher {
         // Native notifications are low-latency but can miss a replacement on
         // some filesystems. Polling the content fingerprint as well closes
         // that gap; the debouncer discards duplicate notifications.
-        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval);
-        spawn_debouncer(paths, rx, callback, target);
+        spawn_poll_watcher(paths.clone(), tx, target, self.poll_interval, None);
+        spawn_debouncer(paths, rx, callback, target, None, false);
+    }
+
+    /// Spawn watching and reconcile once both watcher baselines have been
+    /// captured. This closes the startup window in which a file can change
+    /// after the registry is loaded but before polling/debouncing begins.
+    pub(crate) fn spawn_with_initial_reconcile<F, Fut>(self, target: &'static str, on_change: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let callback = Arc::new(on_change);
+        let paths = self.paths.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+
+        let _native_started = spawn_notify_watcher(paths.clone(), tx.clone(), target);
+        spawn_poll_watcher(
+            paths.clone(),
+            tx,
+            target,
+            self.poll_interval,
+            Some(Arc::clone(&ready)),
+        );
+        spawn_debouncer(paths, rx, callback, target, Some(Arc::clone(&ready)), true);
     }
 }
 
@@ -150,9 +174,13 @@ fn spawn_poll_watcher(
     tx: mpsc::Sender<()>,
     target: &'static str,
     poll_interval: Duration,
+    ready: Option<Arc<tokio::sync::Barrier>>,
 ) {
     tokio::spawn(async move {
         let mut fingerprints = fingerprint_all(&paths).await;
+        if let Some(ready) = ready {
+            ready.wait().await;
+        }
         let mut interval = tokio::time::interval_at(Instant::now() + poll_interval, poll_interval);
         loop {
             interval.tick().await;
@@ -178,6 +206,8 @@ fn spawn_debouncer<F, Fut>(
     mut rx: mpsc::Receiver<()>,
     callback: Arc<F>,
     target: &'static str,
+    ready: Option<Arc<tokio::sync::Barrier>>,
+    initial_reconcile: bool,
 ) where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -186,6 +216,19 @@ fn spawn_debouncer<F, Fut>(
         // Only dispatch when content actually changed; guards against spurious
         // events that slip past the event-kind filter.
         let mut last_fingerprints = fingerprint_all(&paths).await;
+        if let Some(ready) = ready {
+            ready.wait().await;
+        }
+
+        if initial_reconcile {
+            tracing::info!(
+                event = "file_change_detected",
+                rotation.target = target,
+                source = "startup",
+                "reconciling watched file after watcher initialization"
+            );
+            callback().await;
+        }
 
         while rx.recv().await.is_some() {
             while matches!(tokio::time::timeout(DEBOUNCE, rx.recv()).await, Ok(Some(_))) {}
@@ -301,6 +344,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_reconciliation_runs_through_the_serial_callback_path() {
+        let dir = TempDir::new();
+        let path = dir.path.join("secret");
+        tokio::fs::write(&path, "old").await.expect("write initial");
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let callback_active = active.clone();
+        let callback_max = max_active.clone();
+        let callback_completed = completed.clone();
+        let callback_entered = entered.clone();
+        let callback_release = release.clone();
+
+        FileWatcher::new(vec![path.clone()], Duration::from_secs(1)).spawn_with_initial_reconcile(
+            "test",
+            move || {
+                let active = callback_active.clone();
+                let max_active = callback_max.clone();
+                let completed = callback_completed.clone();
+                let entered = callback_entered.clone();
+                let release = callback_release.clone();
+                async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    if completed.load(Ordering::SeqCst) == 0 {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        );
+
+        entered.notified().await;
+        tokio::fs::write(&path, "new").await.expect("write update");
+        release.notify_one();
+
+        timeout(Duration::from_secs(3), async {
+            while completed.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("file change callback did not run after startup reconciliation");
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn change_between_load_and_watcher_start_is_reconciled_without_a_second_edit() {
+        let dir = TempDir::new();
+        let path = dir.path.join("issuers.yaml");
+        std::fs::write(&path, "trusted-key").expect("write initial registry");
+        let revoked = Arc::new(AtomicUsize::new(0));
+        let callback_path = path.clone();
+        let callback_revoked = revoked.clone();
+
+        // Simulate a revocation after the startup load but before watcher tasks
+        // get their first poll or debounce baseline.
+        FileWatcher::new(vec![path.clone()], Duration::from_millis(10))
+            .spawn_with_initial_reconcile("issuer_registry_startup_race", move || {
+                let path = callback_path.clone();
+                let revoked = callback_revoked.clone();
+                async move {
+                    let content = tokio::fs::read_to_string(path).await;
+                    if content.as_deref().unwrap_or_default() == "empty-registry" {
+                        revoked.store(1, Ordering::SeqCst);
+                    }
+                }
+            });
+        std::fs::write(&path, "empty-registry").expect("revoke key during startup");
+
+        timeout(Duration::from_secs(2), async {
+            while revoked.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup revocation was not reconciled without another edit");
+    }
+
+    #[tokio::test]
     async fn debouncer_coalesces_bursty_changes() {
         let dir = TempDir::new();
         let path = dir.path.join("secret");
@@ -321,6 +449,8 @@ mod tests {
                 }
             }),
             "test",
+            None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -368,6 +498,8 @@ mod tests {
                 }
             }),
             "test",
+            None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -408,6 +540,8 @@ mod tests {
                 }
             }),
             "test",
+            None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.
@@ -441,6 +575,8 @@ mod tests {
                 }
             }),
             "test",
+            None,
+            false,
         );
 
         // Let the debouncer establish its baseline fingerprint.

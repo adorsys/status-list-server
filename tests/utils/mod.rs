@@ -99,6 +99,12 @@ fn fixture_state(config: &Config) -> AppState {
         BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
         BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
     );
+    let registry = Arc::new(
+        status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(
+            &issuer_registry,
+        )
+        .unwrap(),
+    );
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -124,12 +130,8 @@ fn fixture_state(config: &Config) -> AppState {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
-        issuer_registry: Arc::new(
-            status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(
-                &issuer_registry,
-            )
-            .unwrap(),
-        ),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,

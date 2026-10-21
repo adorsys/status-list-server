@@ -36,10 +36,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("issuer-registry") {
+        let path = config
+            .management_auth
+            .issuers_file
+            .as_deref()
+            .ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "management_auth.issuers_file is required for issuer-registry validation"
+                )
+            })?;
         let registry =
-            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(
-                &config.management_auth.issuers_file,
-            )?;
+            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(path)?;
         println!(
             "issuer registry is valid: {} trusted keys",
             registry.key_count()

@@ -89,7 +89,11 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
             "--set",
             "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
         ])
-        .args(["--set", "opentelemetry-collector.enabled=false"]);
+        .args(["--set", "opentelemetry-collector.enabled=false"])
+        .args([
+            "--set",
+            "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",
+        ]);
     if disable_postgres {
         command.args(["--set", "postgres.enabled=false"]);
     }

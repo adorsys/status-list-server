@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, Subcommand, ValueEnum};
-use color_eyre::eyre::{OptionExt, Result, WrapErr, ensure};
+use color_eyre::eyre::{OptionExt, Result, WrapErr, bail, ensure};
+use sha2::{Digest, Sha256};
 
 /// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
@@ -154,26 +157,21 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
         } => {
             let mut root = load_registry_yaml(&file)?;
             let key = registry_key(&jwk, &alg)?;
-            let mut issuer = serde_yaml::Mapping::from_iter([
-                (
-                    "id".into(),
-                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
-                ),
-                (
-                    "aggregation_id".into(),
-                    serde_yaml::Value::String(uuid::Uuid::new_v4().to_string()),
-                ),
-                ("tier".into(), serde_yaml::Value::String(tier)),
-                ("keys".into(), serde_yaml::Value::Sequence(vec![key])),
-            ]);
+            let mut issuer = serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "aggregation_id": uuid::Uuid::new_v4().to_string(),
+                "tier": tier,
+                "keys": [key],
+            });
             if let Some(display_name) = display_name {
-                issuer.insert("display_name", display_name.into());
+                issuer["display_name"] = serde_json::Value::String(display_name);
             }
+            let item = issuer;
             root.get_mut("issuers")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?
-                .push(serde_yaml::Value::Mapping(issuer));
-            write_registry_yaml(&file, root)
+                .push(item.clone());
+            write_registry_yaml(&file, root, RegistryInsertion::Issuer(item))
         }
         IssuerTask::AddKey {
             file,
@@ -185,50 +183,211 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
             let key = registry_key(&jwk, &alg)?;
             let issuers = root
                 .get_mut("issuers")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("registry issuers must be a sequence")?;
-            let entry = issuers
-                .iter_mut()
-                .find(|entry| {
-                    entry.get("id").and_then(serde_yaml::Value::as_str) == Some(issuer.as_str())
+            let issuer_index = issuers
+                .iter()
+                .position(|entry| {
+                    entry.get("id").and_then(serde_json::Value::as_str) == Some(issuer.as_str())
                 })
+                .ok_or_eyre("issuer not found")?;
+            let entry = issuers
+                .get_mut(issuer_index)
                 .ok_or_eyre("issuer not found")?;
             entry
                 .get_mut("keys")
-                .and_then(serde_yaml::Value::as_sequence_mut)
+                .and_then(serde_json::Value::as_array_mut)
                 .ok_or_eyre("issuer keys must be a sequence")?
-                .push(key);
-            write_registry_yaml(&file, root)
+                .push(key.clone());
+            write_registry_yaml(&file, root, RegistryInsertion::Key { issuer_index, key })
         }
     }
 }
 
-fn load_registry_yaml(file: &Path) -> Result<serde_yaml::Value> {
+fn load_registry_yaml(file: &Path) -> Result<serde_json::Value> {
     let text = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
-    serde_yaml::from_str(&text).wrap_err("parse issuer registry")
+    serde_saphyr::from_str(&text).wrap_err("parse issuer registry")
 }
 
-fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_yaml::Value> {
+fn registry_key(raw_jwk: &str, alg: &str) -> Result<serde_json::Value> {
     let json: serde_json::Value =
         serde_json::from_str(raw_jwk).wrap_err("parse public JWK JSON")?;
-    let jwk: jsonwebtoken::jwk::Jwk =
-        serde_json::from_value(json.clone()).wrap_err("validate public JWK")?;
-    let kid = jwk
-        .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
-        .wrap_err("compute JWK thumbprint")?;
-    let mut map = serde_yaml::Mapping::new();
-    map.insert("kid", kid.into());
-    map.insert("alg", alg.into());
-    map.insert("jwk", serde_yaml::to_value(&json)?);
-    Ok(serde_yaml::Value::Mapping(map))
+    let kid = jwk_thumbprint(&json).wrap_err("compute JWK thumbprint")?;
+    Ok(serde_json::json!({"kid": kid, "alg": alg, "jwk": json}))
 }
 
-fn write_registry_yaml(file: &Path, value: serde_yaml::Value) -> Result<()> {
-    let content = serde_yaml::to_string(&value)?;
-    status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(&content)
-        .wrap_err("validate updated issuer registry")?;
-    std::fs::write(file, content).wrap_err("write issuer registry")?;
+fn jwk_thumbprint(jwk: &serde_json::Value) -> Result<String> {
+    let member = |name| {
+        jwk.get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_eyre(format!("JWK must contain a string `{name}` member"))
+    };
+    let kty = member("kty")?;
+    let mut canonical = BTreeMap::from([("kty", kty)]);
+
+    match kty {
+        "EC" => {
+            canonical.insert("crv", member("crv")?);
+            canonical.insert("x", member("x")?);
+            canonical.insert("y", member("y")?);
+        }
+        "RSA" => {
+            canonical.insert("e", member("e")?);
+            canonical.insert("n", member("n")?);
+        }
+        "OKP" => {
+            canonical.insert("crv", member("crv")?);
+            canonical.insert("x", member("x")?);
+        }
+        _ => bail!("unsupported JWK kty `{kty}`"),
+    }
+
+    let canonical = serde_json::to_vec(&canonical).wrap_err("serialize JWK thumbprint input")?;
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical)))
+}
+
+enum RegistryInsertion {
+    Issuer(serde_json::Value),
+    Key {
+        issuer_index: usize,
+        key: serde_json::Value,
+    },
+}
+
+fn sequence_item(value: &serde_json::Value, indent: usize) -> Result<String> {
+    let yaml = serde_saphyr::to_string(value)?;
+    let mut lines = yaml.lines();
+    let first = lines.next().ok_or_eyre("empty YAML item")?;
+    let mut rendered = format!("{}- {first}\n", " ".repeat(indent));
+    for line in lines {
+        rendered.push_str(&format!("{}  {line}\n", " ".repeat(indent)));
+    }
+    Ok(rendered)
+}
+
+fn insert_registry_item(original: &str, insertion: RegistryInsertion) -> Result<String> {
+    let mut lines: Vec<String> = original.lines().map(|line| format!("{line}\n")).collect();
+    let issuers = lines
+        .iter()
+        .position(|line| line.starts_with("issuers:"))
+        .ok_or_eyre("expected block-style issuers section; paste the generated entry manually")?;
+    let section_end = (issuers + 1..lines.len())
+        .find(|&i| {
+            let line = lines[i].as_str();
+            !line.trim().is_empty() && !line.starts_with([' ', '#'])
+        })
+        .unwrap_or(lines.len());
+    match insertion {
+        RegistryInsertion::Issuer(item) => {
+            let snippet = sequence_item(&item, 2)?;
+            if lines[issuers].trim_end() == "issuers: []" {
+                lines[issuers] = format!("issuers:\n{snippet}");
+            } else {
+                ensure!(
+                    lines[issuers].trim_end() == "issuers:",
+                    "expected block-style issuers section; paste the generated entry manually"
+                );
+                lines.insert(section_end, snippet);
+            }
+        }
+        RegistryInsertion::Key { issuer_index, key } => {
+            ensure!(
+                lines[issuers].trim_end() == "issuers:",
+                "expected block-style issuers section; paste the generated entry manually"
+            );
+            let issuer_starts: Vec<usize> = (issuers + 1..section_end)
+                .filter(|&i| lines[i].starts_with("  - "))
+                .collect();
+            let start = *issuer_starts
+                .get(issuer_index)
+                .ok_or_eyre("could not locate issuer in block-style YAML")?;
+            let end = issuer_starts
+                .get(issuer_index + 1)
+                .copied()
+                .unwrap_or(section_end);
+            let keys = (start..end)
+                .find(|&i| lines[i].starts_with("    keys:"))
+                .ok_or_eyre("could not locate issuer keys in block-style YAML")?;
+            let key_indent = (keys + 1..end)
+                .find(|&i| lines[i].trim_start().starts_with("- "))
+                .map(|i| lines[i].len() - lines[i].trim_start().len())
+                .unwrap_or(6);
+            let snippet = sequence_item(&key, key_indent)?;
+            if lines[keys].trim() == "keys: []" {
+                lines[keys] = format!("    keys:\n{snippet}");
+            } else {
+                ensure!(
+                    lines[keys].trim() == "keys:",
+                    "expected block-style issuer keys; paste the generated key manually"
+                );
+                let key_end = (keys + 1..end)
+                    .find(|&i| {
+                        lines[i].starts_with("    ")
+                            && !lines[i].starts_with("      ")
+                            && !lines[i].trim_start().starts_with('#')
+                            && !lines[i].trim_start().starts_with("- ")
+                    })
+                    .unwrap_or(end);
+                lines.insert(key_end, snippet);
+            }
+        }
+    }
+    Ok(lines.concat())
+}
+
+fn write_registry_yaml(
+    file: &Path,
+    value: serde_json::Value,
+    insertion: RegistryInsertion,
+) -> Result<()> {
+    let original = std::fs::read_to_string(file).wrap_err("read issuer registry")?;
+    let content = insert_registry_item(&original, insertion)?;
+    let actual: serde_json::Value =
+        serde_saphyr::from_str(&content).wrap_err("parse edited issuer registry")?;
+    ensure!(
+        actual == value,
+        "edited registry differs from validated candidate"
+    );
+    let parent = file.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).wrap_err("create temporary issuer registry")?;
+    std::io::Write::write_all(&mut temporary, content.as_bytes())
+        .wrap_err("write temporary issuer registry")?;
+    validate_registry_file(temporary.path())?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::metadata(file)?.permissions())?;
+    temporary
+        .persist(file)
+        .map_err(|error| error.error)
+        .wrap_err("replace issuer registry atomically")?;
     println!("updated {}", file.display());
+    Ok(())
+}
+
+fn validate_registry_file(file: &Path) -> Result<()> {
+    let workspace = workspace_root()?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.args([
+        "run",
+        "--quiet",
+        "--package",
+        "status-list-server",
+        "--bin",
+        "status-list-server",
+        "--",
+    ]);
+    let status = command
+        .arg("issuer-registry")
+        .current_dir(workspace)
+        .env("APP_MANAGEMENT_AUTH__ISSUERS_FILE", file)
+        .status()
+        .wrap_err("run status-list-server issuer-registry validator")?;
+    ensure!(
+        status.success(),
+        "updated issuer registry failed validation"
+    );
     Ok(())
 }
 
@@ -596,6 +755,49 @@ mod tests {
     }
 
     #[test]
+    fn jwk_thumbprint_uses_rfc_7638_public_members() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                    "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA",
+                    "use": "sig",
+                    "kid": "ignored",
+                }),
+                "058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50",
+            ),
+            (
+                serde_json::json!({
+                    "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiY2g",
+                    "e": "AQAB",
+                    "kty": "RSA",
+                }),
+                "c4pTaQEwUhKut1DxqKsVqtcyJp-F37dxwnbGp3FXiHw",
+            ),
+            (
+                serde_json::json!({
+                    "x": "11qYAYLef1q3gZ0v1L3pDa3mQwGwR6q5H0xW9zX5YbM",
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                }),
+                concat!("2Sy1cth_ZvIuKlHFA3AbIDpW7AbI", "zEWdmixu9ekxpLM"),
+            ),
+        ];
+
+        for (jwk, expected) in cases {
+            assert_eq!(jwk_thumbprint(&jwk).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn jwk_thumbprint_rejects_incomplete_and_unsupported_keys() {
+        assert!(jwk_thumbprint(&serde_json::json!({"kty": "EC", "crv": "P-256"})).is_err());
+        assert!(jwk_thumbprint(&serde_json::json!({"kty": "oct", "k": "secret"})).is_err());
+    }
+
+    #[test]
     fn build_defaults_to_postgres_profile() {
         assert_eq!(
             parse(&["build"]).expect("build parses").command,
@@ -925,7 +1127,8 @@ mod tests {
             "issuer-registry-xtask-{}.yaml",
             uuid::Uuid::new_v4()
         ));
-        let initial = "version: 1\nissuers: []\nadmins: []\n";
+        let initial =
+            "# Operator notes must survive CLI edits.\nversion: 1\nissuers: []\nadmins: []\n";
         std::fs::write(&file, initial).unwrap();
         let public_jwk = r#"{"kty":"EC","crv":"P-256","x":"chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY","y":"YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"}"#;
 
@@ -937,11 +1140,35 @@ mod tests {
             tier: "standard".into(),
         })
         .unwrap();
-        let validated =
-            status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(&file)
-                .unwrap();
-        assert_eq!(validated.key_count(), 1);
-        let issuer_id = validated.issuers()[0].id.parse::<uuid::Uuid>().unwrap();
+        let validated: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(validated["issuers"][0]["keys"].as_array().unwrap().len(), 1);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("# Operator notes must survive CLI edits.")
+        );
+        let rotated_jwk = r#"{"kty":"EC","crv":"P-256","x":"qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY","y":"BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"}"#;
+        issuer_command(IssuerTask::AddKey {
+            file: file.clone(),
+            issuer: validated["issuers"][0]["id"].as_str().unwrap().to_owned(),
+            jwk: rotated_jwk.into(),
+            alg: "ES256".into(),
+        })
+        .unwrap();
+        let rotated: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(rotated["issuers"][0]["keys"].as_array().unwrap().len(), 2);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("# Operator notes must survive CLI edits.")
+        );
+        let issuer_id = validated["issuers"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<uuid::Uuid>()
+            .unwrap();
         assert_eq!(issuer_id.get_version(), Some(uuid::Version::Random));
         let bytes_before_invalid_update = std::fs::read(&file).unwrap();
 
@@ -949,13 +1176,23 @@ mod tests {
         assert!(
             issuer_command(IssuerTask::AddKey {
                 file: file.clone(),
-                issuer: validated.issuers()[0].id.clone(),
+                issuer: validated["issuers"][0]["id"].as_str().unwrap().to_owned(),
                 jwk: private_jwk,
                 alg: "ES256".into(),
             })
             .is_err()
         );
         assert_eq!(std::fs::read(&file).unwrap(), bytes_before_invalid_update);
+
+        let mut private_registry: serde_json::Value =
+            serde_saphyr::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        private_registry["issuers"][0]["keys"][0]["jwk"]["d"] =
+            serde_json::Value::String("private-material".into());
+        std::fs::write(&file, serde_json::to_vec(&private_registry).unwrap()).unwrap();
+        assert!(
+            validate_registry_file(&file).is_err(),
+            "the server validator must reject private JWK material"
+        );
         let _ = std::fs::remove_file(file);
     }
 }

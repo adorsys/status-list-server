@@ -7,27 +7,40 @@ use arc_swap::ArcSwap;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::domain::models::credential::{AggregationId, PublicJwk};
+use crate::domain::models::credential::{
+    AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
+};
+use crate::domain::ports::{IssuerDirectory, IssuerKeyResolver};
 
 const REGISTRY_SCHEMA: &str = include_str!("../../../docs/schemas/issuers.v1.schema.json");
 
 #[derive(Debug, Error)]
 pub enum RegistryError {
-    #[error("failed to read issuer registry: {0}")]
-    Read(#[from] std::io::Error),
+    #[error("failed to read issuer registry `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to parse issuer registry YAML: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] serde_saphyr::Error),
     #[error("issuer registry schema validation failed: {0}")]
     Schema(String),
     #[error("issuer registry semantic validation failed: {0}")]
     Semantic(String),
+    #[error("issuer registry database check failed: {0}")]
+    Database(String),
     #[error("issuer registry schema is invalid: {0}")]
     SchemaDefinition(String),
 }
@@ -75,32 +88,9 @@ pub struct RegistryKey {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedKey {
-    pub principal_id: String,
-    pub principal_kind: PrincipalKind,
-    pub key: Arc<RegistryKey>,
-    pub public_key: Arc<PublicJwk>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrincipalKind {
-    Issuer,
-    Admin,
-}
-
-impl ResolvedKey {
-    pub fn issuer<'a>(&self, registry: &'a ValidatedRegistry) -> Option<&'a IssuerEntry> {
-        registry.issuer(&self.principal_id)
-    }
-
-    pub fn admin<'a>(&self, registry: &'a ValidatedRegistry) -> Option<&'a AdminEntry> {
-        registry.admin(&self.principal_id)
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct ValidatedRegistry {
     registry: IssuerRegistry,
+    fingerprint: String,
     keys: HashMap<String, Arc<ResolvedKey>>,
     issuer_aggregations: HashMap<String, AggregationId>,
     aggregation_issuers: HashMap<AggregationId, String>,
@@ -111,11 +101,14 @@ pub struct ValidatedRegistry {
 pub struct RegistryHandle {
     path: PathBuf,
     active: ArcSwap<ValidatedRegistry>,
+    aggregation_history: Mutex<AggregationHistory>,
+    reload_failures: AtomicU64,
 }
 
-/// Port used by authentication to resolve an operator-trusted signing key.
-pub trait IssuerKeyResolver: Send + Sync {
-    fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>>;
+#[derive(Debug, Default)]
+struct AggregationHistory {
+    by_issuer: HashMap<String, AggregationId>,
+    by_id: HashMap<AggregationId, String>,
 }
 
 /// File-backed implementation name used in the issue and operational docs.
@@ -123,40 +116,108 @@ pub type StaticFileRegistry = RegistryHandle;
 
 impl RegistryHandle {
     pub fn from_yaml(content: &str) -> Result<Self, RegistryError> {
-        Ok(Self {
-            path: PathBuf::from("<memory>"),
-            active: ArcSwap::from_pointee(IssuerRegistry::from_yaml(content)?),
-        })
+        Ok(Self::new(
+            PathBuf::from("<memory>"),
+            IssuerRegistry::from_yaml(content)?,
+        ))
     }
 
     pub fn empty() -> Self {
-        Self {
-            path: PathBuf::from("<empty>"),
-            active: ArcSwap::from_pointee(
-                IssuerRegistry::from_yaml("version: 1\nissuers: []\nadmins: []\n")
-                    .expect("empty registry is valid"),
-            ),
-        }
+        Self::new(
+            PathBuf::from("<empty>"),
+            IssuerRegistry::from_yaml("version: 1\nissuers: []\nadmins: []\n")
+                .expect("empty registry is valid"),
+        )
     }
 
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, RegistryError> {
         let path = path.into();
         let registry = IssuerRegistry::from_file(&path)?;
-        Ok(Self {
+        Ok(Self::new(path, registry))
+    }
+
+    fn new(path: PathBuf, registry: ValidatedRegistry) -> Self {
+        Self {
             path,
+            aggregation_history: Mutex::new(AggregationHistory {
+                by_issuer: registry.issuer_aggregations.clone(),
+                by_id: registry.aggregation_issuers.clone(),
+            }),
+            reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
-        })
+        }
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
         self.active.load_full()
     }
 
+    pub fn reload_failure_count(&self) -> u64 {
+        self.reload_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn record_reload_failure(&self) {
+        self.reload_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn resolve_with_reason(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+        let now = time::OffsetDateTime::now_utc();
+        self.snapshot().resolve_with_reason_at(kid, now)
+    }
+
+    pub fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
+        self.resolve_with_reason(kid).ok()
+    }
+
     pub fn reload(&self) -> Result<(), RegistryError> {
         let registry = IssuerRegistry::from_file(&self.path)?;
-        self.snapshot()
-            .validate_aggregation_ids_unchanged(&registry)?;
-        self.active.store(Arc::new(registry));
+        self.replace(registry)
+    }
+
+    /// Apply a registry only after external consistency checks have succeeded.
+    pub fn replace(&self, registry: ValidatedRegistry) -> Result<(), RegistryError> {
+        let registry = Arc::new(registry);
+        self.validate_candidate(&registry)?;
+        let mut history = self
+            .aggregation_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history
+            .by_issuer
+            .extend(registry.issuer_aggregations.clone());
+        history.by_id.extend(registry.aggregation_issuers.clone());
+        self.active.store(registry);
+        Ok(())
+    }
+
+    /// Check immutable aggregation history before making external adoption writes.
+    pub fn validate_candidate(&self, registry: &ValidatedRegistry) -> Result<(), RegistryError> {
+        let history = self
+            .aggregation_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (issuer, next) in &registry.issuer_aggregations {
+            if history
+                .by_issuer
+                .get(issuer)
+                .is_some_and(|current| current != next)
+            {
+                return Err(RegistryError::Semantic(format!(
+                    "aggregation_id for issuer `{issuer}` is immutable"
+                )));
+            }
+        }
+        for (aggregation_id, issuer) in &registry.aggregation_issuers {
+            if history
+                .by_id
+                .get(aggregation_id)
+                .is_some_and(|current| current != issuer)
+            {
+                return Err(RegistryError::Semantic(format!(
+                    "issuer for aggregation_id `{aggregation_id}` is immutable"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -166,26 +227,38 @@ impl RegistryHandle {
 }
 
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
-        let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
-        let timestamp = u64::try_from(timestamp).ok()?;
-        self.snapshot().resolve_at(kid, timestamp)
+    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+        self.resolve_with_reason(kid)
+    }
+}
+
+impl IssuerDirectory for RegistryHandle {
+    fn issuer_aggregation_id(&self, issuer: &str) -> Option<AggregationId> {
+        self.snapshot().issuer_aggregation_id(issuer)
+    }
+
+    fn issuer_by_aggregation_id(&self, aggregation_id: AggregationId) -> Option<String> {
+        self.snapshot()
+            .issuer_by_aggregation_id(aggregation_id)
+            .map(str::to_owned)
     }
 }
 
 impl IssuerRegistry {
     pub fn from_file(path: impl AsRef<Path>) -> Result<ValidatedRegistry, RegistryError> {
-        let content = std::fs::read_to_string(path)?;
+        let content =
+            std::fs::read_to_string(path.as_ref()).map_err(|source| RegistryError::Read {
+                path: path.as_ref().to_path_buf(),
+                source,
+            })?;
         Self::from_yaml(&content)
     }
 
     pub fn from_yaml(content: &str) -> Result<ValidatedRegistry, RegistryError> {
-        let parser = serde_yaml::ParserConfig::strict();
-        let yaml: serde_yaml::Value = serde_yaml::from_str_with_config(content, &parser)?;
-        let json: Value =
-            serde_json::to_value(&yaml).map_err(|err| RegistryError::Schema(err.to_string()))?;
+        let json: Value = serde_saphyr::from_str(content)?;
         validate_schema(&json)?;
-        let registry: Self = serde_yaml::from_value(&yaml)?;
+        let registry: Self =
+            serde_json::from_value(json).map_err(|err| RegistryError::Schema(err.to_string()))?;
         validate_semantics(&registry)?;
         let now = time::OffsetDateTime::now_utc();
         for issuer in &registry.issuers {
@@ -205,10 +278,14 @@ impl IssuerRegistry {
                 keys.insert(
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
-                        principal_id: issuer.id.clone(),
-                        principal_kind: PrincipalKind::Issuer,
-                        key: Arc::clone(key),
+                        principal: Principal::Issuer {
+                            id: issuer.id.clone(),
+                            aggregation_id,
+                        },
                         public_key: Arc::new(validated_public_key(key)?),
+                        enabled: !issuer.disabled,
+                        not_before: parsed_window(key.not_before.as_deref()),
+                        not_after: parsed_window(key.not_after.as_deref()),
                     }),
                 );
             }
@@ -218,10 +295,13 @@ impl IssuerRegistry {
                 keys.insert(
                     key.kid.clone(),
                     Arc::new(ResolvedKey {
-                        principal_id: admin.id.clone(),
-                        principal_kind: PrincipalKind::Admin,
-                        key: Arc::clone(key),
+                        principal: Principal::Admin {
+                            id: admin.id.clone(),
+                        },
                         public_key: Arc::new(validated_public_key(key)?),
+                        enabled: !admin.disabled,
+                        not_before: parsed_window(key.not_before.as_deref()),
+                        not_after: parsed_window(key.not_after.as_deref()),
                     }),
                 );
             }
@@ -229,6 +309,7 @@ impl IssuerRegistry {
 
         Ok(ValidatedRegistry {
             registry,
+            fingerprint: hex::encode(Sha256::digest(content.as_bytes())),
             keys,
             issuer_aggregations,
             aggregation_issuers,
@@ -237,57 +318,36 @@ impl IssuerRegistry {
 }
 
 impl ValidatedRegistry {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
     pub fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
         self.keys.get(kid).cloned()
     }
 
     /// Resolve a key that is active at the supplied Unix timestamp.
     pub fn resolve_at(&self, kid: &str, unix_timestamp: u64) -> Option<Arc<ResolvedKey>> {
-        let resolved = self.resolve(kid)?;
-        let active = |key: &RegistryKey| {
-            let now =
-                time::OffsetDateTime::from_unix_timestamp(i64::try_from(unix_timestamp).ok()?)
-                    .ok()?;
-            let not_before = key
-                .not_before
-                .as_deref()
-                .map(|value| {
-                    time::OffsetDateTime::parse(
-                        value,
-                        &time::format_description::well_known::Rfc3339,
-                    )
-                })
-                .transpose()
-                .ok()?;
-            let not_after = key
-                .not_after
-                .as_deref()
-                .map(|value| {
-                    time::OffsetDateTime::parse(
-                        value,
-                        &time::format_description::well_known::Rfc3339,
-                    )
-                })
-                .transpose()
-                .ok()?;
-            Some(
-                not_before.is_none_or(|value| now >= value)
-                    && not_after.is_none_or(|value| now < value),
-            )
-        };
-        let enabled = match resolved.principal_kind {
-            PrincipalKind::Issuer => self
-                .issuer(&resolved.principal_id)
-                .is_some_and(|issuer| !issuer.disabled),
-            PrincipalKind::Admin => self
-                .admin(&resolved.principal_id)
-                .is_some_and(|admin| !admin.disabled),
-        };
-        if enabled && active(&resolved.key).unwrap_or(false) {
-            Some(resolved)
-        } else {
-            None
+        let now =
+            time::OffsetDateTime::from_unix_timestamp(i64::try_from(unix_timestamp).ok()?).ok()?;
+        self.resolve_with_reason_at(kid, now).ok()
+    }
+
+    pub fn resolve_with_reason_at(
+        &self,
+        kid: &str,
+        now: time::OffsetDateTime,
+    ) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+        let resolved = self.resolve(kid).ok_or(KeyResolveError::UnknownKid)?;
+        if !resolved.enabled {
+            return Err(KeyResolveError::PrincipalDisabled);
         }
+        if resolved.not_before.is_some_and(|start| now < start) {
+            return Err(KeyResolveError::NotYetValid);
+        }
+        if resolved.not_after.is_some_and(|end| now >= end) {
+            return Err(KeyResolveError::Expired);
+        }
+        Ok(resolved)
     }
 
     pub fn issuer(&self, id: &str) -> Option<&IssuerEntry> {
@@ -320,22 +380,13 @@ impl ValidatedRegistry {
     pub fn key_count(&self) -> usize {
         self.keys.len()
     }
+}
 
-    fn validate_aggregation_ids_unchanged(
-        &self,
-        next: &ValidatedRegistry,
-    ) -> Result<(), RegistryError> {
-        for (issuer, current) in &self.issuer_aggregations {
-            if let Some(next) = next.issuer_aggregations.get(issuer)
-                && next != current
-            {
-                return Err(RegistryError::Semantic(format!(
-                    "aggregation_id for issuer `{issuer}` is immutable"
-                )));
-            }
-        }
-        Ok(())
-    }
+fn parsed_window(value: Option<&str>) -> Option<time::OffsetDateTime> {
+    value.map(|value| {
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .expect("registry validation parsed the key window")
+    })
 }
 
 fn validate_schema(value: &Value) -> Result<(), RegistryError> {
@@ -431,7 +482,9 @@ fn validate_keys<'a>(
             )));
         }
         let public_key = validated_public_key(key)?;
-        if public_key.key_id() != key.kid || format!("{:?}", public_key.algorithm()) != key.alg {
+        if public_key.key_id() != key.kid
+            || key.alg.parse::<jsonwebtoken::Algorithm>().ok() != Some(public_key.algorithm())
+        {
             return Err(RegistryError::Semantic(format!(
                 "key `{}` does not match its kid or alg metadata",
                 key.kid
@@ -611,7 +664,8 @@ mod tests {
             registry
                 .resolve("QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M")
                 .unwrap()
-                .principal_id,
+                .principal
+                .id(),
             "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
         );
     }
@@ -734,6 +788,50 @@ mod tests {
                 .issuer_aggregation_id("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"),
             before
         );
+    }
+
+    #[test]
+    fn reload_rejects_a_changed_aggregation_id_after_issuer_removal() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), VALID).unwrap();
+        let handle = RegistryHandle::load(file.path()).unwrap();
+
+        let mut removed: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        removed["issuers"] = serde_json::Value::Array(Vec::new());
+        std::fs::write(file.path(), serde_saphyr::to_string(&removed).unwrap()).unwrap();
+        handle.reload().unwrap();
+        assert!(handle.snapshot().issuers().is_empty());
+
+        let changed_id = "22222222-2222-4222-8222-222222222222";
+        let readded = VALID.replace("0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60", changed_id);
+        std::fs::write(file.path(), readded).unwrap();
+        let error = handle.reload().unwrap_err();
+        assert!(
+            error.to_string().contains("aggregation_id") && error.to_string().contains("immutable")
+        );
+        assert!(handle.snapshot().issuers().is_empty());
+    }
+
+    #[test]
+    fn reload_rejects_reusing_an_aggregation_id_for_a_different_issuer() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), VALID).unwrap();
+        let handle = RegistryHandle::load(file.path()).unwrap();
+
+        let mut removed: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        removed["issuers"] = serde_json::Value::Array(Vec::new());
+        std::fs::write(file.path(), serde_saphyr::to_string(&removed).unwrap()).unwrap();
+        handle.reload().unwrap();
+
+        let mut readded: serde_json::Value = serde_saphyr::from_str(VALID).unwrap();
+        readded["issuers"][0]["id"] = serde_json::Value::String("different-issuer".into());
+        std::fs::write(file.path(), serde_saphyr::to_string(&readded).unwrap()).unwrap();
+        let error = handle.reload().unwrap_err();
+        assert!(
+            error.to_string().contains("issuer for aggregation_id")
+                && error.to_string().contains("immutable")
+        );
+        assert!(handle.snapshot().issuers().is_empty());
     }
 
     #[test]

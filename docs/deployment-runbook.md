@@ -99,25 +99,38 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
-- **Issuer trust registry**: provide an operator-managed `issuers.yaml` ConfigMap and set `statuslist.issuerRegistry.configMap.name`. The chart mounts the complete directory at `/etc/status-list-server`; do not use `subPath`, because the server watches the file for rotation. ConfigMap propagation is eventual, so verify the reload log/metric after publishing a rotation. The registry is mandatory; an empty registry is fail-closed and trusts no issuers.
+- **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production requires an explicit registry path; without one in development, the server warns and trusts no issuers.
 - To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
 ### Rotate or revoke issuer keys
 
-Keep the registry in the operator-controlled source used to publish the ConfigMap.
+Keep the registry in the operator-controlled source used to publish the mount.
 It contains public keys only. Never put an issuer's private key in the registry.
+
+To start a new registry (there is no committed file), create the three-line skeleton:
+
+```yaml
+version: 1
+issuers: []
+admins: []
+```
+
+`cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
+file must exist with at least this structure before you add keys.
 
 For a zero-downtime rotation:
 
 1. Add the new public key while retaining the old key:
-   `cargo xtask issuer add-key --file issuers.yaml --issuer <issuer-id> --jwk '<public-jwk-json>' --alg ES256`.
-2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml status-list-server issuer-registry`.
-3. Publish the updated ConfigMap and wait for Kubernetes to propagate it to every pod. Check each pod's `issuer_registry_reloaded` log and confirm the `issuer_registry_keys` gauge reflects the registry.
+   `cargo xtask issuer add-key --file <registry-file> --issuer <issuer-id> --jwk '<public-jwk-json>' --alg ES256`.
+2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
+3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the registry data Kubernetes serves with `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`, then compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
-5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the ConfigMap. Confirm reload on every pod; requests signed with the removed key should then be rejected.
+5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
-To revoke one key immediately, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the ConfigMap if it increases. ConfigMap delivery and reload are eventual; do not consider a rotation or revocation complete until all pods report the new snapshot.
+To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Keep the issuer and its aggregation ID in the registry while published tokens may still reference its aggregation URL: removing a registry-only issuer can make that URL return 404 even though its lists remain public. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+
+When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
 ## Redis Status-List Cache
 
@@ -438,7 +451,8 @@ Before the upgrade:
 During the upgrade:
 
 - The migrations add `credentials.aggregation_id` and an `(issuer, list_id)`
-  index on `status_lists`.
+  index on `status_lists`, and create `issuer_aggregations` to keep registry
+  mappings immutable across pod restarts.
 - Pods of the previous release do not serve `/api/v1/aggregation/<id>`, so a
   relying party following a token from a new pod may get a `404` from an old
   one until the rollout completes. The claim is optional, and relying parties
@@ -455,24 +469,26 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the three versions below. Rolling back to a release older than the list
+adds the four versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
 schema changes stay, which the previous release ignores, and so do the
-aggregation IDs.
+credential and registry aggregation IDs.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
 - `m20261014_000001_credentials_key_id`
+- `m20261020_000001_issuer_aggregations`
 
 Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
-**Never undo `credentials.aggregation_id`** once tokens with scoped URIs have
-been served. The server refuses its down migration; do not drop the column by
-hand either. The IDs are lost, new ones are assigned, and every URI already in
-tokens or issuer metadata returns `404`. Restoring a backup taken before it
-does the same and loses status changes too; see
+**Never undo `credentials.aggregation_id` or `issuer_aggregations`** once tokens
+with scoped URIs have been served. The server refuses their down migrations;
+do not drop the column or table by hand either. The IDs are lost, new ones are
+assigned, and every URI already in tokens or issuer metadata returns `404`.
+Restoring a backup from before either migration has the same effect and loses
+status changes too; see
 [Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
 Deleting an issuer's credential in the database and registering it again does
 the same to that issuer.
@@ -684,6 +700,7 @@ here; a test fails until it does.
 | `m20260929_000001_credentials_aggregation_id` | Yes: the column is nullable, and the IDs are kept | None | Nothing; until then, scoped URIs return `404` (see [Rolling back](#rolling-back)) |
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
+| `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
 
 ### Preparing existing management credentials
 

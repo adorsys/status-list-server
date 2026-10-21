@@ -112,11 +112,13 @@ async fn aggregation_page(
     let page = match scope {
         None => state.service.list_uris(after.as_deref(), limit).await?,
         Some(aggregation_id) => {
-            let registry = state.issuer_registry.snapshot();
-            if let Some(issuer) = registry.issuer_by_aggregation_id(aggregation_id) {
+            if let Some(issuer) = state
+                .issuer_registry
+                .issuer_by_aggregation_id(aggregation_id)
+            {
                 state
                     .service
-                    .list_issuer_uris_by_issuer(&Issuer(issuer.to_owned()), after.as_deref(), limit)
+                    .list_issuer_uris_by_issuer(&Issuer(issuer), after.as_deref(), limit)
                     .await?
             } else {
                 state

@@ -493,6 +493,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn exported_issuer_keeps_existing_list_and_aggregation_uri() {
+        use crate::domain::ports::IssuerDirectory;
         use crate::outbound::sql::issuer_export::export_issuers;
         use crate::server::auth::issuer_registry::RegistryHandle;
         use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
@@ -550,10 +551,11 @@ mod tests {
         let draft = export_issuers(&db).await.unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), draft).unwrap();
-        state.issuer_registry = Arc::new(RegistryHandle::load(file.path()).unwrap());
-        let registry = state.issuer_registry.snapshot();
+        let registry = RegistryHandle::load(file.path()).unwrap();
         assert_eq!(registry.issuer_aggregation_id(issuer), Some(aggregation_id));
-        let key = &registry.issuer(issuer).unwrap().keys[0];
+        let snapshot = registry.snapshot();
+        let key = &snapshot.issuer(issuer).unwrap().keys[0];
+        state.set_issuer_registry(Arc::new(registry));
         assert_ne!(key.kid, format!("test-key-{issuer}"));
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
         header.typ = Some("statuslist-management+jwt".into());

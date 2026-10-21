@@ -27,11 +27,10 @@ pub async fn get_credential(
     State(state): State<AppState>,
     issuer: AuthenticatedIssuer,
 ) -> Result<Json<RegistrationResponse>, ApiError> {
+    let registry_aggregation_id = issuer.aggregation_id();
     let issuer = issuer.into_issuer();
-    let aggregation_id = match state
-        .issuer_registry
-        .snapshot()
-        .issuer_aggregation_id(&issuer.0)
+    let aggregation_id = match registry_aggregation_id
+        .or_else(|| state.issuer_registry.issuer_aggregation_id(&issuer.0))
     {
         Some(aggregation_id) => aggregation_id,
         None => state
@@ -113,7 +112,7 @@ mod tests {
                 .unwrap(),
         );
         let aggregation_id = uuid::Uuid::new_v4();
-        let registry = serde_yaml::to_string(&serde_json::json!({
+        let registry = serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
             "issuers": [{
                 "id": "static-issuer",
@@ -123,9 +122,9 @@ mod tests {
             "admins": []
         }))
         .unwrap();
-        app_state.issuer_registry = Arc::new(
+        app_state.set_issuer_registry(Arc::new(
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
-        );
+        ));
 
         let Json(registration) =
             get_credential(State(app_state), authenticated_issuer("static-issuer"))

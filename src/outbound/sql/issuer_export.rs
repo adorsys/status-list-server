@@ -14,7 +14,7 @@ pub enum ExportError {
     #[error("exported registry is invalid: {0}")]
     Registry(#[from] RegistryError),
     #[error("serialize registry: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_saphyr::SerializeError),
 }
 
 /// Export a validated draft without migrating or modifying the source database.
@@ -67,7 +67,7 @@ pub async fn export_issuers(db: &DatabaseConnection) -> Result<String, ExportErr
             "keys": [{"kid": kid, "alg": alg, "jwk": jwk}],
         }));
     }
-    let content = serde_yaml::to_string(&serde_json::json!({
+    let content = serde_saphyr::to_string(&serde_json::json!({
         "version": 1, "issuers": issuers, "admins": [],
     }))?;
     IssuerRegistry::from_yaml(&content)?;
