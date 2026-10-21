@@ -61,6 +61,10 @@ Messages such as `fixed stuff`, `update code`, `address review`, or `WIP` are
 rejected by CI because `git-cliff` and `release-plz` cannot use them to compute
 release notes or semantic version bumps.
 
+## Documentation
+
+Store documentation images and other binary assets in `docs/assets/`.
+
 ## Pull Requests
 
 1. Fork the repository and create a feature branch from `main`.
