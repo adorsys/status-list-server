@@ -1615,7 +1615,7 @@ version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.14"
+version = "0.103.16"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
@@ -2215,7 +2215,7 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-root-certs]]
-version = "1.0.9"
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-root-certs]]
@@ -2223,7 +2223,7 @@ version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
-version = "1.0.9"
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
