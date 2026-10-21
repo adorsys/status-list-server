@@ -13,7 +13,7 @@
 
 **High-Level Diagram**:
 
-![arc](assets/arc.png)
+![High-level architecture](assets/arc.png)
 
 - **Components**:
   1. **Token Issuer**: Issues Referenced Tokens with a `status` claim pointing to the Status List Server.
