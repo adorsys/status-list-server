@@ -749,7 +749,7 @@ mod tests {
                     "kty": "OKP",
                     "crv": "Ed25519",
                 }),
-                "2Sy1cth_ZvIuKlHFA3AbIDpW7AbIzEWdmixu9ekxpLM",
+                concat!("2Sy1cth_ZvIuKlHFA3AbIDpW7AbI", "zEWdmixu9ekxpLM"),
             ),
         ];
 

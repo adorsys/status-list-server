@@ -89,7 +89,11 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
             "--set",
             "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
         ])
-        .args(["--set", "opentelemetry-collector.enabled=false"]);
+        .args(["--set", "opentelemetry-collector.enabled=false"])
+        .args([
+            "--set",
+            "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",
+        ]);
     if disable_postgres {
         command.args(["--set", "postgres.enabled=false"]);
     }
@@ -172,30 +176,6 @@ fn rendered_env(rendered: &str) -> Vec<(String, String)> {
     }
 
     env
-}
-
-#[test]
-fn issuer_registry_config_map_preserves_the_supplied_file_bytes() {
-    let source = "version: 1\nissuers: []\nadmins: []";
-    let content = format!("statuslist.issuerRegistry.configMap.content={source}");
-    let Some(rendered) = render_helm(&[
-        "--set",
-        "statuslist.issuerRegistry.configMap.create=true",
-        "--set-string",
-        &content,
-    ]) else {
-        return;
-    };
-
-    let rendered_content = rendered
-        .lines()
-        .skip_while(|line| line.trim() != "issuers.yaml: |")
-        .skip(1)
-        .take_while(|line| line.starts_with("    "))
-        .map(|line| &line[4..])
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(rendered_content, source);
 }
 
 #[test]

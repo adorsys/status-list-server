@@ -467,15 +467,9 @@
           "title": "Operator-managed issuer registry",
           "properties": {
             "path": { "type": "string", "pattern": "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Registry file inside its dedicated mount directory" },
-            "configMap": {
+            "volume": {
               "type": "object",
-              "properties": {
-                "create": { "type": "boolean" },
-                "name": { "type": "string", "minLength": 1 },
-                "key": { "type": "string", "minLength": 1 },
-                "content": { "type": "string" }
-              },
-              "additionalProperties": false
+              "description": "Any volume source that provides the file named in `path` (e.g. configMap, secret, csi). Required when the chart is enabled."
             }
           },
           "additionalProperties": false

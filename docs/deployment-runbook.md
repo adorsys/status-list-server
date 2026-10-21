@@ -99,25 +99,36 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
-- **Issuer trust registry**: provide an operator-managed `issuers.yaml` ConfigMap and set `statuslist.issuerRegistry.configMap.name`. The chart mounts the complete directory at `/etc/status-list-server`; do not use `subPath`, because the server watches the file for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production requires an explicit registry path; without one in development, the server warns and trusts no issuers.
+- **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart requires a registry volume; do not use `subPath`, because the server watches the whole mounted directory for rotation. The registry file is not committed to the repository — operators supply and mount their own. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production requires an explicit registry path; without one in development, the server warns and trusts no issuers.
 - To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
 ### Rotate or revoke issuer keys
 
-Keep the registry in the operator-controlled source used to publish the ConfigMap.
+Keep the registry in the operator-controlled source used to publish the mount.
 It contains public keys only. Never put an issuer's private key in the registry.
+
+To start a new registry (there is no committed file), create the three-line skeleton:
+
+```yaml
+version: 1
+issuers: []
+admins: []
+```
+
+`cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
+file must exist with at least this structure before you add keys.
 
 For a zero-downtime rotation:
 
 1. Add the new public key while retaining the old key:
    `cargo xtask issuer add-key --file <registry-file> --issuer <issuer-id> --jwk '<public-jwk-json>' --alg ES256`.
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
-3. Publish the updated ConfigMap and wait for Kubernetes to propagate it to every pod. Hash the ConfigMap data Kubernetes serves with `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`, then compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
+3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the registry data Kubernetes serves with `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`, then compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
-5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the ConfigMap. Confirm reload on every pod; requests signed with the removed key should then be rejected.
+5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Keep the issuer and its aggregation ID in the registry while published tokens may still reference its aggregation URL: removing a registry-only issuer can make that URL return 404 even though its lists remain public. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the ConfigMap if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the ConfigMap and use `kubectl rollout restart` so new pods mount it, then verify the fingerprint and rejection on every pod.
+To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Keep the issuer and its aggregation ID in the registry while published tokens may still reference its aggregation URL: removing a registry-only issuer can make that URL return 404 even though its lists remain public. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 

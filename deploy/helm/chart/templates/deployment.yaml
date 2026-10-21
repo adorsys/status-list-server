@@ -27,8 +27,8 @@ from statuslist.podLabels, which are merged into the pod template LABELS).
 {{- if not (regexMatch "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$" .Values.statuslist.issuerRegistry.path) }}
 {{- fail "statuslist.issuerRegistry.path must be a file inside /etc/status-list-server" }}
 {{- end }}
-{{- if eq (trim (toString .Values.statuslist.issuerRegistry.configMap.name)) "" }}
-{{- fail "statuslist.issuerRegistry.configMap.name is required" }}
+{{- if eq (len (dig "issuerRegistry" "volume" dict .Values.statuslist)) 0 }}
+{{- fail "statuslist.issuerRegistry.volume is required; provide a configMap, secret, or csi volume that supplies the registry file" }}
 {{- end }}
 {{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
 {{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
@@ -372,11 +372,7 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: issuer-registry
-          configMap:
-            name: {{ .Values.statuslist.issuerRegistry.configMap.name | quote }}
-            items:
-              - key: {{ .Values.statuslist.issuerRegistry.configMap.key | quote }}
-                path: {{ base .Values.statuslist.issuerRegistry.path | quote }}
+{{- toYaml .Values.statuslist.issuerRegistry.volume | nindent 10 }}
       {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume
           secret:

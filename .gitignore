@@ -1,5 +1,8 @@
 /target
 .env
+# Operator-managed issuer trust registry. Not committed: operators supply and
+# mount their own file (ConfigMap, Secret, or CSI volume).
+issuer-registry/
 .debug/
 .vscode/
 cert.yml
