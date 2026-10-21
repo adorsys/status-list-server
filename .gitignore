@@ -1,7 +1,6 @@
 /target
 .env
-# Operator-managed issuer trust registry. Not committed: operators supply and
-# mount their own file (ConfigMap, Secret, or CSI volume).
+# Operator-managed issuer trust registry; never committed.
 issuer-registry/
 .debug/
 .vscode/

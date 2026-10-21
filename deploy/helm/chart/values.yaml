@@ -258,14 +258,10 @@ statuslist:
   # serviceAccount.annotations below and the cloud-side trust relationship. This block is
   # only needed for the legacy path that mounts static shared-credential files.
   issuerRegistry:
-    # The registry is operator-managed and mounted as a whole directory so
-    # updates can be observed without restarting the pod. `path` is the file
-    # inside the container the server reads (APP_MANAGEMENT_AUTH__ISSUERS_FILE);
-    # the directory containing it is mounted from `volume`. Provide any volume
-    # source that makes the file named in `path` available, for example
-    # configMap: {name: issuers}, secret: {secretName: issuers}, or csi: {...}.
-    # When `volume` is empty the chart mounts no registry: the server warns and
-    # trusts no issuers (the development default).
+    # Operator-managed issuer trust registry, mounted as a directory so rotation
+    # is observed without a restart. `volume` is any volume source that provides
+    # the file named in `path` (configMap, secret, or csi). When empty the chart
+    # mounts no registry and the server trusts no issuers.
     path: /etc/status-list-server/issuers.yaml
     volume: {}
   aws:
