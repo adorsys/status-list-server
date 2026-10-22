@@ -341,6 +341,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
+                  "(async function () {",
                   "const issuer = pm.variables.get('issuer_id');",
                   "const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
                   "const storedKeyOwner = pm.environment.get('issuer_key_owner');",
@@ -365,7 +366,11 @@
                   "} else if (!token) {",
                   "  throw new Error('No issuer JWT or matching private key found. Send Register issuer credentials first.');",
                   "}",
-                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });"
+                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });",
+                  "})().catch(error => {",
+                  "  console.error('Failed to prepare issuer JWT:', error);",
+                  "  throw error;",
+                  "});"
                 ]
               }
             },
