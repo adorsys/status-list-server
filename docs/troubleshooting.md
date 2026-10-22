@@ -888,7 +888,7 @@ If `list_count` and `actual` differ, the counter has drifted; recompute it as de
 - **Raise the quota**, if it is below `1000`. Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the
   Deployment. The limit is global: it raises the ceiling for every issuer, not only this one.
 - **Delete lists the issuer no longer needs**, directly in the database, then
-  [recompute the counter](#recomputing-credentialslist_count). Only delete a list that no
+  [recompute the counter](#recomputing-issuer-list-counts). Only delete a list that no
   unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`
   and can no longer check revocation. Also delete its history rows
   (`DELETE FROM status_list_history WHERE list_id = '<list_id>'`), which have no foreign key to
