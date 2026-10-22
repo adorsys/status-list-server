@@ -1002,6 +1002,7 @@ jobs:
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
+            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
             --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
             --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
             --set "secretStore.enabled=false" \

@@ -469,7 +469,7 @@
             "path": { "type": "string", "pattern": "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Registry file inside its dedicated mount directory" },
             "volume": {
               "type": "object",
-              "description": "Any volume source that provides the file named in `path` (e.g. configMap, secret, csi). Empty mounts no registry; the server then warns and trusts no issuers."
+              "description": "Any volume source that provides the file named in `path` (e.g. configMap, secret, csi). Required in production; empty mounts no registry in development, where the server warns and trusts no issuers."
             }
           },
           "additionalProperties": false

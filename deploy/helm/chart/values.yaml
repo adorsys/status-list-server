@@ -270,7 +270,7 @@ statuslist:
     # Operator-managed issuer trust registry, mounted as a directory so rotation
     # is observed without a restart. `volume` is any volume source that provides
     # the file named in `path` (configMap, secret, or csi). When empty the chart
-    # mounts no registry and the server trusts no issuers.
+    # mounts no registry in development. Production requires a volume.
     path: /etc/status-list-server/issuers.yaml
     volume: {}
   aws:

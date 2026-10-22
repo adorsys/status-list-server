@@ -7,11 +7,6 @@ serviceAccount:
 
 statuslist:
   replicaCount: 2
-  issuerRegistry:
-    # Registry is required in production; operators supply the ConfigMap.
-    volume:
-      configMap:
-        name: status-list-server-issuers
   ingress:
     management:
       # Enable the management listener Ingress in production so issuer writes
