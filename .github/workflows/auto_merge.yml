@@ -61,7 +61,7 @@ jobs:
         run: |
           set -uo pipefail
 
-          # Auto-merge is off in repo settings by choice (CONTRIBUTING.md), so that case warns, not fails.
+          # Auto-merge is off in repo settings by choice, so that case warns, not fails.
           # Read the setting from the API rather than parsing gh's error text, which isn't stable.
           allowed=$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null) || allowed=""
 

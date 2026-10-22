@@ -31,6 +31,7 @@ repo="adorsys/status-list-server"
 image_ref="ghcr.io/adorsys/status-list-server@${digest}"
 release_ref="refs/tags/v1.2.3"
 
+# Absolute path: the no-gh case empties PATH, so env bash would fail and pass for the wrong reason.
 bash_bin=$(command -v bash)
 
 stub_dir=$(mktemp -d)
