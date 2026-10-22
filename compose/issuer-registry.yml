@@ -3,4 +3,9 @@ services:
     environment:
       APP_MANAGEMENT_AUTH__ISSUERS_FILE: /etc/status-list-server/issuers.yaml
     volumes:
-      - ${ISSUER_REGISTRY_DIR:?Set ISSUER_REGISTRY_DIR to the directory containing issuers.yaml}:/etc/status-list-server:ro
+      - type: bind
+        source: ${ISSUER_REGISTRY_DIR:?Set ISSUER_REGISTRY_DIR to the directory containing issuers.yaml}
+        target: /etc/status-list-server
+        read_only: true
+        bind:
+          create_host_path: false

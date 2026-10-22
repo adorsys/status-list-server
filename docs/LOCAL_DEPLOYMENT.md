@@ -20,13 +20,16 @@ directory and file first, then include the registry override:
 
 ```bash
 mkdir -p issuer-registry
-printf 'version: 1\nissuers: []\nadmins: []\n' > issuer-registry/issuers.yaml
+if [ ! -e issuer-registry/issuers.yaml ]; then
+  printf 'version: 1\nissuers: []\nadmins: []\n' > issuer-registry/issuers.yaml
+fi
 ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
   docker compose -f docker-compose.yml -f compose/issuer-registry.yml up -d --build
 ```
 
 Without the override, Compose does not mount or create an issuer-registry
-directory and the server trusts no issuers.
+directory and the server trusts no issuers. The override requires an existing
+host directory; a misspelled `ISSUER_REGISTRY_DIR` fails instead of creating it.
 
 - `postgres`: Add PostgreSQL (`db`) only.
 - `mysql`: Add MySQL (`mysql`) only.
