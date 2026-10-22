@@ -36,20 +36,13 @@ impl TokenValidity {
 /// client holds the current window's token, which is never expired while its
 /// window is live.
 pub(crate) fn token_window(now: i64, validity: TokenValidity) -> (i64, i64) {
-    let width = window_width(validity);
+    let width = window_width(validity.exp_secs);
     let start = now.div_euclid(width) * width;
     (start, start.saturating_add(width))
 }
 
-/// The width of a token validity window: `exp_secs`, clamped to `>= 1`.
-///
-/// Shared by [`token_window`] (which anchors a window on the clock) and the
-/// signed-bytes cache's per-entry expiry (which frees a closed window's bytes at
-/// `window_start + width`), so the two can never drift apart: if one changed the
-/// formula and the other did not, entries would quietly expire at the wrong
-/// time.
-pub(crate) fn window_width(validity: TokenValidity) -> i64 {
-    let exp = i64::try_from(validity.exp_secs).unwrap_or(i64::MAX);
+pub(crate) fn window_width(exp_secs: u64) -> i64 {
+    let exp = i64::try_from(exp_secs).unwrap_or(i64::MAX);
     exp.max(1)
 }
 

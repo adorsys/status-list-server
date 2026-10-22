@@ -3,6 +3,15 @@ global:
   # statuslist.<domain> and the default TLS host becomes *.<domain>.
   # Leave empty for provider-neutral defaults.
   domain: ""
+  # Backends the bundled OpenTelemetry collector exports to. The defaults assume
+  # Tempo and Loki run in a "monitoring" namespace (kube-prometheus-stack layout).
+  observability:
+    tempo:
+      # OTLP/gRPC endpoint (host:port, no scheme) for traces.
+      endpoint: "tempo.monitoring.svc.cluster.local:4317"
+    loki:
+      # Full OTLP/HTTP logs URL, including the /otlp/v1/logs path.
+      logsEndpoint: "http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs"
 
 # Optional annotations merged onto the Pod template metadata (top-level, distinct from
 # statuslist.podLabels which are merged into the pod LABELS). Consumed by deployment.yaml.
@@ -87,12 +96,7 @@ statuslist:
     # scanned. Each variant has its own digest; use the digest matching the selected
     # variant. If set, it must be a valid sha256 digest or the render fails.
     digest: ""
-  # Add prometheus.io/scrape + port + path Pod annotations.
-  # Defaults to false on purpose: kube-prometheus-stack does NOT scrape arbitrary
-  # annotation-marked Pods — the ServiceMonitor above is the authoritative discovery
-  # method. Enable only for compatibility with a separately configured scraper that
-  # relies on these annotations; otherwise leaving them off avoids implying that
-  # annotations alone are sufficient.
+  # Off by default: kube-prometheus-stack uses the ServiceMonitor, not these annotations.
   prometheusAnnotations: false
   service:
     # Render a Service for the application pod. The Ingress routes to this Service via
@@ -385,11 +389,7 @@ statuslist:
     # provisioning guarantees that key exists.
     passwordSecretKey: postgres-password
 
-  # Watcher configuration for file-based credential rotation detection.
-  # When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected.
-  # This requires an application image that implements the file watcher contract
-  # (polls mounted secret files and swaps credentials/pools without restart); the current
-  # published images do not watch files yet, so paths propagate but are loaded at startup.
+  # How often mounted secret files are checked for rotation.
   watcher:
     pollIntervalSecs: "30"
   livenessProbe:
@@ -981,32 +981,28 @@ opentelemetry-collector:
         timeout: 5s
         send_batch_size: 1024
     exporters:
-      # 'debug' is development scaffolding (prints telemetry to stdout).
-      # IMPORTANT: Operators MUST configure production exporters before deploying to production.
+      # Tempo and Loki endpoints come from global.observability.* (see the top of this
+      # file) so the chart works when the observability stack is not in the
+      # "monitoring" namespace.
+      otlp/tempo:
+        endpoint: '{{ .Values.global.observability.tempo.endpoint }}'
+        tls:
+          insecure: true
+      # 'loki' exporter removed in opentelemetry-collector-contrib >= 0.106, so logs use
+      # the native OTLP HTTP exporter. logs_endpoint (not endpoint) avoids otlphttp
+      # appending '/v1/logs' and doubling the path (400).
+      otlphttp/loki:
+        logs_endpoint: '{{ .Values.global.observability.loki.logsEndpoint }}'
+      # Metrics stay on 'debug': /metrics ServiceMonitor scrape is the authoritative
+      # SLI path, so do not remote-write OTLP metrics (double ingestion).
       debug:
         verbosity: basic
-      # PRODUCTION EXPORTER EXAMPLES:
-      # Un-comment and configure the appropriate sink for your infrastructure:
-      #
-      # Traces (e.g. Jaeger / Grafana Tempo via OTLP gRPC):
-      # otlp/tempo:
-      #   endpoint: "tempo.monitoring.svc.cluster.local:4317"
-      #   tls:
-      #     insecure: true
-      #
-      # Metrics (e.g. Prometheus Remote Write):
-      # prometheusremotewrite:
-      #   endpoint: "http://prometheus-k8s.monitoring.svc.cluster.local:9090/api/v1/write"
-      #
-      # Logs (e.g. Grafana Loki):
-      # loki:
-      #   endpoint: "http://loki-gateway.monitoring.svc.cluster.local:3100/loki/api/v1/push"
     service:
       pipelines:
         traces:
           receivers: [otlp]
           processors: [memory_limiter, batch]
-          exporters: [debug]
+          exporters: [otlp/tempo]
         metrics:
           receivers: [otlp]
           processors: [memory_limiter, batch]
@@ -1014,4 +1010,4 @@ opentelemetry-collector:
         logs:
           receivers: [otlp]
           processors: [memory_limiter, batch]
-          exporters: [debug]
+          exporters: [otlphttp/loki]
