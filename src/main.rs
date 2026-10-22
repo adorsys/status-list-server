@@ -23,10 +23,8 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-    // Install the default panic and error report hooks
     color_eyre::install()?;
 
-    // Load configuration first so telemetry can read its settings
     let config = AppConfig::load()?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,16 +34,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize telemetry (tracing + metrics) based on environment.
-    // The guard must be held until shutdown to flush pending OTLP spans.
+    // Keep the guard alive until shutdown or pending spans are lost.
     let (_telemetry_guard, prometheus_registry) = init_telemetry(&config.telemetry)?;
 
-    // Install the crypto provider
     aws_lc_rs::default_provider()
         .install_default()
         .map_err(|e| eyre!("Failed to set crypto provider: {e:?}"))?;
 
-    // Load configuration and build the app state
     let config = AppConfig::load()?;
 
     #[cfg(feature = "acme")]
@@ -54,7 +49,6 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "acme"))]
     let app_state = build_state(&config).await?;
 
-    // Setup certificate renewal scheduler
     #[cfg(feature = "acme")]
     setup_cert_renewal_scheduler(
         cert_manager.clone(),
@@ -62,9 +56,7 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // Setup historical snapshot cleanup scheduler (runs daily at midnight UTC)
-    // This deletes snapshots older than snapshot_retention_secs to prevent
-    // unbounded database growth and mitigate privacy risks (draft-21 §12.7)
+    // Daily at 00:00 UTC (six-field cron, seconds first).
     setup_snapshot_cleanup_scheduler(app_state.clone(), "0 0 0 * * *").await?;
 
     let http_server = HttpServer::new(&config, app_state, prometheus_registry).await?;
@@ -74,13 +66,10 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "acme")]
     {
-        // Zero-init cert-chain cache counters now that the metrics recorder is installed.
         cert_manager.init_cert_chain_cache_counters();
 
-        // Zero-init renewal counters so they appear in Prometheus scrapes
         cert_manager.init_renewal_counters();
 
-        // Initial certificate request
         tokio::spawn(async move {
             if let Err(e) = cert_manager.renew_cert_if_needed().await {
                 warn!("Certificate initialization failed: {e}");

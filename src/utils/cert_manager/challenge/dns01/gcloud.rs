@@ -17,10 +17,7 @@ const PROVIDER: &str = "gcloud";
 const DEFAULT_API_BASE: &str = "https://dns.googleapis.com/dns/v1";
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/ndev.clouddns.readwrite";
 
-/// A DNS provider for Google Cloud DNS, authenticated with Application Default Credentials.
-///
-/// Waits for each change to reach the `done` status, which means the record
-/// is served by all of the zone's authoritative name servers.
+/// Waits for each change to reach done, meaning every authoritative server has it.
 pub struct GoogleCloudDnsProvider {
     client: Client,
     credentials: AccessTokenCredentials,
@@ -80,7 +77,6 @@ impl GoogleCloudDnsProvider {
     const PROPAGATION_INITIAL_DELAY: Duration = Duration::from_secs(2);
     const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
-    /// Create a provider from Application Default Credentials.
     pub fn new(project_id: impl Into<String>) -> Result<Self, ChallengeError> {
         let project_id = project_id.into();
         if project_id.trim().is_empty() {
@@ -107,7 +103,7 @@ impl GoogleCloudDnsProvider {
         })
     }
 
-    /// Override the API base URL (used in tests)
+    /// For tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
@@ -133,7 +129,6 @@ impl GoogleCloudDnsProvider {
 }
 
 impl GoogleCloudDnsProvider {
-    // Find the managed zone for the given domain and return its name
     async fn find_zone(&self, domain: &str) -> Result<String, ChallengeError> {
         self.try_cache_zones().await?;
 
@@ -150,7 +145,6 @@ impl GoogleCloudDnsProvider {
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
-        // Check if zones are already cached
         let read_guard = self.zones.read().await;
         if read_guard.is_some() {
             return Ok(());
@@ -161,7 +155,6 @@ impl GoogleCloudDnsProvider {
         let mut all_zones = Vec::new();
         let mut page_token: Option<String> = None;
 
-        // try to get all managed zones
         loop {
             let url = format!("{}/managedZones", self.project_url());
             let mut request = self.client.get(&url).bearer_auth(token.expose_secret());
@@ -200,7 +193,6 @@ impl GoogleCloudDnsProvider {
             .map_err(|e| dns_err(eyre!("Invalid API response (status {status}): {e}")))
     }
 
-    // Fetch the existing TXT rrset for the record, if any
     async fn get_rrset(
         &self,
         zone: &str,
@@ -220,9 +212,7 @@ impl GoogleCloudDnsProvider {
         Ok(body.rrsets.into_iter().next())
     }
 
-    // Apply a change replacing the existing rrset (if any) with the new one (if any).
-    // Cloud DNS changes replace whole rrsets, so callers pass merged rrdatas.
-    // Retries on conflict since another change may have touched the rrset in between.
+    // Cloud DNS replaces whole rrsets, so pass merged values; retried on conflict.
     async fn change_rrset(
         &self,
         zone: &str,
@@ -240,8 +230,7 @@ impl GoogleCloudDnsProvider {
                 .unwrap_or_default();
             let new_rrdatas = merge(old_rrdatas);
 
-            // Nothing to change: the record is already absent or already holds
-            // the merged values. Cloud DNS rejects an empty or identity change.
+            // Cloud DNS rejects empty or no-op changes.
             if existing.as_ref().map(|r| &r.rrdatas) == Some(&new_rrdatas)
                 || (existing.is_none() && new_rrdatas.is_empty())
             {
@@ -282,7 +271,6 @@ impl GoogleCloudDnsProvider {
         }
     }
 
-    // Wait until the change is served by all authoritative name servers
     async fn wait_for_change(
         &self,
         zone: &str,
@@ -300,7 +288,6 @@ impl GoogleCloudDnsProvider {
 
         let poll_future = async {
             loop {
-                // We double the delay after each attempt
                 let delay = 2u32
                     .checked_pow(retries)
                     .and_then(|factor| Self::PROPAGATION_INITIAL_DELAY.checked_mul(factor))
@@ -612,7 +599,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rrsets": []})))
             .mount(&server)
             .await;
-        // No POST /changes mock: an empty change request would fail the test
 
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
@@ -631,7 +617,6 @@ mod tests {
             .respond_with(rrsets_response(json!(["\"digest-value\""])))
             .mount(&server)
             .await;
-        // No POST /changes mock: an identity change request would fail the test
 
         provider(&server)
             .create_txt_record("status.example.com", "digest-value")
@@ -669,7 +654,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // The zone from the second page must be found
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
             .await

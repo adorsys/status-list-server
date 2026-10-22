@@ -39,9 +39,6 @@ pub(super) async fn assert_credentials_round_trip(db: Arc<DatabaseConnection>, i
     assert!(gone.is_none());
 }
 
-/// A duplicate primary key must surface as `DuplicateEntry`, not a generic
-/// insert error — the one property a mock cannot verify, since it depends on
-/// the real driver's error parsing into `SqlErr::UniqueConstraintViolation`.
 pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
     db: Arc<DatabaseConnection>,
     issuer: &str,
@@ -56,7 +53,6 @@ pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
         .await
         .unwrap();
 
-    // Duplicate credential (same issuer primary key).
     let dup_cred = cred_store
         .insert_one(Credentials::new(issuer.to_string(), key))
         .await;
@@ -65,7 +61,6 @@ pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
         "duplicate credential insert must map to DuplicateEntry, got {dup_cred:?}"
     );
 
-    // A different issuer cannot make the registered kid ambiguous either.
     let dup_kid = cred_store
         .insert_one(Credentials::new(
             format!("{issuer}-other"),
@@ -77,7 +72,6 @@ pub(super) async fn assert_duplicate_insert_maps_to_duplicate_entry(
         "duplicate kid must map to DuplicateEntry, got {dup_kid:?}"
     );
 
-    // Duplicate status list (same list_id primary key).
     let record = fixtures::record(list_id, issuer, "initial", &format!("sub-{list_id}"), 0);
     store
         .insert_one(record.clone(), fixtures::NO_LIST_QUOTA)

@@ -1,9 +1,4 @@
-//! Test harness: builds a wired [`AppState`] over the memory or SQL adapters.
-//!
-//! Shared test *data* does not belong here. This module pulls in the adapters,
-//! so anything defined in it is unreachable from a test module compiled without
-//! them. Put plain literals in [`crate::test_fixtures`], which is dependency-
-//! free precisely so that any test module can reach it whatever its own gate.
+//! Put shared literals in test_fixtures; this module needs the adapters' features.
 
 use crate::domain::models::credential::{AggregationId, Credential, Issuer, PublicJwk};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
@@ -31,8 +26,7 @@ pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIs
     AuthenticatedIssuer::new(Issuer(issuer.into()))
 }
 
-/// Runs `test` behind a fresh Prometheus registry and returns what it exported.
-/// Creates its own runtime, so call it from a plain `#[test]`.
+/// Builds its own runtime, so call it from a plain `#[test]`.
 pub(crate) fn metrics_after(test: impl std::future::Future<Output = ()>) -> String {
     use crate::config::{TelemetryConfig, TelemetryEnvironment};
     use crate::utils::metrics::{metrics_handler, metrics_test_lock, setup_metrics};
@@ -63,7 +57,6 @@ pub(crate) fn metrics_after(test: impl std::future::Future<Output = ()>) -> Stri
         })
 }
 
-/// Registers `issuer` and returns the aggregation ID it was given.
 pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> AggregationId {
     let mut public_key: serde_json::Value =
         serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
@@ -77,7 +70,6 @@ pub(crate) async fn register_issuer(service: &Service, issuer: &str) -> Aggregat
         .unwrap()
 }
 
-/// Publishes an empty list for `issuer` and returns its `sub`.
 pub(crate) async fn publish_list(service: &Service, issuer: &str, list_id: &str) -> String {
     publish_list_under_quota(service, issuer, list_id, u64::MAX)
         .await
@@ -113,8 +105,7 @@ pub(crate) async fn publish_list_under_quota(
     Ok(sub)
 }
 
-/// In-memory SQLite with foreign keys on and the first `steps` migrations
-/// applied (`None` applies all). One connection: each is its own database.
+/// One connection, because each in-memory SQLite connection is its own database.
 #[cfg(feature = "sqlite")]
 pub(crate) async fn sqlite_test_db(steps: Option<u32>) -> Arc<sea_orm::DatabaseConnection> {
     use sea_orm_migration::MigratorTrait;
@@ -162,9 +153,6 @@ pub(crate) async fn test_app_state(db_conn: Option<Arc<sea_orm::DatabaseConnecti
     build_test_app_state(db_conn, None, 1_048_576).await
 }
 
-/// Build a memory-backed [`AppState`] (snapshots disabled, like
-/// [`test_app_state`]) but with an explicitly supplied certificate provider, so
-/// tests can inject a rotating/mutable signer.
 #[cfg(feature = "memory")]
 pub(crate) async fn test_app_state_with_cert_provider(
     cert_provider: Arc<dyn crate::domain::ports::CertificateProvider>,
@@ -206,13 +194,6 @@ pub(crate) async fn test_app_state(_db_conn: Option<Arc<()>>) -> AppState {
     build_test_app_state(None, 1_048_576).await
 }
 
-/// An [`AppState`] whose `Service` has **no** snapshot repo, as built when an
-/// operator sets `snapshot_retention_secs = 0`.
-///
-/// That configuration routes publishes down `Service::publish_status_list`'s
-/// `None` branch to the plain, non-transactional `insert`, which is a different
-/// duplicate-classification call site from `insert_with_snapshot`. Memory-backed
-/// because the branch being exercised is in the service, not the adapter.
 pub(crate) async fn test_app_state_without_snapshots() -> AppState {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -249,8 +230,6 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
     }
 }
 
-/// An [`AppState`] whose `CertificateProvider` returns material with no
-/// certificate chain, so token generation surfaces a missing-chain 500.
 pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -313,9 +292,6 @@ impl crate::domain::ports::CertificateProvider for TestCertProvider {
     }
 }
 
-/// A [`CertificateProvider`] whose signing key and certificate can be swapped at
-/// runtime, used to exercise the signed-token cache's rotation/renewal
-/// invalidation. Holds the material in a mutex; `rotate` replaces it atomically.
 pub(crate) struct RotatingCertProvider {
     inner: Arc<std::sync::Mutex<RotatingMaterial>>,
 }
@@ -368,9 +344,6 @@ impl crate::domain::ports::CertificateProvider for RotatingCertProvider {
 
 #[derive(Default)]
 struct TestStatusListCache {
-    // Keep general HTTP/service tests independent of the real cache adapters.
-    // Adapter behavior is covered in `outbound::cache`; this helper avoids
-    // coupling unrelated tests to cache metrics, TTLs, or Redis/Docker setup.
     records: RwLock<HashMap<String, StatusListRecord>>,
 }
 

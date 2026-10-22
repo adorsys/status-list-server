@@ -28,11 +28,9 @@ use instant_acme::{AuthorizationHandle, ChallengeType};
 
 use crate::cert_manager::challenge::{ChallengeError, ChallengeHandler, CleanupFuture};
 
-/// Timeout applied to every DNS provider HTTP request so a hung API or token
-/// endpoint cannot stall certificate renewal indefinitely.
+/// So a hung provider API can't stall renewal.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Build the HTTP client shared by the DNS provider implementations
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -40,22 +38,13 @@ pub(crate) fn http_client() -> reqwest::Client {
         .expect("failed to build DNS provider HTTP client")
 }
 
-/// Interface for managing the DNS TXT records used by DNS-01 challenges.
-///
-/// The ACME server queries the zone's authoritative name servers directly and
-/// validates only once, so implementations must wait internally until the
-/// created record is served, to the degree their provider's API allows
-/// confirming it (change-status polling where available, a bounded settle
-/// delay otherwise).
+/// create_txt_record must not return until the record is served: the CA checks only once.
 #[async_trait]
 pub trait DnsProvider: Send + Sync {
-    /// Create (or update) the TXT record for the given domain
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
-    /// Delete the TXT record for the given domain
     async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError>;
 }
 
-/// Handler for DNS-01 challenges
 pub struct Dns01Handler {
     dns_provider: Arc<dyn DnsProvider>,
 }
@@ -81,12 +70,10 @@ impl ChallengeHandler for Dns01Handler {
         let digest = challenge.key_authorization().dns_value();
         let domain = challenge.identifier().to_string();
 
-        // Create the DNS record
         self.dns_provider
             .create_txt_record(&domain, &digest)
             .await?;
 
-        // Signal the server we are ready to respond to the challenge
         challenge.set_ready().await?;
 
         let cleanup = {
@@ -103,7 +90,6 @@ impl From<instant_acme::Error> for ChallengeError {
     }
 }
 
-/// A DNS zone known to a provider
 #[derive(Debug, Clone)]
 pub(crate) struct ZoneInfo {
     pub(crate) name: String,
@@ -113,14 +99,13 @@ pub(crate) struct ZoneInfo {
 impl ZoneInfo {
     pub(crate) fn new(name: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
-            // remove the trailing dot from the zone name if any
             name: name.into().trim_end_matches('.').to_string(),
             id: id.into(),
         }
     }
 }
 
-// Find the best matching (longest suffix) zone for the given domain
+// Longest matching suffix wins.
 pub(crate) fn find_best_match<'a>(
     lookup: &str,
     zones: &'a [ZoneInfo],
@@ -130,9 +115,8 @@ pub(crate) fn find_best_match<'a>(
     for zone in zones.iter() {
         let zone_name = &zone.name;
         let is_match = if let Some(stripped) = zone_name.strip_prefix("*.") {
-            // Try to match wildcard domains
             if lookup.ends_with(stripped) {
-                // We ensure there's at least one identifier before the wildcard
+                // The wildcard must cover at least one label.
                 let diff = lookup.len() - stripped.len();
                 lookup[..diff].contains('.')
             } else {
@@ -141,7 +125,6 @@ pub(crate) fn find_best_match<'a>(
         } else if lookup == zone_name {
             true
         } else if lookup.len() > zone_name.len() {
-            // Check if lookup ends with .zone_name
             let idx = lookup.len() - zone_name.len() - 1;
             lookup.as_bytes().get(idx) == Some(&b'.') && &lookup[idx + 1..] == zone_name
         } else {

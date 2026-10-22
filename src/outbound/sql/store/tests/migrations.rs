@@ -1,7 +1,3 @@
-//! Migrations only move forward: `down`, `reset`, `refresh` and `fresh` are
-//! refused, and rolling back relies on every migration re-running once its
-//! record is deleted. See "Migrations are forward-only" in
-//! `src/outbound/sql/README.md`.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -19,9 +15,6 @@ use crate::outbound::sql::test_containers::mysql_helpers;
 #[cfg(feature = "postgres-tests")]
 use crate::outbound::sql::test_containers::postgres_helpers;
 
-/// The oldest migrations, whose `up`s cannot re-run: they are unguarded, and
-/// MySQL has no `CREATE INDEX IF NOT EXISTS`. Every release that can still be
-/// rolled back to knows them.
 const PREDATE_RERUN_RULE: [&str; 4] = [
     "mod",
     "add_updated_at",
@@ -29,8 +22,6 @@ const PREDATE_RERUN_RULE: [&str; 4] = [
     "m20260727_000001_status_list_history_exp_index",
 ];
 
-/// Stands in for a release that knows only the first `N` migrations, as v1.2.0
-/// knows the four oldest.
 struct PreviousRelease<const N: usize>;
 
 #[async_trait::async_trait]
@@ -42,9 +33,6 @@ impl<const N: usize> MigratorTrait for PreviousRelease<N> {
     }
 }
 
-/// `down` to zero fails on the newest migration with every record kept, each
-/// migration's own `down` is refused too, and so are `fresh`, `reset` and
-/// `refresh`, with every table kept.
 async fn assert_down_is_refused(db: Arc<DatabaseConnection>, backend: &str) {
     let migrations = Migrator::migrations();
 
@@ -115,9 +103,6 @@ async fn test_postgres_down_is_refused() {
     assert_down_is_refused(test_db.db.clone(), "Postgres").await;
 }
 
-/// Rolling back to any release after [`PREDATE_RERUN_RULE`] deletes the records
-/// from some migration on. Covers every such point, so later migrations are
-/// held to the rule without being listed.
 async fn assert_every_migration_reruns_after_a_rollback(
     db: Arc<DatabaseConnection>,
     backend: &str,
@@ -197,10 +182,6 @@ async fn test_postgres_every_migration_reruns_after_a_rollback() {
     assert_every_migration_reruns_after_a_rollback(test_db.db.clone(), "Postgres").await;
 }
 
-/// The previous release refuses a database a newer one migrated, naming each
-/// migration it does not know, and starts once their records are deleted. That
-/// is the migrator's half of the rollback recovery; whether the previous release
-/// then runs correctly on the newer schema is not covered by any test.
 async fn assert_previous_release_starts_once_unknown_records_are_deleted(
     db: Arc<DatabaseConnection>,
     backend: &str,

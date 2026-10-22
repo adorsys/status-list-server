@@ -56,7 +56,6 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
         }
         insert_legacy_key(&db, issuer, &key).await;
     }
-    // Null is also a missing ID. Use a distinct key to avoid a real collision.
     let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
     let secret = jsonwebtoken::EncodingKey::from_ec_pem(pair.serialize_pem().as_bytes()).unwrap();
     let null_key =
@@ -67,7 +66,6 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
     let mut null_key = serde_json::to_value(null_key).unwrap();
     null_key["kid"] = serde_json::Value::Null;
     insert_legacy_key(&db, "null-id", &null_key).await;
-    // Do not guess an algorithm for legacy RSA keys.
     let rsa_secret = jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!(
         "../../../../../test_data/gcloud_test_key.dummy.pem"
     ))
@@ -100,8 +98,6 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
     })
     .await;
 
-    // Preflight must report both kinds of collision before writing even an
-    // unrelated generated ID, including on MySQL where DDL is not transactional.
     let mut twin = template.clone();
     twin.as_object_mut().unwrap().remove("kid");
     insert_legacy_key(&db, "missing-twin", &twin).await;
@@ -191,7 +187,6 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
             _ => assert_eq!(kid, None, "{issuer}"),
         }
     }
-    // A rollback/re-upgrade must preserve the indexed values.
     Migrator::migrations()[migration_index()]
         .up(&SchemaManager::new(db.as_ref()))
         .await
@@ -225,7 +220,6 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
             .key_algorithm
             .is_none()
     );
-    // A collision must fail closed without assigning a different ID to an issuer.
     let mut colliding_key = template.clone();
     colliding_key.as_object_mut().unwrap().remove("kid");
     insert_legacy_key(&db, "collision", &colliding_key).await;
@@ -297,7 +291,6 @@ async fn test_postgres_key_id_backfill() {
 #[tokio::test]
 async fn test_mysql_documented_key_inventory_matches_index_collation() {
     async fn inventory(db: &DatabaseConnection) -> Vec<String> {
-        // Execute the actual operator instructions, including session setup and cleanup.
         let script = include_str!("../../../../../docs/deployment-runbook.md")
             .split_once("-- MySQL 8+\n")
             .unwrap()
@@ -339,9 +332,7 @@ async fn test_mysql_documented_key_inventory_matches_index_collation() {
         key["kid"] = kid.into();
         insert_legacy_key(&db, issuer, &key).await;
     }
-    // Before migration the new column will inherit the table's collation.
     assert_eq!(inventory(&db).await, ["lower", "upper"]);
-    // An existing column can have a different collation from the table default.
     db.execute_unprepared(
         "ALTER TABLE credentials ADD COLUMN key_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL",
     )

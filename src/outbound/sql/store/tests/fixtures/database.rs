@@ -7,7 +7,6 @@ use super::TEST_EC_JWK;
 use crate::outbound::sql::SeaOrmStore;
 use crate::outbound::sql::models::Credentials;
 
-/// Quota argument for tests that exercise something other than the quota.
 pub(in super::super) const NO_LIST_QUOTA: u64 = u64::MAX;
 
 #[cfg(feature = "sqlite")]
@@ -15,7 +14,6 @@ pub(in super::super) async fn sqlite_connection() -> Arc<DatabaseConnection> {
     sqlite_connection_migrated(None).await
 }
 
-/// Applies only the first `steps` migrations (`None` applies all).
 #[cfg(feature = "sqlite")]
 pub(in super::super) async fn sqlite_connection_migrated(
     steps: Option<u32>,
@@ -23,8 +21,6 @@ pub(in super::super) async fn sqlite_connection_migrated(
     crate::test_utils::sqlite_test_db(steps).await
 }
 
-/// Seeds a credential whose `issuer` backs the `status_lists.issuer` foreign
-/// key and returns the JWK it was seeded with.
 pub(in super::super) async fn seed_credential(db: &Arc<DatabaseConnection>, issuer: &str) -> Jwk {
     let cred_store = SeaOrmStore::<Credentials>::new(db.clone());
     let mut key: Jwk = serde_json::from_str(TEST_EC_JWK).unwrap();
@@ -36,7 +32,6 @@ pub(in super::super) async fn seed_credential(db: &Arc<DatabaseConnection>, issu
     key
 }
 
-/// The issuer's stored `credentials.list_count`.
 pub(in super::super) async fn list_count(db: &DatabaseConnection, issuer: &str) -> i64 {
     use crate::outbound::sql::models::credentials;
     use sea_orm::{EntityTrait, QuerySelect};
@@ -57,7 +52,6 @@ pub(in super::super) async fn enforce_list_quota(db: &DatabaseConnection) {
         .expect("enabling the list quota with no cap must succeed");
 }
 
-/// Inserts a list without counting it, as a pre-quota pod did.
 pub(in super::super) async fn insert_list_as_old_pod(
     db: &DatabaseConnection,
     list_id: &str,
@@ -73,8 +67,6 @@ pub(in super::super) async fn insert_list_as_old_pod(
     .unwrap();
 }
 
-/// Deletes the `seaql_migrations` records of `versions`, as rolling back a
-/// release does.
 pub(in super::super) async fn forget_migrations(db: &DatabaseConnection, versions: &[&str]) {
     use sea_orm::ConnectionTrait;
 

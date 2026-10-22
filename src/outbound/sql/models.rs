@@ -3,7 +3,6 @@ use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::{FromJsonQueryResult, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
-/// Represents the public key in Json Web Key format
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct PublicKey(pub Jwk);
 
@@ -19,7 +18,6 @@ impl From<Jwk> for PublicKey {
     }
 }
 
-// Credentials entity
 pub(crate) mod credentials {
     use super::*;
 
@@ -32,10 +30,9 @@ pub(crate) mod credentials {
         pub public_key: PublicKey,
         /// Indexed copy of `public_key.kid` used for management authentication.
         pub key_id: Option<String>,
-        /// Status lists published by this issuer; see `store::reserve_list_slot`.
+        /// Maintained by store::reserve_list_slot.
         pub list_count: i64,
-        /// Hyphenated `AggregationId`. `NULL` on rows a release that predates it
-        /// wrote, until the first lookup assigns one.
+        /// NULL on rows from older releases until the first lookup assigns one.
         pub aggregation_id: Option<String>,
     }
 
@@ -87,8 +84,7 @@ impl From<Credentials> for credentials::ActiveModel {
             public_key: Set(PublicKey(creds.public_key)),
             // NotSet so a credential update never resets the counter.
             list_count: NotSet,
-            // NotSet unless given, so a credential update never replaces the ID
-            // that published aggregation URIs point to.
+            // NotSet unless given, so an update can't change an ID that URIs already use.
             aggregation_id: creds
                 .aggregation_id
                 .map_or(NotSet, |aggregation_id| Set(Some(aggregation_id))),
@@ -96,7 +92,6 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
-// Statuses entries
 pub(crate) mod status_lists {
     use super::*;
 
@@ -109,11 +104,7 @@ pub(crate) mod status_lists {
         #[sea_orm(column_type = "Json")]
         pub status_list: StatusList,
         pub sub: String,
-        /// Unix timestamp (seconds) of last modification
         pub updated_at: i64,
-        /// Monotonic optimistic-concurrency version (see domain
-        /// `StatusListRecord.version`); the concurrency guard, distinct from the
-        /// `updated_at` timestamp.
         pub version: i64,
     }
 
@@ -125,8 +116,7 @@ pub(crate) mod status_lists {
 
 pub(crate) type StatusListRecord = status_lists::Model;
 
-// An immutable Status List Token payload and the interval during which it was
-// issued as valid. These rows are retained for draft-21 §8.4 resolution.
+// Immutable snapshots kept for draft-21 §8.4 `?time=` lookups.
 pub(crate) mod status_list_history {
     use super::*;
 
@@ -142,9 +132,6 @@ pub(crate) mod status_list_history {
         pub sub: String,
         pub iat: i64,
         pub exp: i64,
-        /// The list's optimistic-concurrency version when this snapshot was
-        /// taken; tie-breaker for `?time=` resolution when two snapshots share
-        /// an `iat` within the same second.
         pub version: i64,
     }
 
@@ -175,7 +162,6 @@ pub(crate) mod status_list_allocations {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-// Persisted JSON shape of a status list column.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: u8,

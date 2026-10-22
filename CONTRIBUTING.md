@@ -64,6 +64,34 @@ PostgreSQL, MySQL, and Redis integration tests need a running Docker daemon; SQL
 The [feature profile matrix](README.md#development-and-quality-checks) lists all profiles and their features. The `build`, `test`, and `compose` commands default to `postgres`, so select `minimal` explicitly when you want the in-memory workflow.
 Provider-specific setup is described in the [database](docs/database-backends.md), [secrets](docs/secrets-backends.md), and [DNS](docs/dns-providers.md) guides.
 
+### SQL test containers
+
+MySQL and Postgres tests start throwaway containers through `src/outbound/sql/test_containers.rs`.
+
+- Each fixture owns its container and removes it on drop, including during a panic. Keep it in scope until every pool and task using it has finished.
+- Hold one fixture per test. Plain `cargo test` allows four live SQL containers per process, so a test waiting on a second fixture can deadlock; open extra pools on the same fixture instead.
+- Put `mysql` or `postgres` in new database test names so they join nextest's `containers` group.
+- The cleanup regression tests also need the Docker CLI on `PATH`.
+
+A killed run (SIGTERM, including nextest slow-timeouts, Ctrl-C, SIGKILL, an abort, or `TESTCONTAINERS_COMMAND=keep`) can leave containers behind. Every fixture container is labelled with its run ID. Under nextest that is `NEXTEST_RUN_ID`, printed when the run starts; to choose your own, or to group plain `cargo test` runs, export one first:
+
+```bash
+export STATUS_LIST_TEST_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+cargo nextest run --workspace --all-targets --all-features
+```
+
+After the run has stopped, set `STATUS_LIST_TEST_RUN_ID` to its ID and remove only its SQL containers and their anonymous volumes. These filters never match Redis fixtures or other projects' containers.
+
+```bash
+: "${STATUS_LIST_TEST_RUN_ID:?Set the interrupted run ID first}"
+docker container ls -a --filter label=org.adorsys.status-list-server.fixture=sql \
+  --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"
+for id in $(docker container ls -aq --filter label=org.adorsys.status-list-server.fixture=sql \
+  --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"); do
+  docker container rm -fv "$id"
+done
+```
+
 ## Coding style and architecture
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.

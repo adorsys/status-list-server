@@ -8,24 +8,19 @@ use super::{CertError, CertManager, CertificateData};
 use crate::outbound::cert::validate_signing_material;
 use crate::utils::crypto::SigningKey;
 
-/// Provisioning strategy used by [`CertManager`].
 #[async_trait]
 pub trait CertProvisioningStrategy: Send + Sync {
-    /// Human-readable strategy name used in logs and validation errors.
     fn name(&self) -> &'static str;
 
-    /// Whether an existing stored certificate should be checked by this strategy.
     fn should_provision_existing(
         &self,
         manager: &CertManager,
         certificate: &CertificateData,
     ) -> bool;
 
-    /// Provision, renew, or refresh certificate material.
     async fn provision(&self, manager: &CertManager) -> Result<CertificateData, CertError>;
 }
 
-/// ACME-based provisioning strategy.
 #[derive(Debug, Clone, Default)]
 pub struct AcmeProvisioningStrategy;
 
@@ -48,36 +43,28 @@ impl CertProvisioningStrategy for AcmeProvisioningStrategy {
     }
 }
 
-/// Source of individual cryptographic material (certificate or private key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterialSource {
-    /// Load from a filesystem path.
     Filesystem(PathBuf),
-    /// Load from the configured cryptographic material storage by key.
     Storage(String),
 }
 
-/// Source for directly provisioned certificate material.
 #[derive(Debug, Clone)]
 pub enum StoreProvisioningSource {
-    /// Load PEM-encoded certificate chain and PEM signing key from local files.
     Filesystem {
         certificate_path: PathBuf,
         signing_key_path: PathBuf,
     },
-    /// Load PEM-encoded certificate chain and PEM signing key from the configured material backend.
     Storage {
         certificate_key: String,
         signing_key_key: String,
     },
-    /// Load certificate and signing key from independent sources.
     Mixed {
         certificate_source: MaterialSource,
         signing_key_source: MaterialSource,
     },
 }
 
-/// Store-based provisioning strategy.
 #[derive(Debug, Clone)]
 pub struct StoreProvisioningStrategy {
     certificate_source: MaterialSource,
@@ -85,7 +72,6 @@ pub struct StoreProvisioningStrategy {
 }
 
 impl StoreProvisioningStrategy {
-    /// Build a store strategy with explicit sources for certificate and signing key.
     pub fn new(certificate_source: MaterialSource, signing_key_source: MaterialSource) -> Self {
         Self {
             certificate_source,
@@ -93,7 +79,6 @@ impl StoreProvisioningStrategy {
         }
     }
 
-    /// Build a store strategy that loads certificate material from filesystem paths.
     pub fn filesystem(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
         Self {
             certificate_source: MaterialSource::Filesystem(cert_path.into()),
@@ -101,7 +86,6 @@ impl StoreProvisioningStrategy {
         }
     }
 
-    /// Build a store strategy that loads certificate material from the manager's configured storages.
     pub fn storage(certificate_key: impl Into<String>, signing_key_key: impl Into<String>) -> Self {
         Self {
             certificate_source: MaterialSource::Storage(certificate_key.into()),

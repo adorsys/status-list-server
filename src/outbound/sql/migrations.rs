@@ -1,8 +1,5 @@
-//! Database migrations for the SeaORM adapter.
-
 use sea_orm_migration::prelude::*;
 
-/// Main migrator struct for database migrations
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -24,7 +21,7 @@ impl MigratorTrait for Migrator {
         ]
     }
 
-    /// Drops every table without running any `down`, so it is refused with them.
+    /// Refused along with every `down`: it drops all tables.
     async fn fresh<'c, C>(_db: C) -> Result<(), DbErr>
     where
         C: IntoSchemaManagerConnection<'c>,
@@ -38,8 +35,7 @@ pub async fn run_migrations(db: &sea_orm::DatabaseConnection) -> Result<bool, Db
     apply_migrations::<Migrator>(db).await
 }
 
-/// [`run_migrations`] for any migrator, so tests can stand in for an earlier
-/// release with a migrator that knows only the first migrations.
+/// Generic so tests can play an older release with fewer migrations.
 pub(crate) async fn apply_migrations<M: MigratorTrait>(
     db: &sea_orm::DatabaseConnection,
 ) -> Result<bool, DbErr> {
@@ -55,10 +51,7 @@ pub(crate) async fn apply_migrations<M: MigratorTrait>(
     }
 }
 
-/// After migrating failed, names the migrations the database records that `M`
-/// does not know: what stops a rolled-back release from starting. Returns
-/// `err` unchanged when there are none or the records cannot be read, so it
-/// never stops a start that would otherwise have succeeded.
+/// Names migrations the DB has but this release doesn't, the usual reason a rollback won't start.
 async fn name_unknown_migrations<M: MigratorTrait>(
     db: &sea_orm::DatabaseConnection,
     err: DbErr,
@@ -87,34 +80,27 @@ async fn name_unknown_migrations<M: MigratorTrait>(
     ))
 }
 
-/// Recomputes every issuer's `credentials.list_count`. Used as the migration
-/// backfill and quoted verbatim in `docs/troubleshooting.md` as the operator repair.
+/// Quoted verbatim in docs/troubleshooting.md; keep them in sync.
 pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
 
-/// Pins InnoDB on MySQL so `update_with_snapshot`'s UPDATE+INSERT roll back as a
-/// unit rather than depending on the server's default engine. MySQL-only:
-/// sea-query renders the engine option as a literal `ENGINE=InnoDB` clause on
-/// every backend, which SQLite and Postgres reject with a syntax error.
+/// MySQL only: sea-query emits ENGINE=InnoDB for every backend, and the others reject it.
 fn pin_innodb_on_mysql(manager: &SchemaManager<'_>, stmt: &mut TableCreateStatement) {
     if manager.get_database_backend() == sea_orm::DatabaseBackend::MySql {
         stmt.engine("InnoDB");
     }
 }
 
-/// The `docs/deployment-runbook.md` section the refusals and the startup error
-/// point at.
+/// Heading in docs/deployment-runbook.md.
 const ROLLBACK_RUNBOOK_SECTION: &str = "Rolling back across migrations";
 
-/// Every migration's `down`: the schema only moves forward. See "Migrations
-/// are forward-only" in `src/outbound/sql/README.md`.
+/// Migrations are forward-only; see src/outbound/sql/README.md.
 fn refuse_down(migration: &str) -> Result<(), DbErr> {
     Err(forward_only(&format!(
         "migration '{migration}' cannot be rolled back"
     )))
 }
 
-/// The refusal every path back returns, naming what was refused.
 fn forward_only(refused: &str) -> DbErr {
     DbErr::Migration(format!(
         "{refused}: the schema only moves forward. To roll back a release, delete the \
@@ -123,8 +109,7 @@ fn forward_only(refused: &str) -> DbErr {
     ))
 }
 
-/// Tables that must use InnoDB for transactional guarantees and foreign key enforcement.
-/// Extend this list if new transactional tables are added.
+/// Add new transactional tables here.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
     "status_lists",
@@ -133,13 +118,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
     "list_quota",
 ];
 
-/// Queries `information_schema.TABLES` after migrations and refuses to boot if
-/// any of the tables in `INNODB_REQUIRED_TABLES` are not
-/// InnoDB. MyISAM silently ignores transactions, so a non-InnoDB install breaks
-/// the guarantees from issue #244 without any visible error.
-///
-/// No-op on Postgres and SQLite. On failure the error log includes the table
-/// name, its actual engine, and the `ALTER TABLE … ENGINE=InnoDB` fix command.
+/// MyISAM silently ignores transactions, so refuse to boot on it.
 pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{FromQueryResult, Statement, Value};
 
@@ -155,8 +134,6 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
         engine: String,
     }
 
-    // Build `IN (?, ?, …)` from the const table list so the query stays in
-    // sync with INNODB_REQUIRED_TABLES without manual string editing.
     let placeholders = INNODB_REQUIRED_TABLES
         .iter()
         .map(|_| "?")
@@ -186,16 +163,7 @@ pub(crate) async fn verify_innodb_engines(db: &sea_orm::DatabaseConnection) -> R
     evaluate_table_engines(table_pairs)
 }
 
-/// Refuses to boot a MySQL deployment whose binary logging is incompatible with
-/// the READ COMMITTED level the store pins on every write.
-///
-/// InnoDB at READ COMMITTED requires row-based binary logging. Under
-/// `binlog_format = STATEMENT` writes fail with error 1665
-/// (`ER_BINLOG_STMT_MODE_AND_ROW_ENGINE`) — an opaque 500 at first publish, on a
-/// server that started up cleanly. `ROW` and `MIXED` are both fine, and 8.0
-/// defaults to `ROW`, so this only fires where `STATEMENT` was set deliberately.
-///
-/// No-op on PostgreSQL and SQLite.
+/// binlog_format=STATEMENT makes READ COMMITTED writes fail (1665), so catch it at boot.
 pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::{FromQueryResult, Statement};
 
@@ -216,8 +184,7 @@ pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Re
     .one(db)
     .await?;
 
-    // A server built without binary logging exposes no such variable, and has no
-    // replication to be incompatible with. Absence is a pass.
+    // No binlog variable means no binary logging, which is fine.
     let Some(row) = row else {
         return Ok(());
     };
@@ -225,7 +192,7 @@ pub(crate) async fn verify_binlog_format(db: &sea_orm::DatabaseConnection) -> Re
     evaluate_binlog_format(&row.binlog_format)
 }
 
-/// Decision half of [`verify_binlog_format`], testable without a live server.
+/// Split out so it can be tested without a server.
 pub(crate) fn evaluate_binlog_format(format: &str) -> Result<(), DbErr> {
     use tracing::error;
 
@@ -248,7 +215,6 @@ pub(crate) fn evaluate_binlog_format(format: &str) -> Result<(), DbErr> {
     )))
 }
 
-/// Evaluates storage engines for required tables and returns an error if any non-InnoDB engine is found.
 pub(crate) fn evaluate_table_engines<'a, I>(rows: I) -> Result<(), DbErr>
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
@@ -294,7 +260,6 @@ where
 pub(crate) mod tables {
     use super::*;
 
-    /// Migration type for creating database tables
     pub(crate) struct Migration;
 
     impl MigrationName for Migration {
@@ -306,10 +271,7 @@ pub(crate) mod tables {
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
-        /// Creates the necessary database tables if they don't exist
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Credentials table. InnoDB is pinned on MySQL (see
-            // `pin_innodb_on_mysql`) so the FK below is enforced there.
             let mut credentials = Table::create();
             credentials
                 .table(Credentials::Table)
@@ -324,7 +286,6 @@ pub(crate) mod tables {
             pin_innodb_on_mysql(manager, &mut credentials);
             manager.create_table(credentials).await?;
 
-            // StatusLists table; InnoDB pinned on MySQL (see above).
             let mut status_lists = Table::create();
             status_lists
                 .table(StatusLists::Table)
@@ -339,7 +300,6 @@ pub(crate) mod tables {
                 .col(ColumnDef::new(StatusLists::StatusList).json().not_null())
                 .col(ColumnDef::new(StatusLists::Sub).string().not_null())
                 .foreign_key(
-                    // FK: StatusLists.Issuer must reference a valid Credentials.Issuer.
                     ForeignKey::create()
                         .name("fk_status_lists_issuer")
                         .from(StatusLists::Table, StatusLists::Issuer)
@@ -350,7 +310,6 @@ pub(crate) mod tables {
             pin_innodb_on_mysql(manager, &mut status_lists);
             manager.create_table(status_lists).await?;
 
-            // Create an index on list_id for faster lookups
             manager
                 .create_index(
                     Index::create()
@@ -362,7 +321,6 @@ pub(crate) mod tables {
                 )
                 .await?;
 
-            // Create index on issuer for faster lookups
             manager
                 .create_index(
                     Index::create()
@@ -374,7 +332,6 @@ pub(crate) mod tables {
                 )
                 .await?;
 
-            // Create index on sub for faster lookups in find_by_issuer
             manager
                 .create_index(
                     Index::create()
@@ -412,11 +369,9 @@ pub(crate) mod tables {
     }
 }
 
-/// Migration to add updated_at column to status_lists table
 pub(crate) mod add_updated_at {
     use super::*;
 
-    /// Migration type for adding updated_at column
     pub(crate) struct Migration;
 
     impl MigrationName for Migration {
@@ -427,7 +382,6 @@ pub(crate) mod add_updated_at {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Adds updated_at column to status_lists table
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager
@@ -444,12 +398,7 @@ pub(crate) mod add_updated_at {
                 )
                 .await?;
 
-            // Backfill pre-existing rows. With default(0) every legacy row
-            // would report Last-Modified = 1970-01-01, so any
-            // If-Modified-Since date >= 1970 would yield 304 and fresh
-            // tokens would never be served via the IMS path until the first
-            // update touches the row. Setting them to the migration run
-            // time makes the validator meaningful immediately.
+            // A 0 default would answer every legacy If-Modified-Since with 304, so use now.
             let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
             let update_stmt = sea_query::Query::update()
                 .table(StatusLists::Table)
@@ -475,21 +424,10 @@ pub(crate) mod add_updated_at {
     }
 }
 
-/// Migration to add a monotonic optimistic-concurrency `version` column to
-/// `status_lists`, decoupled from the `updated_at` timestamp.
-///
-/// Before this change, `updated_at` doubled as both the real last-modification
-/// timestamp and the optimistic-concurrency guard (`next_updated_at` advanced it
-/// by at least one per write). That let a burst of writes to a single list push
-/// `updated_at` — and therefore the served token's `iat` — ahead of the wall
-/// clock, which relying parties that reject a future `iat` would refuse. This
-/// column splits the two concerns: the monotonic `version` becomes the
-/// concurrency guard and cache-fencing stamp, while `updated_at` stays a real
-/// timestamp.
+/// Splits the concurrency guard off `updated_at`, which write bursts used to push into the future.
 pub(crate) mod add_status_list_version {
     use super::*;
 
-    /// Migration type for adding the version column
     pub(crate) struct Migration;
 
     impl MigrationName for Migration {
@@ -500,7 +438,6 @@ pub(crate) mod add_status_list_version {
 
     #[async_trait::async_trait]
     impl MigrationTrait for Migration {
-        /// Adds the version column to the status_lists table.
         #[allow(elided_lifetimes_in_paths)]
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             // A re-run after a rollback finds the column already there.
@@ -536,13 +473,7 @@ pub(crate) mod add_status_list_version {
     }
 }
 
-/// Adds the `version` tie-breaker to `status_list_history`.
-///
-/// Two updates to the same list within the same second share an `iat` (since
-/// `updated_at` is a real wall-clock timestamp), so `?time=` resolution could
-/// otherwise return the pre-change snapshot. The monotonic optimistic-concurrency
-/// `version` recorded on the snapshot breaks that tie: `find_valid_at` orders by
-/// `iat DESC, version DESC` so the post-change snapshot wins.
+/// Breaks `iat` ties between snapshots written in the same second.
 pub(crate) mod add_status_list_history_version {
     use super::*;
 
@@ -588,7 +519,6 @@ pub(crate) mod add_status_list_history_version {
     }
 }
 
-/// Historical Status List Token payloads used for draft-21 §8.4 queries.
 pub(crate) mod status_list_history {
     use super::*;
 
@@ -604,8 +534,6 @@ pub(crate) mod status_list_history {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // InnoDB pinned on MySQL (see `pin_innodb_on_mysql`) so a failing
-            // snapshot INSERT rolls the paired row UPDATE back.
             let mut history = Table::create();
             history
                 .table(StatusListHistory::Table)
@@ -677,7 +605,7 @@ pub(crate) mod status_list_history {
     }
 }
 
-/// Migration to add an index on `exp` for the retention sweep query.
+/// For the retention sweep.
 pub(crate) mod status_list_history_exp_index {
     use super::*;
 
@@ -711,8 +639,7 @@ pub(crate) mod status_list_history_exp_index {
         }
     }
 
-    // Intentionally redefined in this migration module to be self-contained.
-    // See `status_list_history::Migration` for the full table definition.
+    // Redefined so this migration stays self-contained.
     #[derive(Iden)]
     enum StatusListHistory {
         Table,
@@ -720,7 +647,6 @@ pub(crate) mod status_list_history_exp_index {
     }
 }
 
-/// Migration adding the per-issuer list counter behind `limits.max_lists_per_issuer`.
 pub(crate) mod credentials_list_count {
     use super::*;
 
@@ -736,11 +662,9 @@ pub(crate) mod credentials_list_count {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // MySQL commits the ALTER on its own, so a failed backfill leaves the
-            // column behind with the migration unrecorded; the re-run must skip it.
+            // MySQL auto-commits DDL, so a re-run may find the column already there.
             if !manager.has_column("credentials", "list_count").await? {
-                // DEFAULT 0 lets pods on the previous release keep inserting
-                // credentials during a rolling deploy.
+                // DEFAULT 0 so old pods can still insert during a rolling deploy.
                 manager
                     .alter_table(
                         Table::alter()
@@ -776,8 +700,7 @@ pub(crate) mod credentials_list_count {
     }
 }
 
-/// The switch for `limits.max_lists_per_issuer`, off until `list_quota::on_startup`
-/// or `list-quota enable` turns it on.
+/// Quota switch; off until `on_startup` or `list-quota enable` turns it on.
 pub(crate) mod list_quota {
     use super::*;
 
@@ -855,8 +778,7 @@ pub(crate) mod list_quota {
     }
 }
 
-/// Allocated status-list indices. The composite primary key is the durable
-/// guard against double allocation of a `(list_id, idx)` pair.
+/// The composite primary key is what prevents double allocation.
 pub(crate) mod status_list_allocations {
     use super::*;
 
@@ -922,7 +844,6 @@ pub(crate) mod status_list_allocations {
     }
 }
 
-/// Migration adding the opaque per-issuer ID that aggregation URIs carry.
 pub(crate) mod credentials_aggregation_id {
     use super::*;
 
@@ -940,10 +861,7 @@ pub(crate) mod credentials_aggregation_id {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            // Nullable so pods on the previous release keep registering during a
-            // rolling deploy; the first lookup of such a row fills it in. Each
-            // step is guarded because MySQL commits DDL on its own, so a failed
-            // run is re-run.
+            // Nullable so old pods can still register; the first lookup fills it in.
             if !manager.has_column("credentials", "aggregation_id").await? {
                 manager
                     .alter_table(
@@ -985,8 +903,7 @@ pub(crate) mod credentials_aggregation_id {
     }
 }
 
-/// Stores and uniquely indexes the JWK `kid` used to resolve management tokens without
-/// scanning and deserializing the complete credential registry per request.
+/// Indexes `kid` so management auth doesn't scan the whole credential registry per request.
 pub(crate) mod credentials_key_id {
     use super::*;
     use sea_orm::{ConnectionTrait, Statement};
@@ -1037,10 +954,8 @@ pub(crate) mod credentials_key_id {
                 .execute_unprepared(backfill)
                 .await?;
 
-            // Legacy credentials without a kid get an RFC 7638 SHA-256 public
-            // JWK thumbprint. Preserve every supplied ID and signing algorithm.
-            // Update JSON and its indexed copy in one statement, so retries can
-            // never leave those two representations out of sync.
+            // Legacy keys without a kid get their RFC 7638 thumbprint; supplied IDs stay.
+            // One statement updates the JSON and its indexed copy, so retries can't split them.
             let connection = manager.get_connection();
             let backend = manager.get_database_backend();
             let rows = connection
@@ -1062,8 +977,8 @@ pub(crate) mod credentials_key_id {
                 pending.push((issuer, public_key, kid));
             }
 
-            // Check the complete plan before writing any generated IDs. Let the
-            // database compare existing IDs so MySQL's column collation applies.
+            // Check the whole plan before writing any ID.
+            // The database does the comparing, so MySQL's column collation applies.
             let lookup = match backend {
                 sea_orm::DatabaseBackend::Postgres => {
                     "SELECT issuer FROM credentials WHERE key_id = $1 ORDER BY issuer"
@@ -1160,10 +1075,7 @@ pub(crate) mod credentials_key_id {
     }
 }
 
-/// Migration indexing `status_lists` by `(issuer, list_id)`, so an issuer-scoped
-/// aggregation page is a range scan. Postgres and SQLite indexes on `issuer`
-/// alone do not carry `list_id`, which would read and sort all of an issuer's
-/// lists for every page.
+/// Lets issuer-scoped aggregation pages range-scan instead of sorting every list.
 pub(crate) mod status_lists_issuer_list_id_index {
     use super::*;
 
@@ -1284,8 +1196,6 @@ mod tests {
         }
     }
 
-    /// `MIXED` promotes these statements to row format, so rejecting it would
-    /// refuse to boot a valid deployment.
     #[test]
     fn row_and_mixed_binlog_formats_are_accepted() {
         for variant in ["ROW", "row", "MIXED", "mixed"] {

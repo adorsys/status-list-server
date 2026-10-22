@@ -18,8 +18,7 @@ use crate::domain::ports::{
     StatusListSnapshotRepo,
 };
 
-/// Ordered by `list_id` for range-scanned pages, with each issuer's `list_id`s
-/// for the quota and for issuer-scoped pages.
+/// by_id is ordered for paging; per_issuer backs the quota and scoped pages.
 #[derive(Default)]
 struct ListStore {
     by_id: BTreeMap<String, StatusListRecord>,
@@ -417,9 +416,7 @@ impl StatusListSnapshotRepo for MemoryStatusListSnapshotRepo {
             let result = values
                 .values()
                 .filter(|r| r.list_id == list_id && r.iat <= time && r.exp > time)
-                // Mirrors the SQL adapter's `ORDER BY iat DESC, version DESC`:
-                // two snapshots written in the same second share an `iat`, so
-                // `version` breaks the tie and the post-change snapshot wins.
+                // Same order as the SQL adapter: iat, then version.
                 .max_by_key(|r| (r.iat, r.version as i64))
                 .cloned();
             Ok(result)
@@ -479,7 +476,6 @@ mod tests {
             crate::test_fixtures::TEST_EC_PUBLIC_JWK.as_bytes().to_vec(),
         )
         .unwrap();
-        // Simulate corrupted storage, bypassing the normal insert constraint.
         for issuer in ["one", "two"] {
             repo.values.write().await.by_issuer.insert(
                 issuer.into(),
@@ -631,7 +627,6 @@ mod tests {
         let cache = MemoryStatusListCache::default();
         let service = create_test_service(repo, cache, None);
 
-        // Test out of bounds index
         let result = service
             .publish_status_list(
                 PublishStatusListCommand {
@@ -659,7 +654,6 @@ mod tests {
             })
         ));
 
-        // Test too many statuses per request
         let result = service
             .publish_status_list(
                 PublishStatusListCommand {
@@ -714,16 +708,10 @@ mod tests {
         assert!(matches!(result, Err(StatusListError::IssuerMismatch)));
     }
 
-    /// An empty PATCH is a successful no-op: it must not advance the status
-    /// list version and must not insert a duplicate history snapshot.
-    /// Re-submitting the current value at an existing index behaves the same
-    /// way (see `noop_update_with_identical_values`).
     #[tokio::test]
     async fn empty_update_is_noop_without_version_advance_or_snapshot() {
         let repo = MemoryStatusLists::default();
         let cache = MemoryStatusListCache::default();
-        // Keep a handle to the same backing map the service will share with the
-        // lists repo, so we can count snapshots after the no-op update.
         let snapshot_repo = MemoryStatusListSnapshotRepo::default();
         let snapshots = snapshot_repo.values.clone();
         let lists = repo.clone().with_snapshot(&snapshot_repo);
@@ -765,9 +753,6 @@ mod tests {
         );
     }
 
-    /// The redundant-write guard must catch value-identical updates too, not
-    /// just the literal empty array: re-submitting the current status at an
-    /// existing index must be a successful no-op and must not insert a snapshot.
     #[tokio::test]
     async fn noop_update_with_identical_values() {
         let repo = MemoryStatusLists::default();
@@ -796,7 +781,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Re-submitting index 0 = VALID, which is already its current value.
         service
             .update_statuses(
                 &Issuer("issuer".into()),
@@ -828,11 +812,6 @@ mod tests {
         );
     }
 
-    /// The redundant-write guard must only swallow updates that leave the list
-    /// byte-for-byte identical. A mixed payload — one entry unchanged, one
-    /// changed — must still land: the version advances and a second snapshot is
-    /// written. This pins the behaviour so a later "optimisation" that skips the
-    /// write when *any* entry is unchanged would fail.
     #[tokio::test]
     async fn mixed_update_advances_version_and_writes_snapshot() {
         let repo = MemoryStatusLists::default();
@@ -867,7 +846,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Keep index 0 = VALID but change index 1 to INVALID.
         service
             .update_statuses(
                 &Issuer("issuer".into()),
@@ -905,10 +883,6 @@ mod tests {
         );
     }
 
-    /// Patching an index past the end of the list with VALID grows the list, so
-    /// the write must land and the version must bump. Readers treat an index
-    /// outside the list differently from an index whose value is 0, so this must
-    /// not collapse into a no-op even though the new slot's value is 0.
     #[tokio::test]
     async fn patch_past_end_grows_list_and_bumps_version() {
         let repo = MemoryStatusLists::default();
@@ -968,7 +942,6 @@ mod tests {
         );
     }
 
-    /// Duplicate indices in a single update payload must be rejected outright.
     #[tokio::test]
     async fn update_rejects_duplicate_indices() {
         let repo = MemoryStatusLists::default();
@@ -1001,11 +974,6 @@ mod tests {
         ));
     }
 
-    /// The request-shape bound (index bound) is checked before duplicate indices
-    /// in `update_statuses`, so a payload that is both over `max_status_index`
-    /// and internally duplicated must surface `index_too_large`, never
-    /// `duplicate_index`. This pins the ordering so reordering those two calls
-    /// becomes a deliberate, test-breaking change.
     #[tokio::test]
     async fn update_reorders_duplicate_after_index_bound() {
         let repo = MemoryStatusLists::default();
@@ -1119,8 +1087,6 @@ mod tests {
         );
     }
 
-    /// Asserts completeness, not order: SQL collations order mixed-case IDs
-    /// differently from byte order.
     #[tokio::test]
     async fn list_uris_pages_cover_every_list_exactly_once() {
         let repo = MemoryStatusLists::default();
