@@ -203,9 +203,9 @@ pub fn name_issuers(issuers: &[IssuerCount]) -> String {
 fn issuer_counts(condition: &str) -> String {
     format!(
         "SELECT issuer, list_count, actual FROM (\
-           SELECT c.issuer AS issuer, c.list_count AS list_count, COUNT(s.list_id) AS actual \
-           FROM credentials c LEFT JOIN status_lists s ON s.issuer = c.issuer \
-           GROUP BY c.issuer, c.list_count\
+           SELECT a.issuer AS issuer, a.list_count AS list_count, COUNT(s.list_id) AS actual \
+           FROM issuer_aggregations a LEFT JOIN status_lists s ON s.issuer = a.issuer \
+           GROUP BY a.issuer, a.list_count\
          ) counts \
          WHERE {condition} \
          ORDER BY issuer"

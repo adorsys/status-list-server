@@ -138,7 +138,7 @@ pub(super) async fn begin_read_committed(
 /// While the quota is off, the guard is lifted but the count still kept.
 ///
 /// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
-/// shared lock on this `credentials` row, and two publishes upgrading it would
+/// shared lock on this ownership row, and two publishes upgrading it would
 /// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
 /// rolled back with any later failure. The caller must roll back on `Err`.
 ///
@@ -155,13 +155,13 @@ async fn reserve_list_slot(
     } else {
         i64::MAX
     };
-    let reserved = credentials::Entity::update_many()
+    let reserved = issuer_aggregations::Entity::update_many()
         .col_expr(
-            credentials::Column::ListCount,
-            Expr::col(credentials::Column::ListCount).add(1),
+            issuer_aggregations::Column::ListCount,
+            Expr::col(issuer_aggregations::Column::ListCount).add(1),
         )
-        .filter(credentials::Column::Issuer.eq(issuer))
-        .filter(credentials::Column::ListCount.lt(max))
+        .filter(issuer_aggregations::Column::Issuer.eq(issuer))
+        .filter(issuer_aggregations::Column::ListCount.lt(max))
         .exec(txn)
         .await
         .map_err(map_update_err)?;
@@ -169,10 +169,10 @@ async fn reserve_list_slot(
         return Ok(());
     }
 
-    // Zero rows: either the quota is full or the credential row is missing.
-    let count = credentials::Entity::find_by_id(issuer)
+    // Zero rows: either the quota is full or the ownership row is missing.
+    let count = issuer_aggregations::Entity::find_by_id(issuer)
         .select_only()
-        .column(credentials::Column::ListCount)
+        .column(issuer_aggregations::Column::ListCount)
         .into_tuple::<i64>()
         .one(txn)
         .await
@@ -196,10 +196,9 @@ async fn reserve_list_slot(
                 max: max_lists_per_issuer,
             })
         }
-        // Auth resolved the credential earlier, so a missing row is a server
-        // fault (500), as the FK violation was before (see `map_insert_err`).
+        // Authentication may resolve registry-only issuers without credentials.
         None => Err(RepositoryError::InsertError(format!(
-            "issuer {issuer} has no credential row to reserve a status list slot on"
+            "issuer {issuer} has no ownership row to reserve a status list slot on"
         ))),
     }
 }
@@ -639,7 +638,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Test-only: does not decrement `credentials.list_count`. A production
+    /// Test-only: does not decrement `issuer_aggregations.list_count`. A production
     /// caller must decrement it in the same transaction as the `DELETE`.
     #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
@@ -1026,6 +1025,8 @@ impl SeaOrmStore<Credentials> {
     /// duplicate issuer into a serialization failure.
     pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
         time_query("insert", "credential", async {
+            let issuer = entity.issuer.clone();
+            let aggregation_id = entity.aggregation_id.clone();
             let active: credentials::ActiveModel = entity.into();
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             if let Err(insert_err) = credentials::Entity::insert(active)
@@ -1040,6 +1041,14 @@ impl SeaOrmStore<Credentials> {
                 })?;
                 return Err(map_insert_err(insert_err));
             }
+            issuer_aggregations::Entity::insert(issuer_aggregations::ActiveModel {
+                issuer: Set(issuer),
+                aggregation_id: Set(aggregation_id),
+                list_count: Set(0),
+            })
+            .exec_without_returning(&txn)
+            .await
+            .map_err(map_insert_err)?;
             txn.commit().await.map_err(map_insert_err)?;
             Ok(())
         })
@@ -1103,7 +1112,7 @@ impl SeaOrmStore<Credentials> {
         aggregation_id: &str,
     ) -> Result<(), RepositoryError> {
         time_query("assign_aggregation_id", "credential", async {
-            let db = self.db.current();
+            let txn = self.begin_read_committed().await.map_err(map_update_err)?;
             credentials::Entity::update_many()
                 .col_expr(
                     credentials::Column::AggregationId,
@@ -1111,9 +1120,20 @@ impl SeaOrmStore<Credentials> {
                 )
                 .filter(credentials::Column::Issuer.eq(issuer))
                 .filter(credentials::Column::AggregationId.is_null())
-                .exec(&*db)
+                .exec(&txn)
                 .await
                 .map_err(map_update_err)?;
+            issuer_aggregations::Entity::update_many()
+                .col_expr(
+                    issuer_aggregations::Column::AggregationId,
+                    Expr::value(aggregation_id),
+                )
+                .filter(issuer_aggregations::Column::Issuer.eq(issuer))
+                .filter(issuer_aggregations::Column::AggregationId.is_null())
+                .exec(&txn)
+                .await
+                .map_err(map_update_err)?;
+            txn.commit().await.map_err(map_update_err)?;
             Ok(())
         })
         .await
@@ -1125,14 +1145,25 @@ impl SeaOrmStore<Credentials> {
     ) -> Result<Option<String>, RepositoryError> {
         time_query("find_issuer_by_aggregation_id", "credential", async {
             let db = self.db.current();
-            credentials::Entity::find()
+            let from_credentials = credentials::Entity::find()
                 .select_only()
                 .column(credentials::Column::Issuer)
                 .filter(credentials::Column::AggregationId.eq(aggregation_id))
                 .into_tuple::<String>()
                 .one(&*db)
                 .await
-                .map_err(find_err)
+                .map_err(find_err)?;
+            match from_credentials {
+                Some(issuer) => Ok(Some(issuer)),
+                None => issuer_aggregations::Entity::find()
+                    .select_only()
+                    .column(issuer_aggregations::Column::Issuer)
+                    .filter(issuer_aggregations::Column::AggregationId.eq(aggregation_id))
+                    .into_tuple::<String>()
+                    .one(&*db)
+                    .await
+                    .map_err(find_err),
+            }
         })
         .await
     }
@@ -1156,7 +1187,8 @@ impl SeaOrmStore<Credentials> {
                     let id = aggregation_id.to_string();
                     issuer_aggregations::Entity::insert(issuer_aggregations::ActiveModel {
                         issuer: Set(issuer.clone()),
-                        aggregation_id: Set(id.clone()),
+                        aggregation_id: Set(Some(id.clone())),
+                        list_count: Set(0),
                     })
                     .on_conflict(
                         OnConflict::column(issuer_aggregations::Column::Issuer)
@@ -1166,6 +1198,14 @@ impl SeaOrmStore<Credentials> {
                     .exec_without_returning(&txn)
                     .await
                     .map_err(map_insert_err)?;
+
+                    issuer_aggregations::Entity::update_many()
+                        .col_expr(issuer_aggregations::Column::AggregationId, Expr::value(&id))
+                        .filter(issuer_aggregations::Column::Issuer.eq(issuer))
+                        .filter(issuer_aggregations::Column::AggregationId.is_null())
+                        .exec(&txn)
+                        .await
+                        .map_err(map_update_err)?;
 
                     let by_issuer = issuer_aggregations::Entity::find_by_id(issuer)
                         .one(&txn)
@@ -1178,7 +1218,7 @@ impl SeaOrmStore<Credentials> {
                         .map_err(find_err)?;
                     if by_issuer
                         .as_ref()
-                        .is_some_and(|row| row.aggregation_id != id)
+                        .is_some_and(|row| row.aggregation_id.as_deref() != Some(id.as_str()))
                         || by_id.as_ref().is_some_and(|row| row.issuer != *issuer)
                         || by_issuer.is_none()
                         || by_id.is_none()

@@ -17,13 +17,11 @@ Stores information about issuers and their cryptographic public keys.
 | ---------------- | ----------- | ---- | --- | ---------------------------------------------------------------- |
 | `issuer`         | TEXT        | NO   | PK  | Unique identifier for the issuer                                 |
 | `public_key`     | JSON        | NO   |     | Public key associated with the issuer                            |
-| `list_count`     | BIGINT      | NO   |     | Status lists published; backs `max_lists_per_issuer` (default 0) |
+| `list_count`     | BIGINT      | NO   |     | Legacy counter retained for older release compatibility          |
 | `aggregation_id` | VARCHAR(36) | YES  | UQ  | Opaque UUID naming the issuer in public aggregation URIs         |
 
-`list_count` is incremented by a guarded `UPDATE` inside the publish
-transaction, before the `status_lists` `INSERT`; see `reserve_list_slot` in
-`store.rs` for why that order matters. The `DEFAULT 0` lets pods on the
-previous release keep registering credentials during a rolling deploy.
+The legacy `list_count` column remains for compatibility with older releases
+during rolling upgrades. Current publishes use `issuer_aggregations.list_count`.
 
 `aggregation_id` is set at registration. It is nullable for the same reason:
 pods on the previous release register without one. Such a row gets its ID the
@@ -53,6 +51,22 @@ pods refuse to start meanwhile unless `limits.list_quota_transition` is set; see
 `list_quota.rs`. Publishes read it in their transaction, under a shared lock
 while it is off.
 
+### `issuer_aggregations`
+
+The durable issuer ownership and aggregation record. Every issuer has a row,
+including issuers with no aggregation ID yet. Registry-only issuers receive
+their row together with the immutable aggregation mapping.
+
+| Column           | Type        | Null | Key | Description                                      |
+| ---------------- | ----------- | ---- | --- | ------------------------------------------------ |
+| `issuer`         | TEXT        | NO   | PK  | Unique issuer identifier and status-list owner   |
+| `aggregation_id` | VARCHAR(36) | YES  | UQ  | Public aggregation identifier, when assigned     |
+| `list_count`     | BIGINT      | NO   |     | Status lists published; backs the per-issuer quota |
+
+Publishes increment `issuer_aggregations.list_count` transactionally before
+inserting into `status_lists`. The status-list owner foreign key references
+`issuer_aggregations.issuer`; publishing does not access `credentials`.
+
 ### `status_lists`
 
 Stores status list entries and their associated issuer. Each status list is identified
@@ -61,7 +75,7 @@ by its `list_id`, which acts as the primary key.
 | Column        | Type   | Null | Key | Description                                         |
 | ------------- | ------ | ---- | --- | --------------------------------------------------- |
 | `list_id`     | TEXT   | NO   | PK  | Unique identifier for the status list               |
-| `issuer`      | TEXT   | NO   | FK  | References `credentials.issuer` (ON DELETE CASCADE) |
+| `issuer`      | TEXT   | NO   | FK  | References `issuer_aggregations.issuer` (ON DELETE CASCADE) |
 | `status_list` | JSON   | NO   |     | The status list entry                               |
 | `sub`         | TEXT   | NO   |     | String identifier for the Status List Token         |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp of last status update                |
@@ -136,12 +150,16 @@ erDiagram
     credentials {
         TEXT issuer PK "Unique identifier for the issuer"
         JSON public_key "Public key associated with the issuer"
-        BIGINT list_count "Status lists published by the issuer"
         VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
+    }
+    issuer_aggregations {
+        TEXT issuer PK "Issuer owner"
+        VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
+        BIGINT list_count "Status lists published by the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
-        TEXT issuer FK "References credentials.issuer"
+        TEXT issuer FK "References issuer_aggregations.issuer"
         JSON status_list "The status list entry"
         TEXT sub "String identifier for the Status List Token"
         BIGINT updated_at "UNIX timestamp of last update"
@@ -154,6 +172,6 @@ erDiagram
         BIGINT valid_until "End timestamp"
         BIGINT created_at "Creation timestamp"
     }
-    credentials ||--|{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
+    issuer_aggregations ||--o{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
     status_lists ||--|{ status_list_history : "list_id (ON DELETE CASCADE)"
 ```

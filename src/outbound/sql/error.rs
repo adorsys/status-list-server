@@ -29,7 +29,7 @@ pub enum RepositoryError {
     /// [`DuplicateEntry`]: RepositoryError::DuplicateEntry
     #[error("Write contention ({code}): the transaction lost a lock race and may be retried")]
     Contention { code: &'static str },
-    /// The issuer's `credentials.list_count` already reached the quota.
+    /// The issuer's `ownership-record list count` already reached the quota.
     #[error("Status list quota exceeded: issuer holds {count} of {max}")]
     QuotaExceeded { count: u64, max: u64 },
     #[error("Status list not found")]

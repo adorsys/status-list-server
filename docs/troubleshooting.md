@@ -778,7 +778,7 @@ failure rolls back instead of wedging the release.
 ## Status List Quota
 
 Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
-env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_count` and is
+env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `issuer_aggregations.list_count` and is
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
 the count only ever rises. The cap cannot be set above `1000`, the aggregation page size (see
 [below](#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
@@ -811,7 +811,7 @@ rolling forward from a release that predates it. The rollout stops at its first 
 the previous release keep serving.
 
 **Root cause:** Pods of a release that predates the quota publish without incrementing
-`credentials.list_count`. While any of them serves traffic the counter cannot be trusted, so the
+`issuer_aggregations.list_count`. While any of them serves traffic the counter cannot be trusted, so the
 quota starts off on such a database, and a pod does not serve without it unless told to.
 
 **Fix:**
@@ -873,15 +873,15 @@ lists, an issuer that reaches the quota stays there until an operator acts.
 **Diagnostics:** Compare the stored counter with the lists that actually exist:
 
 ```sql
-SELECT c.issuer,
-       c.list_count,
-       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual
-FROM credentials c
-WHERE c.issuer = '<issuer>';
+SELECT a.issuer,
+       a.list_count,
+       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = a.issuer) AS actual
+FROM issuer_aggregations a
+WHERE a.issuer = '<issuer>';
 ```
 
 If `list_count` and `actual` differ, the counter has drifted; recompute it as described under
-[Recomputing `credentials.list_count`](#recomputing-credentialslist_count).
+[Recomputing issuer list counts](#recomputing-issuer-list-counts).
 
 **Fix:** Either:
 
@@ -929,7 +929,7 @@ server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have 
 
 ---
 
-### Recomputing `credentials.list_count`
+### Recomputing issuer list counts
 
 Recomputes every issuer's counter from the lists that exist. Needed before
 [enabling the quota](#upgrading-to-the-list-quota) and after any manual `DELETE` from `status_lists`.
@@ -948,7 +948,7 @@ refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 two identical). It is portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
-UPDATE credentials SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer);
+UPDATE issuer_aggregations SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuer_aggregations.issuer);
 ```
 
 Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the

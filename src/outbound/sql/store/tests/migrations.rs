@@ -10,7 +10,11 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
 use super::fixtures;
+use crate::domain::models::credential::AggregationId;
+use crate::domain::ports::CredentialRepo;
 use crate::outbound::sql::Migrator;
+use crate::outbound::sql::SeaOrmStore;
+use crate::outbound::sql::SqlCredentialRepo;
 use crate::outbound::sql::list_quota;
 use crate::outbound::sql::migrations::apply_migrations;
 
@@ -131,6 +135,11 @@ async fn assert_every_migration_reruns_after_a_rollback(
     );
 
     fixtures::seed_credential(&db, "issuer-rerun").await;
+    let aggregation_id = AggregationId::generate();
+    SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))
+        .record_registry_aggregation_ids(&[("issuer-rerun".into(), aggregation_id)])
+        .await
+        .unwrap();
     fixtures::insert_list_as_old_pod(&db, "list-rerun", "issuer-rerun").await;
     db.execute_unprepared("UPDATE status_lists SET version = 7 WHERE list_id = 'list-rerun'")
         .await
@@ -165,6 +174,16 @@ async fn assert_every_migration_reruns_after_a_rollback(
             version, 7,
             "a re-run must keep the list's version after a rollback to before {} on {backend}",
             names[first]
+        );
+        assert_eq!(
+            SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))
+                .find_issuer_by_aggregation_id(aggregation_id)
+                .await
+                .unwrap(),
+            Some(crate::domain::models::credential::Issuer(
+                "issuer-rerun".into()
+            )),
+            "a re-run must preserve issuer aggregation ownership on {backend}"
         );
         assert_eq!(
             list_quota::is_enforced(&db).await.unwrap(),

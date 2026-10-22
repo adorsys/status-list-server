@@ -469,15 +469,18 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the four versions below. Rolling back to a release older than the list
+adds the five versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
-schema changes stay, which the previous release ignores, and so do the
-credential and registry aggregation IDs.
+schema changes stay, and so do the credential and registry aggregation IDs.
+Do not start an older server against the schema after
+`m20261022_000001_issuer_ownership`: it expects `status_lists` to reference
+`credentials`, while the migration points it at `issuer_aggregations`.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
 - `m20261014_000001_credentials_key_id`
 - `m20261020_000001_issuer_aggregations`
+- `m20261022_000001_issuer_ownership`
 
 Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
@@ -701,6 +704,7 @@ here; a test fails until it does.
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
+| `m20261022_000001_issuer_ownership` | **No, do not run old and new pods together**: status-list ownership moves to `issuer_aggregations` | Drain old pods before migrating; retain the table and its backfilled rows | Existing list owners, counts, and aggregation IDs are preserved |
 
 ### Preparing existing management credentials
 

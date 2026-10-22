@@ -6,12 +6,14 @@ use jsonwebtoken::jwk::Jwk;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use super::super::fixtures;
+use crate::domain::models::credential::AggregationId;
+use crate::domain::ports::CredentialRepo;
 #[cfg(any(feature = "sqlite", feature = "mysql"))]
 use crate::outbound::sql::models::Credentials;
 use crate::outbound::sql::models::{
     StatusList, StatusListHistoryRecord, StatusListRecord, status_list_allocations,
 };
-use crate::outbound::sql::{RepositoryError, SeaOrmStore};
+use crate::outbound::sql::{RepositoryError, SeaOrmStore, SqlCredentialRepo};
 
 /// The lost-update proof: two writers reading the same `updated_at` cannot
 /// both win. Deterministic (no threads) — first write lands, second's guard
@@ -538,6 +540,33 @@ pub(super) async fn assert_list_quota_is_exact(
     assert_eq!(fixtures::list_count(&db, issuer).await, 2);
 }
 
+pub(super) async fn assert_registry_issuer_can_publish_first_list(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let issuer = format!("registry-only-{backend}");
+    let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
+    repo.record_registry_aggregation_ids(&[(issuer.clone(), AggregationId::generate())])
+        .await
+        .unwrap_or_else(|error| panic!("recording registry issuer on {backend}: {error}"));
+
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let list = fixtures::record(
+        &format!("list-{issuer}"),
+        &issuer,
+        "initial",
+        &format!("sub-{issuer}"),
+        0,
+    );
+    store
+        .insert_one(list.clone(), 1)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("registry-only issuer must publish its first list on {backend}: {error}")
+        });
+    assert_eq!(fixtures::list_count(&db, &issuer).await, 1, "on {backend}");
+}
+
 /// A full walk returns every list exactly once. Mixed-case IDs sort differently
 /// per backend collation, so this asserts completeness, not order.
 pub(super) async fn assert_list_uris_walk_is_complete(
@@ -756,5 +785,15 @@ pub(super) async fn assert_list_count_migration_backfills(
              on {backend}: {e}"
         )
     });
-    assert_eq!(fixtures::list_count(db, "issuer-via-old-pod").await, 0);
+    let legacy_count = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT list_count FROM credentials WHERE issuer = 'issuer-via-old-pod'",
+        ))
+        .await
+        .unwrap()
+        .expect("the legacy credential row must be inserted")
+        .try_get_by_index::<i64>(0)
+        .unwrap();
+    assert_eq!(legacy_count, 0);
 }

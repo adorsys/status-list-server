@@ -19,6 +19,7 @@ use database::{
     assert_duplicate_list_id_is_conflict, assert_list_count_migration_backfills,
     assert_list_quota_is_exact, assert_list_uris_walk_is_complete,
     assert_list_uris_walk_survives_concurrent_publishes,
+    assert_registry_issuer_can_publish_first_list,
     assert_sql_allocations_are_distinct_and_rollback_exhausted,
 };
 
@@ -249,7 +250,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
             read_quota_switch(""),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "credentials" SET "list_count" = "list_count" + $1 WHERE "credentials"."issuer" = $2 AND "credentials"."list_count" < $3"#,
+                r#"UPDATE "issuer_aggregations" SET "list_count" = "list_count" + $1 WHERE "issuer_aggregations"."issuer" = $2 AND "issuer_aggregations"."list_count" < $3"#,
                 [1i32.into(), "issuer-q".into(), 1000i64.into()],
             ),
             Statement::from_sql_and_values(
@@ -333,7 +334,7 @@ async fn test_unenforced_quota_rereads_switch_under_shared_lock_and_still_counts
         statements[3],
         Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            r#"UPDATE "credentials" SET "list_count" = "list_count" + $1 WHERE "credentials"."issuer" = $2 AND "credentials"."list_count" < $3"#,
+            r#"UPDATE "issuer_aggregations" SET "list_count" = "list_count" + $1 WHERE "issuer_aggregations"."issuer" = $2 AND "issuer_aggregations"."list_count" < $3"#,
             [1i32.into(), "issuer-off".into(), i64::MAX.into()],
         ),
         "the guard must be lifted, not the count: {statements:?}"
@@ -1069,6 +1070,13 @@ async fn test_sqlite_list_quota_is_exact() {
     assert_list_quota_is_exact(db, "issuer-quota-sqlite", "SQLite").await;
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_registry_only_issuer_can_publish_first_list() {
+    let db = fixtures::sqlite_connection().await;
+    assert_registry_issuer_can_publish_first_list(db, "sqlite").await;
+}
+
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_list_quota_is_exact() {
@@ -1077,12 +1085,28 @@ async fn test_mysql_list_quota_is_exact() {
     assert_list_quota_is_exact(db, "issuer-quota-mysql", "MySQL").await;
 }
 
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_registry_only_issuer_can_publish_first_list() {
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let db = test_db.connection().await;
+    assert_registry_issuer_can_publish_first_list(db, "mysql").await;
+}
+
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
 async fn test_postgres_list_quota_is_exact() {
     let test_db = postgres_helpers::postgres_connection().await;
     let db = test_db.db.clone();
     assert_list_quota_is_exact(db, "issuer-quota-postgres", "Postgres").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_registry_only_issuer_can_publish_first_list() {
+    let test_db = postgres_helpers::postgres_connection().await;
+    let db = test_db.db.clone();
+    assert_registry_issuer_can_publish_first_list(db, "postgres").await;
 }
 
 #[cfg(feature = "sqlite")]

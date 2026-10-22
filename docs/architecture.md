@@ -195,7 +195,7 @@ persisted status lists:
 | `max_status_index`         | 100000  | `400 Bad Request` — `index` too large     | publish / update handlers                      |
 | `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries      | publish / update handlers                      |
 | `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`                | application services                           |
-| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`credentials.list_count`) |
+| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`issuer_aggregations.list_count`) |
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -204,7 +204,7 @@ lower a bound via configuration should treat the documented maximums as
 defaults, not guarantees.
 
 `max_lists_per_issuer` is enforced exactly, including under concurrent
-publishes: each publish increments `credentials.list_count` with a guarded
+publishes: each publish increments `issuer_aggregations.list_count` with a guarded
 `UPDATE` in the same transaction as its `INSERT`, so a publish that fails
 gives its slot back.
 
