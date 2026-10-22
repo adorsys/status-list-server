@@ -72,6 +72,17 @@ The server uses ports and adapters. See the [architecture guide](docs/architectu
 
 For HTTP and load-testing changes, see [API testing](docs/api-testing.md) and the [performance-test workspace](perf/README.md).
 
+### Code comments
+
+Comments are the exception. Write one only when the code can't say it: a reason that isn't obvious, a gotcha, or a workaround.
+
+- One short line that says why, not what the next line does.
+- Plain words: no bold or capitals for emphasis, no em dashes.
+- No ticket numbers, review notes or history; those belong in commits and PRs.
+- No comments inside tests. Put a gotcha in the assert message or the helper's name.
+- If the explanation is long, put it in the docs and point there.
+- Leave functional comments alone: the version after a pinned action SHA, `zizmor: ignore[...]`, `# pragma: no cover`, the xtask doc comments (clap prints them as `--help`), and the `# KEY=value` lines in `.env.template`.
+
 ## Checking your changes
 
 These commands match the workspace formatting, lint, and test jobs in CI:

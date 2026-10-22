@@ -26,8 +26,7 @@ pub trait ReadinessCheck: Send + Sync {
     /// Human-readable name for logging and the readiness body.
     fn name(&self) -> &'static str;
 
-    /// Returns `Ok(())` when the dependency is reachable and the service can
-    /// function without it; otherwise `Err(reason)` describing the failure.
+    /// `Ok(())` when the dependency is reachable or not needed; `Err` carries the reason.
     async fn check(&self) -> Result<(), String>;
 }
 

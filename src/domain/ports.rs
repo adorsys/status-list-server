@@ -45,7 +45,6 @@ pub trait StatusListCache: Send + Sync + 'static {
     }
 }
 
-/// Interface for managing active status list records.
 #[derive(Debug, Clone)]
 pub struct CreateStatusList {
     pub record: StatusListRecord,
