@@ -845,6 +845,11 @@ jobs:
       # The deployment target is always AWS EKS (see CLUSTER_NAME / AWS_REGION).
       # Useful for deploying, e.g., the -vault variant to AWS EKS without AWS Secrets Manager.
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+      # ElastiCache primary endpoint (hostname only, no scheme or port). Declared at job
+      # level, not workflow level, so a value scoped to the `production` environment
+      # resolves here. Required: production runs the Redis cache backend and the
+      # application rejects an empty host at startup.
+      APP_CACHE_HOST: ${{ vars.APP_CACHE_HOST }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -884,6 +889,16 @@ jobs:
         run: |
           if [[ -z "${APP_DATABASE_PORT}" ]]; then
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
+            exit 1
+          fi
+          if [[ -z "${APP_CACHE_HOST:-}" ]]; then
+            echo "APP_CACHE_HOST repository/environment variable is required" >&2
+            exit 1
+          fi
+          # Bare hostname only; the app assembles rediss:// itself. Not echoed verbatim in
+          # case a misconfigured value embeds credentials.
+          if [[ ! "${APP_CACHE_HOST}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo "APP_CACHE_HOST must be a bare hostname (no scheme, port, path or credentials)" >&2
             exit 1
           fi
 
@@ -975,10 +990,11 @@ jobs:
           # verification can prove reconciliation happened for THIS deployment, not just a
           # stale Ready=True left over from the previous store. On a fresh install the ES
           # does not exist yet, so the baseline is empty and verification skips the change
-          # check for that resource.
+          # check for that resource. The Redis password ExternalSecret
+          # (statuslist-redis-credentials) is defined in values-production.yaml.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
-          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+          for es in statuslist-external-secret statuslist-external-secret-aws-credentials statuslist-redis-credentials; do
             rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
               -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
@@ -998,6 +1014,9 @@ jobs:
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
           # A clean-looking rollback can still leave migration records the old release cannot start on.
+          #
+          # APP_CACHE__HOST comes from the APP_CACHE_HOST variable (see the job env and the
+          # validation step); values-production.yaml deliberately leaves it empty.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
@@ -1011,7 +1030,8 @@ jobs:
             --set-string "statuslist.image.repository=${IMAGE_BASE}" \
             --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
             --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
-            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"; then
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}" \
+            --set-string "statuslist.env.APP_CACHE__HOST=${APP_CACHE_HOST:?cache host missing}"; then
             if [ -n "$PREV_REVISION" ]; then
               echo "::error title=Check for migrations the restored release does not know::The upgrade failed and Helm rolled back to revision $PREV_REVISION. If a pod of the new release started, it may have migrated the database, and then every pod of the restored release that starts from now on (restart, scale-up, node drain) crash-loops until the migration records are deleted, even though the rollback looks clean. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
             fi
@@ -1023,6 +1043,28 @@ jobs:
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
+
+      - name: Verify the Redis cache connected at startup
+        # Redis is not in the readiness probe and warm_up() failure is non-fatal, so a
+        # misconfigured Redis (host/password/TLS/egress) would deploy green while firing
+        # RedisCacheErrors. Gate on the app's startup log: fail on the "unavailable"
+        # warning, confirm the "backend selected" info line, warn if neither is present.
+        # A failure here does not roll back (a broken cache degrades gracefully); the
+        # rollback-protected path is the ESO step.
+        run: |
+          set -euo pipefail
+          NS="${{ env.HELM_NAMESPACE }}"
+          DEPLOY="${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment"
+          LOGS=$(kubectl logs "deployment/$DEPLOY" -n "$NS" --tail=500 2>/dev/null || true)
+          if printf '%s\n' "$LOGS" | grep -q "Redis status-list cache unavailable at startup"; then
+            echo "::error::Redis status-list cache did not connect at startup; the app is running with a broken cache and will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
+            exit 1
+          fi
+          if printf '%s\n' "$LOGS" | grep -q "status-list cache backend selected"; then
+            echo "OK: Redis cache connected at startup"
+          else
+            echo "::warning::Could not confirm Redis cache connected at startup from pod logs (startup lines may have rotated out of the tail); not treating as failure"
+          fi
 
       - name: Verify ESO secret path reconciles
         # On an upgrade the app secrets can remain from the old namespaced store even if the
@@ -1044,10 +1086,11 @@ jobs:
         # This runs after helm upgrade --install --rollback-on-failure has already
         # succeeded, so a failure here alone would leave the broken revision live. We
         # explicitly roll back to the pre-deploy revision (or uninstall on a fresh install)
-        # when either ExternalSecret fails, keeping the cluster on the last known-good state.
+        # when any ExternalSecret fails, keeping the cluster on the last known-good state.
         env:
           PRIMARY_ES: statuslist-external-secret
           CREDS_ES: statuslist-external-secret-aws-credentials
+          REDIS_ES: statuslist-redis-credentials
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
@@ -1081,10 +1124,10 @@ jobs:
           }
           trap cleanup_on_failure EXIT
 
-          # Force ESO to reconcile both release ExternalSecrets immediately, regardless of
+          # Force ESO to reconcile every release ExternalSecret immediately, regardless of
           # the 30m refreshInterval, so an image-only release cannot leave a stale
           # refreshTime for the whole wait window.
-          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+          for es in "$PRIMARY_ES" "$CREDS_ES" "$REDIS_ES"; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
               echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
@@ -1119,5 +1162,9 @@ jobs:
           # The credentials ExternalSecret (aws-credentials-secret) must also sync from the
           # cluster store so the app's mounted credential volume is fresh.
           await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+
+          # The Redis password ExternalSecret (redis-credentials) must sync too, or pods
+          # hit CreateContainerConfigError on their next restart or scale-up.
+          await_synced "$REDIS_ES" "ExternalSecret $REDIS_ES ($NAMESPACE)"
 
           rollback_done=1
