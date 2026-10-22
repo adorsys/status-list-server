@@ -781,8 +781,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/local-ci/tests -p 'test_*.py'
 
   # The single required status check. The jobs above form several independent chains
-  # rather than one, so no individual job represents the suite. Rollout order:
-  # CONTRIBUTING.md, "Branch Protection".
+  # rather than one, so no individual job represents the suite.
   ci-success:
     name: CI Success
     if: always()

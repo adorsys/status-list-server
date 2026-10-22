@@ -41,7 +41,7 @@ workspace = true
 [workspace.lints.rust]
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
-unsafe_op_in_unsafe_fn = "warn"
+unsafe_code = "forbid"
 unused_extern_crates = "warn"
 unused_lifetimes = "warn"
 unreachable_pub = "warn"
