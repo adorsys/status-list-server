@@ -138,6 +138,7 @@ pub struct CertManager {
     email: String,
     // The company name
     organization: Option<String>,
+    // One Extended Key Usage OID as its numbers, e.g. 1,3,6,1,5,5,7,3,30.
     eku: Option<Vec<u64>>,
     // The ACME directory URL
     acme_directory_url: String,

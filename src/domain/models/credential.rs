@@ -18,6 +18,7 @@ pub(crate) const MANAGEMENT_SIGNING_ALGORITHMS: [Algorithm; 4] = [
     Algorithm::PS256,
 ];
 
+/// Domain errors encountered during issuer credential management.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {

@@ -1,3 +1,4 @@
+/// Storage-adapter failures.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {

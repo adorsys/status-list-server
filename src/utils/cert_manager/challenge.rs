@@ -51,6 +51,7 @@ pub enum ChallengeError {
 /// Abstract interface for handling ACME challenges
 #[async_trait::async_trait]
 pub trait ChallengeHandler: Send + Sync {
+    /// Handles the ACME challenge for this authorization and returns a future that cleans it up.
     async fn handle_authorization<'a>(
         &'a self,
         authz: &'a mut AuthorizationHandle<'a>,
