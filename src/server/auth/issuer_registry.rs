@@ -671,6 +671,15 @@ mod tests {
     }
 
     #[test]
+    fn loads_local_demo_fixture() {
+        let registry =
+            IssuerRegistry::from_yaml(include_str!("../../../demo/issuers.yaml")).unwrap();
+        assert_eq!(registry.key_count(), 2);
+        assert!(registry.issuer("gondwana-digital-pole").is_some());
+        assert!(registry.issuer("scott-holdings").is_some());
+    }
+
+    #[test]
     fn rejects_duplicate_kids() {
         let yaml = VALID.replace(
             "CO8SkimGYd7niQ8KCHGbmaO7KFA3ZvNwwYLTYLqyaZ8",

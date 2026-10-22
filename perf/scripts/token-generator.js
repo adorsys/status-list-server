@@ -28,7 +28,10 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
 const jwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 
 const issuerId = `test-issuer-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-jwk.kid = issuerId;
+// RFC 7638 canonical public members, in lexicographic order.
+const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
+jwk.kid = crypto.createHash('sha256').update(canonical).digest('base64url');
+const aggregationId = crypto.randomUUID();
 jwk.alg = 'ES256';
 
 console.log('Generating tokens...');
@@ -51,7 +54,7 @@ for (let i = 0; i < 100; i++) {
     {
       algorithm: 'ES256',
       header: {
-        kid: issuerId,
+        kid: jwk.kid,
         typ: 'statuslist-management+jwt'
       }
     }
@@ -62,6 +65,7 @@ for (let i = 0; i < 100; i++) {
 // Save tokens and issuer info
 const testData = {
   issuerId,
+  aggregationId,
   publicKeyJwk: jwk,
   privateKey,
   audience,
@@ -69,11 +73,9 @@ const testData = {
   generatedAt: new Date().toISOString()
 };
 
-// Write only test-tokens.json. All Artillery scenarios read the issuer, public
-// key and signed JWTs from this one file, so the separate ec-private-key.pem and
-// ec-public-key.jwk files would be unread dead weight. The data is sensitive
-// (it contains the ephemeral private signing key), so it is written once with
-// mode 0600 (owner read/write only).
+// Write private test data separately from the public registry fixture.
+// Artillery reads the issuer and signing material from this file. Write it
+// atomically with owner-only permissions because it holds the private key.
 const testDataPath = path.join(scriptsDir, 'test-tokens.json');
 const serialized = JSON.stringify(testData, null, 2);
 const tmp = `${testDataPath}.tmp-${process.pid}`;
@@ -82,3 +84,20 @@ fs.renameSync(tmp, testDataPath);
 
 console.log(`✓ Generated ${tokens.length} valid tokens`);
 console.log(`✓ Saved to scripts/test-tokens.json`);
+
+// Provision this PUBLIC fixture before setup or Artillery runs. Generation does
+// not contact a server or grant trust remotely.
+const registryPath = path.join(scriptsDir, 'issuers.yaml');
+const registry = {
+  version: 1,
+  issuers: [{
+    id: issuerId,
+    aggregation_id: aggregationId,
+    keys: [{ kid: jwk.kid, alg: jwk.alg, jwk }]
+  }],
+  admins: []
+};
+const registryTmp = `${registryPath}.tmp-${process.pid}`;
+fs.writeFileSync(registryTmp, JSON.stringify(registry, null, 2) + '\n', { mode: 0o644 });
+fs.renameSync(registryTmp, registryPath);
+console.log('✓ Public registry fixture saved to scripts/issuers.yaml; configure the server to load it before setup.');

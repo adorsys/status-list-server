@@ -75,7 +75,7 @@ See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles, inc
 
 ## API Overview
 
-The server exposes endpoints for issuer credential registration, status list publishing and updates, public status list resolution, and list aggregation.
+The server exposes endpoints for authenticated issuer metadata retrieval, status list publishing and updates, public status list resolution, and list aggregation. Issuers are provisioned through an operator-managed registry; self-registration is unavailable. Existing deployments must follow the [issuer registry migration guide](docs/ISSUER_REGISTRY_MIGRATION.md).
 
 ### Retrieving a Status List Token
 

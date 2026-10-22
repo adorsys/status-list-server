@@ -87,6 +87,13 @@ enum Task {
 
 #[derive(Debug, Eq, PartialEq, Subcommand)]
 enum IssuerTask {
+    /// Export a registry draft from legacy SQL credentials without modifying the database.
+    Export {
+        #[arg(long)]
+        database_url: String,
+        #[arg(long, default_value = "issuers.yaml")]
+        file: PathBuf,
+    },
     /// Add a new issuer using a public JWK; the issuer id and kid are generated.
     Add {
         #[arg(long)]
@@ -115,6 +122,32 @@ enum IssuerTask {
 
 fn issuer_command(command: IssuerTask) -> Result<()> {
     match command {
+        IssuerTask::Export { database_url, file } => {
+            // Do not overwrite an operator-reviewed registry, even on a repeated invocation.
+            ensure!(!file.exists(), "output already exists: {}", file.display());
+            let content = tokio::runtime::Runtime::new()?.block_on(async {
+                let mut options = sea_orm::ConnectOptions::new(database_url);
+                options.sqlx_logging(false);
+                let db = sea_orm::Database::connect(options)
+                    .await
+                    .map_err(|_| color_eyre::eyre::eyre!("connect to source database failed"))?;
+                let content =
+                    status_list_server::outbound::sql::issuer_export::export_issuers(&db).await?;
+                db.close().await?;
+                Ok::<_, color_eyre::eyre::Report>(content)
+            })?;
+            use std::io::Write;
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&file)?;
+            output.write_all(content.as_bytes())?;
+            println!(
+                "exported draft to {}; review before deploying",
+                file.display()
+            );
+            Ok(())
+        }
         IssuerTask::Add {
             file,
             jwk,

@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
+use base64::Engine as _;
 use serde_json::json;
 use status_list_server::{
     config::Config,
@@ -214,22 +214,16 @@ impl TestServer {
             client,
             aggregation_id: AGGREGATION_ID.to_owned(),
         };
-        let key = SigningKey::from_pem(KEY).unwrap();
-        let public = key.public_key_bytes();
         let response = app
             .client
-            .post(format!("{}/api/v1/credentials", app.management_url))
-            .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
-                "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
-                "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
-            }}))
+            .get(format!("{}/api/v1/credentials", app.management_url))
+            .bearer_auth(app.bearer_token())
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
         let registration: serde_json::Value = response.json().await.unwrap();
-        uuid::Uuid::parse_str(registration["aggregation_id"].as_str().unwrap()).unwrap();
+        assert_eq!(registration["aggregation_id"], AGGREGATION_ID);
         app
     }
 

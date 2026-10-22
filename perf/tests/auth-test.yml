@@ -27,10 +27,8 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # The issuer is registered once before the run by scripts/setup.js (invoked by
-  # `npm run test:auth*`). Registration used to run as a low-weight scenario
-  # alongside the authenticated flows; until it landed, every authenticated
-  # request returned 401.
+  # Load the generated registry fixture before setup. scripts/setup.js verifies
+  # the issuer and publishes seed lists before authenticated scenarios start.
 
   ensure:
     maxErrorRate: 5 # Max 5% error rate (excluding expected 401s)

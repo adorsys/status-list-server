@@ -124,7 +124,7 @@ The project strictly follows **Hexagonal Architecture (Ports and Adapters)**:
 The HTTP surface is split into three structurally separate listeners (`src/startup.rs`), each built from its own route set so a route is only reachable on the listener that owns it (a request for it on any other listener returns `404`):
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
-- **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
+- **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and authenticated issuer metadata (`GET /api/v1/credentials`).
 - **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
 ### Data Flow
@@ -167,7 +167,6 @@ each tier keyed and tuned independently:
 
 | Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
 | -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
 | **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,          | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
 |                | `GET /api/v1/credentials` (authenticated)                       | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
 | **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
@@ -223,9 +222,8 @@ exclusive lock while it checks, so a publish in flight is either counted by
 the check or refused by the enforced quota. The memory backend enforces the
 quota from startup.
 
-It bounds lists **per issuer**, not in total: while
-`POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
-brings a fresh quota. Lists cannot be deleted through the API, so an issuer at
+It bounds lists **per issuer**, not in total. Only operator-provisioned
+issuers can publish lists; self-registration is unavailable. Lists cannot be deleted through the API, so an issuer at
 its quota stays there until the operator raises it, which is possible only up
 to the aggregation page size (see
 [troubleshooting](troubleshooting.md#status-list-quota)).
@@ -233,10 +231,9 @@ to the aggregation page size (see
 ### Status list aggregation
 
 `GET /api/v1/aggregation/{aggregation_id}` returns one issuer's status list URIs
-(draft-21 §9). Each issuer gets a random `aggregation_id` at registration,
-returned in the registration response and by the authenticated
-`GET /api/v1/credentials`. An issuer registered before aggregation IDs existed
-gets one the first time it is looked up. Public URIs name the issuer by that ID,
+(draft-21 §9). Each issuer has an immutable `aggregation_id` in the operator
+registry, returned by the authenticated `GET /api/v1/credentials`. Existing
+deployments preserve their IDs using the [migration guide](ISSUER_REGISTRY_MIGRATION.md). Public URIs name the issuer by that ID,
 so tokens never disclose the issuer identifier, which may be an internal tenant
 name. With `server.aggregation_uri` set, each status list token carries its
 issuer's URI, `<aggregation_uri>/<aggregation_id>`.

@@ -7657,10 +7657,13 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "color-eyre",
+ "sea-orm",
  "serde-saphyr",
  "serde_json",
  "sha2 0.11.1",
+ "status-list-server",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 

@@ -88,7 +88,7 @@ curl -s http://localhost:8000/
 - `GET /` → "Status list Server"
 - `GET /health/live` → liveness probe (`/health` remains a compatibility alias)
 - `GET /health/ready` → dependency-aware readiness probe
-- `POST /api/v1/credentials` → register an issuer’s public key (JWK)
+- `GET /api/v1/credentials` → retrieve the authenticated, operator-provisioned issuer’s metadata
 - `PUT /api/v1/status-lists/{list_id}/statuses` (auth) → create a status list
 - `PATCH /api/v1/status-lists/{list_id}/statuses` (auth) → update a status list
 - `GET /api/v1/status-lists/{list_id}` (public) → gzip-compressed JWT or CWT

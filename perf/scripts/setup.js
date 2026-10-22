@@ -1,19 +1,6 @@
-// Setup helper for the performance suites.
-//
-// Runs once before an Artillery test and does two things against the live
-// server:
-//   1. Registers the test issuer (from scripts/test-tokens.json) so the
-//      token's `kid` resolves to its registered public key. Otherwise authenticated
-//      requests return `401 invalid_token`. This used to be done
-//      with an Artillery `before:` hook, but that hook does not execute
-//      processor `function:` steps, so the registration silently never ran and
-//      every authenticated request returned 401.
-//   2. Publishes a set of seed status lists and writes their IDs to
-//      scripts/seed-lists.json. The read scenarios (`selectPublishedListId`)
-//      pick from these real IDs instead of random IDs that always 404.
-//
-// It is idempotent: a 409 from an already-registered issuer is treated as
-// success, and re-publishing seed lists simply replaces the previous set.
+// Verify the operator-provisioned test issuer, then publish seed status lists.
+// The public registry fixture generated alongside test-tokens.json must already
+// be loaded by the server. Setup never provisions an issuer over HTTP.
 
 const http = require('http');
 const https = require('https');
@@ -24,7 +11,7 @@ const path = require('path');
 
 const scriptsDir = __dirname;
 const seedFile = path.join(scriptsDir, 'seed-lists.json');
-// Writes (credential registration, seed status-list publishing) go to the
+// Authenticated issuer metadata and seed status-list publishes go to the
 // management listener at :8001 by default, matching the MANAGEMENT_TARGET
 // default the npm test:* scripts pass to Artillery. Override with
 // MANAGEMENT_TARGET for a separate management host.
@@ -76,28 +63,31 @@ function loadTestData() {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function registerIssuer(data) {
-  return request(MANAGEMENT_TARGET, {
-    method: 'POST',
-    path: '/api/v1/credentials',
-    body: { issuer: data.issuerId, public_key: data.publicKeyJwk }
-  }).then(({ statusCode, body }) => {
-    if (statusCode === 202 || statusCode === 409) {
-      console.log(`✓ Issuer registered (${statusCode}): ${data.issuerId}`);
-    } else {
-      throw new Error(`Registration failed (${statusCode}): ${body}`);
-    }
+function managementToken(data) {
+  if (!data.privateKey) return data.tokens[0];
+  const now = Math.floor(Date.now() / 1000);
+  return jwt.sign({ iss: data.issuerId, aud: data.audience, iat: now, exp: now + 300 }, data.privateKey, {
+    algorithm: 'ES256', header: { kid: data.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
   });
 }
 
-async function seedStatusLists(data) {
-  let token = data.tokens[0];
-  const now = Math.floor(Date.now() / 1000);
-  if (data.privateKey) {
-    token = jwt.sign({ iss: data.issuerId, aud: data.audience, iat: now, exp: now + 300 }, data.privateKey, {
-      algorithm: 'ES256', header: { kid: data.publicKeyJwk.kid, typ: 'statuslist-management+jwt' }
-    });
+async function verifyIssuer(data, token) {
+  const { statusCode, body } = await request(MANAGEMENT_TARGET, {
+    method: 'GET',
+    path: '/api/v1/credentials',
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (statusCode !== 200) {
+    throw new Error(`Issuer verification failed (${statusCode}): load scripts/issuers.yaml in the server registry and configure its audience before setup. ${body}`);
   }
+  const metadata = JSON.parse(body);
+  if (metadata.issuer !== data.issuerId || metadata.aggregation_id !== data.aggregationId) {
+    throw new Error('Issuer metadata does not match scripts/issuers.yaml; regenerate the fixture and load it before setup.');
+  }
+  console.log(`✓ Provisioned issuer verified: ${data.issuerId}`);
+}
+
+async function seedStatusLists(token) {
   const created = [];
   for (let i = 0; i < SEED_LISTS; i++) {
     const listId = crypto.randomUUID();
@@ -119,8 +109,9 @@ async function seedStatusLists(data) {
 
 async function main() {
   const data = loadTestData();
-  await registerIssuer(data);
-  await seedStatusLists(data);
+  const token = managementToken(data);
+  await verifyIssuer(data, token);
+  await seedStatusLists(token);
 }
 
 main().then(

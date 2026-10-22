@@ -20,24 +20,10 @@ tc.assertEqual("OK", response.text)
 
 print("Health check successful! Server is running.")
 
-# Register two issuers
+# Use the two issuers provisioned in demo/issuers.yaml
 gondwana_digital_pole = fixtures.get_gondwana_digital_pole_issuer()
 scott_holdings = fixtures.get_scott_holdings_issuer()
 
-for issuer_data in [gondwana_digital_pole, scott_holdings]:
-    print("Proceeding with Issuer:", issuer_data.get("label"))
-
-    credentials_endpoint = f"{MANAGEMENT_URL}/api/v1/credentials"
-    print(f"Testing POST: {credentials_endpoint}")
-
-    payload = {
-        "issuer": issuer_data.get("label"),
-        "public_key": fixtures.get_public_jwk(issuer_data),
-    }
-
-    response = requests.post(credentials_endpoint, json=payload)
-    tc.assertEqual(response.status_code, 202, "Failed to publish credentials")
-    print("Credentials published successfully!\n")
 
 # Issuer A publishes a status list
 issuer_data = gondwana_digital_pole

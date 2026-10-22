@@ -106,10 +106,16 @@ uv run python generate-dev-cert.py
 This writes `tls.crt` and `tls.key` to the root of the repository; both are
 ignored by Git. Existing files are kept unless you pass `--force`.
 
+`demo/issuers.yaml` provisions the two fixed demo identities and public keys.
+The matching private keys in `workflows/helpers/fixtures.py` are public test
+material: use this fixture only for a local demo. The scripts authenticate with
+these identities; they never self-register. Workflow 04 changes the token's
+issuer to an identity absent from the registry to exercise rejection.
+
 Then start the server with in-memory storage from the root of the repository;
 no `.env` file or database is needed.
 
-The server rate-limits credential registration and status list writes per
+The server rate-limits authenticated status list writes per
 client IP address. By default each allows 10 requests and then gets back one
 request per minute, which is less than the workflow scripts need when run back
 to back. The commands below raise the limit to 100 for this local server,
@@ -118,6 +124,7 @@ enough for several full runs of all four workflow scripts.
 macOS or Linux (bash / zsh):
 
 ```bash
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=demo/issuers.yaml \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key \
 APP_RATE_LIMIT__STRICT_BURST_SIZE=100 \
@@ -127,6 +134,7 @@ cargo run
 Windows (PowerShell):
 
 ```powershell
+$env:APP_MANAGEMENT_AUTH__ISSUERS_FILE = "demo/issuers.yaml"
 $env:APP_SERVER__CERT__STORE__CERTIFICATE_PATH = "tls.crt"
 $env:APP_SERVER__CERT__STORE__SIGNING_KEY_PATH = "tls.key"
 $env:APP_RATE_LIMIT__STRICT_BURST_SIZE = "100"
@@ -136,6 +144,7 @@ cargo run
 Windows (cmd):
 
 ```bat
+set APP_MANAGEMENT_AUTH__ISSUERS_FILE=demo/issuers.yaml
 set APP_SERVER__CERT__STORE__CERTIFICATE_PATH=tls.crt
 set APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=tls.key
 set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
