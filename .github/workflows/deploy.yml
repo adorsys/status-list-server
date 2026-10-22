@@ -887,6 +887,22 @@ jobs:
             exit 1
           fi
 
+      - name: Assert the issuer registry ConfigMap exists
+        # The chart mounts the registry from status-list-server-issuers and nothing
+        # creates it. On a missing ConfigMap the pods would sit in ContainerCreating for
+        # the whole --wait window and then roll back; fail fast instead, before the
+        # release is attempted.
+        run: |
+          set -euo pipefail
+          if ! kubectl get configmap status-list-server-issuers \
+              -n "${{ env.HELM_NAMESPACE }}" >/dev/null 2>&1; then
+            echo "::error::ConfigMap 'status-list-server-issuers' does not exist in namespace '${{ env.HELM_NAMESPACE }}'."
+            echo "The deployment mounts the issuer trust registry from it, and nothing creates it."
+            echo "Create it before the first release; see docs/deployment-runbook.md, 'Issuer trust registry'."
+            exit 1
+          fi
+          echo "ConfigMap 'status-list-server-issuers' is present."
+
       - name: Assert the deployed variant is visible outside this environment
         # `vars.IMAGE_VARIANT` resolves environment-scoped variables first, and this job
         # runs in `environment: production`. Nothing outside that environment can see an
