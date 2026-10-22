@@ -21,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
             Box::new(credentials_key_id::Migration),
+            Box::new(issuer_aggregations::Migration),
         ]
     }
 
@@ -127,6 +128,7 @@ fn forward_only(refused: &str) -> DbErr {
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
+    "issuer_aggregations",
     "status_lists",
     "status_list_history",
     "status_list_allocations",
@@ -1335,5 +1337,72 @@ mod tests {
             let result = verify_binlog_format(&db).await;
             assert!(result.is_ok(), "must skip non-MySQL backend {backend:?}");
         }
+    }
+}
+
+/// Persists the `aggregation_id` of issuers that exist only in the operator
+/// trust registry (no `credentials` row, so no `public_key`). The mapping must
+/// survive pod restarts and be shared across pods so an issuer's published
+/// aggregation URI cannot silently change.
+pub(crate) mod issuer_aggregations {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261020_000001_issuer_aggregations"
+        }
+    }
+
+    const INDEX: &str = "idx_issuer_aggregations_aggregation_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuer_aggregations").await? {
+                let mut table = Table::create();
+                table
+                    .table(IssuerAggregations::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(IssuerAggregations::Issuer)
+                            .string()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerAggregations::AggregationId)
+                            .string_len(36)
+                            .not_null(),
+                    );
+                manager.create_table(table).await?;
+            }
+            if !manager.has_index("issuer_aggregations", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(IssuerAggregations::Table)
+                            .col(IssuerAggregations::AggregationId)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum IssuerAggregations {
+        Table,
+        Issuer,
+        AggregationId,
     }
 }

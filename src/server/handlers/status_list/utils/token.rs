@@ -74,6 +74,9 @@ pub(crate) async fn issuer_aggregation_uri(
     if state.aggregation_uri.is_none() || state.aggregation_withheld_from.contains(issuer) {
         return None;
     }
+    if let Some(aggregation_id) = state.issuer_registry.issuer_aggregation_id(&issuer.0) {
+        return state.aggregation_uri_for(issuer, aggregation_id);
+    }
     match state.service.find_aggregation_id(issuer).await {
         Ok(aggregation_id) => state.aggregation_uri_for(issuer, aggregation_id?),
         Err(error) => {

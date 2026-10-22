@@ -95,10 +95,13 @@ jobs:
           set -euo pipefail
 
           cargo build --no-default-features --features memory
+          issuer_registry_file=$(mktemp)
+          printf 'version: 1\nissuers: []\nadmins: []\n' > "$issuer_registry_file"
           APP_SERVER__HOST=0.0.0.0 \
             APP_SERVER__MANAGEMENT__HOST=0.0.0.0 \
             APP_SERVER__ADMIN__HOST=0.0.0.0 \
             APP_SERVER__ENABLE_METRICS=true \
+            APP_MANAGEMENT_AUTH__ISSUERS_FILE="$issuer_registry_file" \
             APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \
             APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
             APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
@@ -108,10 +111,11 @@ jobs:
           cleanup() {
             kill "$server_pid" >/dev/null 2>&1 || true
             wait "$server_pid" >/dev/null 2>&1 || true
+            rm -f "$issuer_registry_file"
           }
           trap cleanup EXIT
 
-          if ! NEWMAN_RUNNER=docker ./scripts/test-postman-collection.sh; then
+          if ! POSTMAN_ISSUER_REGISTRY_FILE="$issuer_registry_file" NEWMAN_RUNNER=docker ./scripts/test-postman-collection.sh; then
             echo "::group::status-list-server logs"
             cat /tmp/status-list-server.log
             echo "::endgroup::"
