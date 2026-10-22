@@ -42,40 +42,70 @@ the previous custom standalone deployment topology. Sidecar mode is not used.
 
 ### Configuring Exporters
 
-The default `values.yaml` configures a `debug` exporter only (telemetry appears in collector stdout logs).
-For production, override the `opentelemetry-collector.config` block in your environment-specific values
-to add backend exporters, for example:
+The default `values.yaml` wires the collector's pipelines to real backends out of the box:
+
+- **Traces** → `otlp/tempo`, using `global.observability.tempo.endpoint` (default
+  `tempo.monitoring.svc.cluster.local:4317`).
+- **Logs** → `otlphttp/loki`, using `global.observability.loki.logsEndpoint` (default
+  `http://loki-gateway.monitoring.svc.cluster.local/otlp/v1/logs`).
+- **Metrics** → `debug` only. The `/metrics` ServiceMonitor scrape is the authoritative SLI
+  path (see §4 and the cluster dependency notes), so metrics are deliberately not
+  remote-written over OTLP to avoid double ingestion.
+
+`debug` remains in the picture as development scaffolding (it prints telemetry to the
+collector's stdout); it is not a configured backend pipeline on its own.
+
+For production, use the supported `global.observability` endpoint overrides rather than
+replacing the whole collector config. Point the existing pipelines at your infrastructure by
+overriding the endpoints, for example:
+
+```yaml
+global:
+  observability:
+    tempo:
+      # OTLP/gRPC endpoint (host:port, no scheme) for traces.
+      endpoint: "tempo.observability.svc.cluster.local:4317"
+    loki:
+      # Full OTLP/HTTP logs URL, including the /otlp/v1/logs path.
+      logsEndpoint: "http://loki-gateway.observability.svc.cluster.local/otlp/v1/logs"
+```
+
+These feed the `otlp/tempo` and `otlphttp/loki` exporters already defined in the default
+`opentelemetry-collector.config`, so the configured default pipelines (traces → Tempo,
+logs → Loki, metrics → debug) are preserved.
+
+Only when you need different pipeline wiring should you override the
+`opentelemetry-collector.config` block in your environment-specific values — for example, to
+add a Prometheus exporter or route metrics elsewhere. If you do, keep the `batch` /
+`memory_limiter` processors and the existing `otlp/tempo` and `otlphttp/loki` exporters, and
+only change what your deployment actually requires:
 
 ```yaml
 opentelemetry-collector:
-  # Expose the Prometheus exporter port on the Service so Prometheus can scrape it.
-  # Without this ports entry, port 8889 exists only on the container but not on the Service.
-  ports:
-    prometheus:
-      enabled: true
-      containerPort: 8889
-      servicePort: 8889
-      protocol: TCP
   config:
     exporters:
-      debug:
-        verbosity: basic
-      otlp/backend:
-        endpoint: "jaeger.example.com:4317"
+      otlp/tempo:
+        endpoint: "{{ .Values.global.observability.tempo.endpoint }}"
         tls:
           insecure: true
+      otlphttp/loki:
+        logs_endpoint: "{{ .Values.global.observability.loki.logsEndpoint }}"
+      debug:
+        verbosity: basic
       prometheus:
         endpoint: "0.0.0.0:8889"
     service:
       pipelines:
         traces:
-          exporters: [otlp/backend, debug]
+          exporters: [otlp/tempo]
         metrics:
-          exporters: [prometheus, debug]
+          exporters: [debug, prometheus]
+        logs:
+          exporters: [otlphttp/loki]
 ```
 
 > [!NOTE]
-> Exposing the Prometheus port via `ports.prometheus` makes it reachable inside the cluster, but Prometheus still needs to discover it. Either add `prometheus.io/scrape: "true"` pod annotations (if using annotation-based discovery) or create a `ServiceMonitor` / `PodMonitor` (if using the Prometheus Operator).
+> Exposing the Prometheus exporter port via `ports.prometheus` makes it reachable inside the cluster, but Prometheus still needs to discover it. Either add `prometheus.io/scrape: "true"` pod annotations (if using annotation-based discovery) or create a `ServiceMonitor` / `PodMonitor` (if using the Prometheus Operator). The default chart uses a `ServiceMonitor` for the application's own `/metrics` endpoint, not the collector's Prometheus exporter.
 
 Default values reference: <https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml>
 
