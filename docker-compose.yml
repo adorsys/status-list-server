@@ -145,7 +145,6 @@ services:
       APP_TELEMETRY__OTLP_ENDPOINT: "http://otel-collector:4317"
       APP_TELEMETRY__ENABLED: ${APP_TELEMETRY__ENABLED:-false}
       APP_TELEMETRY__SAMPLER_RATIO: ${APP_TELEMETRY__SAMPLER_RATIO:-1.0}
-      APP_MANAGEMENT_AUTH__ISSUERS_FILE: ${APP_MANAGEMENT_AUTH__ISSUERS_FILE:-}
       APP_SERVER__CERT__STORE__CERTIFICATE_PATH: ${APP_SERVER__CERT__STORE__CERTIFICATE_PATH:-/etc/status-list/sample-certs/dev.crt}
       APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: ${APP_SERVER__CERT__STORE__SIGNING_KEY_PATH:-/etc/status-list/sample-certs/dev.key}
       APP_CACHE__BACKEND: ${APP_CACHE__BACKEND:-memory}
@@ -161,7 +160,6 @@ services:
     volumes:
       - ./test_data/certs/dev.crt:/etc/status-list/sample-certs/dev.crt:ro
       - ./test_data/certs/dev.key:/etc/status-list/sample-certs/dev.key:ro
-      - ${ISSUER_REGISTRY_DIR:-./issuer-registry}:/etc/status-list-server:ro
       - certdata:/etc/status-list/generated:ro
     depends_on:
       db:
