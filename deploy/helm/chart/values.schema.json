@@ -453,7 +453,7 @@
         "watcher": {
           "type": "object",
           "title": "Credential rotation watcher",
-          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected. Requires an application image implementing the file watcher contract (the current published images do not watch files yet).",
+          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected; otherwise the server polls every 30 seconds.",
           "properties": {
             "pollIntervalSecs": {
               "type": ["string", "integer"],

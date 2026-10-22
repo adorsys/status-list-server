@@ -2,7 +2,7 @@
 :toc: macro
 :toclevels: 2
 :icons: font
-:imagesdir: ..
+:imagesdir: ../assets
 :diagram-server-url: https://kroki.io
 :diagram-server-type: kroki
 
