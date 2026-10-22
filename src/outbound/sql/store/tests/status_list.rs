@@ -404,9 +404,6 @@ async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
     assert_guarded_update_rejects_stale_write(db, "issuer-guard-mysql", "list-guard-mysql").await;
 }
 
-/// A client that loses the optimistic guard must be able to observe 409,
-/// re-read, and retry with the fresh `updated_at`; if the guard were ever
-/// permanently unmatchable, this test would fail on the retry.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_update_one_conflict_loser_can_reread_and_retry() {

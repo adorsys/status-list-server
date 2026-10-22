@@ -854,8 +854,6 @@ jobs:
           persist-credentials: false
 
       - name: Install kubectl
-        # v5.1.0, not v5.0.1: that SHA is the v5.1.0 tag upstream. Both sides of this
-        # merge pinned the same commit and only disagreed about the comment.
         uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
 
       - name: Install Helm
