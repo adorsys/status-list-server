@@ -216,11 +216,7 @@ jobs:
         run: cargo build --workspace --all-targets --all-features
 
       - name: Release image feature set
-        # The Dockerfile default is still the local smoke-build feature set.
-        # Release variants, including Redis status-cache support, are checked by `release-variant-checks` below.
-        #
-        # Still read from the Dockerfile rather than restated here, so this check
-        # cannot drift from the value it is meant to compile.
+        # Read from the Dockerfile so this can't drift from what it compiles.
         run: |
           set -euo pipefail
           features=$(sed -nE 's/^ARG FEATURES="([^"]+)".*/\1/p' Dockerfile)

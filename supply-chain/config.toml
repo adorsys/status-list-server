@@ -261,10 +261,6 @@ criteria = "safe-to-deploy"
 version = "0.72.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.bit-set]]
-version = "0.8.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.bitflags]]
 version = "2.13.1"
 criteria = "safe-to-deploy"
@@ -658,7 +654,7 @@ version = "0.6.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.fancy-regex]]
-version = "0.14.0"
+version = "0.19.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
@@ -678,7 +674,7 @@ version = "1.1.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.fluent-uri]]
-version = "0.3.2"
+version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.flume]]
@@ -690,7 +686,7 @@ version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.fraction]]
-version = "0.15.4"
+version = "0.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.fs_extra]]
@@ -1046,7 +1042,15 @@ version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema]]
-version = "0.30.0"
+version = "0.60.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.jsonschema-regex]]
+version = "0.60.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.jsonschema-value]]
+version = "0.60.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonwebtoken]]
@@ -1159,6 +1163,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.metrics-process]]
 version = "2.4.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.micromap]]
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.mime]]
@@ -1574,7 +1582,7 @@ version = "1.0.26"
 criteria = "safe-to-deploy"
 
 [[exemptions.referencing]]
-version = "0.30.0"
+version = "0.60.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex-automata]]
@@ -1782,10 +1790,6 @@ criteria = "safe-to-deploy"
 version = "1.0.229"
 criteria = "safe-to-deploy"
 
-[[exemptions.serde_ignored]]
-version = "0.1.14"
-criteria = "safe-to-run"
-
 [[exemptions.serde_json]]
 version = "1.0.151"
 criteria = "safe-to-deploy"
@@ -1932,6 +1936,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.strum_macros]]
 version = "0.27.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.strum_macros]]
+version = "0.28.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.subtle]]
@@ -2162,16 +2170,16 @@ criteria = "safe-to-deploy"
 version = "0.1.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.unicode-general-category]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.unicode-ident]]
 version = "1.0.24"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-properties]]
 version = "0.1.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.unicode-width]]
-version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.untrusted]]

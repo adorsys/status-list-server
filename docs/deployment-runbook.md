@@ -99,7 +99,7 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Database port**: `APP_DATABASE__PORT` (e.g. `5432` for PostgreSQL, `3306` for MySQL). If omitted, the chart derives it from `APP_DATABASE__BACKEND`.
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
-- **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production requires an explicit registry path; without one in development, the server warns and trusts no issuers.
+- **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production Helm renders fail without a registry volume; without one in development, the server warns and trusts no issuers. The release-tag workflow deploys with `statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers` and nothing creates that ConfigMap, so it must already exist in the target namespace before the first release; the deploy job fails fast with a clear message when it is missing, and without it the pods would sit in `ContainerCreating` for the whole `--wait` window and then roll back.
 - To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
@@ -124,7 +124,7 @@ For a zero-downtime rotation:
 1. Add the new public key while retaining the old key:
    `cargo xtask issuer add-key --file <registry-file> --issuer <issuer-id> --jwk '<public-jwk-json>' --alg ES256`.
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
-3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the registry data Kubernetes serves with `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`, then compare it with the `fingerprint` in each pod's `issuer_registry_reloaded` log; `issuer_registry_keys` shows the count but cannot identify a key replacement.
+3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the exact bytes delivered by the selected volume source, then compare the result with the `fingerprint` in each pod's `issuer_registry_reloaded` log. For a ConfigMap, use `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`. For a Secret, decode the base64 value first: `kubectl get secret <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | base64 --decode | shasum -a 256` (use the platform's equivalent decode flag if needed). For a CSI volume, hash the file from the provider's source or another copy of the exact mounted bytes; there is no Kubernetes API object to query. `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
 5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
@@ -722,6 +722,9 @@ The release-tag deployment uses `values-aws.yaml` followed by
 `values-production.yaml`. Its management audience is
 `https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
 deployment must put this exact value in `aud` (as a string or an array member).
+The release workflow selects the `status-list-server-issuers` ConfigMap as its
+registry source; the production values file leaves the source empty so other
+deployments can choose a ConfigMap, Secret, or CSI volume.
 Deployments reusing the production overlay for another environment or hostname
 must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
 the production value.

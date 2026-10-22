@@ -1,21 +1,5 @@
-# Zero-Downtime Credential and Key Rotation Example
-# This file demonstrates a complete production deployment pattern for:
-# 1. File-based secret rotation (database credentials, signing keys)
-# 2. Helm-driven rolling restarts when ExternalSecret templates or values change
-# 3. External Secrets Operator with ClusterSecretStore
-#
-# This is preparatory chart support for an application image that implements the
-# file watcher and pool/key reload contract from issue #456. With the current
-# server image, file paths may be injected but database pools and key material are
-# still initialized at process startup.
-#
-# How rotation works:
-# 1. Update secrets in your external secret store (Vault, AWS, GCP, Azure)
-# 2. External Secrets Operator syncs changes to Kubernetes Secrets
-# 3. Kubernetes updates mounted Secret volumes
-# 4. An application image with issue #456 detects file changes and swaps credentials
-# 5. The chart checksum annotation rolls Pods only when Helm-rendered ExternalSecret
-#    manifests change; it does not change when ESO syncs new Secret data from Vault
+# Example: zero-downtime rotation of database credentials and signing keys via ESO-synced file mounts.
+# Pods reload on file change; the checksum annotation only rolls pods when rendered ExternalSecrets change.
 
 # External Secrets Configuration
 # Use ClusterSecretStore for cluster-wide secret management
@@ -97,10 +81,6 @@ statuslist:
 
   fallbackSecret:
     enabled: false
-
-  image:
-    # Replace with an application image that includes issue #456.
-    tag: "requires-456-file-rotation"
 
   aws:
     # Use Workload Identity / ambient cloud credentials in this vendor-neutral example.
@@ -262,65 +242,4 @@ opentelemetry-collector:
           receivers: [otlp]
           exporters: [otlp]
 
-# ---
-# Rotation Procedure
-# ---
-#
-# 1. Database Credential Rotation:
-#    a. Create the new database credential in PostgreSQL while the old credential
-#       remains valid. The external database owner must guarantee overlap for at
-#       least ESO refreshInterval + APP_WATCHER__POLL_INTERVAL_SECS + validation time.
-#    b. Validate the new credential directly against PostgreSQL before publishing it.
-#    c. Update the external secret store (for example Vault) with the new password.
-#    d. External Secrets Operator syncs to statuslist-db-credentials.
-#    e. An application image with issue #456 detects the mounted file change via
-#       APP_WATCHER__POLL_INTERVAL_SECS and swaps the database pool without restart.
-#    f. Verify new connections succeed and logs show a successful credential reload.
-#    g. Revoke the old database credential only after all replicas are healthy on the
-#       new pool. Roll back by restoring the old value in the external secret store
-#       while the old database credential is still valid.
-#
-# 2. Signing Key Rotation:
-#    a. Generate new key pair: openssl req -x509 -newkey rsa:4096 -keyout new.key -out new.crt
-#    b. Update secret in external store with both old and new keys (for grace period)
-#    c. External Secrets Operator syncs to statuslist-token-keys and Kubernetes
-#       updates the mounted files; no checksum-triggered rollout happens for data-only
-#       changes synced by ESO
-#    d. Application image with issue #456 reloads key material from the files, or an
-#       operator performs kubectl rollout restart if using an older image
-#    e. Verify pods have new keys: kubectl exec <pod> -- ls -la /etc/secrets/token-keys/
-#    f. After grace period, remove old key from external store
-#
-# 3. Emergency Rotation (compromised credentials):
-#    a. Create or revoke credentials in PostgreSQL according to the incident plan.
-#       If old credentials must be revoked immediately, expect existing connections
-#       to fail until every replica reloads or restarts.
-#    b. Update the external secret store immediately.
-#    c. Force rolling restart when running an image without issue #456, or when the
-#       incident requires replacing all in-memory state:
-#       kubectl rollout restart deployment/statuslist-status-list-server-deployment
-#    d. Verify all pods use new credentials.
-#
-# ---
-# Validation Commands
-# ---
-#
-# Check secret mounts in running pod:
-#   kubectl exec <pod> -- ls -la /etc/secrets/
-#
-# Verify file contents (be careful with sensitive data):
-#   kubectl exec <pod> -- cat /etc/secrets/database/password
-#
-# Check ExternalSecret sync status:
-#   kubectl get externalsecret statuslist-external-secret
-#   kubectl describe externalsecret statuslist-external-secret
-#
-# Check ClusterSecretStore connectivity:
-#   kubectl get clustersecretstore vault-cluster-store
-#   kubectl describe clustersecretstore vault-cluster-store
-#
-# Verify Helm-driven rolling restart after template/value changes:
-#   kubectl rollout status deployment/statuslist-status-list-server-deployment
-#
-# Check application logs for credential reloading:
-#   kubectl logs -l app.kubernetes.io/name=status-list-server | grep -i "credential\|secret\|reload"
+# Rotation procedure and checks: deploy/helm/README.md, "File-Based Secret Mounts and Rotation".

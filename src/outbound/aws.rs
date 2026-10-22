@@ -16,14 +16,7 @@ pub struct AwsSecretsManager {
 }
 
 impl AwsSecretsManager {
-    // Create a new instance of [AwsSecretsManager] with the given AWS SDK config.
-    ///
-    /// # Caching Behavior
-    /// - If `secrets_cache_ttl` is zero, **caching is disabled**: all secret requests go directly to AWS.
-    /// - If `secrets_cache_ttl` is non-zero, an in-memory cache is created with that TTL.
-    ///
-    /// This TTL semantics is consistent with other caches in the application
-    /// (status-list cache for status-lists and certificate data).
+    /// A zero TTL disables caching.
     pub async fn new(
         config: &SdkConfig,
         secrets_cache_ttl: Duration,

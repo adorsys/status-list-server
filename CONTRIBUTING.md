@@ -68,9 +68,20 @@ Provider-specific setup is described in the [database](docs/database-backends.md
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.
 
-The server uses ports and adapters. See the [architecture guide](docs/architecture.md) for context. Add tests for new behavior, and include a regression test for a bug fix that fails without the fix. Keep unrelated refactoring in a separate change. Update affected configuration examples, API specifications, and documentation alongside the code.
+The server uses ports and adapters. See the [architecture guide](docs/architecture.md) for context. Add tests for new behavior, and include a regression test for a bug fix that fails without the fix. Keep unrelated refactoring in a separate change. Update affected configuration examples, API specifications, and documentation alongside the code. Store documentation images and other binary assets in `docs/assets/`.
 
 For HTTP and load-testing changes, see [API testing](docs/api-testing.md) and the [performance-test workspace](perf/README.md).
+
+### Code comments
+
+Comments are the exception. Write one only when the code can't say it: a reason that isn't obvious, a gotcha, or a workaround.
+
+- One short line that says why, not what the next line does.
+- Plain words: no bold or capitals for emphasis, no em dashes.
+- No ticket numbers, review notes or history; those belong in commits and PRs.
+- No comments inside tests. Put a gotcha in the assert message or the helper's name.
+- If the explanation is long, put it in the docs and point there.
+- Leave functional comments alone: the version after a pinned action SHA, `zizmor: ignore[...]`, `# pragma: no cover`, the xtask doc comments (clap prints them as `--help`), and the `# KEY=value` lines in `.env.template`.
 
 ## Checking your changes
 
