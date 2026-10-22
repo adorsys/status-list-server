@@ -12,7 +12,7 @@ severity_threshold = "low"
 [output]
 deny = ["unmaintained"]  # exit on error if unmaintained dependencies are found
 format = "terminal"  # "terminal" (human readable report) or "json"
-quiet = false  # Only print information on error
+quiet = false
 
 [yanked]
 enabled = true  # Warn for yanked crates in Cargo.lock
