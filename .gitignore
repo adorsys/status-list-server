@@ -1,5 +1,7 @@
 /target
 .env
+# Operator-managed issuer trust registry; never committed.
+issuer-registry/
 .debug/
 .vscode/
 cert.yml

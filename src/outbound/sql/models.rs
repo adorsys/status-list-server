@@ -96,6 +96,24 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
+/// Durable identity history for issuers trusted through the operator registry.
+pub(crate) mod issuer_aggregations {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "issuer_aggregations")]
+    pub(crate) struct Model {
+        #[sea_orm(primary_key)]
+        pub issuer: String,
+        pub aggregation_id: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub(crate) enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Statuses entries
 pub(crate) mod status_lists {
     use super::*;
