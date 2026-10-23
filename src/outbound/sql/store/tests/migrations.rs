@@ -515,7 +515,7 @@ async fn test_mysql_ownership_migration_backfills_mixed_data() {
     let test_db =
         mysql_helpers::MysqlTestDb::start_migrated(Some(ownership_migration_index() as u32)).await;
     let db = test_db.connection().await;
-    db.execute_unprepared("ALTER TABLE issuer_aggregations ENGINE=MyISAM")
+    db.execute_unprepared("ALTER TABLE issuer_aggregations ENGINE=MEMORY")
         .await
         .unwrap();
     assert_ownership_migration_backfills_mixed_data(db, "MySQL").await;
