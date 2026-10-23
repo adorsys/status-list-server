@@ -37,7 +37,6 @@ const PREDATE_RERUN_RULE: [&str; 4] = [
 ];
 
 const OWNERSHIP_MIGRATION: &str = "m20261022_000001_issuer_ownership";
-const ISSUER_AGGREGATIONS_MIGRATION: &str = "m20261020_000001_issuer_aggregations";
 
 fn ownership_migration_index() -> usize {
     Migrator::migrations()
@@ -51,14 +50,8 @@ fn ownership_migration_index() -> usize {
 async fn sqlite_upgrade_renames_the_develop_issuer_aggregations_table() {
     use sea_orm::ConnectionTrait;
 
-    let db = fixtures::sqlite_connection_migrated(Some(
-        Migrator::migrations()
-            .iter()
-            .position(|migration| migration.name() == ISSUER_AGGREGATIONS_MIGRATION)
-            .expect("historical migration must be registered") as u32
-            + 1,
-    ))
-    .await;
+    let issuer_ownership_index = ownership_migration_index();
+    let db = fixtures::sqlite_connection_migrated(Some(issuer_ownership_index as u32)).await;
     let expected = AggregationId::generate();
     db.execute_unprepared(&format!(
         "INSERT INTO issuer_aggregations (issuer, aggregation_id) VALUES ('develop-issuer', '{expected}')"

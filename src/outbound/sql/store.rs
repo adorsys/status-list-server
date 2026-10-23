@@ -1023,15 +1023,15 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 impl SeaOrmStore<Credentials> {
     /// Pinned so registration cannot inherit a raised server default and turn a
     /// duplicate issuer into a serialization failure.
-    pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+    pub async fn insert_one(&self, entity: Credentials) -> Result<String, RepositoryError> {
         time_query("insert", "credential", async {
             let issuer = entity.issuer.clone();
-            let aggregation_id = entity.aggregation_id.clone();
-            let active: credentials::ActiveModel = entity.into();
+            let requested_aggregation_id = entity.aggregation_id.clone();
+            let mut active: credentials::ActiveModel = entity.into();
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             issuers::Entity::insert(issuers::ActiveModel {
-                issuer: Set(issuer),
-                aggregation_id: Set(aggregation_id),
+                issuer: Set(issuer.clone()),
+                aggregation_id: Set(requested_aggregation_id.clone()),
                 list_count: Set(0),
             })
             .on_conflict(
@@ -1042,6 +1042,33 @@ impl SeaOrmStore<Credentials> {
             .exec_without_returning(&txn)
             .await
             .map_err(map_insert_err)?;
+
+            if let Some(aggregation_id) = requested_aggregation_id.as_deref() {
+                issuers::Entity::update_many()
+                    .col_expr(issuers::Column::AggregationId, Expr::value(aggregation_id))
+                    .filter(issuers::Column::Issuer.eq(&issuer))
+                    .filter(issuers::Column::AggregationId.is_null())
+                    .exec(&txn)
+                    .await
+                    .map_err(map_insert_err)?;
+            }
+            let stored_issuer = issuers::Entity::find_by_id(&issuer)
+                .one(&txn)
+                .await
+                .map_err(map_insert_err)?
+                .ok_or_else(|| {
+                    RepositoryError::InsertError(
+                        "issuer ownership row disappeared during credential registration".into(),
+                    )
+                })?;
+            let stored_aggregation_id = stored_issuer.aggregation_id.ok_or_else(|| {
+                RepositoryError::InsertError(
+                    "issuer ownership row has no aggregation ID after credential registration"
+                        .into(),
+                )
+            })?;
+            active.aggregation_id = Set(Some(stored_aggregation_id.clone()));
+
             if let Err(insert_err) = credentials::Entity::insert(active)
                 .exec_without_returning(&txn)
                 .await
@@ -1055,7 +1082,7 @@ impl SeaOrmStore<Credentials> {
                 return Err(map_insert_err(insert_err));
             }
             txn.commit().await.map_err(map_insert_err)?;
-            Ok(())
+            Ok(stored_aggregation_id)
         })
         .await
     }

@@ -21,8 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
             Box::new(credentials_key_id::Migration),
-            Box::new(issuers::Migration),
-            Box::new(issuer_aggregations_to_issuers::Migration),
+            Box::new(issuer_aggregations::Migration),
             Box::new(issuer_ownership::Migration),
         ]
     }
@@ -1348,7 +1347,7 @@ mod tests {
 /// trust registry (no `credentials` row, so no `public_key`). The mapping must
 /// survive pod restarts and be shared across pods so an issuer's published
 /// aggregation URI cannot silently change.
-pub(crate) mod issuers {
+pub(crate) mod issuer_aggregations {
     use super::*;
 
     pub(crate) struct Migration;
@@ -1381,7 +1380,6 @@ pub(crate) mod issuers {
                             .string_len(36)
                             .not_null(),
                     );
-                pin_innodb_on_mysql(manager, &mut table);
                 manager.create_table(table).await?;
             }
             if !manager.has_index("issuer_aggregations", INDEX).await? {
@@ -1409,59 +1407,6 @@ pub(crate) mod issuers {
         Table,
         Issuer,
         AggregationId,
-    }
-}
-
-/// Renames the table created by `m20261020_000001_issuer_aggregations`.
-/// Keep that migration's schema intact because deployed databases record its name.
-pub(crate) mod issuer_aggregations_to_issuers {
-    use super::*;
-
-    pub(crate) struct Migration;
-
-    impl MigrationName for Migration {
-        fn name(&self) -> &str {
-            "m20261021_000001_issuer_aggregations_to_issuers"
-        }
-    }
-
-    #[async_trait::async_trait]
-    #[allow(elided_lifetimes_in_paths)]
-    impl MigrationTrait for Migration {
-        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            let has_old = manager.has_table("issuer_aggregations").await?;
-            let has_new = manager.has_table("issuers").await?;
-            match (has_old, has_new) {
-                (true, false) => manager
-                    .get_connection()
-                    .execute_unprepared("ALTER TABLE issuer_aggregations RENAME TO issuers")
-                    .await
-                    .map(|_| ()),
-                (false, true) => Ok(()),
-                (false, false) => Err(DbErr::Migration(
-                    "neither issuer_aggregations nor issuers exists".into(),
-                )),
-                (true, true) => {
-                    manager
-                        .get_connection()
-                        .execute_unprepared(
-                            "INSERT INTO issuers (issuer, aggregation_id) \
-                             SELECT old.issuer, old.aggregation_id FROM issuer_aggregations old \
-                             WHERE NOT EXISTS (SELECT 1 FROM issuers existing WHERE existing.issuer = old.issuer)",
-                        )
-                        .await?;
-                    manager
-                        .get_connection()
-                        .execute_unprepared("DROP TABLE issuer_aggregations")
-                        .await
-                        .map(|_| ())
-                }
-            }
-        }
-
-        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-            refuse_down(self.name())
-        }
     }
 }
 
@@ -1519,10 +1464,57 @@ pub(crate) mod issuer_ownership {
     const SQLITE_ISSUER_INDEX: &str =
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_issuers_aggregation_id ON issuers (aggregation_id)";
 
+    async fn rename_issuer_aggregations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+        let has_old = manager.has_table("issuer_aggregations").await?;
+        let has_new = manager.has_table("issuers").await?;
+        match (has_old, has_new) {
+            (true, false) => {
+                manager
+                    .get_connection()
+                    .execute_unprepared("ALTER TABLE issuer_aggregations RENAME TO issuers")
+                    .await?;
+                if manager
+                    .has_index("issuers", "idx_issuer_aggregations_aggregation_id")
+                    .await?
+                {
+                    manager
+                        .drop_index(
+                            Index::drop()
+                                .name("idx_issuer_aggregations_aggregation_id")
+                                .table(Issuers::Table)
+                                .to_owned(),
+                        )
+                        .await?;
+                }
+                Ok(())
+            }
+            (false, true) => Ok(()),
+            (true, true) => {
+                manager
+                    .get_connection()
+                    .execute_unprepared(
+                        "INSERT INTO issuers (issuer, aggregation_id) \
+                         SELECT old.issuer, old.aggregation_id FROM issuer_aggregations old \
+                         WHERE NOT EXISTS (SELECT 1 FROM issuers existing WHERE existing.issuer = old.issuer)",
+                    )
+                    .await?;
+                manager
+                    .get_connection()
+                    .execute_unprepared("DROP TABLE issuer_aggregations")
+                    .await
+                    .map(|_| ())
+            }
+            (false, false) => Err(DbErr::Migration(
+                "neither issuer_aggregations nor issuers exists".into(),
+            )),
+        }
+    }
+
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            rename_issuer_aggregations(manager).await?;
             validate_aggregation_id_collisions(manager).await?;
             if !manager.has_column("issuers", "list_count").await? {
                 manager

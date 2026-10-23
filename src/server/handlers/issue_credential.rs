@@ -66,14 +66,10 @@ pub async fn credential_handler(
         issuer: issuer.clone(),
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
-    let aggregation_id = match state.issuer_registry.issuer_aggregation_id(&issuer.0) {
-        Some(aggregation_id) => aggregation_id,
-        None => state
-            .service
-            .find_aggregation_id(&issuer)
-            .await?
-            .unwrap_or_else(AggregationId::generate),
-    };
+    let aggregation_id = state
+        .issuer_registry
+        .issuer_aggregation_id(&issuer.0)
+        .unwrap_or_else(AggregationId::generate);
     let aggregation_id = state
         .service
         .publish_credential_with_aggregation_id(credential, aggregation_id)
@@ -307,7 +303,7 @@ mod tests {
     #[cfg(all(feature = "history", feature = "sqlite"))]
     #[tokio::test]
     async fn re_registering_a_persisted_issuer_reuses_its_aggregation_id() {
-        use sea_orm::ConnectionTrait;
+        use sea_orm::{ConnectionTrait, Statement};
 
         let db = crate::test_utils::sqlite_test_db(None).await;
         let aggregation_id = uuid::Uuid::new_v4();
@@ -317,7 +313,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        let app_state = test_app_state(Some(db)).await;
+        let app_state = test_app_state(Some(db.clone())).await;
 
         let response = credential_handler(
             State(app_state),
@@ -335,6 +331,17 @@ mod tests {
             .unwrap();
         let registration: CredentialsResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(registration.aggregation_id.0, aggregation_id);
+        let stored_credential_id = db
+            .query_one_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT aggregation_id FROM credentials WHERE issuer = 'removed-registry-issuer'",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "aggregation_id")
+            .unwrap();
+        assert_eq!(stored_credential_id, aggregation_id.to_string());
     }
 
     #[tokio::test]

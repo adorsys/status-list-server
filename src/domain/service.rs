@@ -416,8 +416,7 @@ impl Service {
     ) -> Result<AggregationId, CredentialError> {
         self.credential_repo
             .insert(credential, aggregation_id)
-            .await?;
-        Ok(aggregation_id)
+            .await
     }
 
     /// The issuer's aggregation ID, or `None` for an unknown issuer.

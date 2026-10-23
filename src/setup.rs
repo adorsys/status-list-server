@@ -1554,7 +1554,11 @@ mod general_tests {
             unavailable()
         }
 
-        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+        async fn insert(
+            &self,
+            _: Credential,
+            _: AggregationId,
+        ) -> Result<AggregationId, CredentialError> {
             unavailable()
         }
 
