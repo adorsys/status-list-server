@@ -326,6 +326,10 @@ impl Service {
         self.status_list_repo.list_uris(None, after, limit).await
     }
 
+    pub async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        self.status_list_repo.issuers_with_status_lists().await
+    }
+
     /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
     /// `None` when no issuer has it.
     pub async fn list_issuer_uris(
@@ -346,6 +350,19 @@ impl Service {
             .list_uris(Some(&issuer.0), after, limit)
             .await
             .map(Some)
+    }
+
+    /// List one page of an issuer's status lists when its public aggregation
+    /// identity was resolved outside the credential database.
+    pub async fn list_issuer_uris_by_issuer(
+        &self,
+        issuer: &Issuer,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -623,6 +640,10 @@ mod tests {
                 .status_lists
                 .len(),
             2
+        );
+        assert_eq!(
+            service.issuers_with_status_lists().await.unwrap(),
+            ["one", "two"]
         );
     }
 

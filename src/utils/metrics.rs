@@ -24,6 +24,8 @@ static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// a stale, previously-dropped provider.
 static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceLock::new();
+static ISSUER_REGISTRY_METRICS: OnceLock<Mutex<Option<(u64, IssuerRegistryMetrics)>>> =
+    OnceLock::new();
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) const TARGET_DATABASE: &str = "database";
@@ -34,6 +36,49 @@ pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
 struct RotationMetrics {
     total: Counter<u64>,
     last_success_timestamp: Gauge<f64>,
+}
+
+#[derive(Clone)]
+struct IssuerRegistryMetrics {
+    keys: Gauge<u64>,
+    reload_failures: Counter<u64>,
+    auth_requests: Counter<u64>,
+}
+
+fn issuer_registry_metrics() -> IssuerRegistryMetrics {
+    cached_instruments(&ISSUER_REGISTRY_METRICS, || {
+        let meter = global::meter("status-list-server");
+        IssuerRegistryMetrics {
+            keys: meter.u64_gauge("issuer_registry_keys").build(),
+            reload_failures: meter
+                .u64_counter("issuer_registry_reload_failures_total")
+                .build(),
+            auth_requests: meter.u64_counter("management_auth_requests_total").build(),
+        }
+    })
+}
+
+pub(crate) fn set_issuer_registry_keys(count: usize) {
+    issuer_registry_metrics().keys.record(count as u64, &[]);
+}
+
+pub(crate) fn record_issuer_registry_reload_failure() {
+    issuer_registry_metrics().reload_failures.add(1, &[]);
+}
+
+pub(crate) fn record_management_auth_request(
+    issuer: Option<&str>,
+    kid: Option<&str>,
+    outcome: &'static str,
+) {
+    issuer_registry_metrics().auth_requests.add(
+        1,
+        &[
+            KeyValue::new("issuer", issuer.unwrap_or("-").to_owned()),
+            KeyValue::new("kid", kid.unwrap_or("-").to_owned()),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
 }
 
 /// The current global meter-provider generation.

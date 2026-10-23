@@ -15,6 +15,22 @@ For variables listed under `environment:` in `docker-compose.yml`, Compose uses 
 
 `docker compose up --build` starts only the server. It uses in-memory storage and a checked-in local test certificate. This file requires Docker Compose 2.24.0 or later. The server starts with every profile; each profile adds only the selected optional services. Starting a profile does not reconfigure the server to use that service: select the matching build feature and application settings when integration is required.
 
+The issuer registry is opt-in for Compose. To mount a local registry, create the
+directory and file first, then include the registry override:
+
+```bash
+mkdir -p issuer-registry
+if [ ! -e issuer-registry/issuers.yaml ]; then
+  printf 'version: 1\nissuers: []\nadmins: []\n' > issuer-registry/issuers.yaml
+fi
+ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
+  docker compose -f docker-compose.yml -f compose/issuer-registry.yml up -d --build
+```
+
+Without the override, Compose does not mount or create an issuer-registry
+directory and the server trusts no issuers. The override requires an existing
+host directory; a misspelled `ISSUER_REGISTRY_DIR` fails instead of creating it.
+
 - `postgres`: Add PostgreSQL (`db`) only.
 - `mysql`: Add MySQL (`mysql`) only.
 - `observability`: OpenTelemetry Collector, Jaeger, Prometheus, Alertmanager,

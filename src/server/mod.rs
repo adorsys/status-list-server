@@ -79,6 +79,10 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Last-known-good operator-managed issuer trust registry snapshot.
+    pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
+    /// Trust-source port used by authentication.
+    pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.
@@ -88,6 +92,10 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn set_issuer_registry(&mut self, registry: Arc<auth::issuer_registry::RegistryHandle>) {
+        self.issuer_key_resolver = registry.clone();
+        self.issuer_registry = registry;
+    }
     /// The issuer's aggregation URI, or `None` when aggregation is not
     /// configured or is withheld from the issuer.
     pub fn aggregation_uri_for(

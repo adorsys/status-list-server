@@ -16,6 +16,7 @@ NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
 NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
 MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
+POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
 tmp_dir=""
@@ -91,11 +92,11 @@ generate_postman_artifacts() {
   local collection_out="$1"
   local environment_out="$2"
 
-  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" <<'NODE'
+  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 
-const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience] = process.argv.slice(2);
+const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, registryFile] = process.argv.slice(2);
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
 
@@ -134,6 +135,23 @@ const token = `${signingInput}.${base64url(signature)}`;
 const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
 publicKeyJwk.kid = header.kid;
 publicKeyJwk.alg = header.alg;
+
+if (registryFile) {
+  const registryContent = JSON.stringify({
+    version: 1,
+    issuers: [{
+      id: issuerId,
+      aggregation_id: listId,
+      display_name: 'Newman test issuer',
+      tier: 'standard',
+      keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
+    }],
+    admins: [],
+  }, null, 2);
+  const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryRegistry, registryContent);
+  fs.renameSync(temporaryRegistry, registryFile);
+}
 
 function visitItems(items, visitor) {
   for (const item of items || []) {
@@ -215,6 +233,24 @@ fi
 
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 wait_for_api
+if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
+  # Wait for the generated key to authenticate, rather than guessing how long
+  # the file watcher will take on this runner.
+  token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="token").value)' "$environment_artifact")"
+  if [[ -n "$MANAGEMENT_URL" ]]; then
+    probe_url="${MANAGEMENT_URL%/}"
+  else
+    probe_url="$(_sibling_url "$API_ENDPOINT" 8001)"
+  fi
+  deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
+  until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "$probe_url/api/v1/credentials" 2>/dev/null || true)" == "200" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for generated issuer key to authenticate" >&2
+      exit 14
+    fi
+    sleep 1
+  done
+fi
 
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then

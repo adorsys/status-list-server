@@ -15,13 +15,13 @@
 # Exit status is 0 when every expectation holds, 1 when any does not.
 set -euo pipefail
 
-# These checks render production profiles with an explicit test-only audience.
-# Keep the actual chart default unset so deployments must choose their own.
+# These checks render production profiles with test-only audience and registry values.
+# Keep the actual chart defaults unset so deployments must choose their own.
 helm() {
   local action="$1"
   shift
   if [[ "$action" == template || "$action" == lint ]]; then
-    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 "$@"
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers "$@"
   else
     command helm "$action" "$@"
   fi

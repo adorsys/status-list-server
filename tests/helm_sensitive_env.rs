@@ -67,7 +67,11 @@ fn helm_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) -> Option<Output> {
+fn helm_template_with_registry(
+    args: &[&str],
+    disable_postgres: bool,
+    registry_volume: bool,
+) -> Option<Output> {
     if !helm_available() {
         if env::var_os("CI").is_some() {
             panic!("helm is required for helm_sensitive_env tests in CI");
@@ -90,6 +94,12 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
             "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
         ])
         .args(["--set", "opentelemetry-collector.enabled=false"]);
+    if registry_volume {
+        command.args([
+            "--set",
+            "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",
+        ]);
+    }
     if disable_postgres {
         command.args(["--set", "postgres.enabled=false"]);
     }
@@ -102,11 +112,11 @@ fn helm_template_with_postgres_default(args: &[&str], disable_postgres: bool) ->
 }
 
 fn helm_template(args: &[&str]) -> Option<Output> {
-    helm_template_with_postgres_default(args, true)
+    helm_template_with_registry(args, true, true)
 }
 
 fn helm_template_chart_defaults(args: &[&str]) -> Option<Output> {
-    helm_template_with_postgres_default(args, false)
+    helm_template_with_registry(args, false, true)
 }
 
 fn render_helm(args: &[&str]) -> Option<String> {
@@ -215,6 +225,100 @@ fn production_chart_requires_an_explicit_management_audience() {
 }
 
 #[test]
+fn production_chart_requires_an_issuer_registry_volume() {
+    for profile in ["production", "prod", " PRODUCTION "] {
+        let Some(output) = helm_template_with_registry(
+            &["--set-string", &format!("statuslist.env.APP_ENV={profile}")],
+            true,
+            false,
+        ) else {
+            return;
+        };
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("statuslist.issuerRegistry.volume is required in production")
+        );
+    }
+}
+
+#[test]
+fn development_chart_without_registry_omits_registry_mount_and_env() {
+    let Some(output) = helm_template_with_registry(
+        &[
+            "--set-string",
+            "statuslist.env.APP_ENV=development",
+            "--set-string",
+            "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+        ],
+        true,
+        false,
+    ) else {
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).expect("helm output should be UTF-8");
+    assert!(!rendered.contains("name: issuer-registry"));
+    assert!(!rendered.contains("name: APP_MANAGEMENT_AUTH__ISSUERS_FILE"));
+}
+
+#[test]
+fn production_chart_mounts_secret_backed_registry() {
+    let Some(output) = helm_template_with_registry(
+        &[
+            "-f",
+            "deploy/helm/chart/values-production.yaml",
+            "--set",
+            "statuslist.issuerRegistry.volume.secret.secretName=trusted-issuers",
+        ],
+        true,
+        false,
+    ) else {
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).expect("helm output should be UTF-8");
+    assert!(rendered.contains("name: APP_MANAGEMENT_AUTH__ISSUERS_FILE"));
+    assert!(rendered.contains("value: \"/etc/status-list-server/issuers.yaml\""));
+    assert!(rendered.contains("name: issuer-registry"));
+    assert!(rendered.contains("mountPath: \"/etc/status-list-server\""));
+    assert!(rendered.contains("secretName: trusted-issuers"));
+    let volume = rendered
+        .rsplit_once("- name: issuer-registry\n")
+        .expect("registry volume should be rendered")
+        .1
+        .split("- name:")
+        .next()
+        .unwrap();
+    assert!(volume.contains("secret:\n"));
+    assert!(!volume.contains("configMap:"));
+}
+
+#[test]
+fn production_overlay_without_registry_source_fails_to_render() {
+    let Some(output) = helm_template_with_registry(
+        &["-f", "deploy/helm/chart/values-production.yaml"],
+        true,
+        false,
+    ) else {
+        return;
+    };
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("statuslist.issuerRegistry.volume is required in production")
+    );
+}
+
+#[test]
 fn release_production_overlays_supply_the_management_audience() {
     if !helm_available() {
         assert!(env::var_os("CI").is_none(), "helm is required in CI");
@@ -229,6 +333,10 @@ fn release_production_overlays_supply_the_management_audience() {
         .args(["-f", "deploy/helm/chart/values-aws.yaml"])
         .args(["-f", "deploy/helm/chart/values-production.yaml"])
         .args(["--namespace", "statuslist-production"])
+        .args([
+            "--set",
+            "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",
+        ])
         .args(["--set", "opentelemetry-collector.enabled=false"])
         .output()
         .unwrap();

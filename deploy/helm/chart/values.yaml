@@ -261,6 +261,13 @@ statuslist:
   # Workload Identity (IRSA) is NOT configured by default - you opt in by adding the
   # serviceAccount.annotations below and the cloud-side trust relationship. This block is
   # only needed for the legacy path that mounts static shared-credential files.
+  issuerRegistry:
+    # Operator-managed issuer trust registry, mounted as a directory so rotation
+    # is observed without a restart. `volume` is any volume source that provides
+    # the file named in `path` (configMap, secret, or csi). When empty the chart
+    # mounts no registry in development. Production requires a volume.
+    path: /etc/status-list-server/issuers.yaml
+    volume: {}
   aws:
     # Mount AWS credential files from aws-credentials-secret into the pod.
     # Disabled by default so the base chart stays provider-neutral. Do NOT combine this

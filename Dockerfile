@@ -39,6 +39,7 @@ ARG FEATURES="postgres,aws,redis"
 # empty-but-present artifact it exists to catch. The decode is captured before it is
 # counted so a rust-audit-info crash fails as itself rather than as a count of 0.
 RUN --mount=type=bind,source=src,target=src \
+    --mount=type=bind,source=docs,target=docs \
     --mount=type=bind,source=test_data,target=test_data \
     --mount=type=bind,source=xtask,target=xtask \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \

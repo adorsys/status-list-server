@@ -132,6 +132,9 @@ services:
         required: false
     environment:
       APP_ENV: ${APP_ENV:-development}
+      # Override the .env value for local Compose: environment wins over
+      # env_file, and an empty path means "no issuer registry" at startup.
+      APP_MANAGEMENT_AUTH__ISSUERS_FILE: ""
       APP_SERVER__HOST: "0.0.0.0"
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
       APP_SERVER__MANAGEMENT__HOST: ${APP_SERVER__MANAGEMENT__HOST:-0.0.0.0}
