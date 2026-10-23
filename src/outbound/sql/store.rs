@@ -1032,7 +1032,7 @@ impl SeaOrmStore<Credentials> {
             });
             let mut active: credentials::ActiveModel = entity.into();
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
-            issuers::Entity::insert(issuers::ActiveModel {
+            if let Err(error) = issuers::Entity::insert(issuers::ActiveModel {
                 issuer: Set(issuer.clone()),
                 aggregation_id: Set(Some(aggregation_id.clone())),
                 list_count: Set(0),
@@ -1044,43 +1044,69 @@ impl SeaOrmStore<Credentials> {
             )
             .exec_without_returning(&txn)
             .await
-            .map_err(map_insert_err)?;
+            {
+                return Err(
+                    rollback_insert_failure(txn, "issuer ownership insert", map_insert_err(error))
+                        .await,
+                );
+            }
 
-            issuers::Entity::update_many()
+            if let Err(error) = issuers::Entity::update_many()
                 .col_expr(issuers::Column::AggregationId, Expr::value(&aggregation_id))
                 .filter(issuers::Column::Issuer.eq(&issuer))
                 .filter(issuers::Column::AggregationId.is_null())
                 .exec(&txn)
                 .await
-                .map_err(map_insert_err)?;
-            let stored_issuer = issuers::Entity::find_by_id(&issuer)
-                .one(&txn)
-                .await
-                .map_err(map_insert_err)?
-                .ok_or_else(|| {
-                    RepositoryError::InsertError(
-                        "issuer ownership row disappeared during credential registration".into(),
+            {
+                return Err(
+                    rollback_insert_failure(txn, "issuer aggregation ID update", map_insert_err(error))
+                        .await,
+                );
+            }
+            let stored_issuer = match issuers::Entity::find_by_id(&issuer).one(&txn).await {
+                Ok(Some(stored_issuer)) => stored_issuer,
+                Ok(None) => {
+                    return Err(rollback_insert_failure(
+                        txn,
+                        "issuer ownership lookup",
+                        RepositoryError::InsertError(
+                            "issuer ownership row disappeared during credential registration"
+                                .into(),
+                        ),
                     )
-                })?;
-            let stored_aggregation_id = stored_issuer.aggregation_id.ok_or_else(|| {
-                RepositoryError::InsertError(
-                    "issuer ownership row has no aggregation ID after credential registration"
-                        .into(),
-                )
-            })?;
+                    .await);
+                }
+                Err(error) => {
+                    return Err(
+                        rollback_insert_failure(txn, "issuer ownership lookup", map_insert_err(error))
+                            .await,
+                    );
+                }
+            };
+            let stored_aggregation_id = match stored_issuer.aggregation_id {
+                Some(aggregation_id) => aggregation_id,
+                None => {
+                    return Err(rollback_insert_failure(
+                        txn,
+                        "issuer aggregation ID lookup",
+                        RepositoryError::InsertError(
+                            "issuer ownership row has no aggregation ID after credential registration"
+                                .into(),
+                        ),
+                    )
+                    .await);
+                }
+            };
             active.aggregation_id = Set(Some(stored_aggregation_id.clone()));
 
             if let Err(insert_err) = credentials::Entity::insert(active)
                 .exec_without_returning(&txn)
                 .await
             {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "credential insert failed ({insert_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_insert_err(insert_err));
+                return Err(
+                    rollback_insert_failure(txn, "credential insert", map_insert_err(insert_err))
+                        .await,
+                );
             }
             txn.commit().await.map_err(map_insert_err)?;
             Ok(stored_aggregation_id)
@@ -1306,6 +1332,19 @@ fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
         _ => contention_err(&e).unwrap_or_else(|| RepositoryError::InsertError(e.to_string())),
+    }
+}
+
+async fn rollback_insert_failure(
+    txn: DatabaseTransaction,
+    operation: &str,
+    error: RepositoryError,
+) -> RepositoryError {
+    match txn.rollback().await {
+        Ok(()) => error,
+        Err(rollback_err) => RepositoryError::InsertError(format!(
+            "{operation} failed ({error}); rolling the transaction back also failed: {rollback_err}"
+        )),
     }
 }
 

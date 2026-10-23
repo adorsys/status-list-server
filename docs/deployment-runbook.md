@@ -478,9 +478,10 @@ does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 adds the five versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
 schema changes stay, and so do the credential and registry aggregation IDs.
-Do not start an older server against the schema after
-`m20261022_000001_issuer_ownership`: it expects `status_lists` to reference
-`credentials`, while the migration points it at `issuers`.
+If rolling back across `m20261022_000001_issuer_ownership`, follow the
+instructions in [Rolling back across migrations](#rolling-back-across-migrations).
+The previous release cannot create ownership rows for new issuer registrations
+or update the new quota counter, and it can publish only for existing owners.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
@@ -501,6 +502,12 @@ status changes too; see
 [Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
 Deleting an issuer's credential in the database and registering it again does
 the same to that issuer.
+
+If the ownership migration stops because an issuer has different aggregation
+IDs in `issuer_aggregations` and `credentials`, follow
+[Resolving issuer aggregation ID conflicts](troubleshooting.md#resolving-issuer-aggregation-id-conflicts)
+before retrying the upgrade. This schema keeps one ID per issuer; URLs carrying
+the other ID will return `404` after the migration.
 
 ### Metrics
 
@@ -710,7 +717,7 @@ here; a test fails until it does.
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
-| `m20261022_000001_issuer_ownership` | **No**: the previous release does not update the new quota counter and cannot create issuer-owner rows | Run `list-quota disable` before deleting its migration record; the old release can publish only for existing owners and cannot register new issuers | Recreate the new release; the migration safely reruns, preserves owner IDs and recomputes counts from `status_lists` |
+| `m20261022_000001_issuer_ownership` | **No**: the previous release does not update the new quota counter and cannot create issuer-owner rows | Run `list-quota disable` before deleting its migration record; the old release can publish only for existing owners and cannot register new issuers | Recreate the new release; the migration safely reruns, preserves owner IDs and recomputes counts from `status_lists`. If it reports conflicting aggregation IDs, follow [the repair steps](troubleshooting.md#resolving-issuer-aggregation-id-conflicts) first |
 
 ### Preparing existing management credentials
 

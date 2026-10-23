@@ -24,14 +24,16 @@ The legacy `list_count` column is no longer maintained. Current publishes use
 `issuers.list_count`; remove the legacy counter together with the duplicate
 `credentials.aggregation_id` in a later schema cleanup.
 
-`aggregation_id` is set at registration. It is nullable for credentials
-registered before aggregation IDs were introduced. Such a row gets its ID the
-first time it is looked up (`SqlCredentialRepo::find_aggregation_id`), through
-an `UPDATE` guarded by `aggregation_id IS NULL` so racing requests agree on one.
-The canonical mapping is `issuers.aggregation_id`; the credential copy remains
-for the current repository transition and should be removed with the legacy
-`list_count` column in a later schema cleanup. The issuer identifier itself
-never appears in a public URI.
+`aggregation_id` is set at registration in `issuers` and copied to
+`credentials`. It is nullable for credentials registered before aggregation
+IDs were introduced. On first lookup (`SqlCredentialRepo::find_aggregation_id`),
+the ID is assigned to `issuers.aggregation_id` with an `UPDATE` guarded by
+`aggregation_id IS NULL`, so racing requests agree on one; the legacy
+`credentials.aggregation_id` copy remains NULL. The canonical mapping is
+`issuers.aggregation_id`; the credential copy remains for the current
+repository transition and should be removed with the legacy `list_count` column
+in a later schema cleanup. The issuer identifier itself never appears in a
+public URI.
 
 #### Indexes
 
@@ -72,6 +74,12 @@ inserting into `status_lists`. The status-list owner foreign key references
 `issuers.issuer`. Credentials also reference `issuers.issuer`, so a credential
 cannot be registered without its ownership row. The two rows are created in one
 transaction.
+
+#### Indexes
+
+| Index name                    | Column           |
+| ----------------------------- | ---------------- |
+| `idx_issuers_aggregation_id` | `aggregation_id` |
 
 ### `status_lists`
 

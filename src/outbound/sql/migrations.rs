@@ -1516,6 +1516,7 @@ pub(crate) mod issuer_ownership {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             validate_aggregation_id_collisions(manager).await?;
             rename_issuer_aggregations(manager).await?;
+            ensure_issuers_use_innodb(manager).await?;
             if !manager.has_column("issuers", "list_count").await? {
                 manager
                     .alter_table(
@@ -1659,7 +1660,8 @@ pub(crate) mod issuer_ownership {
                 }));
         }
 
-        let sql = match connection.get_database_backend() {
+        let backend = connection.get_database_backend();
+        let sql = match backend {
             DatabaseBackend::MySql => "SELECT 1 FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?".to_owned(),
             DatabaseBackend::Postgres => "SELECT 1 FROM information_schema.key_column_usage kcu \
                  JOIN information_schema.constraint_column_usage ccu \
@@ -1675,20 +1677,40 @@ pub(crate) mod issuer_ownership {
                 });
             }
         };
-        let stmt = match connection.get_database_backend() {
-            DatabaseBackend::MySql => Statement::from_sql_and_values(
-                DatabaseBackend::MySql,
-                sql,
-                [source.into(), target.into()],
-            ),
-            DatabaseBackend::Postgres => Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                sql,
-                [source.into(), target.into()],
-            ),
-            _ => unreachable!(),
-        };
+        let stmt = Statement::from_sql_and_values(backend, sql, [source.into(), target.into()]);
         Ok(!connection.query_all_raw(stmt).await?.is_empty())
+    }
+
+    async fn ensure_issuers_use_innodb(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+        use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+
+        if manager.get_database_backend() != sea_orm::DatabaseBackend::MySql {
+            return Ok(());
+        }
+
+        #[derive(FromQueryResult)]
+        struct TableEngine {
+            engine: String,
+        }
+
+        let connection = manager.get_connection();
+        let engine = TableEngine::find_by_statement(Statement::from_string(
+            sea_orm::DatabaseBackend::MySql,
+            "SELECT ENGINE AS engine FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issuers'",
+        ))
+        .one(connection)
+        .await?
+        .ok_or_else(|| {
+            DbErr::Migration("issuers table was not found after the ownership rename".into())
+        })?;
+
+        if !engine.engine.eq_ignore_ascii_case("InnoDB") {
+            connection
+                .execute_unprepared("ALTER TABLE issuers ENGINE=InnoDB")
+                .await?;
+        }
+        Ok(())
     }
 
     async fn validate_aggregation_id_collisions(manager: &SchemaManager<'_>) -> Result<(), DbErr> {

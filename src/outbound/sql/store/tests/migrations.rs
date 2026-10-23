@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Statement};
+use sea_orm::{
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    Statement,
+};
 use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
 use super::fixtures;
@@ -282,6 +285,24 @@ async fn assert_ownership_migration_backfills_mixed_data(
         .await
         .unwrap_or_else(|error| panic!("ownership migration failed on {backend}: {error}"));
 
+    if backend == "MySQL" {
+        #[derive(FromQueryResult)]
+        struct IssuerTableEngine {
+            engine: String,
+        }
+
+        let engine = IssuerTableEngine::find_by_statement(Statement::from_string(
+            DatabaseBackend::MySql,
+            "SELECT ENGINE AS engine FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issuers'",
+        ))
+        .one(db.as_ref())
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(engine.engine, "InnoDB");
+    }
+
     db.execute_unprepared(
         "UPDATE credentials SET list_count = 0 WHERE issuer = 'credential-with-id'",
     )
@@ -493,7 +514,11 @@ async fn test_sqlite_ownership_migration_reports_same_issuer_aggregation_id_mism
 async fn test_mysql_ownership_migration_backfills_mixed_data() {
     let test_db =
         mysql_helpers::MysqlTestDb::start_migrated(Some(ownership_migration_index() as u32)).await;
-    assert_ownership_migration_backfills_mixed_data(test_db.connection().await, "MySQL").await;
+    let db = test_db.connection().await;
+    db.execute_unprepared("ALTER TABLE issuer_aggregations ENGINE=MyISAM")
+        .await
+        .unwrap();
+    assert_ownership_migration_backfills_mixed_data(db, "MySQL").await;
 }
 
 #[cfg(feature = "mysql")]

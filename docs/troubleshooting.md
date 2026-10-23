@@ -858,6 +858,58 @@ the upgrade above.
 soon as it has migrated. A pod that crashes partway through that first migration leaves a database
 the next start treats as an upgrade; follow the steps above.
 
+### Resolving issuer aggregation ID conflicts
+
+**When you see this:** The ownership migration stops with a message such as
+`issuer <issuer> has credentials aggregation ID <credential-id> but issuer aggregation ID <registry-id>`.
+
+**Root cause:** On the old schema, the same issuer has different IDs in
+`credentials` and `issuer_aggregations`. The ownership schema stores one ID per
+issuer, so it cannot preserve both mappings. After migration, aggregation URLs
+using the ID you do not keep will return `404`.
+
+**Diagnostics:** Before retrying the upgrade, take a database backup and list
+the mismatches:
+
+```sql
+SELECT c.issuer,
+       a.aggregation_id AS registry_id,
+       c.aggregation_id AS credential_id
+FROM credentials c
+JOIN issuer_aggregations a ON a.issuer = c.issuer
+WHERE c.aggregation_id IS NOT NULL
+  AND a.aggregation_id IS NOT NULL
+  AND c.aggregation_id <> a.aggregation_id;
+```
+
+**Fix:** Keep the ID whose aggregation URL must continue working, usually the
+one already present in tokens or issuer metadata. If both IDs have been given
+to clients, pause the upgrade and decide which URL can be retired; this schema
+cannot keep both. Update the other table to the chosen ID in a transaction.
+Run exactly one of these updates for each affected issuer:
+
+```sql
+-- Keep the registry mapping's ID.
+UPDATE credentials
+SET aggregation_id = (
+    SELECT aggregation_id FROM issuer_aggregations
+    WHERE issuer = credentials.issuer
+)
+WHERE issuer = '<issuer>';
+
+-- Or keep the credentials mapping's ID.
+UPDATE issuer_aggregations
+SET aggregation_id = (
+    SELECT aggregation_id FROM credentials
+    WHERE issuer = issuer_aggregations.issuer
+)
+WHERE issuer = '<issuer>';
+```
+
+Commit only after confirming the selected ID is not assigned to another issuer.
+Then retry the upgrade. Do not replace an ID that appears in a URL that must
+remain valid.
+
 ### A credential has no issuer-owner row
 
 The ownership migration creates an `issuers` row for every credential and registry-only issuer.
