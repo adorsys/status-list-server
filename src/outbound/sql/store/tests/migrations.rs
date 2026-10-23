@@ -178,9 +178,13 @@ async fn assert_every_migration_reruns_after_a_rollback(
     );
 
     fixtures::seed_credential(&db, "issuer-rerun").await;
-    let aggregation_id = AggregationId::generate();
-    SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))
-        .record_registry_aggregation_ids(&[("issuer-rerun".into(), aggregation_id)])
+    let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
+    let aggregation_id = repo
+        .find_aggregation_id("issuer-rerun")
+        .await
+        .unwrap()
+        .unwrap();
+    repo.record_registry_aggregation_ids(&[("issuer-rerun".into(), aggregation_id)])
         .await
         .unwrap();
     fixtures::insert_list_as_old_pod(&db, "list-rerun", "issuer-rerun").await;
@@ -250,7 +254,7 @@ async fn assert_ownership_migration_backfills_mixed_data(
     without_id_key.common.key_id = Some("key-without-id".into());
 
     db.execute_unprepared(&format!(
-        "INSERT INTO issuers (issuer, aggregation_id) VALUES ('credential-with-id', '{credential_id}'), ('registry-only', '{registry_id}')"
+        "INSERT INTO issuer_aggregations (issuer, aggregation_id) VALUES ('credential-with-id', '{credential_id}'), ('registry-only', '{registry_id}')"
     )).await.unwrap();
     let with_id: credentials::ActiveModel =
         Credentials::new("credential-with-id".into(), with_id_key)
@@ -379,7 +383,7 @@ async fn assert_ownership_collision_fails_before_schema_changes(
 ) {
     let conflicting_id = AggregationId::generate();
     db.execute_unprepared(&format!(
-        "INSERT INTO issuers (issuer, aggregation_id) VALUES ('registry-owner', '{conflicting_id}')"
+        "INSERT INTO issuer_aggregations (issuer, aggregation_id) VALUES ('registry-owner', '{conflicting_id}')"
     ))
     .await
     .unwrap();
