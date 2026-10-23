@@ -17,17 +17,21 @@ Stores information about issuers and their cryptographic public keys.
 | ---------------- | ----------- | ---- | --- | ---------------------------------------------------------------- |
 | `issuer`         | TEXT        | NO   | PK  | Unique identifier for the issuer                                 |
 | `public_key`     | JSON        | NO   |     | Public key associated with the issuer                            |
-| `list_count`     | BIGINT      | NO   |     | Legacy counter retained for older release compatibility          |
+| `list_count`     | BIGINT      | NO   |     | Unmaintained legacy counter; scheduled for later removal         |
 | `aggregation_id` | VARCHAR(36) | YES  | UQ  | Opaque UUID naming the issuer in public aggregation URIs         |
 
-The legacy `list_count` column remains for compatibility with older releases
-during rolling upgrades. Current publishes use `issuer_aggregations.list_count`.
+The legacy `list_count` column is no longer maintained. Current publishes use
+`issuers.list_count`; remove the legacy counter together with the duplicate
+`credentials.aggregation_id` in a later schema cleanup.
 
-`aggregation_id` is set at registration. It is nullable for the same reason:
-pods on the previous release register without one. Such a row gets its ID the
+`aggregation_id` is set at registration. It is nullable for credentials
+registered before aggregation IDs were introduced. Such a row gets its ID the
 first time it is looked up (`SqlCredentialRepo::find_aggregation_id`), through
-an `UPDATE` guarded by `aggregation_id IS NULL` so racing pods agree on one.
-The issuer identifier itself never appears in a public URI.
+an `UPDATE` guarded by `aggregation_id IS NULL` so racing requests agree on one.
+The canonical mapping is `issuers.aggregation_id`; the credential copy remains
+for the current repository transition and should be removed with the legacy
+`list_count` column in a later schema cleanup. The issuer identifier itself
+never appears in a public URI.
 
 #### Indexes
 
@@ -51,11 +55,11 @@ pods refuse to start meanwhile unless `limits.list_quota_transition` is set; see
 `list_quota.rs`. Publishes read it in their transaction, under a shared lock
 while it is off.
 
-### `issuer_aggregations`
+### `issuers`
 
 The durable issuer ownership and aggregation record. Every issuer has a row,
-including issuers with no aggregation ID yet. Registry-only issuers receive
-their row together with the immutable aggregation mapping.
+including issuers with no credential or aggregation ID yet. Registry-only
+issuers receive their row together with the immutable aggregation mapping.
 
 | Column           | Type        | Null | Key | Description                                      |
 | ---------------- | ----------- | ---- | --- | ------------------------------------------------ |
@@ -63,9 +67,11 @@ their row together with the immutable aggregation mapping.
 | `aggregation_id` | VARCHAR(36) | YES  | UQ  | Public aggregation identifier, when assigned     |
 | `list_count`     | BIGINT      | NO   |     | Status lists published; backs the per-issuer quota |
 
-Publishes increment `issuer_aggregations.list_count` transactionally before
+Publishes increment `issuers.list_count` transactionally before
 inserting into `status_lists`. The status-list owner foreign key references
-`issuer_aggregations.issuer`; publishing does not access `credentials`.
+`issuers.issuer`. Credentials also reference `issuers.issuer`, so a credential
+cannot be registered without its ownership row. The two rows are created in one
+transaction.
 
 ### `status_lists`
 
@@ -75,7 +81,7 @@ by its `list_id`, which acts as the primary key.
 | Column        | Type   | Null | Key | Description                                         |
 | ------------- | ------ | ---- | --- | --------------------------------------------------- |
 | `list_id`     | TEXT   | NO   | PK  | Unique identifier for the status list               |
-| `issuer`      | TEXT   | NO   | FK  | References `issuer_aggregations.issuer` (ON DELETE CASCADE) |
+| `issuer`      | TEXT   | NO   | FK  | References `issuers.issuer` (ON DELETE RESTRICT) |
 | `status_list` | JSON   | NO   |     | The status list entry                               |
 | `sub`         | TEXT   | NO   |     | String identifier for the Status List Token         |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp of last status update                |
@@ -150,16 +156,18 @@ erDiagram
     credentials {
         TEXT issuer PK "Unique identifier for the issuer"
         JSON public_key "Public key associated with the issuer"
+        VARCHAR key_id "Indexed management key id"
+        BIGINT list_count "Unmaintained legacy counter"
         VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
     }
-    issuer_aggregations {
+    issuers {
         TEXT issuer PK "Issuer owner"
         VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
         BIGINT list_count "Status lists published by the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
-        TEXT issuer FK "References issuer_aggregations.issuer"
+        TEXT issuer FK "References issuers.issuer"
         JSON status_list "The status list entry"
         TEXT sub "String identifier for the Status List Token"
         BIGINT updated_at "UNIX timestamp of last update"
@@ -172,6 +180,7 @@ erDiagram
         BIGINT valid_until "End timestamp"
         BIGINT created_at "Creation timestamp"
     }
-    issuer_aggregations ||--o{ status_lists : "issuer (ON DELETE CASCADE, ON UPDATE CASCADE)"
+    issuers ||--o{ credentials : "issuer (ON DELETE RESTRICT, ON UPDATE RESTRICT)"
+    issuers ||--o{ status_lists : "issuer (ON DELETE RESTRICT, ON UPDATE RESTRICT)"
     status_lists ||--|{ status_list_history : "list_id (ON DELETE CASCADE)"
 ```

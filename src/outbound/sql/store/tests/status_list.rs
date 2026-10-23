@@ -250,7 +250,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
             read_quota_switch(""),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "issuer_aggregations" SET "list_count" = "list_count" + $1 WHERE "issuer_aggregations"."issuer" = $2 AND "issuer_aggregations"."list_count" < $3"#,
+                r#"UPDATE "issuers" SET "list_count" = "list_count" + $1 WHERE "issuers"."issuer" = $2 AND "issuers"."list_count" < $3"#,
                 [1i32.into(), "issuer-q".into(), 1000i64.into()],
             ),
             Statement::from_sql_and_values(
@@ -334,7 +334,7 @@ async fn test_unenforced_quota_rereads_switch_under_shared_lock_and_still_counts
         statements[3],
         Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            r#"UPDATE "issuer_aggregations" SET "list_count" = "list_count" + $1 WHERE "issuer_aggregations"."issuer" = $2 AND "issuer_aggregations"."list_count" < $3"#,
+            r#"UPDATE "issuers" SET "list_count" = "list_count" + $1 WHERE "issuers"."issuer" = $2 AND "issuers"."list_count" < $3"#,
             [1i32.into(), "issuer-off".into(), i64::MAX.into()],
         ),
         "the guard must be lifted, not the count: {statements:?}"
@@ -1159,7 +1159,7 @@ async fn test_postgres_list_uris_walk_survives_concurrent_publishes() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes() {
+async fn test_sqlite_list_count_migration_backfills_existing_rows() {
     for column_already_added in [false, true] {
         let steps = list_count_migration_index() as u32;
         let db = fixtures::sqlite_connection_migrated(Some(steps)).await;
@@ -1169,7 +1169,7 @@ async fn test_sqlite_list_count_migration_backfills_and_accepts_old_pod_writes()
 
 #[cfg(feature = "mysql")]
 #[tokio::test]
-async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() {
+async fn test_mysql_list_count_migration_backfills_existing_rows() {
     for column_already_added in [false, true] {
         let steps = list_count_migration_index() as u32;
         let test_db = mysql_helpers::MysqlTestDb::start_migrated(Some(steps)).await;
@@ -1180,7 +1180,7 @@ async fn test_mysql_list_count_migration_backfills_and_accepts_old_pod_writes() 
 
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
-async fn test_postgres_list_count_migration_backfills_and_accepts_old_pod_writes() {
+async fn test_postgres_list_count_migration_backfills_existing_rows() {
     for column_already_added in [false, true] {
         let steps = list_count_migration_index() as u32;
         let test_db = postgres_helpers::postgres_connection_migrated(Some(steps)).await;

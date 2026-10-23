@@ -97,11 +97,11 @@ impl From<Credentials> for credentials::ActiveModel {
 }
 
 /// Durable issuer ownership, list quota, and registry aggregation identity.
-pub(crate) mod issuer_aggregations {
+pub(crate) mod issuers {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-    #[sea_orm(table_name = "issuer_aggregations")]
+    #[sea_orm(table_name = "issuers")]
     pub(crate) struct Model {
         #[sea_orm(primary_key)]
         pub issuer: String,

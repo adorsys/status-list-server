@@ -21,7 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(credentials_aggregation_id::Migration),
             Box::new(status_lists_issuer_list_id_index::Migration),
             Box::new(credentials_key_id::Migration),
-            Box::new(issuer_aggregations::Migration),
+            Box::new(issuers::Migration),
             Box::new(issuer_ownership::Migration),
         ]
     }
@@ -91,8 +91,8 @@ async fn name_unknown_migrations<M: MigratorTrait>(
 
 /// Recomputes every issuer's ownership-record list count and is quoted verbatim
 /// in `docs/troubleshooting.md` as the operator repair.
-pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuer_aggregations SET list_count = \
-     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuer_aggregations.issuer)";
+pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer)";
 const BACKFILL_CREDENTIAL_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
 
@@ -131,7 +131,7 @@ fn forward_only(refused: &str) -> DbErr {
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
-    "issuer_aggregations",
+    "issuers",
     "status_lists",
     "status_list_history",
     "status_list_allocations",
@@ -1347,7 +1347,7 @@ mod tests {
 /// trust registry (no `credentials` row, so no `public_key`). The mapping must
 /// survive pod restarts and be shared across pods so an issuer's published
 /// aggregation URI cannot silently change.
-pub(crate) mod issuer_aggregations {
+pub(crate) mod issuers {
     use super::*;
 
     pub(crate) struct Migration;
@@ -1358,37 +1358,38 @@ pub(crate) mod issuer_aggregations {
         }
     }
 
-    const INDEX: &str = "idx_issuer_aggregations_aggregation_id";
+    const INDEX: &str = "idx_issuers_aggregation_id";
 
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager.has_table("issuer_aggregations").await? {
+            if !manager.has_table("issuers").await? {
                 let mut table = Table::create();
                 table
-                    .table(IssuerAggregations::Table)
+                    .table(Issuers::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(IssuerAggregations::Issuer)
+                        ColumnDef::new(Issuers::Issuer)
                             .string()
                             .not_null()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(IssuerAggregations::AggregationId)
+                        ColumnDef::new(Issuers::AggregationId)
                             .string_len(36)
                             .not_null(),
                     );
+                pin_innodb_on_mysql(manager, &mut table);
                 manager.create_table(table).await?;
             }
-            if !manager.has_index("issuer_aggregations", INDEX).await? {
+            if !manager.has_index("issuers", INDEX).await? {
                 manager
                     .create_index(
                         Index::create()
                             .name(INDEX)
-                            .table(IssuerAggregations::Table)
-                            .col(IssuerAggregations::AggregationId)
+                            .table(Issuers::Table)
+                            .col(Issuers::AggregationId)
                             .unique()
                             .to_owned(),
                     )
@@ -1403,7 +1404,8 @@ pub(crate) mod issuer_aggregations {
     }
 
     #[derive(Iden)]
-    enum IssuerAggregations {
+    enum Issuers {
+        #[iden = "issuers"]
         Table,
         Issuer,
         AggregationId,
@@ -1423,20 +1425,59 @@ pub(crate) mod issuer_ownership {
         }
     }
 
+    const SQLITE_CREATE_STATUS_LISTS: &str = "CREATE TABLE status_lists_new (\
+        list_id TEXT NOT NULL PRIMARY KEY, issuer TEXT NOT NULL, \
+        status_list JSON NOT NULL, sub TEXT NOT NULL, \
+        updated_at BIGINT NOT NULL DEFAULT 0, version BIGINT NOT NULL DEFAULT 1, \
+        CONSTRAINT fk_status_lists_issuer_issuers \
+        FOREIGN KEY (issuer) REFERENCES issuers(issuer) \
+        ON DELETE RESTRICT ON UPDATE RESTRICT\
+    )";
+    const SQLITE_COPY_STATUS_LISTS: &str = "INSERT INTO status_lists_new \
+        (list_id, issuer, status_list, sub, updated_at, version) \
+        SELECT list_id, issuer, status_list, sub, updated_at, version FROM status_lists";
+    const SQLITE_STATUS_LIST_INDEXES: [&str; 4] = [
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_list_id ON status_lists (list_id)",
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_issuer ON status_lists (issuer)",
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_sub ON status_lists (sub)",
+        "CREATE INDEX IF NOT EXISTS idx_status_lists_issuer_list_id ON status_lists (issuer, list_id)",
+    ];
+    const SQLITE_CREATE_CREDENTIALS: &str = "CREATE TABLE credentials_new (\
+        issuer TEXT NOT NULL PRIMARY KEY, public_key JSON NOT NULL, key_id VARCHAR(255) NULL, \
+        list_count BIGINT NOT NULL DEFAULT 0, aggregation_id VARCHAR(36) NULL, \
+        CONSTRAINT fk_credentials_issuer_issuers \
+        FOREIGN KEY (issuer) REFERENCES issuers(issuer) \
+        ON DELETE RESTRICT ON UPDATE RESTRICT\
+    )";
+    const SQLITE_COPY_CREDENTIALS: &str = "INSERT INTO credentials_new \
+        (issuer, public_key, key_id, list_count, aggregation_id) \
+        SELECT issuer, public_key, key_id, list_count, aggregation_id FROM credentials";
+    const SQLITE_CREDENTIAL_INDEXES: [&str; 2] = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_credentials_key_id ON credentials (key_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_credentials_aggregation_id ON credentials (aggregation_id)",
+    ];
+    const SQLITE_CREATE_ISSUERS: &str = "CREATE TABLE issuers_new (\
+        issuer TEXT NOT NULL PRIMARY KEY, aggregation_id VARCHAR(36) NULL, \
+        list_count BIGINT NOT NULL DEFAULT 0\
+    )";
+    const SQLITE_COPY_ISSUERS: &str = "INSERT INTO issuers_new \
+        (issuer, aggregation_id, list_count) \
+        SELECT issuer, aggregation_id, list_count FROM issuers";
+    const SQLITE_ISSUER_INDEX: &str =
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_issuers_aggregation_id ON issuers (aggregation_id)";
+
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager
-                .has_column("issuer_aggregations", "list_count")
-                .await?
-            {
+            validate_aggregation_id_collisions(manager).await?;
+            if !manager.has_column("issuers", "list_count").await? {
                 manager
                     .alter_table(
                         Table::alter()
-                            .table(IssuerAggregations::Table)
+                            .table(Issuers::Table)
                             .add_column(
-                                ColumnDef::new(IssuerAggregations::ListCount)
+                                ColumnDef::new(Issuers::ListCount)
                                     .big_integer()
                                     .not_null()
                                     .default(0),
@@ -1447,16 +1488,16 @@ pub(crate) mod issuer_ownership {
             }
 
             if manager.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
-                rebuild_sqlite_issuer_aggregations(manager).await?;
+                if sqlite_column_is_not_null(manager, "issuers", "aggregation_id").await? {
+                    rebuild_sqlite_issuers(manager).await?;
+                }
             } else {
                 manager
                     .alter_table(
                         Table::alter()
-                            .table(IssuerAggregations::Table)
+                            .table(Issuers::Table)
                             .modify_column(
-                                ColumnDef::new(IssuerAggregations::AggregationId)
-                                    .string_len(36)
-                                    .null(),
+                                ColumnDef::new(Issuers::AggregationId).string_len(36).null(),
                             )
                             .to_owned(),
                     )
@@ -1466,9 +1507,9 @@ pub(crate) mod issuer_ownership {
             manager
                 .get_connection()
                 .execute_unprepared(
-                    "INSERT INTO issuer_aggregations (issuer, aggregation_id, list_count) \
+                    "INSERT INTO issuers (issuer, aggregation_id, list_count) \
                      SELECT c.issuer, c.aggregation_id, c.list_count FROM credentials c \
-                     WHERE NOT EXISTS (SELECT 1 FROM issuer_aggregations a WHERE a.issuer = c.issuer)",
+                     WHERE NOT EXISTS (SELECT 1 FROM issuers a WHERE a.issuer = c.issuer)",
                 )
                 .await?;
             manager
@@ -1476,8 +1517,28 @@ pub(crate) mod issuer_ownership {
                 .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
                 .await?;
 
-            let owns_lists = foreign_key_targets(manager, "issuer_aggregations").await?;
-            let references_credentials = foreign_key_targets(manager, "credentials").await?;
+            if manager.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
+                if !foreign_key_references_table(manager, "credentials", "issuers").await? {
+                    rebuild_sqlite_credentials(manager).await?;
+                }
+            } else if !foreign_key_references_table(manager, "credentials", "issuers").await? {
+                manager
+                    .create_foreign_key(
+                        ForeignKey::create()
+                            .name("fk_credentials_issuer_issuers")
+                            .from(Credentials::Table, Credentials::Issuer)
+                            .to(Issuers::Table, Issuers::Issuer)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Restrict)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
+            let owns_lists =
+                foreign_key_references_table(manager, "status_lists", "issuers").await?;
+            let references_credentials =
+                foreign_key_references_table(manager, "status_lists", "credentials").await?;
             if manager.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
                 if references_credentials || !manager.has_table("status_lists").await? {
                     rebuild_sqlite_status_lists(manager).await?;
@@ -1497,11 +1558,11 @@ pub(crate) mod issuer_ownership {
                     manager
                         .create_foreign_key(
                             ForeignKey::create()
-                                .name("fk_status_lists_issuer_aggregation")
+                                .name("fk_status_lists_issuer_issuers")
                                 .from(StatusLists::Table, StatusLists::Issuer)
-                                .to(IssuerAggregations::Table, IssuerAggregations::Issuer)
-                                .on_delete(ForeignKeyAction::Cascade)
-                                .on_update(ForeignKeyAction::Cascade)
+                                .to(Issuers::Table, Issuers::Issuer)
+                                .on_delete(ForeignKeyAction::Restrict)
+                                .on_update(ForeignKeyAction::Restrict)
                                 .to_owned(),
                         )
                         .await?;
@@ -1515,7 +1576,11 @@ pub(crate) mod issuer_ownership {
         }
     }
 
-    async fn foreign_key_targets(manager: &SchemaManager<'_>, target: &str) -> Result<bool, DbErr> {
+    async fn foreign_key_references_table(
+        manager: &SchemaManager<'_>,
+        source: &str,
+        target: &str,
+    ) -> Result<bool, DbErr> {
         use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
         let connection = manager.get_connection();
@@ -1523,7 +1588,7 @@ pub(crate) mod issuer_ownership {
             return Ok(connection
                 .query_all_raw(Statement::from_string(
                     DatabaseBackend::Sqlite,
-                    "PRAGMA foreign_key_list(status_lists)".to_owned(),
+                    format!("PRAGMA foreign_key_list({source})"),
                 ))
                 .await?
                 .iter()
@@ -1534,42 +1599,129 @@ pub(crate) mod issuer_ownership {
         }
 
         let sql = match connection.get_database_backend() {
-            DatabaseBackend::MySql => format!(
-                "SELECT 1 FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'status_lists' AND REFERENCED_TABLE_NAME = '{target}'"
-            ),
-            DatabaseBackend::Postgres => format!(
-                "SELECT 1 FROM information_schema.key_column_usage kcu \
+            DatabaseBackend::MySql => "SELECT 1 FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?".to_owned(),
+            DatabaseBackend::Postgres => "SELECT 1 FROM information_schema.key_column_usage kcu \
                  JOIN information_schema.constraint_column_usage ccu \
                  ON kcu.constraint_catalog = ccu.constraint_catalog \
                  AND kcu.constraint_schema = ccu.constraint_schema \
                  AND kcu.constraint_name = ccu.constraint_name \
-                 WHERE kcu.table_schema = current_schema() AND kcu.table_name = 'status_lists' \
-                 AND ccu.table_name = '{target}'"
-            ),
+                 WHERE kcu.table_schema = current_schema() AND kcu.table_name = $1 \
+                 AND ccu.table_name = $2".to_owned(),
             other => {
                 return Err(DbErr::BackendNotSupported {
                     db: other.as_str(),
-                    ctx: "foreign_key_targets",
+                    ctx: "foreign_key_references",
                 });
             }
         };
-        Ok(!connection
-            .query_all_raw(Statement::from_string(
-                connection.get_database_backend(),
+        let stmt = match connection.get_database_backend() {
+            DatabaseBackend::MySql => Statement::from_sql_and_values(
+                DatabaseBackend::MySql,
                 sql,
+                [source.into(), target.into()],
+            ),
+            DatabaseBackend::Postgres => Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                [source.into(), target.into()],
+            ),
+            _ => unreachable!(),
+        };
+        Ok(!connection.query_all_raw(stmt).await?.is_empty())
+    }
+
+    async fn validate_aggregation_id_collisions(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+        use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
+
+        #[derive(FromQueryResult)]
+        struct Collision {
+            credential_issuer: String,
+            existing_issuer: String,
+            aggregation_id: String,
+        }
+
+        let db = manager.get_connection();
+        let backend = db.get_database_backend();
+        let sql = "SELECT c.issuer AS credential_issuer, a.issuer AS existing_issuer, \
+                   c.aggregation_id AS aggregation_id FROM credentials c JOIN issuers a \
+                   ON c.aggregation_id = a.aggregation_id AND c.issuer <> a.issuer";
+        let collisions =
+            Collision::find_by_statement(Statement::from_string(backend, sql.to_owned()))
+                .all(db)
+                .await?;
+        if collisions.is_empty() {
+            return Ok(());
+        }
+        let details = collisions
+            .into_iter()
+            .map(|c| {
+                format!(
+                    "{} conflicts with {} for {}",
+                    c.credential_issuer, c.existing_issuer, c.aggregation_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(DbErr::Migration(format!(
+            "aggregation ID collisions must be repaired before issuer ownership migration: {details}"
+        )))
+    }
+
+    async fn sqlite_column_is_not_null(
+        manager: &SchemaManager<'_>,
+        table: &str,
+        column: &str,
+    ) -> Result<bool, DbErr> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let rows = manager
+            .get_connection()
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!("PRAGMA table_info({table})"),
             ))
-            .await?
-            .is_empty())
+            .await?;
+        Ok(rows.iter().any(|row| {
+            row.try_get::<String>("", "name")
+                .is_ok_and(|name| name == column)
+                && row
+                    .try_get::<i64>("", "notnull")
+                    .is_ok_and(|value| value != 0)
+        }))
+    }
+
+    async fn sqlite_table_rebuild(
+        manager: &SchemaManager<'_>,
+        rebuild: impl AsyncFnOnce() -> Result<(), DbErr>,
+    ) -> Result<(), DbErr> {
+        use sea_orm::ConnectionTrait;
+        let connection = manager.get_connection();
+        // The SQLite pool is pinned to one connection so the pragma and DDL share a transaction.
+        connection
+            .execute_unprepared("PRAGMA foreign_keys = OFF")
+            .await?;
+        connection.execute_unprepared("BEGIN IMMEDIATE").await?;
+        let result = rebuild().await;
+        let finish = if result.is_ok() {
+            connection.execute_unprepared("COMMIT").await
+        } else {
+            connection.execute_unprepared("ROLLBACK").await
+        };
+        if finish.is_err() {
+            let _ = connection.execute_unprepared("ROLLBACK").await;
+        }
+        let restore_foreign_keys = connection
+            .execute_unprepared("PRAGMA foreign_keys = ON")
+            .await;
+        finish?;
+        restore_foreign_keys?;
+        result
     }
 
     async fn rebuild_sqlite_status_lists(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         use sea_orm::ConnectionTrait;
-
         let connection = manager.get_connection();
-        connection
-            .execute_unprepared("PRAGMA foreign_keys = OFF")
-            .await?;
-        let result = async {
+        sqlite_table_rebuild(manager, async || {
             if !manager.has_table("status_lists").await? {
                 connection
                     .execute_unprepared("ALTER TABLE status_lists_new RENAME TO status_lists")
@@ -1578,102 +1730,82 @@ pub(crate) mod issuer_ownership {
                 connection
                     .execute_unprepared("DROP TABLE IF EXISTS status_lists_new")
                     .await?;
-            connection.execute_unprepared(
-                "CREATE TABLE status_lists_new (\
-                    list_id TEXT NOT NULL PRIMARY KEY, \
-                    issuer TEXT NOT NULL, \
-                    status_list JSON NOT NULL, \
-                    sub TEXT NOT NULL, \
-                    updated_at BIGINT NOT NULL, \
-                    version BIGINT NOT NULL DEFAULT 1, \
-                    CONSTRAINT fk_status_lists_issuer_aggregation \
-                    FOREIGN KEY (issuer) REFERENCES issuer_aggregations(issuer) \
-                    ON DELETE CASCADE ON UPDATE CASCADE\
-                )",
-            ).await?;
-            connection.execute_unprepared(
-                "INSERT INTO status_lists_new (list_id, issuer, status_list, sub, updated_at, version) \
-                 SELECT list_id, issuer, status_list, sub, updated_at, version FROM status_lists",
-            ).await?;
-            connection.execute_unprepared("DROP TABLE status_lists").await?;
-            connection.execute_unprepared("ALTER TABLE status_lists_new RENAME TO status_lists").await?;
+                connection
+                    .execute_unprepared(SQLITE_CREATE_STATUS_LISTS)
+                    .await?;
+                connection
+                    .execute_unprepared(SQLITE_COPY_STATUS_LISTS)
+                    .await?;
+                connection
+                    .execute_unprepared("DROP TABLE status_lists")
+                    .await?;
+                connection
+                    .execute_unprepared("ALTER TABLE status_lists_new RENAME TO status_lists")
+                    .await?;
             }
-            for index in [
-                "CREATE INDEX IF NOT EXISTS idx_status_lists_list_id ON status_lists (list_id)",
-                "CREATE INDEX IF NOT EXISTS idx_status_lists_issuer ON status_lists (issuer)",
-                "CREATE INDEX IF NOT EXISTS idx_status_lists_sub ON status_lists (sub)",
-                "CREATE INDEX IF NOT EXISTS idx_status_lists_issuer_list_id ON status_lists (issuer, list_id)",
-            ] {
+            for index in SQLITE_STATUS_LIST_INDEXES {
                 connection.execute_unprepared(index).await?;
             }
-            Ok::<(), DbErr>(())
-        }
-        .await;
-        connection
-            .execute_unprepared("PRAGMA foreign_keys = ON")
-            .await?;
-        result
+            Ok(())
+        })
+        .await
     }
 
-    async fn rebuild_sqlite_issuer_aggregations(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    async fn rebuild_sqlite_credentials(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         use sea_orm::ConnectionTrait;
-
         let connection = manager.get_connection();
-        connection
-            .execute_unprepared("PRAGMA foreign_keys = OFF")
-            .await?;
-        let result = async {
-            if !manager.has_table("issuer_aggregations").await? {
+        sqlite_table_rebuild(manager, async || {
+            connection
+                .execute_unprepared("DROP TABLE IF EXISTS credentials_new")
+                .await?;
+            connection
+                .execute_unprepared(SQLITE_CREATE_CREDENTIALS)
+                .await?;
+            connection
+                .execute_unprepared(SQLITE_COPY_CREDENTIALS)
+                .await?;
+            connection
+                .execute_unprepared("DROP TABLE credentials")
+                .await?;
+            connection
+                .execute_unprepared("ALTER TABLE credentials_new RENAME TO credentials")
+                .await?;
+            for index in SQLITE_CREDENTIAL_INDEXES {
+                connection.execute_unprepared(index).await?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn rebuild_sqlite_issuers(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+        use sea_orm::ConnectionTrait;
+        let connection = manager.get_connection();
+        sqlite_table_rebuild(manager, async || {
+            if !manager.has_table("issuers").await? {
                 connection
-                    .execute_unprepared(
-                        "ALTER TABLE issuer_aggregations_new RENAME TO issuer_aggregations",
-                    )
+                    .execute_unprepared("ALTER TABLE issuers_new RENAME TO issuers")
                     .await?;
             } else {
                 connection
-                    .execute_unprepared("DROP TABLE IF EXISTS issuer_aggregations_new")
+                    .execute_unprepared("DROP TABLE IF EXISTS issuers_new")
                     .await?;
+                connection.execute_unprepared(SQLITE_CREATE_ISSUERS).await?;
+                connection.execute_unprepared(SQLITE_COPY_ISSUERS).await?;
+                connection.execute_unprepared("DROP TABLE issuers").await?;
                 connection
-                    .execute_unprepared(
-                        "CREATE TABLE IF NOT EXISTS issuer_aggregations_new (\
-                issuer TEXT NOT NULL PRIMARY KEY, \
-                aggregation_id VARCHAR(36) NULL, \
-                list_count BIGINT NOT NULL DEFAULT 0\
-            )",
-                    )
-                    .await?;
-                connection
-                    .execute_unprepared(
-                        "INSERT INTO issuer_aggregations_new (issuer, aggregation_id, list_count) \
-             SELECT issuer, aggregation_id, list_count FROM issuer_aggregations",
-                    )
-                    .await?;
-                connection
-                    .execute_unprepared("DROP TABLE issuer_aggregations")
-                    .await?;
-                connection
-                    .execute_unprepared(
-                        "ALTER TABLE issuer_aggregations_new RENAME TO issuer_aggregations",
-                    )
+                    .execute_unprepared("ALTER TABLE issuers_new RENAME TO issuers")
                     .await?;
             }
-            connection
-                .execute_unprepared(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_issuer_aggregations_aggregation_id \
-             ON issuer_aggregations (aggregation_id)",
-                )
-                .await?;
-            Ok::<(), DbErr>(())
-        }
-        .await;
-        connection
-            .execute_unprepared("PRAGMA foreign_keys = ON")
-            .await?;
-        result
+            connection.execute_unprepared(SQLITE_ISSUER_INDEX).await?;
+            Ok(())
+        })
+        .await
     }
 
     #[derive(Iden)]
-    enum IssuerAggregations {
+    enum Issuers {
+        #[iden = "issuers"]
         Table,
         Issuer,
         AggregationId,
@@ -1682,6 +1814,12 @@ pub(crate) mod issuer_ownership {
 
     #[derive(Iden)]
     enum StatusLists {
+        Table,
+        Issuer,
+    }
+
+    #[derive(Iden)]
+    enum Credentials {
         Table,
         Issuer,
     }

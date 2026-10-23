@@ -38,12 +38,12 @@ pub(in super::super) async fn seed_credential(db: &Arc<DatabaseConnection>, issu
 
 /// The issuer's stored ownership-record `list_count`.
 pub(in super::super) async fn list_count(db: &DatabaseConnection, issuer: &str) -> i64 {
-    use crate::outbound::sql::models::issuer_aggregations;
+    use crate::outbound::sql::models::issuers;
     use sea_orm::{EntityTrait, QuerySelect};
 
-    issuer_aggregations::Entity::find_by_id(issuer)
+    issuers::Entity::find_by_id(issuer)
         .select_only()
-        .column(issuer_aggregations::Column::ListCount)
+        .column(issuers::Column::ListCount)
         .into_tuple::<i64>()
         .one(db)
         .await

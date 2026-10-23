@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
+use jsonwebtoken::jwk::Jwk;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Statement};
 use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
 use super::fixtures;
@@ -17,6 +18,8 @@ use crate::outbound::sql::SeaOrmStore;
 use crate::outbound::sql::SqlCredentialRepo;
 use crate::outbound::sql::list_quota;
 use crate::outbound::sql::migrations::apply_migrations;
+use crate::outbound::sql::migrations::issuer_ownership;
+use crate::outbound::sql::models::{Credentials, credentials};
 
 #[cfg(feature = "mysql")]
 use crate::outbound::sql::test_containers::mysql_helpers;
@@ -32,6 +35,15 @@ const PREDATE_RERUN_RULE: [&str; 4] = [
     "m20250101_000003_status_list_history",
     "m20260727_000001_status_list_history_exp_index",
 ];
+
+const OWNERSHIP_MIGRATION: &str = "m20261022_000001_issuer_ownership";
+
+fn ownership_migration_index() -> usize {
+    Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == OWNERSHIP_MIGRATION)
+        .expect("ownership migration must be registered")
+}
 
 /// Stands in for a release that knows only the first `N` migrations, as v1.2.0
 /// knows the four oldest.
@@ -193,6 +205,230 @@ async fn assert_every_migration_reruns_after_a_rollback(
         );
         fixtures::enforce_list_quota(&db).await;
     }
+}
+
+async fn assert_ownership_migration_backfills_mixed_data(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let credential_id = AggregationId::generate();
+    let registry_id = AggregationId::generate();
+    let mut with_id_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    with_id_key.common.key_id = Some("key-with-id".into());
+    let mut without_id_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    without_id_key.common.key_id = Some("key-without-id".into());
+
+    db.execute_unprepared(&format!(
+        "INSERT INTO issuers (issuer, aggregation_id) VALUES ('credential-with-id', '{credential_id}'), ('registry-only', '{registry_id}')"
+    )).await.unwrap();
+    let with_id: credentials::ActiveModel =
+        Credentials::new("credential-with-id".into(), with_id_key)
+            .with_aggregation_id(credential_id.to_string())
+            .into();
+    credentials::Entity::insert(with_id)
+        .exec_without_returning(db.as_ref())
+        .await
+        .unwrap();
+    let without_id: credentials::ActiveModel =
+        Credentials::new("credential-without-id".into(), without_id_key).into();
+    credentials::Entity::insert(without_id)
+        .exec_without_returning(db.as_ref())
+        .await
+        .unwrap();
+    fixtures::insert_list_as_old_pod(&db, "owned-list", "credential-with-id").await;
+    fixtures::insert_list_as_old_pod(&db, "legacy-list", "credential-without-id").await;
+    db.execute_unprepared(
+        "INSERT INTO status_list_allocations (list_id, idx) VALUES ('owned-list', 7)",
+    )
+    .await
+    .unwrap();
+
+    Migrator::up(db.as_ref(), None)
+        .await
+        .unwrap_or_else(|error| panic!("ownership migration failed on {backend}: {error}"));
+
+    db.execute_unprepared(
+        "UPDATE credentials SET list_count = 0 WHERE issuer = 'credential-with-id'",
+    )
+    .await
+    .unwrap();
+    issuer_ownership::Migration
+        .up(&SchemaManager::new(db.as_ref()))
+        .await
+        .unwrap_or_else(|error| panic!("ownership migration rerun failed on {backend}: {error}"));
+
+    assert_eq!(fixtures::list_count(&db, "credential-with-id").await, 1);
+    assert_eq!(fixtures::list_count(&db, "credential-without-id").await, 1);
+    assert_eq!(fixtures::list_count(&db, "registry-only").await, 0);
+    let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
+    assert_eq!(
+        repo.find_stored_aggregation_id("credential-without-id")
+            .await
+            .unwrap(),
+        Some(None),
+        "the migration must retain null aggregation IDs on {backend}"
+    );
+    assert_eq!(
+        repo.find_issuer_by_aggregation_id(credential_id)
+            .await
+            .unwrap(),
+        Some(crate::domain::models::credential::Issuer(
+            "credential-with-id".into()
+        ))
+    );
+    assert_eq!(
+        repo.find_issuer_by_aggregation_id(registry_id)
+            .await
+            .unwrap(),
+        Some(crate::domain::models::credential::Issuer(
+            "registry-only".into()
+        ))
+    );
+    assert_eq!(
+        db.query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT idx FROM status_list_allocations WHERE list_id = 'owned-list'",
+        ))
+        .await
+        .unwrap()
+        .expect("allocation must survive the ownership migration")
+        .try_get_by_index::<i64>(0)
+        .unwrap(),
+        7
+    );
+    assert!(
+        db.execute_unprepared("DELETE FROM issuers WHERE issuer = 'credential-with-id'")
+            .await
+            .is_err(),
+        "owners with credentials or status lists must not be deleted on {backend}"
+    );
+    db.execute_unprepared(
+        "INSERT INTO status_lists (list_id, issuer, status_list, sub) \
+         VALUES ('default-updated-at', 'credential-with-id', '{}', 'sub-default')",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db.query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT updated_at FROM status_lists WHERE list_id = 'default-updated-at'",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<i64>(0)
+        .unwrap(),
+        0,
+        "the status-list timestamp default must survive the migration on {backend}"
+    );
+    assert!(
+        db.execute_unprepared(
+            "INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) \
+             VALUES ('orphan-list', 'missing-issuer', '{}', 'sub', 0)",
+        )
+        .await
+        .is_err(),
+        "status lists must reference issuers on {backend}"
+    );
+    let missing_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    let missing: credentials::ActiveModel =
+        Credentials::new("missing-owner".into(), missing_key).into();
+    assert!(
+        credentials::Entity::insert(missing)
+            .exec_without_returning(db.as_ref())
+            .await
+            .is_err(),
+        "credentials must reference issuers on {backend}"
+    );
+}
+
+async fn assert_ownership_collision_fails_before_schema_changes(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let conflicting_id = AggregationId::generate();
+    db.execute_unprepared(&format!(
+        "INSERT INTO issuers (issuer, aggregation_id) VALUES ('registry-owner', '{conflicting_id}')"
+    ))
+    .await
+    .unwrap();
+    let mut key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    key.common.key_id = Some("collision-test-key".into());
+    let credential: credentials::ActiveModel = Credentials::new("credential-owner".into(), key)
+        .with_aggregation_id(conflicting_id.to_string())
+        .into();
+    credentials::Entity::insert(credential)
+        .exec_without_returning(db.as_ref())
+        .await
+        .unwrap();
+
+    let error = issuer_ownership::Migration
+        .up(&SchemaManager::new(db.as_ref()))
+        .await
+        .expect_err("the migration must reject a conflicting public ID");
+    let message = error.to_string();
+    assert!(
+        message.contains("registry-owner")
+            && message.contains("credential-owner")
+            && message.contains(&conflicting_id.to_string()),
+        "the migration must name both issuers and the colliding ID on {backend}: {message}"
+    );
+    assert!(
+        !SchemaManager::new(db.as_ref())
+            .has_column("issuers", "list_count")
+            .await
+            .unwrap(),
+        "collision detection must happen before altering the schema on {backend}"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_ownership_migration_backfills_mixed_data() {
+    let db = fixtures::sqlite_connection_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_ownership_migration_backfills_mixed_data(db, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_ownership_migration_reports_aggregation_id_collisions() {
+    let db = fixtures::sqlite_connection_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_ownership_collision_fails_before_schema_changes(db, "SQLite").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_ownership_migration_backfills_mixed_data() {
+    let test_db =
+        mysql_helpers::MysqlTestDb::start_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_ownership_migration_backfills_mixed_data(test_db.connection().await, "MySQL").await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_ownership_migration_reports_aggregation_id_collisions() {
+    let test_db =
+        mysql_helpers::MysqlTestDb::start_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_ownership_collision_fails_before_schema_changes(test_db.connection().await, "MySQL")
+        .await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_ownership_migration_backfills_mixed_data() {
+    let test_db =
+        postgres_helpers::postgres_connection_migrated(Some(ownership_migration_index() as u32))
+            .await;
+    assert_ownership_migration_backfills_mixed_data(test_db.db.clone(), "Postgres").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_ownership_migration_reports_aggregation_id_collisions() {
+    let test_db =
+        postgres_helpers::postgres_connection_migrated(Some(ownership_migration_index() as u32))
+            .await;
+    assert_ownership_collision_fails_before_schema_changes(test_db.db.clone(), "Postgres").await;
 }
 
 #[cfg(feature = "sqlite")]

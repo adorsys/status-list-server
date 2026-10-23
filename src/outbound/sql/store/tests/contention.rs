@@ -274,7 +274,7 @@ mod database_implementation {
         let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
         let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
-        // status_lists.issuer is a foreign key onto issuer_aggregations.issuer, so the
+        // status_lists.issuer is a foreign key onto issuers.issuer, so the
         // credential has to be committed before either writer starts.
         SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
             .insert_one(Credentials::new(

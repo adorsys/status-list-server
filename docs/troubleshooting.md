@@ -778,7 +778,7 @@ failure rolls back instead of wedging the release.
 ## Status List Quota
 
 Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
-env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `issuer_aggregations.list_count` and is
+env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `issuers.list_count` and is
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
 the count only ever rises. The cap cannot be set above `1000`, the aggregation page size (see
 [below](#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
@@ -811,7 +811,7 @@ rolling forward from a release that predates it. The rollout stops at its first 
 the previous release keep serving.
 
 **Root cause:** Pods of a release that predates the quota publish without incrementing
-`issuer_aggregations.list_count`. While any of them serves traffic the counter cannot be trusted, so the
+`issuers.list_count`. While any of them serves traffic the counter cannot be trusted, so the
 quota starts off on such a database, and a pod does not serve without it unless told to.
 
 **Fix:**
@@ -858,6 +858,29 @@ the upgrade above.
 soon as it has migrated. A pod that crashes partway through that first migration leaves a database
 the next start treats as an upgrade; follow the steps above.
 
+### A credential has no issuer-owner row
+
+The ownership migration creates an `issuers` row for every credential and registry-only issuer.
+If an out-of-band write or an interrupted older deployment left a credential without an owner,
+publishing fails because credentials and status lists must reference `issuers`. Stop old pods and
+disable the list quota before repairing the rows:
+
+```sql
+INSERT INTO issuers (issuer, aggregation_id, list_count)
+SELECT c.issuer,
+       c.aggregation_id,
+       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer)
+FROM credentials c
+WHERE NOT EXISTS (SELECT 1 FROM issuers a WHERE a.issuer = c.issuer);
+
+UPDATE issuers
+SET list_count = (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = issuers.issuer);
+```
+
+If the insert reports a duplicate aggregation ID, inspect both issuer records and resolve the
+conflict before retrying; do not change an ID that appears in an issued token. Run
+`status-list-server list-quota enable` after the repair to verify counts and restore enforcement.
+
 ---
 
 ### Publish rejected with `400` `list_quota_exceeded`
@@ -876,7 +899,7 @@ lists, an issuer that reaches the quota stays there until an operator acts.
 SELECT a.issuer,
        a.list_count,
        (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = a.issuer) AS actual
-FROM issuer_aggregations a
+FROM issuers a
 WHERE a.issuer = '<issuer>';
 ```
 
@@ -948,7 +971,7 @@ refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 two identical). It is portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
-UPDATE issuer_aggregations SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuer_aggregations.issuer);
+UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer);
 ```
 
 Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the

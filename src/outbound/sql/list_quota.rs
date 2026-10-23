@@ -204,7 +204,7 @@ fn issuer_counts(condition: &str) -> String {
     format!(
         "SELECT issuer, list_count, actual FROM (\
            SELECT a.issuer AS issuer, a.list_count AS list_count, COUNT(s.list_id) AS actual \
-           FROM issuer_aggregations a LEFT JOIN status_lists s ON s.issuer = a.issuer \
+           FROM issuers a LEFT JOIN status_lists s ON s.issuer = a.issuer \
            GROUP BY a.issuer, a.list_count\
          ) counts \
          WHERE {condition} \
