@@ -1562,6 +1562,22 @@ pub(crate) mod issuer_ownership {
                 .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
                 .await?;
 
+            if !manager
+                .has_index("issuers", "idx_issuers_aggregation_id")
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .unique()
+                            .name("idx_issuers_aggregation_id")
+                            .table(Issuers::Table)
+                            .col(Issuers::AggregationId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+
             if manager.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
                 if !foreign_key_references_table(manager, "credentials", "issuers").await? {
                     rebuild_sqlite_credentials(manager).await?;

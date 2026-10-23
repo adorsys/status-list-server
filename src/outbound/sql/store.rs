@@ -1027,11 +1027,14 @@ impl SeaOrmStore<Credentials> {
         time_query("insert", "credential", async {
             let issuer = entity.issuer.clone();
             let requested_aggregation_id = entity.aggregation_id.clone();
+            let aggregation_id = requested_aggregation_id.clone().unwrap_or_else(|| {
+                crate::domain::models::credential::AggregationId::generate().to_string()
+            });
             let mut active: credentials::ActiveModel = entity.into();
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
             issuers::Entity::insert(issuers::ActiveModel {
                 issuer: Set(issuer.clone()),
-                aggregation_id: Set(requested_aggregation_id.clone()),
+                aggregation_id: Set(Some(aggregation_id.clone())),
                 list_count: Set(0),
             })
             .on_conflict(
@@ -1043,15 +1046,13 @@ impl SeaOrmStore<Credentials> {
             .await
             .map_err(map_insert_err)?;
 
-            if let Some(aggregation_id) = requested_aggregation_id.as_deref() {
-                issuers::Entity::update_many()
-                    .col_expr(issuers::Column::AggregationId, Expr::value(aggregation_id))
-                    .filter(issuers::Column::Issuer.eq(&issuer))
-                    .filter(issuers::Column::AggregationId.is_null())
-                    .exec(&txn)
-                    .await
-                    .map_err(map_insert_err)?;
-            }
+            issuers::Entity::update_many()
+                .col_expr(issuers::Column::AggregationId, Expr::value(&aggregation_id))
+                .filter(issuers::Column::Issuer.eq(&issuer))
+                .filter(issuers::Column::AggregationId.is_null())
+                .exec(&txn)
+                .await
+                .map_err(map_insert_err)?;
             let stored_issuer = issuers::Entity::find_by_id(&issuer)
                 .one(&txn)
                 .await
