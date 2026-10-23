@@ -22,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(status_lists_issuer_list_id_index::Migration),
             Box::new(credentials_key_id::Migration),
             Box::new(issuers::Migration),
+            Box::new(issuer_aggregations_to_issuers::Migration),
             Box::new(issuer_ownership::Migration),
         ]
     }
@@ -1358,38 +1359,38 @@ pub(crate) mod issuers {
         }
     }
 
-    const INDEX: &str = "idx_issuers_aggregation_id";
+    const INDEX: &str = "idx_issuer_aggregations_aggregation_id";
 
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager.has_table("issuers").await? {
+            if !manager.has_table("issuer_aggregations").await? {
                 let mut table = Table::create();
                 table
-                    .table(Issuers::Table)
+                    .table(IssuerAggregations::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(Issuers::Issuer)
+                        ColumnDef::new(IssuerAggregations::Issuer)
                             .string()
                             .not_null()
                             .primary_key(),
                     )
                     .col(
-                        ColumnDef::new(Issuers::AggregationId)
+                        ColumnDef::new(IssuerAggregations::AggregationId)
                             .string_len(36)
                             .not_null(),
                     );
                 pin_innodb_on_mysql(manager, &mut table);
                 manager.create_table(table).await?;
             }
-            if !manager.has_index("issuers", INDEX).await? {
+            if !manager.has_index("issuer_aggregations", INDEX).await? {
                 manager
                     .create_index(
                         Index::create()
                             .name(INDEX)
-                            .table(Issuers::Table)
-                            .col(Issuers::AggregationId)
+                            .table(IssuerAggregations::Table)
+                            .col(IssuerAggregations::AggregationId)
                             .unique()
                             .to_owned(),
                     )
@@ -1404,11 +1405,63 @@ pub(crate) mod issuers {
     }
 
     #[derive(Iden)]
-    enum Issuers {
-        #[iden = "issuers"]
+    enum IssuerAggregations {
         Table,
         Issuer,
         AggregationId,
+    }
+}
+
+/// Renames the table created by `m20261020_000001_issuer_aggregations`.
+/// Keep that migration's schema intact because deployed databases record its name.
+pub(crate) mod issuer_aggregations_to_issuers {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261021_000001_issuer_aggregations_to_issuers"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let has_old = manager.has_table("issuer_aggregations").await?;
+            let has_new = manager.has_table("issuers").await?;
+            match (has_old, has_new) {
+                (true, false) => manager
+                    .get_connection()
+                    .execute_unprepared("ALTER TABLE issuer_aggregations RENAME TO issuers")
+                    .await
+                    .map(|_| ()),
+                (false, true) => Ok(()),
+                (false, false) => Err(DbErr::Migration(
+                    "neither issuer_aggregations nor issuers exists".into(),
+                )),
+                (true, true) => {
+                    manager
+                        .get_connection()
+                        .execute_unprepared(
+                            "INSERT INTO issuers (issuer, aggregation_id) \
+                             SELECT old.issuer, old.aggregation_id FROM issuer_aggregations old \
+                             WHERE NOT EXISTS (SELECT 1 FROM issuers existing WHERE existing.issuer = old.issuer)",
+                        )
+                        .await?;
+                    manager
+                        .get_connection()
+                        .execute_unprepared("DROP TABLE issuer_aggregations")
+                        .await
+                        .map(|_| ())
+                }
+            }
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
     }
 }
 

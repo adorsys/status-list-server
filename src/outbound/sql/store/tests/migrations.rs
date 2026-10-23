@@ -37,12 +37,50 @@ const PREDATE_RERUN_RULE: [&str; 4] = [
 ];
 
 const OWNERSHIP_MIGRATION: &str = "m20261022_000001_issuer_ownership";
+const ISSUER_AGGREGATIONS_MIGRATION: &str = "m20261020_000001_issuer_aggregations";
 
 fn ownership_migration_index() -> usize {
     Migrator::migrations()
         .iter()
         .position(|migration| migration.name() == OWNERSHIP_MIGRATION)
         .expect("ownership migration must be registered")
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_upgrade_renames_the_develop_issuer_aggregations_table() {
+    use sea_orm::ConnectionTrait;
+
+    let db = fixtures::sqlite_connection_migrated(Some(
+        Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == ISSUER_AGGREGATIONS_MIGRATION)
+            .expect("historical migration must be registered") as u32
+            + 1,
+    ))
+    .await;
+    let expected = AggregationId::generate();
+    db.execute_unprepared(&format!(
+        "INSERT INTO issuer_aggregations (issuer, aggregation_id) VALUES ('develop-issuer', '{expected}')"
+    ))
+    .await
+    .unwrap();
+
+    Migrator::up(db.as_ref(), None)
+        .await
+        .expect("upgrade from the develop schema must succeed");
+
+    assert!(
+        !SchemaManager::new(db.as_ref())
+            .has_table("issuer_aggregations")
+            .await
+            .unwrap()
+    );
+    let stored = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()))
+        .find_aggregation_id("develop-issuer")
+        .await
+        .unwrap();
+    assert_eq!(stored, Some(expected));
 }
 
 /// Stands in for a release that knows only the first `N` migrations, as v1.2.0
