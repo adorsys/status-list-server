@@ -1514,8 +1514,8 @@ pub(crate) mod issuer_ownership {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            rename_issuer_aggregations(manager).await?;
             validate_aggregation_id_collisions(manager).await?;
+            rename_issuer_aggregations(manager).await?;
             if !manager.has_column("issuers", "list_count").await? {
                 manager
                     .alter_table(
@@ -1697,34 +1697,55 @@ pub(crate) mod issuer_ownership {
         #[derive(FromQueryResult)]
         struct Collision {
             credential_issuer: String,
-            existing_issuer: String,
-            aggregation_id: String,
+            owner_issuer: String,
+            credential_aggregation_id: String,
+            owner_aggregation_id: String,
         }
 
         let db = manager.get_connection();
         let backend = db.get_database_backend();
-        let sql = "SELECT c.issuer AS credential_issuer, a.issuer AS existing_issuer, \
-                   c.aggregation_id AS aggregation_id FROM credentials c JOIN issuers a \
-                   ON c.aggregation_id = a.aggregation_id AND c.issuer <> a.issuer";
-        let collisions =
-            Collision::find_by_statement(Statement::from_string(backend, sql.to_owned()))
-                .all(db)
-                .await?;
+        let mut collisions = Vec::new();
+        for owner_table in ["issuer_aggregations", "issuers"] {
+            if !manager.has_table(owner_table).await? {
+                continue;
+            }
+            let sql = format!(
+                "SELECT c.issuer AS credential_issuer, a.issuer AS owner_issuer, \
+                 c.aggregation_id AS credential_aggregation_id, \
+                 a.aggregation_id AS owner_aggregation_id \
+                 FROM credentials c JOIN {owner_table} a \
+                 ON (c.aggregation_id = a.aggregation_id AND c.issuer <> a.issuer) \
+                 OR (c.issuer = a.issuer AND c.aggregation_id <> a.aggregation_id) \
+                 WHERE c.aggregation_id IS NOT NULL AND a.aggregation_id IS NOT NULL"
+            );
+            collisions.extend(
+                Collision::find_by_statement(Statement::from_string(backend, sql))
+                    .all(db)
+                    .await?,
+            );
+        }
         if collisions.is_empty() {
             return Ok(());
         }
         let details = collisions
             .into_iter()
             .map(|c| {
-                format!(
-                    "{} conflicts with {} for {}",
-                    c.credential_issuer, c.existing_issuer, c.aggregation_id
-                )
+                if c.credential_issuer == c.owner_issuer {
+                    format!(
+                        "issuer {} has credentials aggregation ID {} but issuer aggregation ID {}",
+                        c.credential_issuer, c.credential_aggregation_id, c.owner_aggregation_id
+                    )
+                } else {
+                    format!(
+                        "aggregation ID {} is assigned to credentials issuer {} and issuer {}",
+                        c.credential_aggregation_id, c.credential_issuer, c.owner_issuer
+                    )
+                }
             })
             .collect::<Vec<_>>()
             .join("; ");
         Err(DbErr::Migration(format!(
-            "aggregation ID collisions must be repaired before issuer ownership migration: {details}"
+            "aggregation ID conflicts must be repaired before issuer ownership migration: {details}"
         )))
     }
 

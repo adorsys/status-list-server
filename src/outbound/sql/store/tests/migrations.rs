@@ -417,6 +417,56 @@ async fn assert_ownership_collision_fails_before_schema_changes(
     );
 }
 
+async fn assert_same_issuer_aggregation_ids_fail_before_schema_changes(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let registry_id = AggregationId::generate();
+    let credential_id = AggregationId::generate();
+    assert_ne!(registry_id, credential_id);
+    db.execute_unprepared(&format!(
+        "INSERT INTO issuer_aggregations (issuer, aggregation_id) VALUES ('removed-registry-issuer', '{registry_id}')"
+    ))
+    .await
+    .unwrap();
+    let mut key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    key.common.key_id = Some("same-issuer-id-mismatch".into());
+    let credential: credentials::ActiveModel =
+        Credentials::new("removed-registry-issuer".into(), key)
+            .with_aggregation_id(credential_id.to_string())
+            .into();
+    credentials::Entity::insert(credential)
+        .exec_without_returning(db.as_ref())
+        .await
+        .unwrap();
+
+    let error = issuer_ownership::Migration
+        .up(&SchemaManager::new(db.as_ref()))
+        .await
+        .expect_err("the migration must reject different IDs for one issuer");
+    let message = error.to_string();
+    assert!(
+        message.contains("removed-registry-issuer")
+            && message.contains(&registry_id.to_string())
+            && message.contains(&credential_id.to_string()),
+        "the error must name the issuer and both IDs on {backend}: {message}"
+    );
+    assert!(
+        SchemaManager::new(db.as_ref())
+            .has_table("issuer_aggregations")
+            .await
+            .unwrap(),
+        "the migration must detect the mismatch before renaming the old table on {backend}"
+    );
+    assert!(
+        !SchemaManager::new(db.as_ref())
+            .has_table("issuers")
+            .await
+            .unwrap(),
+        "the failed migration must leave the schema unchanged on {backend}"
+    );
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_ownership_migration_backfills_mixed_data() {
@@ -429,6 +479,13 @@ async fn test_sqlite_ownership_migration_backfills_mixed_data() {
 async fn test_sqlite_ownership_migration_reports_aggregation_id_collisions() {
     let db = fixtures::sqlite_connection_migrated(Some(ownership_migration_index() as u32)).await;
     assert_ownership_collision_fails_before_schema_changes(db, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_ownership_migration_reports_same_issuer_aggregation_id_mismatch() {
+    let db = fixtures::sqlite_connection_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_same_issuer_aggregation_ids_fail_before_schema_changes(db, "SQLite").await;
 }
 
 #[cfg(feature = "mysql")]
@@ -448,6 +505,18 @@ async fn test_mysql_ownership_migration_reports_aggregation_id_collisions() {
         .await;
 }
 
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_ownership_migration_reports_same_issuer_aggregation_id_mismatch() {
+    let test_db =
+        mysql_helpers::MysqlTestDb::start_migrated(Some(ownership_migration_index() as u32)).await;
+    assert_same_issuer_aggregation_ids_fail_before_schema_changes(
+        test_db.connection().await,
+        "MySQL",
+    )
+    .await;
+}
+
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
 async fn test_postgres_ownership_migration_backfills_mixed_data() {
@@ -464,6 +533,16 @@ async fn test_postgres_ownership_migration_reports_aggregation_id_collisions() {
         postgres_helpers::postgres_connection_migrated(Some(ownership_migration_index() as u32))
             .await;
     assert_ownership_collision_fails_before_schema_changes(test_db.db.clone(), "Postgres").await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_ownership_migration_reports_same_issuer_aggregation_id_mismatch() {
+    let test_db =
+        postgres_helpers::postgres_connection_migrated(Some(ownership_migration_index() as u32))
+            .await;
+    assert_same_issuer_aggregation_ids_fail_before_schema_changes(test_db.db.clone(), "Postgres")
+        .await;
 }
 
 #[cfg(feature = "sqlite")]
