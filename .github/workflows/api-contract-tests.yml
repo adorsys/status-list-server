@@ -51,6 +51,7 @@ jobs:
             docs/openapi.yaml \
             postman \
             scripts/test-postman-collection.sh \
+            scripts/tests/test_postman_registration.cjs \
             scripts/check-api-test-images.sh \
             src/config.rs \
             src/startup.rs \
@@ -88,6 +89,10 @@ jobs:
       - name: Verify pinned API test images
         if: steps.api-changes.outputs.changed == 'true'
         run: ./scripts/check-api-test-images.sh
+
+      - name: Test Postman registration scripts
+        if: steps.api-changes.outputs.changed == 'true'
+        run: node --test scripts/tests/test_postman_registration.cjs
 
       - name: Start in-memory server and run collection
         if: steps.api-changes.outputs.changed == 'true'

@@ -2285,10 +2285,12 @@ criteria = "safe-to-deploy"
 [[exemptions.webpki-root-certs]]
 version = "1.0.10"
 criteria = "safe-to-deploy"
+notes = "Upgrade fixes RUSTSEC-2026-0383. This carries forward the existing version-specific exemption; it is not a new audit."
 
 [[exemptions.webpki-roots]]
 version = "1.0.10"
 criteria = "safe-to-deploy"
+notes = "Upgrade fixes RUSTSEC-2026-0381. This carries forward the existing version-specific exemption; it is not a new audit."
 
 [[exemptions.whoami]]
 version = "2.1.3"

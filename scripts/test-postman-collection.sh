@@ -176,6 +176,7 @@ const values = new Map([
   ['list_id', listId],
   ['issuer_id', issuerId],
   ['token', token],
+  ['issuer_public_key', JSON.stringify(publicKeyJwk)],
 ]);
 
 for (const variable of collection.variable || []) {
