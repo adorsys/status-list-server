@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal mock webhook receiver used by test-alertmanager-config.sh.
-
-Starts an HTTP server that appends every POSTed Alertmanager notification to a
-JSON-lines file as it arrives (thread-safe), so captured notifications survive
-regardless of when or how the process is stopped. Exits 0 if it received at
-least one request, non-zero otherwise.
-
-Usage:
-    python3 mock_webhook.py --port 18080 --out /tmp/notifications.jsonl
-
-The server runs until it receives a SIGTERM/SIGINT (the test harness stops it
-after exercising Alertmanager), then prints a summary.
-"""
+"""Mock webhook for test-alertmanager-config.sh: appends each POST to a JSON-lines file."""
 
 import argparse
 import fcntl
@@ -31,7 +19,6 @@ def main() -> int:
     count = 0
     count_lock = threading.Lock()
 
-    # Append a notification to the sink immediately, under a file lock.
     def record(payload: dict) -> None:
         nonlocal count
         with count_lock:

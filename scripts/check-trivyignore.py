@@ -1,38 +1,7 @@
 #!/usr/bin/env python3
-"""Validate .trivyignore.yaml before Trivy ever reads it.
-
-Two problems this catches, both of which currently fail late and confusingly:
-
-1. A malformed file. `.trivyignore.yaml` is read by the `trivy-config` job (in
-   `.github/workflows/helm-checks.yml`) and validated by CI.yml's `config-guards` job on
-   every pull request, and by the image scan in `deploy.yml` on every release. A YAML error
-   or an unknown top-level key added under time pressure breaks pull request CI for
-   the whole repository, and it surfaces as a scanner failure rather than as "you
-   broke the ignore file".
-
-2. An unexplained or immortal exception. An ignore entry suppresses a finding
-   permanently and silently; that is the whole point of the file and also its
-   hazard. Requiring a `statement` means a reader can tell why something was
-   accepted, and requiring `expired_at` on vulnerability entries means the decision
-   lapses instead of outliving the person who made it.
-
-`expired_at` is required for `vulnerabilities` but not for `misconfigurations`. A
-vulnerability exception is a claim about a changing world -- whether a fix exists,
-whether the path is reachable -- so it rots and must be re-argued. A misconfiguration
-exception here is a claim about a structural fact, that a path belongs to a
-third-party subchart this repository does not control, which does not rot on a
-schedule. Forcing a date on the latter produces churn without new information.
-
-Exit status is 0 when the file is valid, 1 when it is not. Expired entries are
-reported as warnings, not failures: an expired entry has already stopped suppressing
-anything, so it is dead configuration rather than a broken gate.
-
-`--expiring-within DAYS` additionally lists entries that lapse within that window, on
-stdout, as `id<TAB>expired_at<TAB>days_remaining`. It does not change the exit status.
-Validity and imminence are different questions: validity is checked on every pull
-request, where a date three weeks out is not yet news, while imminence is asked by the
-scheduled re-scan, which is the only thing that can give notice before an expiry lands
-on a release instead of ahead of one.
+"""Validate .trivyignore.yaml before Trivy reads it: malformed files and unexplained or immortal exceptions.
+Vulnerabilities need expired_at (they rot); misconfigurations don't. Expired entries only warn.
+--expiring-within DAYS prints id, expired_at and days left as TSV for the nightly scan.
 """
 
 from __future__ import annotations
@@ -48,54 +17,24 @@ try:
 except ImportError:  # pragma: no cover - depends on the runner image
     sys.exit("PyYAML is required: pip install pyyaml")
 
-# Trivy's documented ignore-file sections. Anything else is a typo that Trivy will
-# accept and silently ignore, which is the failure mode worth catching here: a
-# section named `vulnerability` suppresses nothing and looks like it works.
+# Trivy silently ignores unknown sections, so "vulnerability" would suppress nothing.
 KNOWN_SECTIONS = {"vulnerabilities", "misconfigurations", "secrets", "licenses"}
 EXPIRY_REQUIRED_IN = {"vulnerabilities"}
 
-# Sections where an entry must name what it applies to. Every misconfiguration
-# exception here is a claim about specific vendored subchart paths, and an entry with
-# no scope applies the rule-wide -- the same repository-wide widening as the `path:`
-# typo below, reached by omission rather than by misspelling.
-#
-# Not required for vulnerabilities: a scratch image holding one binary has no
-# meaningful path to scope to, so an unscoped crate advisory is the intended form and
-# demanding `paths: ["**"]` would be noise.
+# An unscoped misconfiguration entry applies repo-wide; a one-binary image has no useful vuln path.
 SCOPE_REQUIRED_IN = {"misconfigurations"}
 SCOPE_KEYS = ("paths", "purls")
 
-# Trivy silently ignores keys it does not recognise, which turns a one-character
-# typo into a scope change rather than an error. `path:` instead of `paths:` leaves
-# the entry with no path filter at all, and an entry with no paths applies
-# everywhere -- so an exception written to cover one vendored subchart quietly
-# starts suppressing that rule across the whole repository. Measured against this
-# chart, the typo took KSV-0014 from 8 remaining findings to 0.
-#
-# This list is the complete set from Trivy's filtering documentation, verified
-# rather than inferred: https://trivy.dev/latest/docs/configuration/filtering/
-#
-# It fails closed on purpose. If a future Trivy release adds a field, this script
-# rejects it and pull request CI breaks until someone adds the name here. That is
-# the intended trade for a file whose whole job is suppressing security findings:
-# a build that stops is recoverable in minutes, a silently widened exception is not
-# discovered at all. Do not relax this to a warning -- add the new field.
+# Trivy ignores unknown keys, so path: for paths: widens an entry to the whole repo.
+# Fails closed on new Trivy fields on purpose; add them here, don't relax this.
 KNOWN_ENTRY_KEYS = {"id", "paths", "purls", "statement", "expired_at"}
 
-# The character set every advisory and rule scheme actually uses: CVE-2024-1234,
-# RUSTSEC-2024-0001, AVD-KSV-0014, GHSA-xxxx-xxxx-xxxx. Deliberately the same set the
-# scheduled re-scan enforces on advisory IDs coming back from Trivy, because these ids
-# reach the same places -- a tab-separated stream and a GitHub issue body.
+# Same charset the nightly enforces on Trivy's IDs, since both reach a TSV stream and an issue body.
 ID_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _load_document(path: pathlib.Path) -> tuple[dict | None, list[str]]:
-    """Read and parse the ignore file.
-
-    Returns `(doc, errors)`. `doc` is None when there is nothing to walk -- either
-    because loading failed, in which case `errors` says why, or because the file is
-    legitimately empty, in which case `errors` is empty too.
-    """
+    """None with no errors means the file is legitimately empty."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -107,7 +46,7 @@ def _load_document(path: pathlib.Path) -> tuple[dict | None, list[str]]:
         return None, [f"{path}: not valid YAML: {exc}"]
 
     if doc is None:
-        return None, []  # An empty ignore file is legitimate.
+        return None, []
     if not isinstance(doc, dict):
         return None, [f"{path}: top level must be a mapping, found {type(doc).__name__}"]
 
@@ -115,12 +54,7 @@ def _load_document(path: pathlib.Path) -> tuple[dict | None, list[str]]:
 
 
 def _parse_expiry(value: object) -> tuple[datetime.date | None, str | None]:
-    """Coerce an `expired_at` value to a date, or explain why it is not one.
-
-    PyYAML parses an unquoted YYYY-MM-DD into a date; a quoted one stays a string.
-    Trivy accepts both, so both are handled here. `datetime` is checked before `date`
-    because it is a subclass of it.
-    """
+    """Unquoted dates parse to date, quoted ones stay str; check datetime first, it subclasses date."""
     if isinstance(value, datetime.datetime):
         return value.date(), None
     if isinstance(value, str):
@@ -171,14 +105,7 @@ def check(path: pathlib.Path) -> list[str]:
             if not identifier or not str(identifier).strip():
                 errors.append(f"{where}: missing 'id'")
             elif not ID_PATTERN.fullmatch(str(identifier)):
-                # These ids leave this file. `--expiring-within` writes them to stdout
-                # as tab-separated fields, and the scheduled re-scan reads that back
-                # with `while IFS=$'\t' read -r id date days` and renders it into a
-                # GitHub issue body. A tab or newline in an id desynchronises that
-                # parse and corrupts the report; Markdown metacharacters render as
-                # formatting. The workflow already refuses advisory IDs from Trivy that
-                # fall outside this set -- applying a looser rule to our own ledger,
-                # which reaches the same sinks, is the wrong way round.
+                # These IDs end up in a TSV stream and an issue body, so tabs, newlines and Markdown are refused.
                 errors.append(
                     f"{where}: 'id' must match {ID_PATTERN.pattern} -- letters, digits, "
                     f"dot, underscore and hyphen. Got {identifier!r}."
@@ -254,18 +181,7 @@ def check(path: pathlib.Path) -> list[str]:
 def expiring_entries(
     path: pathlib.Path, within_days: int
 ) -> list[tuple[str, datetime.date, int]]:
-    """Vulnerability exceptions that lapse within `within_days` days, or already have.
-
-    Returns `(id, expired_at, days_remaining)`, soonest first. `days_remaining` is
-    negative for an entry that has already lapsed.
-
-    Only `vulnerabilities` are considered, for the same reason only they require an
-    `expired_at`: a misconfiguration exception is a claim about a structural fact and
-    does not rot on a schedule.
-
-    Malformed dates are skipped rather than guessed at. `check()` already rejects
-    them, and this function's answer is only meaningful for a file that passed it.
-    """
+    """(id, expired_at, days_remaining), soonest first; negative days means already lapsed."""
     doc, _ = _load_document(path)
     if doc is None:
         return []
@@ -316,8 +232,7 @@ def main() -> int:
     args = parser.parse_args()
     path = args.path
 
-    # A negative window silently lists only entries that have already lapsed, which
-    # reads as "nothing is expiring soon" to a caller that asked for a warning.
+    # A negative window would only list lapsed entries and read as "nothing soon".
     if args.expiring_within is not None and args.expiring_within < 0:
         parser.error("--expiring-within takes a non-negative number of days")
 
@@ -334,16 +249,12 @@ def main() -> int:
         )
         return 1
 
-    # Under --expiring-within, stdout is the machine-readable channel, so the human
-    # line moves aside rather than landing in the middle of the table.
+    # stdout is the TSV channel under --expiring-within.
     print(f"{path}: ok", file=sys.stderr if args.expiring_within is not None else sys.stdout)
 
     if args.expiring_within is not None:
         for identifier, expires, remaining in expiring_entries(path, args.expiring_within):
             print(f"{identifier}\t{expires.isoformat()}\t{remaining}")
-            # Already-lapsed entries are warned about by check(); this covers the ones
-            # that still suppress today and would otherwise first be noticed by
-            # blocking a release.
             if remaining >= 0:
                 print(
                     f"warning: {path}: {identifier}: 'expired_at' {expires} is "

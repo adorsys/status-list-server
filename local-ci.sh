@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 
-# Local CI runner.
-#
-# Command inventory mirrored from:
-# - .github/workflows/CI.yml
-# - .github/workflows/cargo_deny.yml
-# - .github/workflows/crate_type.yml
-#
-# Default mode keeps the day-to-day loop approachable: Rust format/build/lint/test
-# gates plus fast local wiring checks. Use --full for the practical local equivalent
-# of the required GitHub CI jobs. GitHub-only behavior that is not replicated locally:
-# checkout permissions, workflow concurrency/caching, Actions annotations, SARIF and
-# artifact uploads, and ci-success' JSON aggregation of already-finished jobs.
+# Local CI runner mirroring CI.yml, cargo_deny.yml and crate_type.yml.
+# --full runs the practical local equivalent of every required GitHub job.
 
 set -euo pipefail
 
