@@ -1473,11 +1473,7 @@ pub(crate) mod issuer_ownership {
                 .await?;
             manager
                 .get_connection()
-                .execute_unprepared(
-                    "UPDATE issuer_aggregations SET list_count = \
-                     (SELECT c.list_count FROM credentials c WHERE c.issuer = issuer_aggregations.issuer) \
-                     WHERE EXISTS (SELECT 1 FROM credentials c WHERE c.issuer = issuer_aggregations.issuer)",
-                )
+                .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
                 .await?;
 
             let owns_lists = foreign_key_targets(manager, "issuer_aggregations").await?;
