@@ -887,8 +887,20 @@ mod database_implementation {
         let issuer = "issuer-contention-credential";
         let key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
 
+        // The ownership row must exist before testing a credential write, since
+        // registration creates it before inserting the credential.
+        conn_a
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::MySql,
+                "INSERT INTO issuers (issuer, list_count) VALUES (?, 0)",
+                vec![Value::from(issuer)],
+            ))
+            .await
+            .expect("failed to seed the issuer owner");
+
         // A holds the primary-key entry uncommitted, so B's insert of the same
-        // issuer blocks on it rather than failing fast as a duplicate.
+        // issuer blocks on it rather than failing fast as a duplicate. B's
+        // ownership upsert succeeds against the already committed owner row.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
             .execute_raw(Statement::from_sql_and_values(

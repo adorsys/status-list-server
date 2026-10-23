@@ -292,7 +292,7 @@ async fn assert_ownership_migration_backfills_mixed_data(
         .await
         .unwrap()
         .expect("allocation must survive the ownership migration")
-        .try_get_by_index::<i64>(0)
+        .try_get_by_index::<i32>(0)
         .unwrap(),
         7
     );
