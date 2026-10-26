@@ -164,7 +164,7 @@ pub trait CredentialRepo: Send + Sync + 'static {
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
-    ) -> Result<(), CredentialError>;
+    ) -> Result<AggregationId, CredentialError>;
 
     /// The issuer's aggregation ID, or `None` for an unknown issuer.
     async fn find_aggregation_id(

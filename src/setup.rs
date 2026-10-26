@@ -1062,7 +1062,7 @@ async fn validate_registry_aggregation_ids(
             })?;
         if stored.flatten().is_some_and(|stored| stored != expected) {
             return Err(RegistryError::Semantic(format!(
-                "aggregation_id for issuer `{}` differs from its existing credential (stored: {})",
+                "aggregation_id for issuer `{}` differs from its persisted issuer mapping (stored: {})",
                 issuer.id,
                 stored.flatten().expect("checked above")
             )));
@@ -1122,7 +1122,7 @@ async fn validate_registry_aggregation_ids(
             })?;
         if stored.flatten() != Some(expected) {
             return Err(RegistryError::Semantic(format!(
-                "aggregation_id for issuer `{issuer}` differs from its existing credential (stored: {})",
+                "aggregation_id for issuer `{issuer}` differs from its persisted issuer mapping (stored: {})",
                 stored
                     .flatten()
                     .map_or_else(|| "NULL".to_owned(), |id| id.to_string())
@@ -1601,7 +1601,11 @@ mod general_tests {
             unavailable()
         }
 
-        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+        async fn insert(
+            &self,
+            _: Credential,
+            _: AggregationId,
+        ) -> Result<AggregationId, CredentialError> {
             unavailable()
         }
 
@@ -1926,7 +1930,7 @@ mod general_tests {
                 .await
                 .expect_err("restart must reject a changed aggregation ID");
             assert!(
-                error.to_string().contains("immutable history"),
+                error.to_string().contains("persisted issuer mapping"),
                 "unexpected restart error: {error:?}"
             );
             let _ = std::fs::remove_dir_all(dir);

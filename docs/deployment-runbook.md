@@ -128,7 +128,7 @@ For a zero-downtime rotation:
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
 5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Keep the issuer and its aggregation ID in the registry while published tokens may still reference its aggregation URL: removing a registry-only issuer can make that URL return 404 even though its lists remain public. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
@@ -385,6 +385,12 @@ kubectl scale deployment statuslist-status-list-server-deployment -n <namespace>
 
 Only scale back out after all pods are on the new version.
 
+The issuer-ownership migration also changes the foreign keys on `credentials` and
+`status_lists`. An old pod cannot register credentials or publish lists against the new
+schema, so the `Recreate` rollout is required for this migration as well. On MySQL, adding
+the `status_lists` foreign key can rebuild that table; plan the maintenance window based on
+the table's size and test the upgrade duration on a production-sized copy first.
+
 ## Status List Aggregation
 
 Set `APP_SERVER__AGGREGATION_URI` to the aggregation endpoint's public URL, for
@@ -451,13 +457,13 @@ Before the upgrade:
 During the upgrade:
 
 - The migrations add `credentials.aggregation_id` and an `(issuer, list_id)`
-  index on `status_lists`, and create `issuer_aggregations` to keep registry
+  index on `status_lists`, and create `issuers` to keep registry
   mappings immutable across pod restarts.
 - Pods of the previous release do not serve `/api/v1/aggregation/<id>`, so a
   relying party following a token from a new pod may get a `404` from an old
   one until the rollout completes. The claim is optional, and relying parties
   still fetch each status list directly.
-- Issuers registered before the upgrade, or by an old pod during it, get an
+- Issuers registered before the upgrade get an
   aggregation ID the first time one of their tokens is served. They can read it
   from `GET /api/v1/credentials`.
 - The signed-token cache is per pod and starts empty, so every token a new pod
@@ -469,21 +475,25 @@ During the upgrade:
 The previous release refuses to start while the database records migrations it
 does not know, so `helm rollback` alone leaves its pods crash-looping. Follow
 [Rolling back across migrations](#rolling-back-across-migrations). This upgrade
-adds the four versions below. Rolling back to a release older than the list
+adds the five versions below. Rolling back to a release older than the list
 quota, such as v1.2.0, crosses more, and its pods' logs name every one. The
-schema changes stay, which the previous release ignores, and so do the
-credential and registry aggregation IDs.
+schema changes stay, and so do the credential and registry aggregation IDs.
+If rolling back across `m20261022_000001_issuer_ownership`, follow the
+instructions in [Rolling back across migrations](#rolling-back-across-migrations).
+The previous release cannot create ownership rows for new issuer registrations
+or update the new quota counter, and it can publish only for existing owners.
 
 - `m20260929_000001_credentials_aggregation_id`
 - `m20260929_000002_status_lists_issuer_list_id_index`
 - `m20261014_000001_credentials_key_id`
 - `m20261020_000001_issuer_aggregations`
+- `m20261022_000001_issuer_ownership`
 
 Upgrading again re-runs these migrations, which find their changes already made.
 Tokens served meanwhile carry the unscoped URI again, and scoped URIs relying
 parties already hold return `404` until the upgrade.
 
-**Never undo `credentials.aggregation_id` or `issuer_aggregations`** once tokens
+**Never undo `credentials.aggregation_id` or `issuers`** once tokens
 with scoped URIs have been served. The server refuses their down migrations;
 do not drop the column or table by hand either. The IDs are lost, new ones are
 assigned, and every URI already in tokens or issuer metadata returns `404`.
@@ -492,6 +502,12 @@ status changes too; see
 [Restoring a backup taken before the upgrade](#restoring-a-backup-taken-before-the-upgrade).
 Deleting an issuer's credential in the database and registering it again does
 the same to that issuer.
+
+If the ownership migration stops because an issuer has different aggregation
+IDs in `issuer_aggregations` and `credentials`, follow
+[Resolving issuer aggregation ID conflicts](troubleshooting.md#resolving-issuer-aggregation-id-conflicts)
+before retrying the upgrade. This schema keeps one ID per issuer; URLs carrying
+the other ID will return `404` after the migration.
 
 ### Metrics
 
@@ -701,9 +717,10 @@ here; a test fails until it does.
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
-| `m20261021_000001_issuers` | Yes: the tables are empty until the hosted onboarding surface writes them, and an older release ignores them | None; keep the tables | Empty tables |
-| `m20261021_000002_issuer_keys` | Yes, as above | None; keep the tables | Empty tables |
-| `m20261021_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty tables |
+| `m20261022_000001_issuer_ownership` | **No**: the previous release does not update the new quota counter and cannot create issuer-owner rows | Run `list-quota disable` before deleting its migration record; the old release can publish only for existing owners and cannot register new issuers | Recreate the new release; the migration safely reruns, preserves owner IDs and recomputes counts from `status_lists`. If it reports conflicting aggregation IDs, follow [the repair steps](troubleshooting.md#resolving-issuer-aggregation-id-conflicts) first |
+| `m20261023_000001_hosted_issuers` | Yes: the columns carry defaults, so rows created without them load unchanged, and an older release ignores them | None; keep the columns | Hosted metadata is additive; registry-created rows keep their defaults |
+| `m20261023_000002_issuer_keys` | Yes: the table is empty until the hosted onboarding surface writes keys, and an older release ignores it | None; keep the table | Empty table |
+| `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
 
 ### Preparing existing management credentials
 

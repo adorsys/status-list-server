@@ -96,44 +96,31 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
-/// Durable identity history for issuers trusted through the operator registry.
-pub(crate) mod issuer_aggregations {
-    use super::*;
-
-    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-    #[sea_orm(table_name = "issuer_aggregations")]
-    pub(crate) struct Model {
-        #[sea_orm(primary_key)]
-        pub issuer: String,
-        pub aggregation_id: String,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub(crate) enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-// Hosted-profile issuer rows (`issuers` table, ADR 0002 hosted profile).
-pub(crate) mod hosted_issuers {
+/// Durable issuer ownership, list quota, and registry aggregation identity.
+/// A portal issuer (hosted profile) is *this* row, keyed in `issuer` by its
+/// server-assigned UUID, with the hosted metadata columns added by the
+/// `hosted_issuers` migration — not a second ownership model.
+pub(crate) mod issuers {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
     #[sea_orm(table_name = "issuers")]
     pub(crate) struct Model {
-        /// Server-assigned UUID v4; identifiers are never chosen by an issuer.
-        #[sea_orm(primary_key, column_type = "String(StringLen::N(36))")]
-        pub id: String,
+        #[sea_orm(primary_key)]
+        pub issuer: String,
+        pub aggregation_id: Option<String>,
+        pub list_count: i64,
         pub display_name: Option<String>,
         pub source: String,
         pub tier: String,
         pub state: String,
         pub owner: Option<String>,
-        /// Unix seconds.
+        /// Unix seconds of portal registration; 0 for rows created by
+        /// another trust source.
         pub created_at: i64,
-        /// Unix seconds.
+        /// Unix seconds; until when the portal issuer may authenticate.
         pub expires_at: Option<i64>,
-        /// Optimistic-concurrency version.
+        /// Optimistic-concurrency version of hosted-profile writes.
         pub version: i64,
     }
 
@@ -152,7 +139,9 @@ pub(crate) mod hosted_issuer_keys {
     pub(crate) struct Model {
         #[sea_orm(primary_key, column_type = "String(StringLen::N(255))")]
         pub kid: String,
-        #[sea_orm(column_type = "String(StringLen::N(36))")]
+        /// The owning `issuers.issuer` (a server-assigned UUID for portal
+        /// issuers); text to match the unrestricted PK column.
+        #[sea_orm(column_type = "Text")]
         pub issuer_id: String,
         pub alg: String,
         #[sea_orm(column_type = "Json")]

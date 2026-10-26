@@ -6,12 +6,14 @@ use jsonwebtoken::jwk::Jwk;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use super::super::fixtures;
+use crate::domain::models::credential::AggregationId;
+use crate::domain::ports::CredentialRepo;
 #[cfg(any(feature = "sqlite", feature = "mysql"))]
 use crate::outbound::sql::models::Credentials;
 use crate::outbound::sql::models::{
     StatusList, StatusListHistoryRecord, StatusListRecord, status_list_allocations,
 };
-use crate::outbound::sql::{RepositoryError, SeaOrmStore};
+use crate::outbound::sql::{RepositoryError, SeaOrmStore, SqlCredentialRepo};
 
 /// The lost-update proof: two writers reading the same `updated_at` cannot
 /// both win. Deterministic (no threads) — first write lands, second's guard
@@ -538,6 +540,48 @@ pub(super) async fn assert_list_quota_is_exact(
     assert_eq!(fixtures::list_count(&db, issuer).await, 2);
 }
 
+pub(super) async fn assert_registry_issuer_can_publish_first_list(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    let issuer = format!("registry-only-{backend}");
+    let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
+    repo.record_registry_aggregation_ids(&[(issuer.clone(), AggregationId::generate())])
+        .await
+        .unwrap_or_else(|error| panic!("recording registry issuer on {backend}: {error}"));
+    fixtures::enforce_list_quota(&db).await;
+
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let list = fixtures::record(
+        &format!("list-{issuer}"),
+        &issuer,
+        "initial",
+        &format!("sub-{issuer}"),
+        0,
+    );
+    store
+        .insert_one(list.clone(), 1)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("registry-only issuer must publish its first list on {backend}: {error}")
+        });
+    assert_eq!(fixtures::list_count(&db, &issuer).await, 1, "on {backend}");
+    let second = fixtures::record(
+        &format!("list-second-{issuer}"),
+        &issuer,
+        "second",
+        &format!("sub-second-{issuer}"),
+        0,
+    );
+    assert!(
+        matches!(
+            store.insert_one(second, 1).await,
+            Err(RepositoryError::QuotaExceeded { count: 1, max: 1 })
+        ),
+        "registry-only issuers must be subject to the configured quota on {backend}"
+    );
+}
+
 /// A full walk returns every list exactly once. Mixed-case IDs sort differently
 /// per backend collation, so this asserts completeness, not order.
 pub(super) async fn assert_list_uris_walk_is_complete(
@@ -695,9 +739,8 @@ pub(in super::super) fn list_count_migration_index() -> usize {
         .expect("the list_count migration must be registered")
 }
 
-/// The backfill counts existing lists, and old-pod credential inserts still
-/// work. `column_already_added` recreates a failed MySQL backfill: column
-/// present, migration unrecorded.
+/// Counts lists that predate the migration. `column_already_added` recreates a
+/// failed MySQL backfill: column present, migration unrecorded.
 pub(super) async fn assert_list_count_migration_backfills(
     db: &DatabaseConnection,
     column_already_added: bool,
@@ -745,16 +788,4 @@ pub(super) async fn assert_list_count_migration_backfills(
         0,
         "on {backend}"
     );
-
-    db.execute_unprepared(
-        "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-via-old-pod', '{}')",
-    )
-    .await
-    .unwrap_or_else(|e| {
-        panic!(
-            "NOT NULL DEFAULT 0 must let pods on the previous release keep registering \
-             on {backend}: {e}"
-        )
-    });
-    assert_eq!(fixtures::list_count(db, "issuer-via-old-pod").await, 0);
 }

@@ -108,12 +108,19 @@ impl CredentialRepo for SqlCredentialRepo {
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
-    ) -> Result<(), CredentialError> {
+    ) -> Result<AggregationId, CredentialError> {
         let public_key = serde_json::from_slice(credential.public_key.as_bytes())
             .map_err(|e| CredentialError::InvalidPublicJwk(format!("parse failed: {e}")))?;
         let entity = models::Credentials::new(credential.issuer.0, public_key)
             .with_aggregation_id(aggregation_id.to_string());
-        self.store.insert_one(entity).await.map_err(Into::into)
+        let stored_id = self
+            .store
+            .insert_one(entity)
+            .await
+            .map_err(CredentialError::from)?;
+        stored_id
+            .parse()
+            .map_err(|error| CredentialError::Backend(std::io::Error::other(error).into()))
     }
 
     async fn find_aggregation_id(

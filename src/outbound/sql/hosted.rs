@@ -1,17 +1,17 @@
-//! SQL adapter for the hosted-profile issuer store (`issuers`, `issuer_keys`),
-//! plus the `issuer_aggregations` mapping every hosted creation records in the
-//! same transaction. Dynamic keys resolve per request by `kid` primary key
+//! SQL adapter for the hosted-profile issuer store. A portal issuer is a
+//! row of the shared ownership table (`issuers`, expanded by the
+//! `hosted_issuers` migration), so creating one records its aggregation ID
+//! and its ownership/quota slot in the same unit; keys live in
+//! `issuer_keys`. Dynamic keys resolve per request by `kid` primary key
 //! with no cache, so revocation takes effect on the next request.
 
 use async_trait::async_trait;
-use sea_orm::{
-    ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set, sea_query::OnConflict,
-};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
 use super::error::{RepositoryError, contention_err};
-use super::models::{PublicKey, hosted_issuer_keys, hosted_issuers, issuer_aggregations};
+use super::models::{PublicKey, hosted_issuer_keys, issuers};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
@@ -81,10 +81,26 @@ fn tried_from_unix(seconds: i64) -> Result<OffsetDateTime, RepositoryError> {
         .map_err(|e| RepositoryError::FindError(e.to_string()))
 }
 
-fn parse_issuer(
-    row: hosted_issuers::Model,
-    aggregation_id: AggregationId,
-) -> Result<HostedIssuer, RepositoryError> {
+/// A hosted `issuers` row must carry its aggregation ID and a source of
+/// `portal`: metadata added by the hosted migration that another trust
+/// source leaves defaulted. A row without the mapping cannot resolve, so
+/// aggregation-less registry rows stay unreachable through this adapter.
+fn parse_issuer(row: issuers::Model) -> Result<HostedIssuer, RepositoryError> {
+    let aggregation_id = match row.aggregation_id.as_deref().map(str::parse) {
+        Some(Ok(uuid)) => AggregationId(uuid),
+        Some(Err(e)) => {
+            return Err(RepositoryError::FindError(format!(
+                "hosted issuer `{}` has an unusable aggregation mapping: {e}",
+                row.issuer
+            )));
+        }
+        None => {
+            return Err(RepositoryError::FindError(format!(
+                "hosted issuer `{}` has no aggregation mapping",
+                row.issuer
+            )));
+        }
+    };
     let created_at = tried_from_unix(row.created_at)?;
     let expires_at = match row.expires_at {
         Some(seconds) => Some(tried_from_unix(seconds)?),
@@ -96,12 +112,12 @@ fn parse_issuer(
         other => {
             return Err(RepositoryError::FindError(format!(
                 "hosted issuer `{}` has unknown state `{other}`",
-                row.id
+                row.issuer
             )));
         }
     };
     Ok(HostedIssuer {
-        id: row.id,
+        id: row.issuer,
         display_name: row.display_name,
         tier: row.tier,
         state,
@@ -146,12 +162,11 @@ fn parse_key(row: hosted_issuer_keys::Model) -> Result<HostedIssuerKey, Reposito
 }
 
 fn parse_entry(
-    issuer: hosted_issuers::Model,
-    aggregation_id: AggregationId,
+    issuer: issuers::Model,
     key: hosted_issuer_keys::Model,
 ) -> Result<HostedIssuerKeyEntry, RepositoryError> {
     Ok(HostedIssuerKeyEntry {
-        issuer: parse_issuer(issuer, aggregation_id)?,
+        issuer: parse_issuer(issuer)?,
         key: parse_key(key)?,
     })
 }
@@ -160,9 +175,8 @@ fn parse_entry(
 /// deliberately missing: malformed stored timestamps surface as FindError and
 /// fail closed.
 ///
-/// Reads must join three tables: `issuer_keys.kid`, its `issuers` row, and the
-/// `issuer_aggregations` mapping created with the issuer. An orphaned row is a
-/// data fault (the FK only covers the first hop), not an empty result.
+/// Reads join `issuer_keys.kid` with its `issuers` row. An orphaned row is a
+/// data fault (the FK only covers one direction), not an empty result.
 async fn load_entry(
     kid: &str,
     db: &sea_orm::DatabaseConnection,
@@ -174,63 +188,38 @@ async fn load_entry(
     let Some(key) = key else {
         return Ok(None);
     };
-    let issuer = hosted_issuers::Entity::find_by_id(&key.issuer_id)
+    let issuer = issuers::Entity::find_by_id(&key.issuer_id)
         .one(db)
         .await
         .map_err(find_err)?
         .ok_or_else(|| {
             RepositoryError::FindError(format!("issuer key `{kid}` has no issuer row"))
         })?;
-    let mapping = issuer_aggregations::Entity::find_by_id(&issuer.id)
-        .one(db)
-        .await
-        .map_err(find_err)?
-        .ok_or_else(|| {
-            RepositoryError::FindError(format!(
-                "hosted issuer `{}` has no aggregation mapping",
-                issuer.id
-            ))
-        })?;
-    let aggregation_id = mapping
-        .aggregation_id
-        .parse()
-        .map(AggregationId)
-        .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-    Some(parse_entry(issuer, aggregation_id, key)).transpose()
+    Some(parse_entry(issuer, key)).transpose()
 }
 
 async fn load_issuer(
     id: &str,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Option<HostedIssuer>, RepositoryError> {
-    let issuer = hosted_issuers::Entity::find_by_id(id)
+    let issuer = issuers::Entity::find_by_id(id)
         .one(db)
         .await
         .map_err(find_err)?;
-    let Some(issuer) = issuer else {
-        return Ok(None);
-    };
-    let mapping = issuer_aggregations::Entity::find_by_id(issuer.id.as_str())
-        .one(db)
-        .await
-        .map_err(find_err)?
-        .ok_or_else(|| {
-            RepositoryError::FindError(format!("hosted issuer `{id}` has no aggregation mapping"))
-        })?;
-    let aggregation_id = mapping
-        .aggregation_id
-        .parse()
-        .map(AggregationId)
-        .map_err(|e| RepositoryError::FindError(e.to_string()))?;
-    Some(parse_issuer(issuer, aggregation_id)).transpose()
+    match issuer {
+        Some(row) => Ok(Some(parse_issuer(row)?)),
+        None => Ok(None),
+    }
 }
 
 async fn insert_issuer_row(
     txn: &sea_orm::DatabaseTransaction,
     issuer: &HostedIssuer,
 ) -> Result<(), DbErr> {
-    hosted_issuers::Entity::insert(hosted_issuers::ActiveModel {
-        id: Set(issuer.id.clone()),
+    issuers::Entity::insert(issuers::ActiveModel {
+        issuer: Set(issuer.id.clone()),
+        aggregation_id: Set(Some(issuer.aggregation_id.to_string())),
+        list_count: Set(0),
         display_name: Set(issuer.display_name.clone()),
         source: Set("portal".to_string()),
         tier: Set(issuer.tier.clone()),
@@ -246,46 +235,34 @@ async fn insert_issuer_row(
 }
 
 /// Same insert–readback discipline as the registry reconciliation
-/// (`record_registry_aggregation_ids`): the mapping is only accepted when both
-/// directions of the association still name this issuer, so a hosted creation
-/// can neither reach an existing mapping nor let two issuers share one.
-async fn insert_aggregation_mapping(
+/// (`record_registry_aggregation_ids`): conflict handling is agnostic about
+/// which unique constraint fired, so the stored rows decide — the issuer PK
+/// names this creation (it cannot preexist), and the aggregation mapping
+/// names this issuer, or the write is rejected.
+async fn insert_issuer_with_mapping(
     txn: &sea_orm::DatabaseTransaction,
-    issuer: &str,
-    aggregation_id: &AggregationId,
+    issuer: &HostedIssuer,
 ) -> Result<(), DbErr> {
-    let id = aggregation_id.to_string();
-    issuer_aggregations::Entity::insert(issuer_aggregations::ActiveModel {
-        issuer: Set(issuer.to_string()),
-        aggregation_id: Set(id.clone()),
-    })
-    .on_conflict(
-        OnConflict::column(issuer_aggregations::Column::Issuer)
-            .do_nothing_on([issuer_aggregations::Column::Issuer])
-            .to_owned(),
-    )
-    .exec_without_returning(txn)
-    .await?;
-    let by_issuer = issuer_aggregations::Entity::find_by_id(issuer)
-        .one(txn)
-        .await?;
-    let by_id = issuer_aggregations::Entity::find()
-        .filter(issuer_aggregations::Column::AggregationId.eq(&id))
+    let id = issuer.aggregation_id.to_string();
+    insert_issuer_row(txn, issuer).await?;
+    let by_issuer = issuers::Entity::find_by_id(&issuer.id).one(txn).await?;
+    let by_id = issuers::Entity::find()
+        .filter(issuers::Column::AggregationId.eq(&id))
         .one(txn)
         .await?;
     match (by_issuer, by_id) {
         (Some(issuer_row), Some(id_row))
-            if issuer_row.aggregation_id == id && id_row.issuer == issuer =>
+            if issuer_row.issuer == issuer.id && id_row.issuer == issuer.id =>
         {
             Ok(())
         }
-        // A colliding caller won the race for this aggregation ID: the stored
-        // direction of the association names someone else.
-        (Some(_), Some(id_row)) if id_row.issuer != issuer => Err(DbErr::Custom(format!(
-            "aggregation mapping conflict for issuer {issuer}"
+        (Some(_), Some(id_row)) if id_row.issuer != issuer.id => Err(DbErr::Custom(format!(
+            "aggregation mapping conflict for issuer {}",
+            issuer.id
         ))),
         _ => Err(DbErr::Custom(format!(
-            "aggregation mapping lookup failed for issuer {issuer}"
+            "aggregation mapping lookup failed for issuer {}",
+            issuer.id
         ))),
     }
 }
@@ -348,7 +325,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                     );
                 }
                 let mapping_result =
-                    insert_aggregation_mapping(&txn, &stored.id, &stored.aggregation_id).await;
+                    insert_issuer_with_mapping(&txn, &stored).await;
                 if let Err(mapping_err) = mapping_result {
                     // Only a lost race for the random aggregation ID is
                     // retried with a fresh ID; anything else fails the write.
@@ -391,9 +368,9 @@ impl SeaOrmStore<HostedIssuerRow> {
                 )));
             }
             let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
-            if hosted_issuers::Entity::find_by_id(&key.issuer_id)
+            if issuers::Entity::find_by_id(&key.issuer_id)
                 .select_only()
-                .column(hosted_issuers::Column::Id)
+                .column(issuers::Column::Issuer)
                 .into_tuple::<String>()
                 .one(&txn)
                 .await
