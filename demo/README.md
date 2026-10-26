@@ -175,7 +175,8 @@ the pip fallback, then commit both:
 uv lock
 uv export --format requirements-txt -o requirements.txt
 ```
-# Issuer registry fixture
+
+## Issuer registry fixture
 
 The workflows use fixed issuer identities that must be trusted before the
 server starts. Generate the local public-key registry fixture, then mount it

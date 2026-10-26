@@ -257,7 +257,6 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-
   /api/v1/aggregation/{aggregation_id}:
     get:
       operationId: getIssuerAggregation
