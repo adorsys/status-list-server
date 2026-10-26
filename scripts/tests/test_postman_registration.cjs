@@ -37,7 +37,7 @@ function authenticates(token, issuer, server) {
     Buffer.from(signature, 'base64url'),
   );
 }
-async function register(environment, server, { status, crypto = webcrypto, lookup, method = 'POST' } = {}) {
+async function register(environment, server, { status, crypto = webcrypto, lookup, method = 'POST', requestName } = {}) {
   const failures = [];
   const collectionVariables = scope(new Map([['token', 'stale-collection-token']]));
   const pm = {
@@ -47,6 +47,7 @@ async function register(environment, server, { status, crypto = webcrypto, looku
       replaceIn: text => text.replace('{{managementUrl}}', 'http://localhost:8001'),
     },
     test(name, callback) { try { callback(); } catch (error) { failures.push({ name, error }); } },
+    info: { requestName: requestName || (method === 'POST' ? 'Register issuer credentials' : method === 'PUT' ? 'Publish status list' : 'Update status list') },
     request: { method, url: { toString: () => method === 'POST' ? 'http://localhost:8001/api/v1/credentials' : 'http://localhost:8001/api/v1/status-lists/id/statuses' }, headers: { upsert(header) { this.authorization = header.value; } } },
     sendRequest(request, callback) {
       assert.equal(request.method, 'GET');
@@ -138,6 +139,9 @@ test('Newman preconfigured token works without WebCrypto for 202 and 409', async
   const write = await register(environment, server, { crypto: null, method: 'PUT' });
   assert.deepEqual(write.failures, []);
   assert.equal(write.authorization, `Bearer ${token}`);
+  const unauthenticated = await register(environment, server, { crypto: null, method: 'PUT', requestName: 'Publish status list without auth' });
+  assert.deepEqual(unauthenticated.failures, []);
+  assert.equal(unauthenticated.authorization, undefined);
 });
 
 test('failed registration clears tokens and records a failed readiness test', async () => {
