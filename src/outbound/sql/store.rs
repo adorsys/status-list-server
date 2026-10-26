@@ -14,7 +14,7 @@ use tracing::warn;
 use super::error::{RepositoryError, contention_err};
 use super::list_quota::list_quota_enforced;
 use super::models::{
-    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, issuer_aggregations,
+    Credentials, StatusListHistoryRecord, StatusListRecord, credentials, issuers,
     status_list_allocations, status_list_history, status_lists,
 };
 use crate::{
@@ -138,7 +138,7 @@ pub(super) async fn begin_read_committed(
 /// While the quota is off, the guard is lifted but the count still kept.
 ///
 /// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
-/// shared lock on this `credentials` row, and two publishes upgrading it would
+/// shared lock on this ownership row, and two publishes upgrading it would
 /// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
 /// rolled back with any later failure. The caller must roll back on `Err`.
 ///
@@ -155,13 +155,13 @@ async fn reserve_list_slot(
     } else {
         i64::MAX
     };
-    let reserved = credentials::Entity::update_many()
+    let reserved = issuers::Entity::update_many()
         .col_expr(
-            credentials::Column::ListCount,
-            Expr::col(credentials::Column::ListCount).add(1),
+            issuers::Column::ListCount,
+            Expr::col(issuers::Column::ListCount).add(1),
         )
-        .filter(credentials::Column::Issuer.eq(issuer))
-        .filter(credentials::Column::ListCount.lt(max))
+        .filter(issuers::Column::Issuer.eq(issuer))
+        .filter(issuers::Column::ListCount.lt(max))
         .exec(txn)
         .await
         .map_err(map_update_err)?;
@@ -169,10 +169,10 @@ async fn reserve_list_slot(
         return Ok(());
     }
 
-    // Zero rows: either the quota is full or the credential row is missing.
-    let count = credentials::Entity::find_by_id(issuer)
+    // Zero rows: either the quota is full or the ownership row is missing.
+    let count = issuers::Entity::find_by_id(issuer)
         .select_only()
-        .column(credentials::Column::ListCount)
+        .column(issuers::Column::ListCount)
         .into_tuple::<i64>()
         .one(txn)
         .await
@@ -196,10 +196,9 @@ async fn reserve_list_slot(
                 max: max_lists_per_issuer,
             })
         }
-        // Auth resolved the credential earlier, so a missing row is a server
-        // fault (500), as the FK violation was before (see `map_insert_err`).
+        // A missing ownership row violates the FK invariant required for publishing.
         None => Err(RepositoryError::InsertError(format!(
-            "issuer {issuer} has no credential row to reserve a status list slot on"
+            "issuer {issuer} has no ownership row to reserve a status list slot"
         ))),
     }
 }
@@ -639,7 +638,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Test-only: does not decrement `credentials.list_count`. A production
+    /// Test-only: does not decrement `issuers.list_count`. A production
     /// caller must decrement it in the same transaction as the `DELETE`.
     #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
@@ -1024,24 +1023,93 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 impl SeaOrmStore<Credentials> {
     /// Pinned so registration cannot inherit a raised server default and turn a
     /// duplicate issuer into a serialization failure.
-    pub async fn insert_one(&self, entity: Credentials) -> Result<(), RepositoryError> {
+    pub async fn insert_one(&self, entity: Credentials) -> Result<String, RepositoryError> {
         time_query("insert", "credential", async {
-            let active: credentials::ActiveModel = entity.into();
+            let issuer = entity.issuer.clone();
+            let requested_aggregation_id = entity.aggregation_id.clone();
+            let aggregation_id = requested_aggregation_id.clone().unwrap_or_else(|| {
+                crate::domain::models::credential::AggregationId::generate().to_string()
+            });
+            let mut active: credentials::ActiveModel = entity.into();
             let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
+            if let Err(error) = issuers::Entity::insert(issuers::ActiveModel {
+                issuer: Set(issuer.clone()),
+                aggregation_id: Set(Some(aggregation_id.clone())),
+                list_count: Set(0),
+            })
+            .on_conflict(
+                OnConflict::column(issuers::Column::Issuer)
+                    .do_nothing_on([issuers::Column::Issuer])
+                    .to_owned(),
+            )
+            .exec_without_returning(&txn)
+            .await
+            {
+                return Err(
+                    rollback_insert_failure(txn, "issuer ownership insert", map_insert_err(error))
+                        .await,
+                );
+            }
+
+            if let Err(error) = issuers::Entity::update_many()
+                .col_expr(issuers::Column::AggregationId, Expr::value(&aggregation_id))
+                .filter(issuers::Column::Issuer.eq(&issuer))
+                .filter(issuers::Column::AggregationId.is_null())
+                .exec(&txn)
+                .await
+            {
+                return Err(
+                    rollback_insert_failure(txn, "issuer aggregation ID update", map_insert_err(error))
+                        .await,
+                );
+            }
+            let stored_issuer = match issuers::Entity::find_by_id(&issuer).one(&txn).await {
+                Ok(Some(stored_issuer)) => stored_issuer,
+                Ok(None) => {
+                    return Err(rollback_insert_failure(
+                        txn,
+                        "issuer ownership lookup",
+                        RepositoryError::InsertError(
+                            "issuer ownership row disappeared during credential registration"
+                                .into(),
+                        ),
+                    )
+                    .await);
+                }
+                Err(error) => {
+                    return Err(
+                        rollback_insert_failure(txn, "issuer ownership lookup", map_insert_err(error))
+                            .await,
+                    );
+                }
+            };
+            let stored_aggregation_id = match stored_issuer.aggregation_id {
+                Some(aggregation_id) => aggregation_id,
+                None => {
+                    return Err(rollback_insert_failure(
+                        txn,
+                        "issuer aggregation ID lookup",
+                        RepositoryError::InsertError(
+                            "issuer ownership row has no aggregation ID after credential registration"
+                                .into(),
+                        ),
+                    )
+                    .await);
+                }
+            };
+            active.aggregation_id = Set(Some(stored_aggregation_id.clone()));
+
             if let Err(insert_err) = credentials::Entity::insert(active)
                 .exec_without_returning(&txn)
                 .await
             {
-                txn.rollback().await.map_err(|rollback_err| {
-                    RepositoryError::InsertError(format!(
-                        "credential insert failed ({insert_err}); \
-                         rolling the transaction back also failed: {rollback_err}"
-                    ))
-                })?;
-                return Err(map_insert_err(insert_err));
+                return Err(
+                    rollback_insert_failure(txn, "credential insert", map_insert_err(insert_err))
+                        .await,
+                );
             }
             txn.commit().await.map_err(map_insert_err)?;
-            Ok(())
+            Ok(stored_aggregation_id)
         })
         .await
     }
@@ -1083,11 +1151,11 @@ impl SeaOrmStore<Credentials> {
         &self,
         issuer: &str,
     ) -> Result<Option<Option<String>>, RepositoryError> {
-        time_query("find_aggregation_id", "credential", async {
+        time_query("find_aggregation_id", "issuer", async {
             let db = self.db.current();
-            credentials::Entity::find_by_id(issuer)
+            issuers::Entity::find_by_id(issuer)
                 .select_only()
-                .column(credentials::Column::AggregationId)
+                .column(issuers::Column::AggregationId)
                 .into_tuple::<Option<String>>()
                 .one(&*db)
                 .await
@@ -1102,18 +1170,16 @@ impl SeaOrmStore<Credentials> {
         issuer: &str,
         aggregation_id: &str,
     ) -> Result<(), RepositoryError> {
-        time_query("assign_aggregation_id", "credential", async {
-            let db = self.db.current();
-            credentials::Entity::update_many()
-                .col_expr(
-                    credentials::Column::AggregationId,
-                    Expr::value(aggregation_id),
-                )
-                .filter(credentials::Column::Issuer.eq(issuer))
-                .filter(credentials::Column::AggregationId.is_null())
-                .exec(&*db)
+        time_query("assign_aggregation_id", "issuer", async {
+            let txn = self.begin_read_committed().await.map_err(map_update_err)?;
+            issuers::Entity::update_many()
+                .col_expr(issuers::Column::AggregationId, Expr::value(aggregation_id))
+                .filter(issuers::Column::Issuer.eq(issuer))
+                .filter(issuers::Column::AggregationId.is_null())
+                .exec(&txn)
                 .await
                 .map_err(map_update_err)?;
+            txn.commit().await.map_err(map_update_err)?;
             Ok(())
         })
         .await
@@ -1125,10 +1191,10 @@ impl SeaOrmStore<Credentials> {
     ) -> Result<Option<String>, RepositoryError> {
         time_query("find_issuer_by_aggregation_id", "credential", async {
             let db = self.db.current();
-            credentials::Entity::find()
+            issuers::Entity::find()
                 .select_only()
-                .column(credentials::Column::Issuer)
-                .filter(credentials::Column::AggregationId.eq(aggregation_id))
+                .column(issuers::Column::Issuer)
+                .filter(issuers::Column::AggregationId.eq(aggregation_id))
                 .into_tuple::<String>()
                 .one(&*db)
                 .await
@@ -1154,35 +1220,55 @@ impl SeaOrmStore<Credentials> {
                 let txn = self.begin_read_committed().await.map_err(map_insert_err)?;
                 for (issuer, aggregation_id) in mappings {
                     let id = aggregation_id.to_string();
-                    issuer_aggregations::Entity::insert(issuer_aggregations::ActiveModel {
-                        issuer: Set(issuer.clone()),
-                        aggregation_id: Set(id.clone()),
-                    })
-                    .on_conflict(
-                        OnConflict::column(issuer_aggregations::Column::Issuer)
-                            .do_nothing_on([issuer_aggregations::Column::Issuer])
-                            .to_owned(),
-                    )
-                    .exec_without_returning(&txn)
-                    .await
-                    .map_err(map_insert_err)?;
-
-                    let by_issuer = issuer_aggregations::Entity::find_by_id(issuer)
+                    let current = issuers::Entity::find_by_id(issuer)
                         .one(&txn)
                         .await
                         .map_err(find_err)?;
-                    let by_id = issuer_aggregations::Entity::find()
-                        .filter(issuer_aggregations::Column::AggregationId.eq(&id))
+                    match current {
+                        Some(row) if row.aggregation_id.as_deref() == Some(id.as_str()) => {}
+                        Some(row) if row.aggregation_id.is_some() => {
+                            txn.rollback().await.map_err(map_insert_err)?;
+                            return Err(RepositoryError::DuplicateEntry);
+                        }
+                        Some(_) => {
+                            issuers::Entity::update_many()
+                                .col_expr(issuers::Column::AggregationId, Expr::value(&id))
+                                .filter(issuers::Column::Issuer.eq(issuer))
+                                .filter(issuers::Column::AggregationId.is_null())
+                                .exec(&txn)
+                                .await
+                                .map_err(map_update_err)?;
+                        }
+                        None => {
+                            issuers::Entity::insert(issuers::ActiveModel {
+                                issuer: Set(issuer.clone()),
+                                aggregation_id: Set(Some(id.clone())),
+                                list_count: Set(0),
+                            })
+                            .on_conflict(
+                                OnConflict::column(issuers::Column::Issuer)
+                                    .do_nothing_on([issuers::Column::Issuer])
+                                    .to_owned(),
+                            )
+                            .exec_without_returning(&txn)
+                            .await
+                            .map_err(map_insert_err)?;
+                            issuers::Entity::update_many()
+                                .col_expr(issuers::Column::AggregationId, Expr::value(&id))
+                                .filter(issuers::Column::Issuer.eq(issuer))
+                                .filter(issuers::Column::AggregationId.is_null())
+                                .exec(&txn)
+                                .await
+                                .map_err(map_update_err)?;
+                        }
+                    }
+                    let by_id = issuers::Entity::find()
+                        .filter(issuers::Column::AggregationId.eq(&id))
                         .one(&txn)
                         .await
                         .map_err(find_err)?;
-                    if by_issuer
-                        .as_ref()
-                        .is_some_and(|row| row.aggregation_id != id)
-                        || by_id.as_ref().is_some_and(|row| row.issuer != *issuer)
-                        || by_issuer.is_none()
-                        || by_id.is_none()
-                    {
+                    if by_id.as_ref().is_none_or(|row| row.issuer != *issuer) {
+                        txn.rollback().await.map_err(map_insert_err)?;
                         return Err(RepositoryError::DuplicateEntry);
                     }
                 }
@@ -1235,10 +1321,8 @@ impl SeaOrmStore<Credentials> {
 /// (#143, #244).
 ///
 /// Foreign-key violations deliberately fall through to `InsertError`/500.
-/// The only FK on the write paths is `status_lists.issuer -> credentials.issuer`,
-/// and authentication resolves the issuer's credential before any handler runs,
-/// so reaching this function with a missing issuer means the credential was
-/// deleted mid-request — a server-side consistency failure, correctly a 500.
+/// Credentials and status lists both reference `issuers`; registration creates
+/// the ownership row in the same transaction, so a missing owner is inconsistent data.
 /// If that ever stops holding, add a `ForeignKeyConstraintViolation` arm rather
 /// than widening the unique-violation one.
 ///
@@ -1248,6 +1332,19 @@ fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
         _ => contention_err(&e).unwrap_or_else(|| RepositoryError::InsertError(e.to_string())),
+    }
+}
+
+async fn rollback_insert_failure(
+    txn: DatabaseTransaction,
+    operation: &str,
+    error: RepositoryError,
+) -> RepositoryError {
+    match txn.rollback().await {
+        Ok(()) => error,
+        Err(rollback_err) => RepositoryError::InsertError(format!(
+            "{operation} failed ({error}); rolling the transaction back also failed: {rollback_err}"
+        )),
     }
 }
 

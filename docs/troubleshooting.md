@@ -778,7 +778,7 @@ failure rolls back instead of wedging the release.
 ## Status List Quota
 
 Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
-env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `credentials.list_count` and is
+env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `issuers.list_count` and is
 maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
 the count only ever rises. The cap cannot be set above `1000`, the aggregation page size (see
 [below](#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
@@ -811,7 +811,7 @@ rolling forward from a release that predates it. The rollout stops at its first 
 the previous release keep serving.
 
 **Root cause:** Pods of a release that predates the quota publish without incrementing
-`credentials.list_count`. While any of them serves traffic the counter cannot be trusted, so the
+`issuers.list_count`. While any of them serves traffic the counter cannot be trusted, so the
 quota starts off on such a database, and a pod does not serve without it unless told to.
 
 **Fix:**
@@ -858,6 +858,81 @@ the upgrade above.
 soon as it has migrated. A pod that crashes partway through that first migration leaves a database
 the next start treats as an upgrade; follow the steps above.
 
+### Resolving issuer aggregation ID conflicts
+
+**When you see this:** The ownership migration stops with a message such as
+`issuer <issuer> has credentials aggregation ID <credential-id> but issuer aggregation ID <registry-id>`.
+
+**Root cause:** On the old schema, the same issuer has different IDs in
+`credentials` and `issuer_aggregations`. The ownership schema stores one ID per
+issuer, so it cannot preserve both mappings. After migration, aggregation URLs
+using the ID you do not keep will return `404`.
+
+**Diagnostics:** Before retrying the upgrade, take a database backup and list
+the mismatches:
+
+```sql
+SELECT c.issuer,
+       a.aggregation_id AS registry_id,
+       c.aggregation_id AS credential_id
+FROM credentials c
+JOIN issuer_aggregations a ON a.issuer = c.issuer
+WHERE c.aggregation_id IS NOT NULL
+  AND a.aggregation_id IS NOT NULL
+  AND c.aggregation_id <> a.aggregation_id;
+```
+
+**Fix:** Keep the ID whose aggregation URL must continue working, usually the
+one already present in tokens or issuer metadata. If both IDs have been given
+to clients, pause the upgrade and decide which URL can be retired; this schema
+cannot keep both. Update the other table to the chosen ID in a transaction.
+Run exactly one of these updates for each affected issuer:
+
+```sql
+-- Keep the registry mapping's ID.
+UPDATE credentials
+SET aggregation_id = (
+    SELECT aggregation_id FROM issuer_aggregations
+    WHERE issuer = credentials.issuer
+)
+WHERE issuer = '<issuer>';
+
+-- Or keep the credentials mapping's ID.
+UPDATE issuer_aggregations
+SET aggregation_id = (
+    SELECT aggregation_id FROM credentials
+    WHERE issuer = issuer_aggregations.issuer
+)
+WHERE issuer = '<issuer>';
+```
+
+Commit only after confirming the selected ID is not assigned to another issuer.
+Then retry the upgrade. Do not replace an ID that appears in a URL that must
+remain valid.
+
+### A credential has no issuer-owner row
+
+The ownership migration creates an `issuers` row for every credential and registry-only issuer.
+If an out-of-band write or an interrupted older deployment left a credential without an owner,
+publishing fails because credentials and status lists must reference `issuers`. Stop old pods and
+disable the list quota before repairing the rows:
+
+```sql
+INSERT INTO issuers (issuer, aggregation_id, list_count)
+SELECT c.issuer,
+       c.aggregation_id,
+       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer)
+FROM credentials c
+WHERE NOT EXISTS (SELECT 1 FROM issuers a WHERE a.issuer = c.issuer);
+
+UPDATE issuers
+SET list_count = (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = issuers.issuer);
+```
+
+If the insert reports a duplicate aggregation ID, inspect both issuer records and resolve the
+conflict before retrying; do not change an ID that appears in an issued token. Run
+`status-list-server list-quota enable` after the repair to verify counts and restore enforcement.
+
 ---
 
 ### Publish rejected with `400` `list_quota_exceeded`
@@ -873,22 +948,22 @@ lists, an issuer that reaches the quota stays there until an operator acts.
 **Diagnostics:** Compare the stored counter with the lists that actually exist:
 
 ```sql
-SELECT c.issuer,
-       c.list_count,
-       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = c.issuer) AS actual
-FROM credentials c
-WHERE c.issuer = '<issuer>';
+SELECT a.issuer,
+       a.list_count,
+       (SELECT COUNT(*) FROM status_lists s WHERE s.issuer = a.issuer) AS actual
+FROM issuers a
+WHERE a.issuer = '<issuer>';
 ```
 
 If `list_count` and `actual` differ, the counter has drifted; recompute it as described under
-[Recomputing `credentials.list_count`](#recomputing-credentialslist_count).
+[Recomputing issuer list counts](#recomputing-issuer-list-counts).
 
 **Fix:** Either:
 
 - **Raise the quota**, if it is below `1000`. Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the
   Deployment. The limit is global: it raises the ceiling for every issuer, not only this one.
 - **Delete lists the issuer no longer needs**, directly in the database, then
-  [recompute the counter](#recomputing-credentialslist_count). Only delete a list that no
+  [recompute the counter](#recomputing-issuer-list-counts). Only delete a list that no
   unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`
   and can no longer check revocation. Also delete its history rows
   (`DELETE FROM status_list_history WHERE list_id = '<list_id>'`), which have no foreign key to
@@ -929,7 +1004,7 @@ server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have 
 
 ---
 
-### Recomputing `credentials.list_count`
+### Recomputing issuer list counts
 
 Recomputes every issuer's counter from the lists that exist. Needed before
 [enabling the quota](#upgrading-to-the-list-quota) and after any manual `DELETE` from `status_lists`.
@@ -948,7 +1023,7 @@ refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 two identical). It is portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
-UPDATE credentials SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer);
+UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer);
 ```
 
 Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the
