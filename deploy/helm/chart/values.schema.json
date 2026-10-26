@@ -453,7 +453,7 @@
         "watcher": {
           "type": "object",
           "title": "Credential rotation watcher",
-          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected. Requires an application image implementing the file watcher contract (the current published images do not watch files yet).",
+          "description": "Watcher configuration for file-based credential rotation detection. When pollIntervalSecs is set, APP_WATCHER__POLL_INTERVAL_SECS is injected; otherwise the server polls every 30 seconds.",
           "properties": {
             "pollIntervalSecs": {
               "type": ["string", "integer"],
@@ -461,6 +461,18 @@
               "description": "Seconds between file-reload polls; injected as APP_WATCHER__POLL_INTERVAL_SECS."
             }
           }
+        },
+        "issuerRegistry": {
+          "type": "object",
+          "title": "Operator-managed issuer registry",
+          "properties": {
+            "path": { "type": "string", "pattern": "^/etc/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Registry file inside its dedicated mount directory" },
+            "volume": {
+              "type": "object",
+              "description": "Any volume source that provides the file named in `path` (e.g. configMap, secret, csi). Required in production; empty mounts no registry in development, where the server warns and trusts no issuers."
+            }
+          },
+          "additionalProperties": false
         },
         "livenessProbe": {
           "type": "object",

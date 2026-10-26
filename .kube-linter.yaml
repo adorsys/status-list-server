@@ -1,6 +1,4 @@
-# "latest-tag" is deliberately NOT in the exclude list below. The chart used to
-# default statuslist.image.tag to "latest"; it now defaults to appVersion, so nothing
-# renders ":latest" and the check will fire if that regresses.
+# latest-tag stays enforced: every image in the chart has a pinned tag.
 checks:
   exclude:
     # Subchart containers (postgres) use template-level defaults
@@ -9,8 +7,3 @@ checks:
     - "unset-cpu-requirements"
     - "unset-memory-requirements"
     - "no-read-only-root-fs"
-    # The status-list-server:latest and init container busybox images are
-    # template defaults overridden by CI tag injection at deploy time.
-    - "latest-tag"
-    # Cache TTL env vars (e.g. APP_CACHE__TTL) are numeric durations, not secrets.
-    - "env-var-secret"

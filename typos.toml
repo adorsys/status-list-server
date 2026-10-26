@@ -1,5 +1,5 @@
 [default]
-extend-ignore-identifiers-re = []
+extend-ignore-identifiers-re = ["2Sy1cth_ZvIuKlHFA3AbIDpW7AbIzEWdmixu9ekxpLM"]
 # Base64url aggregation cursors (`v1:` encodes to `djE6`).
 extend-ignore-re = ["djE6[A-Za-z0-9_-]+"]
 

@@ -698,10 +698,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Now attempt another concurrent update - the service layer should detect
-        // the conflict if the backend properly implements optimistic locking
-        // Note: This test may pass trivially with the memory backend if it doesn't
-        // enforce optimistic locking. The SQL backends enforce it via updated_at checks.
         let result = update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),

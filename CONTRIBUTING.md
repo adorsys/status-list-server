@@ -68,9 +68,20 @@ Provider-specific setup is described in the [database](docs/database-backends.md
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.
 
-The server uses ports and adapters. See the [architecture guide](docs/architecture.md) for context. Add tests for new behavior, and include a regression test for a bug fix that fails without the fix. Keep unrelated refactoring in a separate change. Update affected configuration examples, API specifications, and documentation alongside the code.
+The server uses ports and adapters. See the [architecture guide](docs/architecture.md) for context. Add tests for new behavior, and include a regression test for a bug fix that fails without the fix. Keep unrelated refactoring in a separate change. Update affected configuration examples, API specifications, and documentation alongside the code. Store documentation images and other binary assets in `docs/assets/`.
 
 For HTTP and load-testing changes, see [API testing](docs/api-testing.md) and the [performance-test workspace](perf/README.md).
+
+### Code comments
+
+Comments are the exception. Write one only when the code can't say it: a reason that isn't obvious, a gotcha, or a workaround.
+
+- One short line that says why, not what the next line does.
+- Plain words: no bold or capitals for emphasis, no em dashes.
+- No ticket numbers, review notes or history; those belong in commits and PRs.
+- No comments inside tests. Put a gotcha in the assert message or the helper's name.
+- If the explanation is long, put it in the docs and point there.
+- Leave functional comments alone: the version after a pinned action SHA, `zizmor: ignore[...]`, `# pragma: no cover`, the xtask doc comments (clap prints them as `--help`), and the `# KEY=value` lines in `.env.template`.
 
 ## Checking your changes
 
@@ -130,3 +141,20 @@ For a breaking change, add `!` after the type or scope, or a `BREAKING CHANGE:` 
 Keep each PR focused on one problem and each commit a coherent change. In the description, explain the problem, the resulting behavior, and any compatibility or configuration changes. Link the related issue if there is one.
 
 List the checks you ran with their commands, feature selections, and results. State what you could not check, including provider tests that need credentials or infrastructure you do not have. Local checks and remote CI provide different evidence; link CI results when available. Address review feedback and update tests and documentation as the implementation changes.
+
+## AI-assisted contributions
+
+You may use AI tools to write code, tests, and documentation, or to review your own changes. You are responsible for everything you submit, and AI-assisted changes go through the same review and CI gates as any other change. You must understand the change and be able to explain it in your own words.
+
+If an AI tool generated or substantially changed code, tests, documentation, or configuration in your PR, say so in the PR description: what it produced, how you verified it, and what you could not verify. Single-line autocompletion, spelling, and translation help need no disclosure.
+
+These rules apply to every AI-assisted change:
+
+- **No unverified output.** Read every line you submit, run the checks above, and make sure the tests exercise the change. Do not submit code you have not built and run.
+- **No unjustified dependencies.** Explain in the PR why a new dependency is needed and why existing crates or a small local implementation are not enough. The `cargo vet`, `cargo deny`, and `cargo machete` gates apply.
+- **Tests and attention for high-risk areas.** Changes to authentication, cryptography, certificate management, secrets backends, storage, CI, or deployment need explicit tests, and the PR must say which of these areas it touches.
+- **No runtime AI dependency.** Server behavior must not depend on an AI service or model. Propose such a feature in a separate design issue first.
+- **No drifting documentation.** Documentation must describe the code, configuration, and CI as they are. Check every command, setting, and check name you write down.
+- **No bypassed checks.** Do not delete, skip, or weaken tests, lints, or CI gates, and do not add supply-chain exemptions to make a failing check pass.
+
+Maintainers may ask for evidence, a smaller change, or an explanation, and may close PRs that do not meet these rules. Coding agents should also follow [AGENTS.md](AGENTS.md).

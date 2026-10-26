@@ -206,12 +206,9 @@ mod database_implementation {
             a_releasing_lock
         );
 
-        // The CRITICAL assertion: B should NOT have won
-        // B's guard was base_timestamp, but A changed updated_at to base_timestamp + 1
-        // So B's WHERE updated_at = base_timestamp should affect 0 rows
         assert!(
             !b_won,
-            "B should lose (0 rows affected) because A already advanced updated_at. \
+            "B should lose (0 rows affected) because A already advanced the version. \
          B blocked, then got a stale guard"
         );
 
