@@ -11,7 +11,7 @@ use database::{assert_credentials_round_trip, assert_duplicate_insert_maps_to_du
 
 use super::fixtures;
 use crate::outbound::sql::SeaOrmStore;
-use crate::outbound::sql::models::{Credentials, credentials};
+use crate::outbound::sql::models::{Credentials, credentials, issuers};
 #[cfg(feature = "sqlite")]
 use crate::outbound::sql::{RepositoryError, models::StatusListRecord};
 
@@ -44,6 +44,11 @@ async fn test_seaorm_store() {
 
     let db_conn = Arc::new(
         mock_db
+            .append_query_results::<issuers::Model, Vec<_>, _>(vec![vec![issuers::Model {
+                issuer: entity.issuer.clone(),
+                aggregation_id: Some("00000000-0000-4000-8000-000000000001".to_string()),
+                list_count: 0,
+            }]])
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![
                 vec![credentials::Model {
                     issuer: entity.issuer.clone(),
@@ -75,6 +80,10 @@ async fn test_seaorm_store() {
                 }],
             ])
             .append_exec_results(vec![
+                MockExecResult {
+                    rows_affected: 1,
+                    last_insert_id: 0,
+                },
                 MockExecResult {
                     rows_affected: 1,
                     last_insert_id: 0,

@@ -237,8 +237,11 @@ impl CredentialRepo for CachingCredentialRepo {
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
-    ) -> Result<(), CredentialError> {
-        self.inner.insert(credential, aggregation_id).await
+    ) -> Result<AggregationId, CredentialError> {
+        let issuer = credential.issuer.0.clone();
+        let stored_id = self.inner.insert(credential, aggregation_id).await?;
+        self.aggregation_ids.insert(issuer, stored_id).await;
+        Ok(stored_id)
     }
 
     /// A miss is not kept: the issuer may be registered, or given an ID, right after.
@@ -652,8 +655,12 @@ mod tests {
             Ok(None)
         }
 
-        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
-            Ok(())
+        async fn insert(
+            &self,
+            _: Credential,
+            aggregation_id: AggregationId,
+        ) -> Result<AggregationId, CredentialError> {
+            Ok(aggregation_id)
         }
 
         async fn find_aggregation_id(
