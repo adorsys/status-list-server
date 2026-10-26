@@ -1049,19 +1049,38 @@ jobs:
         # misconfigured Redis (host/password/TLS/egress) would deploy green while firing
         # RedisCacheErrors. Gate on the app's startup log: fail on the "unavailable"
         # warning, confirm the "backend selected" info line, warn if neither is present.
+        # Inspect EVERY pod, not just one: `kubectl logs deployment/...` reads a single
+        # replica, so under the HPA a broken sibling pod would otherwise go undetected.
         # A failure here does not roll back (a broken cache degrades gracefully); the
         # rollback-protected path is the ESO step.
         run: |
           set -euo pipefail
           NS="${{ env.HELM_NAMESPACE }}"
-          DEPLOY="${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment"
-          LOGS=$(kubectl logs "deployment/$DEPLOY" -n "$NS" --tail=500 2>/dev/null || true)
-          if printf '%s\n' "$LOGS" | grep -q "Redis status-list cache unavailable at startup"; then
-            echo "::error::Redis status-list cache did not connect at startup; the app is running with a broken cache and will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
+          PODS=$(kubectl get pods -n "$NS" \
+            -l "app=status-list-server,app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+          checked=0
+          failed=""
+          confirmed=""
+          for pod in $PODS; do
+            checked=$((checked + 1))
+            logs=$(kubectl logs "pod/$pod" -n "$NS" --tail=500 2>/dev/null || true)
+            if printf '%s\n' "$logs" | grep -q "Redis status-list cache unavailable at startup"; then
+              echo "::error::Pod $pod: Redis status-list cache did not connect at startup; it will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
+              failed=1
+            elif printf '%s\n' "$logs" | grep -q "status-list cache backend selected"; then
+              confirmed=1
+            fi
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::warning::No status-list-server pods found to inspect; skipping Redis startup verification"
+            exit 0
+          fi
+          if [ -n "$failed" ]; then
             exit 1
           fi
-          if printf '%s\n' "$LOGS" | grep -q "status-list cache backend selected"; then
-            echo "OK: Redis cache connected at startup"
+          if [ -n "$confirmed" ]; then
+            echo "OK: Redis cache connected at startup on all $checked inspected pod(s)"
           else
             echo "::warning::Could not confirm Redis cache connected at startup from pod logs (startup lines may have rotated out of the tail); not treating as failure"
           fi

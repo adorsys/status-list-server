@@ -339,6 +339,38 @@ PROD_STORE_KIND_COUNT=$(grep -c 'kind: ClusterSecretStore' "${RENDER_TEMP}/rende
 if [ "$PROD_STORE_REF_COUNT" -ne "$PROD_ES_COUNT" ] || [ "$PROD_STORE_KIND_COUNT" -ne "$PROD_ES_COUNT" ]; then
   echo "ERROR: every production ExternalSecret must reference ClusterSecretStore/datev-secret-store (refs=$PROD_STORE_REF_COUNT kinds=$PROD_STORE_KIND_COUNT es=$PROD_ES_COUNT)"; exit 1
 fi
+# The Redis password ExternalSecret must sync redis-credentials with the password
+# secretKey, and the Deployment's APP_CACHE__PASSWORD secretKeyRef must reference that
+# exact Secret name+key. A mismatch between secretEnv and the ExternalSecret target only
+# surfaces as CreateContainerConfigError at pod start, so assert it at render time.
+PROD_ES="${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml"
+# Isolate the redis ExternalSecret document by name so the greps below cannot match a
+# different ExternalSecret in the same rendered file.
+REDIS_ES_BLOCK=$(awk 'BEGIN{RS="---\n"} /name: statuslist-redis-credentials/ {print}' "$PROD_ES")
+if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -q 'name: statuslist-redis-credentials'; then
+  echo "ERROR: production render must emit the statuslist-redis-credentials ExternalSecret"; exit 1
+fi
+if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^    name: redis-credentials$'; then
+  echo "ERROR: statuslist-redis-credentials ExternalSecret must target the redis-credentials Secret"; exit 1
+fi
+if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+-\s+secretKey: password$'; then
+  echo "ERROR: statuslist-redis-credentials ExternalSecret must emit secretKey: password"; exit 1
+fi
+if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+key: statuslist-redis-password$'; then
+  echo "ERROR: statuslist-redis-credentials ExternalSecret must read remote key statuslist-redis-password"; exit 1
+fi
+if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+property: PASSWORD$'; then
+  echo "ERROR: statuslist-redis-credentials ExternalSecret must read remote property PASSWORD"; exit 1
+fi
+# The Deployment secretEnv APP_CACHE__PASSWORD must reference redis-credentials/password so
+# the app pod can start once ESO syncs it.
+PROD_DEPLOY="${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/deployment.yaml"
+if ! grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -qE 'name: "?redis-credentials"?$'; then
+  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef must reference the redis-credentials Secret"; exit 1
+fi
+if ! grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -qE 'key: "?password"?$'; then
+  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef must reference the password key"; exit 1
+fi
 # Azure Workload Identity primary path: application pod label + application KSA distinct
 # from the External Secrets Operator identity.
 helm template status-list-server "$CHART_DIR" \

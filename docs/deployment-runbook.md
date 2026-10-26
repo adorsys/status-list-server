@@ -155,6 +155,21 @@ The application requires `APP_CACHE__TLS=true` and a password whenever `APP_ENV=
 (validated in `src/config.rs` `CacheConfig::validate`), so a plaintext unauthenticated
 Redis is never accepted in production.
 
+### Verifying the cache at deploy time
+
+The production deploy (`.github/workflows/deploy.yml`, "Verify the Redis cache connected
+at startup") inspects **every** app pod's startup log and fails if any pod logged the
+"Redis status-list cache unavailable at startup" warning. Because Redis is not part of the
+readiness probe and `warm_up()` failure is non-fatal, this is the only automated gate that
+a misconfigured Redis would otherwise slip past.
+
+That gate proves the cache **connected at startup only**; it does not cover runtime
+health. If Redis becomes unreachable after startup (egress/security-group drift, an AZ or
+instance failure), the app degrades gracefully and fires the `RedisCacheErrors` alert
+(`status_list_cache_errors_total`, shipped in the chart's PrometheusRule). Monitor that
+alert and the `/metrics` cache-hit ratio (`status_list_cache_hits_total` /
+`status_list_cache_misses_total`) as the ongoing health signal.
+
 Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
 write-capable Redis user with other applications. For the default prefix, create one with:
 

@@ -36,6 +36,8 @@ statuslist:
     APP_CACHE__TLS: "true"
     APP_CACHE__DATABASE: "0"
     APP_CACHE__KEY_PREFIX: "status-list-server:status-list:"
+    # APP_CACHE__MAX_CAPACITY (inherited from the base values) applies only to the
+    # in-memory backend; Redis uses native key expiration from APP_CACHE__TTL.
   # Redis password from the ESO-provisioned redis-credentials Secret. The name must
   # match externalSecret.spec.extraExternalSecrets[].spec.target.name below; a mismatch
   # only surfaces as CreateContainerConfigError. Read once at pod start.
