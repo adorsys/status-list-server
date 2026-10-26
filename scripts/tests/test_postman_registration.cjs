@@ -124,6 +124,27 @@ test('per-issuer key cache retains keys when switching away and back', async () 
   assert.ok(authenticates(environment.get('token'), 'A', server));
 });
 
+test('legacy active issuer key migrates into the cache without replacing other issuers', async () => {
+  const server = new Map();
+  const registered = new Map([['issuer_id', 'Issuer90']]);
+  await register(registered, server);
+  const legacyPrivateJwk = JSON.parse(registered.get('issuer_private_jwks')).Issuer90;
+  const environment = new Map([
+    ['issuer_id', 'Issuer90'],
+    ['issuer_private_jwk', JSON.stringify(legacyPrivateJwk)],
+    ['issuer_key_owner', 'Issuer90'],
+    ['issuer_private_jwks', JSON.stringify({ issuer92: { kty: 'EC', crv: 'P-256', x: 'other', y: 'key' } })],
+  ]);
+  const result = await register(environment, server);
+  assert.deepEqual(result.failures, []);
+  assert.ok(authenticates(environment.get('token'), 'Issuer90', server));
+  const keys = JSON.parse(environment.get('issuer_private_jwks'));
+  assert.ok(keys.Issuer90);
+  assert.ok(keys.issuer92);
+  assert.equal(environment.get('issuer_private_jwk'), undefined);
+  assert.equal(environment.get('issuer_key_owner'), undefined);
+});
+
 test('Newman preconfigured token works without WebCrypto for 202 and 409', async () => {
   const server = new Map();
   const generated = new Map([['issuer_id', 'A']]);

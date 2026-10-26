@@ -37,14 +37,17 @@ generates and registers a temporary issuer for the run.
 In Postman, select the included environment and send **Register issuer
 credentials** before publishing. Generated keys are saved per issuer in that
 environment; switching `issuer_id` back to an earlier issuer reuses its key.
-Keep the private key cache secret when backing up your local environment.
+Keep the private key cache secret when backing up your local environment. Older
+environments with `issuer_private_jwk` and `issuer_key_owner` values migrate that
+key into the cache on the next registration or protected write, then clear the
+old values.
 
 A registration conflict (`409`) is accepted only after an authenticated
 `GET {{managementUrl}}/api/v1/credentials` confirms the saved key works for that
 issuer. If it fails, the collection clears `token` and reports a failed test.
 Restore the issuer's original private key/environment, or choose a new
-`issuer_id` and register again. Reimporting an empty environment cannot recover the private
-key of an issuer already registered on the server.
+`issuer_id` and register again. Reimporting an empty environment cannot recover
+the private key of an issuer already registered on the server.
 
 Run the registration-script regression checks with:
 
