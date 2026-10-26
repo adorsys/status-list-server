@@ -111,6 +111,13 @@ enum IssuerTask {
         #[arg(long, default_value = "ES256")]
         alg: String,
     },
+    /// Export stored issuer identities as a registry draft.
+    Export {
+        #[arg(long)]
+        database_url: String,
+        #[arg(long, default_value = "issuers.yaml")]
+        output: PathBuf,
+    },
 }
 
 fn issuer_command(command: IssuerTask) -> Result<()> {
@@ -167,6 +174,33 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
                 .ok_or_eyre("issuer keys must be a sequence")?
                 .push(key.clone());
             write_registry_yaml(&file, root, RegistryInsertion::Key { issuer_index, key })
+        }
+        IssuerTask::Export {
+            database_url,
+            output,
+        } => {
+            let workspace = workspace_root()?;
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = Command::new(cargo)
+                .args([
+                    "run",
+                    "--quiet",
+                    "--features",
+                    "postgres,mysql,sqlite",
+                    "--bin",
+                    "status-list-server",
+                    "--",
+                    "issuer-export",
+                    "--database-url",
+                ])
+                .arg(database_url)
+                .arg("--output")
+                .arg(&output)
+                .current_dir(workspace)
+                .status()
+                .wrap_err("run issuer registry exporter")?;
+            ensure!(status.success(), "issuer registry export failed");
+            Ok(())
         }
     }
 }

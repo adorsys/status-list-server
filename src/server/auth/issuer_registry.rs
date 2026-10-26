@@ -35,6 +35,8 @@ pub enum RegistryError {
     },
     #[error("failed to parse issuer registry YAML: {0}")]
     Parse(#[from] serde_saphyr::Error),
+    #[error("failed to serialize issuer registry YAML: {0}")]
+    Serialize(#[from] serde_saphyr::SerializeError),
     #[error("issuer registry schema validation failed: {0}")]
     Schema(String),
     #[error("issuer registry semantic validation failed: {0}")]
@@ -245,6 +247,52 @@ impl IssuerDirectory for RegistryHandle {
 }
 
 impl IssuerRegistry {
+    /// Convert durable legacy credential rows into an operator-reviewed registry draft.
+    pub fn export_legacy_issuers(
+        credentials: impl IntoIterator<Item = (String, String, Value)>,
+    ) -> Result<String, RegistryError> {
+        let mut issuers = Vec::new();
+        for (id, aggregation_id, key) in credentials {
+            let jwk: jsonwebtoken::jwk::Jwk =
+                serde_json::from_value(key.clone()).map_err(|err| {
+                    RegistryError::Semantic(format!(
+                        "issuer `{id}` has an invalid public JWK: {err}"
+                    ))
+                })?;
+            let kid = jwk
+                .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
+                .map_err(|err| {
+                    RegistryError::Semantic(format!("issuer `{id}` JWK thumbprint failed: {err}"))
+                })?;
+            let alg = key
+                .get("alg")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RegistryError::Semantic(format!("issuer `{id}` public key has no alg"))
+                })?
+                .to_owned();
+            let mut public_key = key;
+            let object = public_key.as_object_mut().ok_or_else(|| {
+                RegistryError::Semantic(format!("issuer `{id}` public key is not an object"))
+            })?;
+            for field in ["kid", "alg", "use", "key_ops"] {
+                object.remove(field);
+            }
+            issuers.push(serde_json::json!({
+                "id": id,
+                "aggregation_id": aggregation_id,
+                "tier": "standard",
+                "keys": [{"kid": kid, "alg": alg, "jwk": public_key}],
+            }));
+        }
+        serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": issuers,
+            "admins": [],
+        }))
+        .map_err(RegistryError::Serialize)
+    }
+
     pub fn from_file(path: impl AsRef<Path>) -> Result<ValidatedRegistry, RegistryError> {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|source| RegistryError::Read {

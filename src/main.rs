@@ -27,9 +27,11 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     // Load configuration first so telemetry can read its settings
-    let config = AppConfig::load()?;
-
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("issuer-export") {
+        return export_issuers(&args[1..]).await;
+    }
+    let config = AppConfig::load()?;
     if args.first().map(String::as_str) == Some("list-quota") {
         let action = args.get(1).map(String::as_str).unwrap_or_default();
         println!("{}", run_list_quota_command(&config, action).await?);
@@ -108,4 +110,36 @@ async fn main() -> Result<()> {
 
     http_server.run(shutdown_rx).await?;
     Ok(())
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+async fn export_issuers(args: &[String]) -> Result<()> {
+    use sea_orm::Database;
+    let value = |name: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].as_str())
+    };
+    let url = value("--database-url").ok_or_else(|| eyre!("--database-url is required"))?;
+    let output = value("--output").unwrap_or("issuers.yaml");
+    let db = Database::connect(url).await?;
+    let credentials =
+        status_list_server::outbound::sql::issuer_export::legacy_issuer_credentials(&db)
+            .await
+            .map_err(|err| eyre!(err.to_string()))?;
+    let issuer_count = credentials.len();
+    let yaml =
+        status_list_server::server::auth::issuer_registry::IssuerRegistry::export_legacy_issuers(
+            credentials
+                .into_iter()
+                .map(|row| (row.issuer, row.aggregation_id, row.public_key)),
+        )?;
+    std::fs::write(output, yaml)?;
+    println!("exported {} issuer(s) to {}", issuer_count, output);
+    Ok(())
+}
+
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+async fn export_issuers(_: &[String]) -> Result<()> {
+    Err(eyre!("issuer export requires a SQL database feature"))
 }

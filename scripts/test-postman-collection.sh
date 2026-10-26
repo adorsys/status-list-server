@@ -160,15 +160,6 @@ function visitItems(items, visitor) {
   }
 }
 
-visitItems(collection.item, (item) => {
-  if (item.name === 'Register issuer credentials' && item.request?.body?.raw) {
-    item.request.body.raw = JSON.stringify({
-      issuer: issuerId,
-      public_key: publicKeyJwk,
-    }, null, 2);
-  }
-});
-
 const values = new Map([
   ['baseUrl', baseUrl],
   ['managementUrl', mgmtUrl],

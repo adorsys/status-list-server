@@ -14,6 +14,91 @@ use serde_json::json;
 mod utils;
 use utils::{TestServer, certificate};
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn exported_registry_load_preserves_issuer_identity_for_existing_list_updates() {
+    use sea_orm::Database;
+    use status_list_server::outbound::sql::{Credentials, SeaOrmStore, run_migrations};
+    use std::sync::Arc;
+
+    let database = Database::connect("sqlite::memory:").await.unwrap();
+    run_migrations(&database).await.unwrap();
+    let key = status_list_server::crypto::SigningKey::from_pem(utils::KEY).unwrap();
+    let public = key.public_key_bytes();
+    let public_jwk = json!({
+        "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "legacy-key-id",
+        "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
+        "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
+    });
+    let jwk = serde_json::from_value(public_jwk).unwrap();
+    let store = SeaOrmStore::<Credentials>::new(Arc::new(database.clone()));
+    store
+        .insert_one(
+            Credentials::new("conformance-issuer".to_owned(), jwk)
+                .with_aggregation_id("00000000-0000-4000-8000-000000000001".to_owned()),
+        )
+        .await
+        .unwrap();
+    let credentials =
+        status_list_server::outbound::sql::issuer_export::legacy_issuer_credentials(&database)
+            .await
+            .unwrap();
+    let exported_registry =
+        status_list_server::server::auth::issuer_registry::IssuerRegistry::export_legacy_issuers(
+            credentials
+                .into_iter()
+                .map(|row| (row.issuer, row.aggregation_id, row.public_key)),
+        )
+        .unwrap();
+    let loaded = status_list_server::server::auth::issuer_registry::IssuerRegistry::from_yaml(
+        &exported_registry,
+    )
+    .unwrap();
+    assert_eq!(
+        loaded
+            .issuer("conformance-issuer")
+            .unwrap()
+            .aggregation_id
+            .to_string(),
+        "00000000-0000-4000-8000-000000000001"
+    );
+
+    let aggregation_uri = "https://statuslist.example.com/api/v1/aggregation";
+    let app =
+        TestServer::start_with_registry(Some(aggregation_uri.to_owned()), Some(exported_registry))
+            .await;
+    let list_uri = publish(&app).await;
+    let list_id = list_uri.rsplit('/').next().unwrap();
+    let response = app
+        .client
+        .patch(format!(
+            "{}/api/v1/status-lists/{list_id}/statuses",
+            app.management_url
+        ))
+        .bearer_auth(app.bearer_token())
+        .json(&json!({"statuses": [{"index": 0, "status": 0}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let registration: serde_json::Value = app
+        .client
+        .get(format!("{}/api/v1/credentials", app.management_url))
+        .bearer_auth(app.bearer_token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(registration["aggregation_id"], app.aggregation_id);
+    assert_eq!(
+        registration["aggregation_uri"],
+        format!("{aggregation_uri}/{}", app.aggregation_id)
+    );
+}
+
 async fn publish(app: &TestServer) -> String {
     let list_id = uuid::Uuid::new_v4();
     let response = app

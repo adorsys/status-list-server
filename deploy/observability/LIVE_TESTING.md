@@ -85,7 +85,20 @@ Service name / host port (from the resolved `docker compose config`):
 
 ---
 
-## 4. Start the app with metrics + telemetry enabled
+## 4. Generate the issuer fixture
+
+Generate the test signing key and registry before starting the app. The script
+writes the signed tokens to `perf/scripts/test-tokens.json` and a matching
+operator-managed registry to `perf/scripts/issuer-registry.json`.
+
+```bash
+cd perf
+npm install
+npm run generate-tokens
+cd ..
+```
+
+## 5. Start the app with metrics + telemetry enabled
 
 The app **does not serve `/metrics` by default** (`server.enable_metrics`
 defaults to `false` in `src/config.rs`). You must start it with:
@@ -95,6 +108,8 @@ defaults to `false` in `src/config.rs`). You must start it with:
 APP_SERVER__ENABLE_METRICS=true \
 APP_TELEMETRY__ENABLED=true \
 APP_TELEMETRY__ENVIRONMENT=development \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$PWD/perf/scripts/issuer-registry.json" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
 RUST_LOG=info \
 ./target/debug/status-list-server
 ```
@@ -119,7 +134,7 @@ is served on the admin listener (`server.admin`, port `8002`).
 
 ---
 
-## 5. Point Prometheus at the app
+## 6. Point Prometheus at the app
 
 Prometheus's default scrape target is `app:8002` (the Compose DNS name for the
 in-Docker app, admin listener). If you run the app **on the host** (as in this demo), that DNS
@@ -152,7 +167,7 @@ curl -s http://localhost:9092/api/v1/rules | python3 -c 'import sys,json;d=json.
 
 ---
 
-## 6. Fix the Grafana "Data source prometheus was not found" error
+## 6a. Fix the Grafana "Data source prometheus was not found" error
 
 The committed dashboard (`deploy/observability/dashboards/generated/status-list-slo.json`)
 references the datasource UID `prometheus` in every panel. The provisioning file
@@ -197,8 +212,8 @@ them.
 Before running, be aware of two real API contract details (verified against the
 running server):
 
-1. **Credential registration takes a JWK** public key, not a PEM string —
-   sending PEM yields `422 invalid type for public_key`.
+1. **Issuer keys are provisioned in the mounted registry** before the server
+   starts. The token generator writes the registry and tokens from the same key.
 2. **Statuses are integers** in the request body: `0`=VALID, `1`=INVALID,
    `2`=SUSPENDED (`src/server/handlers/status_list/utils/request.rs`). Sending
    `"VALID"` yields `422`.
@@ -207,12 +222,11 @@ running server):
    `429 Too Many Requests`. For a demo, raise the limits (Section 8) or keep
    traffic just under them.
 
-The issuer key and signed JWTs used below are generated locally by
-`perf/scripts/token-generator.js` (`npm run generate-tokens` in
-`perf/`). They are git-ignored and never shipped with the repo, so
-generate them before running the simulation (Section 7b). The script writes a
-single `perf/scripts/test-tokens.json` containing the issuer ID, the public JWK
-and the signed JWTs, all of which the following commands read.
+The issuer key, registry, and signed JWTs used below are generated locally by
+`perf/scripts/token-generator.js` (`npm run generate-tokens` in `perf/`). The
+script writes git-ignored `perf/scripts/test-tokens.json` and
+`perf/scripts/issuer-registry.json`; keep the registry path configured on the
+app and do not regenerate these files while the simulation is running.
 
 ### 7a. Optional: restart the app with raised rate limits (recommended for the demo)
 
@@ -221,6 +235,8 @@ and the signed JWTs, all of which the following commands read.
 APP_SERVER__ENABLE_METRICS=true \
 APP_TELEMETRY__ENABLED=true \
 APP_TELEMETRY__ENVIRONMENT=development \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$PWD/perf/scripts/issuer-registry.json" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
 APP_RATE_LIMIT__STRICT_BURST_SIZE=5000 \
 APP_RATE_LIMIT__STRICT_PERIOD_SECS=60 \
 APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE=10000 \
@@ -228,21 +244,6 @@ APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS=60 \
 RUST_LOG=info \
 ./target/debug/status-list-server
 ```
-
-### 7b. Generate tokens (once)
-
-```bash
-cd perf
-npm install
-# token-generator.js resolves paths via __dirname, so it can run from anywhere;
-# here it is launched from inside perf:
-npm run generate-tokens
-```
-
-This writes a single git-ignored `perf/scripts/test-tokens.json`.
-It holds the public JWK and the signed JWTs (the private signing key is used
-only in-memory to sign and is never persisted), and the run scripts read the key
-from `test-tokens.json`, so the key always matches the tokens.
 
 ### 7c. Run the simulation
 
@@ -255,14 +256,8 @@ s = requests.Session()
 data = json.load(open("perf/scripts/test-tokens.json"))
 jwk, issuer, tokens = data["publicKeyJwk"], data["issuerId"], data["tokens"]
 
-# 1) Register issuer with a JWK (202 = new, 409 = already exists)
-r = s.post(f"{BASE}/api/v1/credentials",
-           json={"issuer": issuer, "public_key": jwk, "alg": "ES256"})
-print(f"[register] -> {r.status_code} {r.text[:40]}")
-time.sleep(3)  # pace to stay under default rate limits
-
 lists = []
-# 2) Publish + update status lists (token-gen + DB write path) using signed JWTs
+# Publish + update status lists using keys provisioned in the mounted registry.
 for i in range(3):
     lid = str(uuid.uuid4()); lists.append(lid)
     h = {"Authorization": f"Bearer {tokens[i % len(tokens)]}"}

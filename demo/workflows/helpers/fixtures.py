@@ -3,6 +3,9 @@ import string
 import jwt
 import time
 import os
+import hashlib
+import json
+import base64
 
 # ---------------------------------------------------------------------
 # Example token issuer configurations
@@ -22,9 +25,8 @@ def get_gondwana_digital_pole_issuer():
     Returns the Gondwana Digital Pole issuer dictionary with a random suffix
     appended to the label.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"gondwana-digital-pole-{random_suffix}",
+        "label": "gondwana-digital-pole",
         "keypair": {
             "alg": "ES256",
             "public_key": (
@@ -47,9 +49,8 @@ def get_scott_holdings_issuer():
     Returns the Scott Holdings issuer dictionary with a random suffix
     appended to the label.
     """
-    random_suffix = generate_random_string(5)
     issuer_data = {
-        "label": f"scott-holdings-{random_suffix}",
+        "label": "scott-holdings",
         "keypair": {
             "alg": "PS256",
             "public_key": (
@@ -86,7 +87,33 @@ def get_public_jwk(issuer: dict) -> dict:
     jwk.pop("key_ops", None)
 
     # Management JWTs are resolved by kid and pinned to this signing algorithm.
-    return {**jwk, "alg": alg, "kid": issuer["label"]}
+    thumbprint_fields = {name: jwk[name] for name in ("crv", "kty", "x", "y") if name in jwk}
+    if jwk.get("kty") == "RSA":
+        thumbprint_fields = {name: jwk[name] for name in ("e", "kty", "n")}
+    thumbprint = base64.urlsafe_b64encode(hashlib.sha256(
+        json.dumps(thumbprint_fields, sort_keys=True, separators=(",", ":")).encode()
+    ).digest()).decode().rstrip("=")
+    return {**jwk, "alg": alg, "kid": thumbprint}
+
+
+def write_registry_fixture(path="issuer-registry/issuers.yaml"):
+    """Write the fixed local demo identities as a JSON-compatible YAML registry."""
+    issuers = []
+    for issuer, aggregation_id in [
+        (get_gondwana_digital_pole_issuer(), "00000000-0000-4000-8000-000000000101"),
+        (get_scott_holdings_issuer(), "00000000-0000-4000-8000-000000000102"),
+    ]:
+        jwk = get_public_jwk(issuer)
+        issuers.append({
+            "id": issuer["label"],
+            "aggregation_id": aggregation_id,
+            "tier": "standard",
+            "keys": [{"kid": jwk["kid"], "alg": jwk["alg"], "jwk": jwk}],
+        })
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as registry:
+        json.dump({"version": 1, "issuers": issuers, "admins": []}, registry, indent=2)
+        registry.write("\n")
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:

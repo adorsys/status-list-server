@@ -26,7 +26,7 @@ Lists, and Aggregation folders. Requests include Postman test scripts that check
 status codes, content types, token response headers, and JSON response shapes.
 
 Protected management routes require a Bearer JWT signed by the private key that
-matches the issuer public JWK registered through `POST /api/v1/credentials`.
+matches the issuer public JWK provisioned in the operator-managed issuer registry.
 For fully automated local collection testing, use the Newman script below; it
 generates and registers a temporary issuer for the run.
 
@@ -59,7 +59,7 @@ Then run the same collection check used by CI:
 ```
 
 The script generates a temporary P-256 issuer key, patches a temporary copy of
-the collection so `POST /api/v1/credentials` registers the matching public JWK,
+the collection so the issuer public JWK is provisioned in the operator-managed registry,
 and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
 `issuer_id`, `token`, and `historical_time`. No generated collection or
 environment is written into the repository. Set `NEWMAN_RUNNER=docker` to use

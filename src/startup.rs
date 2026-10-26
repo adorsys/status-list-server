@@ -32,8 +32,8 @@ use tower_http::{
 use crate::config::{API_V1_PREFIX, Config};
 
 use crate::server::handlers::{
-    allocate_indices_route, credential_handler, get_aggregation, get_credential,
-    get_issuer_aggregation, get_status_list, publish_status_route, update_status_route,
+    allocate_indices_route, get_aggregation, get_credential, get_issuer_aggregation,
+    get_status_list, publish_status_route, update_status_route,
 };
 use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
@@ -64,8 +64,7 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let (strict_governor, issuer_governor, permissive_governor) =
-            build_governor_configs(&config.rate_limit)?;
+        let (issuer_governor, permissive_governor) = build_governor_configs(&config.rate_limit)?;
 
         let public_router = with_listener_name(
             with_common_layers(
@@ -86,10 +85,7 @@ impl HttpServer {
         .with_state(state.clone());
 
         let management_router = with_listener_name(
-            with_common_layers(
-                management_routes(state.clone(), issuer_governor, strict_governor),
-                config,
-            ),
+            with_common_layers(management_routes(state.clone(), issuer_governor), config),
             "management",
         )
         .with_state(state.clone());
@@ -276,7 +272,6 @@ async fn shutdown_signal() {
 }
 
 type GovernorPolicies = (
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
@@ -284,13 +279,6 @@ type GovernorPolicies = (
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let strict = Arc::new(
-        GovernorConfigBuilder::default()
-            .burst_size(config.strict_burst_size)
-            .period(Duration::from_secs(config.strict_period_secs))
-            .finish()
-            .ok_or_else(|| eyre!("strict governor requires non-zero burst_size and period"))?,
-    );
     let issuer = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.strict_burst_size)
@@ -306,7 +294,7 @@ fn build_governor_configs(
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((strict, issuer, permissive))
+    Ok((issuer, permissive))
 }
 
 /// Routes owned by the public listener: status-list reads, aggregation reads,
@@ -328,12 +316,10 @@ fn public_routes(
         .nest(API_V1_PREFIX, public_reads)
 }
 
-/// Routes owned by the management listener: authenticated issuer writes and
-/// credential registration. Nothing public or admin is registered here.
+/// Routes owned by the management listener: authenticated issuer operations.
 fn management_routes(
     state: AppState,
     issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
-    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
     let protected = Router::new()
         .nest(
@@ -350,14 +336,7 @@ fn management_routes(
         .route_layer(from_fn_with_state(state.clone(), auth))
         .layer(GovernorLayer::new(issuer_governor));
 
-    let credentials = Router::new()
-        .route("/credentials", post(credential_handler))
-        .layer(GovernorLayer::new(strict_governor));
-
-    Router::new().nest(
-        API_V1_PREFIX,
-        Router::new().merge(protected).merge(credentials),
-    )
+    Router::new().nest(API_V1_PREFIX, protected)
 }
 
 /// Routes owned by the admin listener: readiness and (optionally) metrics.
@@ -462,15 +441,16 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
-    /// Credential registration and retrieval live on the management listener,
-    /// while aggregation reads live on the public listener; each keeps its own
+    /// Credential lookup lives on the management listener, while aggregation
+    /// reads live on the public listener; each keeps its own
     /// layers (auth, permissive governor) once built as separate routers.
     #[tokio::test]
-    async fn test_management_register_issuers_and_public_serve_aggregation() {
+    async fn test_management_rejects_registration_and_public_serves_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
-        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
+        let aggregation_id = crate::test_utils::register_issuer(&state.service, "issuer1").await;
+        let management = management_routes(state.clone(), issuer).with_state(state.clone());
         let public = public_routes(permissive).with_state(state);
         let send = |router: Router, method: Method, uri: String, body: String| {
             let request = Request::builder()
@@ -497,14 +477,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(registration.status(), StatusCode::ACCEPTED);
-        let registration: serde_json::Value = serde_json::from_slice(
-            &to_bytes(registration.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let aggregation_id = registration["aggregation_id"].as_str().unwrap();
+        assert_eq!(registration.status(), StatusCode::NOT_FOUND);
 
         let unauthenticated = send(
             management,
@@ -546,7 +519,7 @@ mod tests {
             ("APP_SERVER__ENABLE_METRICS", "true"),
         ])
         .unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
 
         // Seed a registered issuer and a published list so the public read
         // routes return a real (non-404) response on their owner.
@@ -556,7 +529,7 @@ mod tests {
         publish_list(&state.service, "issuer1", &list_id).await;
 
         let public = public_routes(permissive).with_state(state.clone());
-        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
+        let management = management_routes(state.clone(), issuer).with_state(state.clone());
         let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
@@ -617,11 +590,6 @@ mod tests {
                 MANAGEMENT,
             ),
             (
-                Method::POST,
-                &format!("{API_V1_PREFIX}/credentials"),
-                MANAGEMENT,
-            ),
-            (
                 Method::GET,
                 &format!("{API_V1_PREFIX}/credentials"),
                 MANAGEMENT,
@@ -666,7 +634,7 @@ mod tests {
         use axum::body::to_bytes;
 
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
         let public = public_routes(permissive).with_state(state);
 
@@ -717,7 +685,7 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive) = build_governor_configs(&config.rate_limit).unwrap();
         let router = public_routes(permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)
@@ -880,22 +848,10 @@ mod tests {
 
         // Hold a request in flight on the management listener: send the head
         // and only half of the body, so the handler is waiting on the rest.
-        let body = format!(
-            r#"{{"issuer":"issuer1","public_key":{}}}"#,
-            crate::test_fixtures::TEST_EC_PUBLIC_JWK
-        );
-        let (first_half, second_half) = body.as_bytes().split_at(body.len() / 2);
         let mut slow = TcpStream::connect(management_addr).await.unwrap();
-        let head = format!(
-            "POST {API_V1_PREFIX}/credentials HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
-        slow.write_all(head.as_bytes()).await.unwrap();
-        slow.write_all(first_half).await.unwrap();
+        slow.write_all(b"GET /api/v1/credentials HTTP/1.1\r\nHost:")
+            .await
+            .unwrap();
         slow.flush().await.unwrap();
         // Give the server time to read the head and start the handler, so the
         // request is genuinely in flight when shutdown is signalled.
@@ -913,8 +869,9 @@ mod tests {
         );
 
         // Finish the request: it must still be served despite shutdown.
-        slow.write_all(second_half).await.unwrap();
-        slow.flush().await.unwrap();
+        slow.write_all(b" localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = Vec::new();
         tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut response))
             .await
@@ -922,7 +879,7 @@ mod tests {
             .unwrap();
         let response = String::from_utf8_lossy(&response);
         assert!(
-            response.starts_with("HTTP/1.1 202"),
+            response.starts_with("HTTP/1.1 401"),
             "in-flight request must complete normally, got: {response}"
         );
 

@@ -1,32 +1,14 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::models::credential::{AggregationId, Credential, Issuer, PublicJwk},
+    domain::models::credential::AggregationId,
     server::{
         AppState,
         auth::{AuthenticatedIssuer, errors::AuthenticationError},
         error::{ApiError, IntoApiError},
     },
 };
-
-/// Request body for registering issuer public key credentials.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialsRequest {
-    pub issuer: String,
-    pub public_key: serde_json::Map<String, serde_json::Value>,
-}
-
-/// Response body for a registration. The issuer cannot derive its aggregation
-/// URI itself, so it is told here.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialsResponse {
-    pub status: String,
-    pub aggregation_id: AggregationId,
-    /// Present when the server advertises an aggregation endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregation_uri: Option<String>,
-}
 
 /// Response body for GET /credentials.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,56 +20,8 @@ pub struct RegistrationResponse {
     pub aggregation_uri: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum CredentialError {
-    AlreadyExists,
-    Port,
-    AuthError(AuthenticationError),
-}
-
-impl From<AuthenticationError> for CredentialError {
-    fn from(value: AuthenticationError) -> Self {
-        CredentialError::AuthError(value)
-    }
-}
-
-/// `err(level = "info")` for the reason on `update_status`: the default ERROR
-/// level would page on write contention and on a duplicate registration, both
-/// 409s the response layer already logs at the right severity.
-#[tracing::instrument(skip_all, fields(issuer = payload.issuer), err(level = "info", Debug))]
-pub async fn credential_handler(
-    State(state): State<AppState>,
-    Json(payload): Json<CredentialsRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let public_key_bytes = serde_json::to_vec(&payload.public_key)
-        .map_err(|e| ApiError::bad_request("invalid_public_jwk", e.to_string()))?;
-    let issuer = Issuer(payload.issuer);
-    let credential = Credential {
-        issuer: issuer.clone(),
-        public_key: PublicJwk::try_new(public_key_bytes)?,
-    };
-    let aggregation_id = state
-        .issuer_registry
-        .issuer_aggregation_id(&issuer.0)
-        .unwrap_or_else(AggregationId::generate);
-    let aggregation_id = state
-        .service
-        .publish_credential_with_aggregation_id(credential, aggregation_id)
-        .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(CredentialsResponse {
-            status: "Credentials stored successfully".to_string(),
-            aggregation_id,
-            aggregation_uri: state.aggregation_uri_for(&issuer, aggregation_id),
-        }),
-    )
-        .into_response())
-}
-
 /// Handle GET /credentials: the calling issuer's aggregation ID and URI. The
-/// only other place an issuer learns them is the registration response, which
-/// issuers registered before aggregation IDs existed never got.
+/// Returns the aggregation identity provisioned for the authenticated issuer.
 #[tracing::instrument(skip_all, fields(issuer = %issuer), err(level = "info", Debug))]
 pub async fn get_credential(
     State(state): State<AppState>,
@@ -119,114 +53,9 @@ pub async fn get_credential(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{authenticated_issuer, register_issuer, test_app_state};
-    use axum::{
-        Router,
-        body::Body,
-        extract::Request,
-        http::{Method, header},
-        routing::post,
-    };
-    use std::{collections::HashSet, sync::Arc};
-    use tower::ServiceExt;
-
-    fn create_test_router(app_state: AppState) -> Router {
-        Router::new()
-            .route("/issue-credential", post(credential_handler))
-            .with_state(app_state)
-    }
-
-    fn test_jwk() -> serde_json::Map<String, serde_json::Value> {
-        serde_json::from_str(
-            r#"{
-                "kty": "EC",
-                "crv": "P-256",
-                "kid": "test-key",
-                "alg": "ES256",
-                "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
-                "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
-            }
-            "#,
-        )
-        .unwrap()
-    }
-
-    async fn register(app_state: AppState) -> CredentialsResponse {
-        let credentials = CredentialsRequest {
-            issuer: "test_issuer".into(),
-            public_key: test_jwk(),
-        };
-        let response = create_test_router(app_state)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/issue-credential")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&credentials).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_publish_credentials_success() {
-        let app_state = test_app_state(None).await;
-        let response = register(app_state.clone()).await;
-
-        assert_eq!(
-            app_state
-                .service
-                .find_aggregation_id(&Issuer("test_issuer".into()))
-                .await
-                .unwrap(),
-            Some(response.aggregation_id)
-        );
-        assert_eq!(response.aggregation_uri, None);
-    }
-
-    #[tokio::test]
-    async fn test_publish_credentials_returns_scoped_aggregation_uri() {
-        let mut app_state = test_app_state(None).await;
-        app_state.aggregation_uri = Some(
-            "https://statuslist.example.com/api/v1/aggregation"
-                .parse()
-                .unwrap(),
-        );
-        let response = register(app_state).await;
-
-        assert_eq!(
-            response.aggregation_uri.unwrap(),
-            format!(
-                "https://statuslist.example.com/api/v1/aggregation/{}",
-                response.aggregation_id
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_credential_returns_the_issuers_aggregation() {
-        let mut app_state = test_app_state(None).await;
-        app_state.aggregation_uri = Some(
-            "https://statuslist.example.com/api/v1/aggregation"
-                .parse()
-                .unwrap(),
-        );
-        let registered = register(app_state.clone()).await;
-
-        let Json(registration) =
-            get_credential(State(app_state), authenticated_issuer("test_issuer"))
-                .await
-                .unwrap();
-        assert_eq!(registration.issuer, "test_issuer");
-        assert_eq!(registration.aggregation_id, registered.aggregation_id);
-        assert_eq!(registration.aggregation_uri, registered.aggregation_uri);
-    }
+    use crate::test_utils::{authenticated_issuer, test_app_state};
+    use axum::extract::State;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn static_registry_issuer_gets_its_aggregation_without_a_database_credential() {
@@ -242,7 +71,11 @@ mod tests {
             "issuers": [{
                 "id": "static-issuer",
                 "aggregation_id": aggregation_id,
-                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": test_jwk()}],
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": {
+                    "kty": "EC", "crv": "P-256",
+                    "x": "4R_68o1GpW2SvRroSJnCqWzcEX0JRnK3fQf9Rl4Jqig",
+                    "y": "D0wUeShMhjtWIGilbnCeboV-wkiCUmYPXVjezCml1Uk"
+                }}],
             }],
             "admins": []
         }))
@@ -256,230 +89,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(registration.aggregation_id.0, aggregation_id);
-        let expected_uri =
-            format!("https://statuslist.example.com/api/v1/aggregation/{aggregation_id}");
         assert_eq!(
             registration.aggregation_uri.as_deref(),
-            Some(expected_uri.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn registering_a_credential_for_a_registry_issuer_keeps_its_aggregation_id() {
-        let mut app_state = test_app_state(None).await;
-        let aggregation_id = uuid::Uuid::new_v4();
-        let registry = serde_saphyr::to_string(&serde_json::json!({
-            "version": 1,
-            "issuers": [{
-                "id": "static-issuer",
-                "aggregation_id": aggregation_id,
-                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": test_jwk()}],
-            }],
-            "admins": []
-        }))
-        .unwrap();
-        app_state.set_issuer_registry(Arc::new(
-            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
-        ));
-
-        let response = credential_handler(
-            State(app_state),
-            Json(CredentialsRequest {
-                issuer: "static-issuer".into(),
-                public_key: test_jwk(),
-            }),
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let registration: CredentialsResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(registration.aggregation_id.0, aggregation_id);
-    }
-
-    #[cfg(all(feature = "history", feature = "sqlite"))]
-    #[tokio::test]
-    async fn re_registering_a_persisted_issuer_reuses_its_aggregation_id() {
-        use sea_orm::{ConnectionTrait, Statement};
-
-        let db = crate::test_utils::sqlite_test_db(None).await;
-        let aggregation_id = uuid::Uuid::new_v4();
-        db.execute_unprepared(&format!(
-            "INSERT INTO issuers (issuer, aggregation_id, list_count) \
-             VALUES ('removed-registry-issuer', '{aggregation_id}', 0)"
-        ))
-        .await
-        .unwrap();
-        let app_state = test_app_state(Some(db.clone())).await;
-
-        let response = credential_handler(
-            State(app_state),
-            Json(CredentialsRequest {
-                issuer: "removed-registry-issuer".into(),
-                public_key: test_jwk(),
-            }),
-        )
-        .await
-        .unwrap()
-        .into_response();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let registration: CredentialsResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(registration.aggregation_id.0, aggregation_id);
-        let stored_credential_id = db
-            .query_one_raw(Statement::from_string(
-                db.get_database_backend(),
-                "SELECT aggregation_id FROM credentials WHERE issuer = 'removed-registry-issuer'",
-            ))
-            .await
-            .unwrap()
-            .unwrap()
-            .try_get::<String>("", "aggregation_id")
-            .unwrap();
-        assert_eq!(stored_credential_id, aggregation_id.to_string());
-    }
-
-    #[tokio::test]
-    async fn test_credentials_withhold_the_aggregation_uri_per_issuer() {
-        let mut app_state = test_app_state(None).await;
-        app_state.aggregation_uri = Some(
-            "https://statuslist.example.com/api/v1/aggregation"
-                .parse()
-                .unwrap(),
-        );
-        app_state.aggregation_withheld_from =
-            Arc::new(HashSet::from([Issuer::from("test_issuer")]));
-        let withheld = register(app_state.clone()).await;
-        assert_eq!(withheld.aggregation_uri, None);
-        let Json(registration) = get_credential(
-            State(app_state.clone()),
-            authenticated_issuer("test_issuer"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(registration.aggregation_id, withheld.aggregation_id);
-        assert_eq!(registration.aggregation_uri, None);
-
-        let other_id = register_issuer(&app_state.service, "other_issuer").await;
-        let Json(other) = get_credential(State(app_state), authenticated_issuer("other_issuer"))
-            .await
-            .unwrap();
-        assert_eq!(
-            other.aggregation_uri,
-            Some(format!(
-                "https://statuslist.example.com/api/v1/aggregation/{other_id}"
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_credential_for_an_unknown_issuer_is_invalid_token() {
-        let app_state = test_app_state(None).await;
-        let err = get_credential(State(app_state), authenticated_issuer("nobody"))
-            .await
-            .unwrap_err();
-        let response = err.into_response();
-        let expected = AuthenticationError::InvalidToken.into_response();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.status(), expected.status());
-        assert_eq!(
-            response.headers()[header::WWW_AUTHENTICATE],
-            expected.headers()[header::WWW_AUTHENTICATE]
-        );
-        assert_eq!(
-            axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-            axum::body::to_bytes(expected.into_body(), usize::MAX)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_publish_credentials_wrong_key_format() {
-        let app_state = test_app_state(None).await;
-        let app = create_test_router(app_state);
-
-        let body = r#"{"issuer": "test_issuer", "public_key": "wrong_key"}"#;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/issue-credential")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
+            Some(
+                format!("https://statuslist.example.com/api/v1/aggregation/{aggregation_id}")
+                    .as_str()
             )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn test_registration_rejects_private_jwk_member() {
-        let app_state = test_app_state(None).await;
-        let mut public_key = test_jwk();
-        public_key.insert("d".to_string(), serde_json::json!("private-material"));
-        let response = create_test_router(app_state.clone())
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/issue-credential")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"issuer": "private-key-issuer", "public_key": public_key})
-                            .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            app_state
-                .service
-                .find_credential("private-key-issuer")
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_registration_rejects_duplicate_kid_across_issuers() {
-        let app_state = test_app_state(None).await;
-        register(app_state.clone()).await;
-        let response = create_test_router(app_state.clone())
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/issue-credential")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"issuer": "other-issuer", "public_key": test_jwk()})
-                            .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            app_state
-                .service
-                .find_credential_by_kid("test-key")
-                .await
-                .unwrap()
-                .unwrap()
-                .issuer,
-            Issuer("test_issuer".into())
         );
     }
 }
