@@ -17,14 +17,15 @@ use time::OffsetDateTime;
 const TEST_EC_JWK: &str = crate::test_fixtures::TEST_EC_PUBLIC_JWK;
 
 fn issuer(id: &str) -> HostedIssuer {
+    let now = OffsetDateTime::now_utc();
     HostedIssuer {
         id: id.to_string(),
         display_name: Some("Portal issuer".into()),
         tier: "standard".into(),
         state: HostedIssuerState::Active,
         owner: Some("portal-operator".into()),
-        created_at: OffsetDateTime::from_unix_timestamp(1_791_763_200).unwrap(),
-        expires_at: Some(OffsetDateTime::from_unix_timestamp(1_799_540_800).unwrap()),
+        created_at: now,
+        expires_at: Some(now + time::Duration::days(365)),
         version: 1,
         aggregation_id: AggregationId::generate(),
     }
@@ -36,7 +37,6 @@ fn key(issuer_id: &str, kid: &str) -> HostedIssuerKey {
 
 /// A second, distinct EC key so tests that assert *material* reuse start from
 /// a namespace that earlier helpers have not touched.
-#[allow(dead_code)]
 const ROTATED_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"rotated","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
 
 fn key_with_material(issuer_id: &str, kid: &str, jwk_json: &str) -> HostedIssuerKey {
@@ -58,7 +58,7 @@ async fn round_trip(store: &SqlHostedIssuerStore, backend: &str) {
     let stored = store
         .create_issuer(hosted.clone())
         .await
-        .unwrap_or_else(|e| panic!("creating a hosted issuer on {backend}: {e}"));
+        .unwrap_or_else(|e| panic!("creating a hosted issuer on {backend}: {e:?}"));
     assert_eq!(stored.id, hosted.id, "on {backend}");
     let kid = "hosted-kid";
     store
@@ -105,7 +105,6 @@ async fn round_trip(store: &SqlHostedIssuerStore, backend: &str) {
     );
 }
 
-#[allow(dead_code)]
 async fn rejects_duplicates(store: &SqlHostedIssuerStore, backend: &str) {
     let first = key("00000000-0000-4000-8000-000000000003", "kid-1");
     let hosted = issuer("00000000-0000-4000-8000-000000000003");
@@ -127,7 +126,6 @@ async fn rejects_duplicates(store: &SqlHostedIssuerStore, backend: &str) {
     }
 }
 
-#[allow(dead_code)]
 async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
     // A rotated key: the earlier duplicate helpers register the base fixture.
     let key = |issuer_id: &str, kid: &str| key_with_material(issuer_id, kid, ROTATED_EC_JWK);
@@ -176,6 +174,198 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
 #[tokio::test]
 async fn test_sqlite_hosted_round_trip() {
     round_trip(&sqlite_store().await, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_hosted_rejects_conflicts() {
+    let store = sqlite_store().await;
+    rejects_duplicates(&store, "SQLite").await;
+    rejects_reused_material(&store, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_add_key_to_missing_issuer_is_not_found() {
+    let store = sqlite_store().await;
+    match store.add_key(key("nobody", "orphan-key")).await {
+        Err(HostedIssuerError::NotFound) => {}
+        other => panic!("a missing issuer must be NotFound, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_add_key_stores_the_requested_state() {
+    let store = sqlite_store().await;
+    let hosted = issuer("00000000-0000-4000-8000-00000000000a");
+    store.create_issuer(hosted.clone()).await.unwrap();
+    let mut revoked = key(&hosted.id, "revoked-key");
+    revoked.state = HostedIssuerKeyState::Revoked;
+    store.add_key(revoked.clone()).await.unwrap();
+
+    let found = store
+        .find_key_by_kid("revoked-key")
+        .await
+        .unwrap()
+        .expect("the revoked key must resolve to its row");
+    assert_eq!(
+        found.key.state,
+        HostedIssuerKeyState::Revoked,
+        "the stored state must match the requested state"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_non_portal_issuer_is_invisible() {
+    use crate::outbound::sql::models::issuers;
+    use sea_orm::ActiveValue::Set;
+    use sea_orm::EntityTrait;
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    // A registry/credential row in the shared table, without the portal source.
+    issuers::Entity::insert(issuers::ActiveModel {
+        issuer: Set("credential-issuer".to_string()),
+        aggregation_id: Set(Some(
+            crate::domain::models::credential::AggregationId::generate().to_string(),
+        )),
+        list_count: Set(0),
+        display_name: Set(None),
+        source: Set("registry".to_string()),
+        tier: Set("standard".to_string()),
+        state: Set("active".to_string()),
+        owner: Set(None),
+        created_at: Set(0),
+        expires_at: Set(None),
+        version: Set(0),
+    })
+    .exec_without_returning(&*db)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.find_issuer("credential-issuer").await.unwrap(),
+        None,
+        "a non-portal issuer must not resolve as hosted"
+    );
+    match store.add_key(key("credential-issuer", "stray-key")).await {
+        Err(HostedIssuerError::NotFound) => {}
+        other => panic!("a key for a non-portal issuer must be NotFound, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_issuer_id_collision_is_a_conflict() {
+    let store = sqlite_store().await;
+    let hosted = issuer("00000000-0000-4000-8000-00000000000b");
+    store.create_issuer(hosted.clone()).await.unwrap();
+    match store.create_issuer(hosted.clone()).await {
+        Err(HostedIssuerError::AlreadyExists) => {}
+        other => panic!("a duplicate issuer id must be AlreadyExists, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_concurrent_same_material_adds_allow_exactly_one() {
+    let store = sqlite_store().await;
+    let first = issuer("00000000-0000-4000-8000-00000000000c");
+    let second = issuer("00000000-0000-4000-8000-00000000000d");
+    store.create_issuer(first.clone()).await.unwrap();
+    store.create_issuer(second.clone()).await.unwrap();
+
+    // Same material under different kids, registered concurrently. The
+    // `key_material` unique index guarantees exactly one wins; the other gets
+    // a typed KeyMaterialReused, never a silent duplicate.
+    let (a, b) = tokio::join!(
+        store.add_key(key(&first.id, "concurrent-a")),
+        store.add_key(key(&second.id, "concurrent-b")),
+    );
+    let outcomes = [a, b];
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one concurrent registration of the same material must win"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|result| matches!(result, Err(HostedIssuerError::KeyMaterialReused(_)))),
+        "the losing registration must be a typed KeyMaterialReused"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_malformed_row_is_quarantined_not_fatal() {
+    use crate::outbound::sql::models::PublicKey;
+    use crate::outbound::sql::models::hosted_issuer_keys;
+    use jsonwebtoken::jwk::Jwk;
+    use sea_orm::ActiveValue::Set;
+    use sea_orm::EntityTrait;
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-00000000000e");
+    store.create_issuer(hosted.clone()).await.unwrap();
+    store.add_key(key(&hosted.id, "good-key")).await.unwrap();
+
+    // A structurally-valid Jwk that PublicJwk::try_new rejects (kty=oct),
+    // inserted directly as an old pod or manual edit could.
+    let bad: Jwk = serde_json::from_value(
+        serde_json::json!({"kty":"oct","kid":"bad-key","alg":"HS256","k":"c2VjcmV0"}),
+    )
+    .unwrap();
+    hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
+        kid: Set("bad-key".to_string()),
+        issuer_id: Set(hosted.id.clone()),
+        key_material: Set("b".repeat(64)),
+        alg: Set("HS256".to_string()),
+        jwk: Set(PublicKey(bad)),
+        state: Set("active".to_string()),
+        not_before: Set(None),
+        not_after: Set(None),
+        created_at: Set(0),
+    })
+    .exec_without_returning(&*db)
+    .await
+    .unwrap();
+
+    // all_keys() (the startup/reload scan) must not fail because of it; the
+    // malformed row is quarantined and the rest still resolves.
+    let keys = store.all_keys().await.unwrap();
+    let kids: Vec<&str> = keys.iter().map(|key| key.kid.as_str()).collect();
+    assert!(kids.contains(&"good-key"));
+    assert!(
+        !kids.contains(&"bad-key"),
+        "the malformed row must be quarantined"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_stored_alg_is_the_jose_name() {
+    use crate::outbound::sql::models::hosted_issuer_keys;
+    use sea_orm::EntityTrait;
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-00000000000f");
+    store.create_issuer(hosted.clone()).await.unwrap();
+    store.add_key(key(&hosted.id, "alg-key")).await.unwrap();
+
+    let row = hosted_issuer_keys::Entity::find_by_id("alg-key")
+        .one(&*db)
+        .await
+        .unwrap()
+        .expect("the key must be stored");
+    assert_eq!(
+        row.alg, "ES256",
+        "the alg column must hold the JOSE name, not a Debug representation"
+    );
 }
 
 #[cfg(feature = "sqlite")]

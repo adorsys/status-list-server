@@ -143,6 +143,11 @@ pub(crate) mod hosted_issuer_keys {
         /// issuers); text to match the unrestricted PK column.
         #[sea_orm(column_type = "Text")]
         pub issuer_id: String,
+        /// SHA-256 of the canonical key material (RFC 7638 §7 parameters),
+        /// uniquely indexed so material reuse is a database constraint instead
+        /// of a race-prone application scan.
+        #[sea_orm(column_type = "String(StringLen::N(64))")]
+        pub key_material: String,
         pub alg: String,
         #[sea_orm(column_type = "Json")]
         pub jwk: PublicKey,

@@ -540,7 +540,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
-            dynamic_issuer_store = config.server.profile.is_hosted().then_some({
+            dynamic_issuer_store = config.server.profile.is_hosted().then(|| {
                 let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone());
                 Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
             });
@@ -887,7 +887,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         fingerprint = %issuer_registry.snapshot().fingerprint(),
         "issuer registry loaded"
     );
-    warn_missing_registry_issuers(&service, &issuer_registry.snapshot()).await;
+    warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
+        .await;
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -995,8 +996,12 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             crate::utils::metrics::set_issuer_registry_keys(
                                 registry_handle.snapshot().key_count(),
                             );
-                            warn_missing_registry_issuers(&service, &registry_handle.snapshot())
-                                .await;
+                            warn_missing_registry_issuers(
+                                &service,
+                                &registry_handle.snapshot(),
+                                &dynamic_issuer_store,
+                            )
+                            .await;
                             tracing::info!(
                                 event = "issuer_registry_reloaded",
                                 fingerprint = %registry_handle.snapshot().fingerprint(),
@@ -1135,13 +1140,23 @@ async fn validate_registry_aggregation_ids(
 async fn warn_missing_registry_issuers(
     service: &crate::domain::service::Service,
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
 ) {
     match service.issuers_with_status_lists().await {
         Ok(owners) => {
             for issuer in owners {
-                if registry.issuer(&issuer).is_none() {
-                    tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
+                if registry.issuer(&issuer).is_some() {
+                    continue;
                 }
+                // A hosted (portal) issuer owns its lists legitimately and is
+                // not expected to appear in the static registry; skip it so the
+                // warning keeps meaning "an operator-backed issuer is missing".
+                if let Some(store) = dynamic_issuer_store
+                    && store.find_issuer(&issuer).await.ok().flatten().is_some()
+                {
+                    continue;
+                }
+                tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
             }
         }
         Err(error) => {

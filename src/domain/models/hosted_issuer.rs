@@ -133,6 +133,9 @@ impl HostedIssuerKeyEntry {
         if !self.issuer.is_currently_enabled(now) {
             return Err(KeyResolveError::PrincipalDisabled);
         }
+        if self.key.state != HostedIssuerKeyState::Active {
+            return Err(KeyResolveError::Revoked);
+        }
         if !self.key.is_currently_valid(now) {
             if self.key.not_before.is_some_and(|start| now < start) {
                 return Err(KeyResolveError::NotYetValid);
@@ -237,7 +240,7 @@ mod tests {
         );
         assert!(matches!(
             entry.resolved_key(now()),
-            Err(KeyResolveError::Expired)
+            Err(KeyResolveError::Revoked)
         ));
     }
 

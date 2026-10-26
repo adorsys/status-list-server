@@ -381,6 +381,38 @@ impl ValidatedRegistry {
     pub fn key_count(&self) -> usize {
         self.keys.len()
     }
+
+    /// Every (principal id, kid, key material) across issuers and admins, so
+    /// cross-source uniqueness checks cannot miss admin credentials. Key
+    /// material is the canonical per-type string (RFC 7638 §7).
+    pub fn all_principal_keys(&self) -> Vec<(&str, &str, String)> {
+        let mut out = Vec::new();
+        for issuer in &self.registry.issuers {
+            for key in &issuer.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((issuer.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        for admin in &self.registry.admins {
+            for key in &admin.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((admin.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any principal (issuer or admin) carries this id.
+    pub fn has_principal_id(&self, id: &str) -> bool {
+        self.registry.issuers.iter().any(|i| i.id == id)
+            || self.registry.admins.iter().any(|a| a.id == id)
+    }
 }
 
 fn parsed_window(value: Option<&str>) -> Option<time::OffsetDateTime> {

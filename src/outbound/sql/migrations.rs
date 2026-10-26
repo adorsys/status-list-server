@@ -25,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(issuer_ownership::Migration),
             Box::new(hosted_issuers::Migration),
             Box::new(issuer_keys::Migration),
+            Box::new(issuer_keys_key_material::Migration),
             Box::new(issuer_audit_events::Migration),
         ]
     }
@@ -1957,9 +1958,9 @@ pub(crate) mod hosted_issuers {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             for (column, kind) in [
                 ("display_name", "TEXT NULL"),
-                ("source", "TEXT NOT NULL DEFAULT 'registry'"),
-                ("tier", "TEXT NOT NULL DEFAULT 'standard'"),
-                ("state", "TEXT NOT NULL DEFAULT 'active'"),
+                ("source", "VARCHAR(32) NOT NULL DEFAULT 'registry'"),
+                ("tier", "VARCHAR(32) NOT NULL DEFAULT 'standard'"),
+                ("state", "VARCHAR(32) NOT NULL DEFAULT 'active'"),
                 ("owner", "TEXT NULL"),
                 ("created_at", "BIGINT NOT NULL DEFAULT 0"),
                 ("expires_at", "BIGINT NULL"),
@@ -1970,9 +1971,7 @@ pub(crate) mod hosted_issuers {
                 }
                 manager
                     .get_connection()
-                    .execute_unprepared(&format!(
-                        "ALTER TABLE issuers ADD COLUMN {column} {kind}"
-                    ))
+                    .execute_unprepared(&format!("ALTER TABLE issuers ADD COLUMN {column} {kind}"))
                     .await?;
             }
             Ok(())
@@ -2067,6 +2066,84 @@ pub(crate) mod issuer_keys {
         NotBefore,
         NotAfter,
         CreatedAt,
+    }
+}
+
+/// Uniquely indexes each hosted key's canonical material hash so key-material
+/// reuse is rejected by a database constraint, not a race-prone application
+/// scan. Additive so it applies on top of the `issuer_keys` table regardless of
+/// whether that migration already shipped.
+pub(crate) mod issuer_keys_key_material {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261024_000001_issuer_keys_key_material"
+        }
+    }
+
+    const INDEX: &str = "idx_issuer_keys_key_material";
+    const ISSUER_ID_INDEX: &str = "idx_issuer_keys_issuer_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_column("issuer_keys", "key_material").await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(IssuerKeys::Table)
+                            .add_column(
+                                ColumnDef::new(IssuerKeys::KeyMaterial)
+                                    .string_len(64)
+                                    .not_null()
+                                    .default(""),
+                            )
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            if !manager.has_index("issuer_keys", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(IssuerKeys::Table)
+                            .col(IssuerKeys::KeyMaterial)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // Listing an issuer's keys and the `ON DELETE CASCADE` scan this
+            // column; Postgres does not index FK columns automatically.
+            if !manager.has_index("issuer_keys", ISSUER_ID_INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(ISSUER_ID_INDEX)
+                            .table(IssuerKeys::Table)
+                            .col(IssuerKeys::IssuerId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum IssuerKeys {
+        Table,
+        IssuerId,
+        KeyMaterial,
     }
 }
 

@@ -61,9 +61,9 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                     Err(error) => {
                         tracing::error!(
                             error = %error,
-                            "hosted issuer key resolution failed; failing closed"
+                            "hosted issuer key resolution failed; the trust backend is unavailable"
                         );
-                        Err(KeyResolveError::UnknownKid)
+                        Err(KeyResolveError::BackendUnavailable)
                     }
                 },
             },
@@ -80,26 +80,9 @@ fn material_of(jwk: &PublicJwk) -> Option<String> {
 
 fn static_materials(snapshot: &ValidatedRegistry) -> HashSet<String> {
     snapshot
-        .issuers()
-        .iter()
-        .flat_map(|issuer| issuer.keys.iter())
-        .filter_map(|key| {
-            let material = canonical_jwk_material(&key.jwk);
-            material.ok()
-        })
-        .collect()
-}
-
-fn dynamic_materials(keys: &[HostedIssuerKey]) -> Result<HashSet<String>, HostedIssuerError> {
-    keys.iter()
-        .map(|key| {
-            material_of(&key.jwk).ok_or_else(|| {
-                hosted_conflict(&format!(
-                    "stored issuer key `{}` has malformed JWK parameters",
-                    key.kid
-                ))
-            })
-        })
+        .all_principal_keys()
+        .into_iter()
+        .map(|(_, _, material)| material)
         .collect()
 }
 
@@ -116,12 +99,13 @@ fn hosted_conflict(message: &str) -> HostedIssuerError {
 /// ([`validate_static_candidate_against_dynamic`]).
 async fn validate_dynamic_write(
     registry: &RegistryHandle,
-    store: &Arc<dyn HostedIssuerStore>,
     issuer_id: &str,
     key: Option<&HostedIssuerKey>,
 ) -> Result<(), HostedIssuerError> {
     let snapshot = registry.snapshot();
-    if snapshot.issuer(issuer_id).is_some() {
+    // A hosted issuer may not reuse any static principal's id — issuer or
+    // admin — nor a static kid, nor static key material.
+    if snapshot.has_principal_id(issuer_id) {
         return Err(hosted_conflict(
             "issuer id is already owned by the static registry",
         ));
@@ -129,13 +113,11 @@ async fn validate_dynamic_write(
     let Some(key) = key else {
         return Ok(());
     };
-    for issuer in snapshot.issuers() {
-        for static_key in &issuer.keys {
-            if static_key.kid == key.kid {
-                return Err(hosted_conflict(
-                    "kid is already owned by the static registry",
-                ));
-            }
+    for (_, kid, _) in snapshot.all_principal_keys() {
+        if kid == key.kid {
+            return Err(hosted_conflict(
+                "kid is already owned by the static registry",
+            ));
         }
     }
     let registers = material_of(&key.jwk)
@@ -146,50 +128,55 @@ async fn validate_dynamic_write(
             "key material is owned by the static registry",
         ));
     }
-    let dynamics = dynamic_materials(&store.all_keys().await?)?;
-    if dynamics.contains(&registers) {
-        return Err(hosted_conflict(
-            "key material is already used by another issuer",
-        ));
-    }
+    // Dynamic-vs-dynamic material uniqueness is enforced by the `key_material`
+    // unique index in storage, not here: a pre-check here would be racy and
+    // would duplicate the full-table scan the index replaces.
     Ok(())
 }
 
 /// Validate a static registry candidate against durable dynamic state before
-/// it may replace the active snapshot: any candidate issuer id, kid, or key
-/// material owned by a hosted issuer keeps the last-known-good snapshot in
-/// force (the reload fails closed, exactly like an invalid document).
+/// it may replace the active snapshot: any candidate principal id, kid, or key
+/// material (issuer or admin) owned by a hosted issuer keeps the last-known-good
+/// snapshot in force (the reload fails closed, exactly like an invalid document).
 pub async fn validate_static_candidate_against_dynamic(
     store: &Arc<dyn HostedIssuerStore>,
     candidate: &ValidatedRegistry,
 ) -> Result<(), RegistryError> {
-    let mut candidate_materials: HashSet<String> = HashSet::new();
-    for issuer in candidate.issuers() {
+    let candidate_keys = candidate.all_principal_keys();
+    let candidate_materials: HashSet<&str> = candidate_keys
+        .iter()
+        .map(|(_, _, material)| material.as_str())
+        .collect();
+    // A candidate principal whose id already exists as a hosted issuer must
+    // not shadow it: two principals sharing an id is genuinely ambiguous.
+    for (principal_id, kid, _) in &candidate_keys {
         if store
-            .find_issuer(&issuer.id)
+            .find_issuer(principal_id)
             .await
             .map_err(dynamic_check_failed)?
             .is_some()
         {
             return Err(RegistryError::Semantic(format!(
-                "issuer id `{}` collides with a hosted issuer",
-                issuer.id
+                "principal id `{principal_id}` collides with a hosted issuer"
             )));
         }
-        for key in &issuer.keys {
-            if store
-                .find_key_by_kid(&key.kid)
-                .await
-                .map_err(dynamic_check_failed)?
-                .is_some()
-            {
-                return Err(RegistryError::Semantic(format!(
-                    "kid `{}` collides with a hosted issuer key",
-                    key.kid
-                )));
-            }
-            let material = canonical_jwk_material(&key.jwk).map_err(RegistryError::Semantic)?;
-            candidate_materials.insert(material);
+        // A kid the hosted source already owns is not a startup blocker: the
+        // resolver is static-first, so the candidate static key wins and the
+        // hosted key with the same kid is shadowed (unreachable) for this
+        // deployment. Fail-closed is right for an auth *decision*; it is the
+        // wrong response to a startup collision where the authoritative static
+        // source should win (see the kid-namespace policy in ADR 0002).
+        if store
+            .find_key_by_kid(kid)
+            .await
+            .map_err(dynamic_check_failed)?
+            .is_some()
+        {
+            tracing::warn!(
+                kid = %kid,
+                "static registry key shadows a hosted issuer key with the same kid; \
+                 the hosted key is unreachable for this deployment"
+            );
         }
     }
     for key in store.all_keys().await.map_err(dynamic_check_failed)? {
@@ -199,7 +186,7 @@ pub async fn validate_static_candidate_against_dynamic(
                 key.kid
             ))
         })?;
-        if candidate_materials.contains(&material) {
+        if candidate_materials.contains(material.as_str()) {
             return Err(RegistryError::Semantic(
                 "a candidate registry key reuses hosted issuer key material".into(),
             ));
@@ -220,7 +207,7 @@ pub async fn register_hosted_issuer(
     store: &Arc<dyn HostedIssuerStore>,
     issuer: HostedIssuer,
 ) -> Result<HostedIssuer, HostedIssuerError> {
-    validate_dynamic_write(registry, store, &issuer.id, None).await?;
+    validate_dynamic_write(registry, &issuer.id, None).await?;
     store.create_issuer(issuer).await
 }
 
@@ -229,7 +216,7 @@ pub async fn register_hosted_issuer_key(
     store: &Arc<dyn HostedIssuerStore>,
     key: HostedIssuerKey,
 ) -> Result<(), HostedIssuerError> {
-    validate_dynamic_write(registry, store, &key.issuer_id, Some(&key)).await?;
+    validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
     store.add_key(key).await
 }
 
@@ -243,6 +230,10 @@ mod tests {
     use std::collections::HashMap;
 
     const EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"dynamic-key","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
+
+    /// A second, distinct EC key so a collision test can isolate the kid branch
+    /// from the material branch.
+    const DISTINCT_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"distinct","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
 
     /// Minimal in-memory `HostedIssuerStore` double, enough to exercise the
     /// composition logic without a backend.
@@ -353,6 +344,20 @@ mod tests {
         }
     }
 
+    fn key_with_material(kid: &str, jwk_json: &str) -> HostedIssuerKey {
+        let mut jwk: serde_json::Value = serde_json::from_str(jwk_json).unwrap();
+        jwk["kid"] = kid.into();
+        HostedIssuerKey {
+            kid: kid.to_string(),
+            issuer_id: "00000000-0000-4000-8000-000000000002".into(),
+            jwk: PublicJwk::try_new(serde_json::to_vec(&jwk).unwrap()).unwrap(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            not_before: None,
+            not_after: None,
+            state: HostedIssuerKeyState::Active,
+        }
+    }
+
     fn static_registry() -> RegistryHandle {
         let mut jwk = serde_json::to_value(
             PublicJwk::try_new(EC_JWK.as_bytes().to_vec())
@@ -381,10 +386,43 @@ mod tests {
         .unwrap()
     }
 
+    /// A registry with an issuer and an admin principal. The admin's key uses
+    /// distinct material (`DISTINCT_EC_JWK`) so collision tests can tell the
+    /// kid/material branches apart.
+    fn registry_with_admin() -> RegistryHandle {
+        let mut issuer_jwk = serde_json::to_value(
+            PublicJwk::try_new(EC_JWK.as_bytes().to_vec())
+                .unwrap()
+                .jwk(),
+        )
+        .unwrap();
+        issuer_jwk
+            .as_object_mut()
+            .unwrap()
+            .insert("kid".into(), serde_json::Value::String("static-key".into()));
+        let mut admin_jwk: serde_json::Value = serde_json::from_str(DISTINCT_EC_JWK).unwrap();
+        admin_jwk["kid"] = "admin-key".into();
+        RegistryHandle::from_yaml(
+            &serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "static-issuer",
+                    "aggregation_id": uuid::Uuid::new_v4(),
+                    "keys": [{ "kid": "static-key", "alg": "ES256", "jwk": issuer_jwk }],
+                }],
+                "admins": [{
+                    "id": "admin-1",
+                    "scopes": ["issuers:write"],
+                    "keys": [{ "kid": "admin-key", "alg": "ES256", "jwk": admin_jwk }],
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn write_colliding_with_static_issuer_id_fails_closed() {
-        let registry = RegistryHandle::empty();
-        assert!(registry.snapshot().issuer("static-issuer").is_none());
         let registry = static_registry();
         let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
         let mut hosted = issuer();
@@ -400,7 +438,9 @@ mod tests {
     async fn write_colliding_with_static_kid_fails_closed() {
         let registry = static_registry();
         let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
-        let mut hosted = key("static-key");
+        // Distinct material so the kid branch — not the material branch — is
+        // what rejects the write.
+        let mut hosted = key_with_material("static-key", DISTINCT_EC_JWK);
         hosted.issuer_id = "00000000-0000-4000-8000-000000000003".into();
         assert!(
             register_hosted_issuer_key(&registry, &store, hosted)
@@ -438,10 +478,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_candidate_colliding_with_dynamic_state_fails_closed() {
+    async fn write_colliding_with_admin_kid_fails_closed() {
+        let registry = registry_with_admin();
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
+        // Distinct material so only the admin's kid collides.
+        let mut hosted = key_with_material("admin-key", EC_JWK);
+        hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
+        assert!(
+            register_hosted_issuer_key(&registry, &store, hosted)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_reusing_admin_key_material_fails_closed() {
+        let registry = registry_with_admin();
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
+        // The admin's material under a different kid.
+        let mut hosted = key_with_material("hosted-key", DISTINCT_EC_JWK);
+        hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
+        assert!(
+            register_hosted_issuer_key(&registry, &store, hosted)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_colliding_with_admin_id_fails_closed() {
+        let registry = registry_with_admin();
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
+        let mut hosted = issuer();
+        hosted.id = "admin-1".into();
+        assert!(
+            register_hosted_issuer(&registry, &store, hosted)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn static_candidate_kid_collision_with_dynamic_state_warns_and_static_wins() {
         let registry = static_registry();
-        let store: Arc<dyn HostedIssuerStore> =
-            InMemoryHostedStore::with_keys(&[key("dynamic-key")]);
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[
+            // The candidate's kid with distinct material: resolution is
+            // static-first, so the candidate static key wins and the hosted
+            // key is shadowed rather than crashing the reload.
+            key_with_material("static-key", DISTINCT_EC_JWK),
+        ]);
+        assert!(
+            validate_static_candidate_against_dynamic(&store, &registry.snapshot())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn static_candidate_reusing_dynamic_material_still_fails_closed() {
+        let registry = static_registry();
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[
+            // Same material as the candidate's `static-key`, under a different
+            // kid: key-material reuse across sources must still block the
+            // reload.
+            key_with_material("dynamic-key", EC_JWK),
+        ]);
         assert!(
             validate_static_candidate_against_dynamic(&store, &registry.snapshot())
                 .await
@@ -500,35 +601,109 @@ mod tests {
         );
     }
 
-    /// Acceptance criterion: a portal issuer's key authenticates a management
+    /// A store that fails every read, standing in for a trust-backend outage.
+    #[derive(Debug)]
+    struct FailingHostedStore;
+
+    #[async_trait]
+    impl HostedIssuerStore for FailingHostedStore {
+        async fn find_key_by_kid(
+            &self,
+            _kid: &str,
+        ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
+        async fn find_issuer(&self, _id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
+        async fn create_issuer(
+            &self,
+            _issuer: HostedIssuer,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
+        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
+        async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
+    }
+
+    /// A trust-backend fault must not masquerade as an unknown kid: operators
+    /// need the real reason, and the HTTP layer maps it to a retryable 503.
+    #[tokio::test]
+    async fn backend_failure_resolves_as_backend_unavailable() {
+        let resolver = CompositeIssuerKeyResolver::new(
+            Arc::new(RegistryHandle::empty()),
+            Some(Arc::new(FailingHostedStore) as Arc<dyn HostedIssuerStore>),
+        );
+        assert!(matches!(
+            resolver.resolve("any-kid").await,
+            Err(KeyResolveError::BackendUnavailable)
+        ));
+    }
+
+    /// Acceptance criteria: a portal issuer's key authenticates a management
     /// write exactly like a static issuer's key — same middleware path, same
     /// `AuthenticatedIssuer` context, aggregation ID resolved from the
-    /// hosted issuer's immutable mapping.
-    #[cfg(feature = "sqlite")]
+    /// hosted issuer's `issuers` row — and a portal issuer publishes its
+    /// first list without a credentials row: that row is the quota record
+    /// the publish path reserves slots against.
+    #[cfg(all(feature = "memory", feature = "sqlite"))]
     #[tokio::test]
-    async fn hosted_issuer_key_authenticates_like_a_static_key() {
+    async fn hosted_issuer_publishes_first_list_like_a_static_issuer() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        publish_first_list_flow(db, "SQLite").await;
+    }
+
+    #[cfg(all(feature = "memory", feature = "postgres-tests"))]
+    #[tokio::test]
+    async fn hosted_issuer_publishes_first_list_like_a_static_issuer_postgres() {
+        use crate::outbound::sql::test_containers::postgres_helpers;
+        let test_db = postgres_helpers::postgres_connection().await;
+        publish_first_list_flow(test_db.db.clone(), "Postgres").await;
+    }
+
+    #[cfg(all(
+        feature = "memory",
+        any(feature = "sqlite", feature = "postgres-tests")
+    ))]
+    async fn publish_first_list_flow(
+        db: std::sync::Arc<sea_orm::DatabaseConnection>,
+        backend: &str,
+    ) {
         use axum::{
             Router,
             body::Body,
             http::{Request, StatusCode},
-            routing::get,
+            routing::put,
         };
         use tower::ServiceExt;
 
         let registry = Arc::new(RegistryHandle::empty());
-        let db = crate::test_utils::sqlite_test_db(None).await;
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let mut hosted = issuer();
-        hosted.id = "00000000-0000-4000-8000-000000000002".into();
-        let hosted = register_hosted_issuer(&registry, &store, hosted)
+        let hosted = register_hosted_issuer(&registry, &store, issuer())
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("registering a portal issuer on {backend}: {e}"));
         register_hosted_issuer_key(&registry, &store, key("portal-key"))
             .await
-            .unwrap();
+            .unwrap_or_else(|e| panic!("registering a portal key on {backend}: {e}"));
 
-        let mut state = crate::test_utils::test_app_state(None).await;
+        // SQL-backed app state: the publish path's quota slot reservation and
+        // the resolver's read both hit this database.
+        let mut state = crate::test_utils::test_app_state(Some(db)).await;
         state.set_issuer_registry(registry.clone());
         state.issuer_key_resolver =
             Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
@@ -554,8 +729,15 @@ mod tests {
         )
         .unwrap();
 
+        let list_id = uuid::Uuid::new_v4().to_string();
         let app = Router::new()
-            .route("/test", get(|| async { "Ok" }))
+            .nest(
+                "/api/v1",
+                Router::new().route(
+                    "/status-lists/{list_id}/statuses",
+                    put(crate::server::handlers::status_list::publish_status_route),
+                ),
+            )
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 crate::server::auth::auth,
@@ -564,13 +746,19 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/test")
+                    .method(axum::http::Method::PUT)
+                    .uri(format!("/api/v1/status-lists/{list_id}/statuses"))
                     .header("Authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"statuses":[]}"#.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "the portal issuer's first list must publish on {backend}"
+        );
     }
 }

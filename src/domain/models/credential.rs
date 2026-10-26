@@ -62,6 +62,10 @@ pub enum KeyResolveError {
     NotYetValid,
     #[error("key has expired")]
     Expired,
+    #[error("key has been revoked")]
+    Revoked,
+    #[error("the trust backend is unavailable")]
+    BackendUnavailable,
 }
 
 use jsonwebtoken::{

@@ -721,6 +721,7 @@ here; a test fails until it does.
 | `m20261023_000001_hosted_issuers` | Yes: the columns carry defaults, so rows created without them load unchanged, and an older release ignores them | None; keep the columns | Hosted metadata is additive; registry-created rows keep their defaults |
 | `m20261023_000002_issuer_keys` | Yes: the table is empty until the hosted onboarding surface writes keys, and an older release ignores it | None; keep the table | Empty table |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
+| `m20261024_000001_issuer_keys_key_material` | Yes: the column defaults to empty and the unique index is a hardening step an older release ignores | None; keep the column and index | Additive; new writes populate it |
 
 ### Preparing existing management credentials
 
