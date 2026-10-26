@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPL
 ARG FEATURES="postgres,aws,redis"
 
 # strip, lto and codegen-units=1 can drop .dep-v0, which would make scans pass on nothing.
-# Require a non-empty decode; an empty graph still exits 0.
+# Require a non-empty decode (an empty graph still exits 0); capture it first so a decode crash fails as itself.
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=docs,target=docs \
     --mount=type=bind,source=test_data,target=test_data \
