@@ -435,7 +435,7 @@ fn attach_metrics<S: Clone + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -477,7 +477,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(registration.status(), StatusCode::NOT_FOUND);
+        // The shared path is owned by authenticated GET; the removed POST has
+        // no handler and must never accept an unauthenticated registration.
+        assert_eq!(registration.status(), StatusCode::UNAUTHORIZED);
 
         let unauthenticated = send(
             management,
@@ -672,6 +674,7 @@ mod tests {
         use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
         use crate::outbound::sql::list_quota;
         use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
+        use axum::body::to_bytes;
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let db = sqlite_test_db(None).await;

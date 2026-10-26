@@ -238,7 +238,7 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let app = Self {
+        Self {
             base_url,
             management_url,
             client,
@@ -252,8 +252,7 @@ impl TestServer {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| KEY_ID.to_owned()),
-        };
-        app
+        }
     }
 
     pub(super) fn bearer_token(&self) -> String {
