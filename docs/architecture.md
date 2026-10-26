@@ -195,7 +195,7 @@ persisted status lists:
 | `max_status_index`         | 100000  | `400 Bad Request` — `index` too large     | publish / update handlers                      |
 | `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries      | publish / update handlers                      |
 | `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`                | application services                           |
-| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`credentials.list_count`) |
+| `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`issuers.list_count`) |
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -204,7 +204,7 @@ lower a bound via configuration should treat the documented maximums as
 defaults, not guarantees.
 
 `max_lists_per_issuer` is enforced exactly, including under concurrent
-publishes: each publish increments `credentials.list_count` with a guarded
+publishes: each publish increments `issuers.list_count` with a guarded
 `UPDATE` in the same transaction as its `INSERT`, so a publish that fails
 gives its slot back.
 
@@ -263,9 +263,11 @@ is covered in the [runbook](deployment-runbook.md#status-list-aggregation) and
 [troubleshooting](troubleshooting.md). Pages are read by a keyset scan on
 `(issuer, list_id)` and there is no total count.
 
-An unknown `aggregation_id` is a `404`, so a relying party whose URI went stale
-finds out instead of caching an empty aggregation. Responses carry a weak `ETag`
-and answer a matching `If-None-Match` with `304`.
+An `aggregation_id` that was never registered is a `404`, so a relying party
+finds out instead of caching an empty aggregation. Removing a registry-only
+issuer does not remove its durable mapping, so already-issued aggregation URLs
+continue resolving. Responses carry a weak `ETag` and answer a matching
+`If-None-Match` with `304`.
 
 Serving a status list token needs its issuer's aggregation ID, so
 `CachingCredentialRepo` keeps found IDs in memory; an ID never changes once
