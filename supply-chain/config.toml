@@ -2034,10 +2034,6 @@ criteria = "safe-to-deploy"
 version = "0.8.4"
 criteria = "safe-to-deploy"
 
-[[exemptions.tokio]]
-version = "1.53.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.tokio-cron-scheduler]]
 version = "0.15.1"
 criteria = "safe-to-deploy"
