@@ -13,16 +13,17 @@ Collection v2.1 exports:
 
 The environment exposes these variables:
 
-| Variable          | Default                                | Purpose                                                               |
-| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
-| `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
-| `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
-| `token`           | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
-| `issuer_private_jwk` | empty                               | Local secret used to reuse the generated issuer key pair.             |
-| `issuer_private_jwks` | empty                              | Secret key cache indexed by issuer, retained when switching issuers.   |
-| `issuer_public_key`  | empty                               | Public JWK generated for issuer registration.                         |
-| `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
+| Variable              | Default                                | Purpose                                                               |
+| --------------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `baseUrl`             | `http://localhost:8000`                | Public status-list-server endpoint.                                   |
+| `managementUrl`       | `http://localhost:8001`                | Management endpoint for issuer and status-list writes.                |
+| `list_id`             | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
+| `issuer_id`           | `my-issuer`                            | Issuer identifier used for credential registration.                   |
+| `issuer_audience`     | empty                                  | Optional audience claim for deployments that require one.             |
+| `token`               | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
+| `issuer_private_jwks` | empty                                  | Secret key cache indexed by issuer, retained when switching issuers.  |
+| `issuer_public_key`   | empty                                  | Public JWK generated for issuer registration.                         |
+| `historical_time`     | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
 The collection is organized into Health & Metrics, Issuer Management, Status
 Lists, and Aggregation folders. Requests include Postman test scripts that check
@@ -36,15 +37,13 @@ generates and registers a temporary issuer for the run.
 In Postman, select the included environment and send **Register issuer
 credentials** before publishing. Generated keys are saved per issuer in that
 environment; switching `issuer_id` back to an earlier issuer reuses its key.
-Existing `issuer_private_jwk` and `issuer_key_owner` values are migrated into
-the cache automatically. Keep these secret values when backing up your local
-environment.
+Keep the private key cache secret when backing up your local environment.
 
 A registration conflict (`409`) is accepted only after an authenticated
-`GET /api/v1/credentials` confirms the saved key works for that issuer. If it
-fails, the collection clears `token` and reports a failed test. Restore the
-issuer's original private key/environment, or choose a new `issuer_id` and
-register again. Reimporting an empty environment cannot recover the private
+`GET {{managementUrl}}/api/v1/credentials` confirms the saved key works for that
+issuer. If it fails, the collection clears `token` and reports a failed test.
+Restore the issuer's original private key/environment, or choose a new
+`issuer_id` and register again. Reimporting an empty environment cannot recover the private
 key of an issuer already registered on the server.
 
 Run the registration-script regression checks with:
@@ -83,10 +82,11 @@ Then run the same collection check used by CI:
 
 The script generates a temporary P-256 issuer key, patches a temporary copy of
 the collection so `POST /api/v1/credentials` registers the matching public JWK,
-and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
-`issuer_id`, `token`, and `historical_time`. No generated collection or
-environment is written into the repository. Set `NEWMAN_RUNNER=docker` to use
-the pinned Newman container instead of a locally installed Newman binary.
+and runs Newman with a temporary environment containing `baseUrl`,
+`managementUrl`, `list_id`, `issuer_id`, `token`, and `historical_time`. No
+generated collection or environment is written into the repository. Set
+`NEWMAN_RUNNER=docker` to use the pinned Newman container instead of a locally
+installed Newman binary.
 
 Useful environment overrides:
 

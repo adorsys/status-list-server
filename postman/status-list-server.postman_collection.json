@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Select the included environment, set `baseUrl`, `list_id`, and `issuer_id`, then send `Register issuer credentials` once. Its pre-request script generates or reuses an ES256 issuer key pair, registers the public key, and creates a five-minute JWT in `token` for protected status-list write requests.",
+    "description": "Ready-to-run requests for exploring the status-list-server API. Select the included environment, set `baseUrl`, `list_id`, and `issuer_id`, then send `Register issuer credentials` once. The collection generates or reuses an ES256 issuer key pair, registers its public key, and refreshes five-minute JWTs for protected writes. Set `issuer_audience` when the management server requires an audience claim.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,
@@ -21,6 +21,69 @@
     ]
   },
   "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "exec": [
+          "const method = pm.request.method;",
+          "const requestUrl = pm.request.url.toString();",
+          "const isRegistration = method === 'POST' && requestUrl.includes('/api/v1/credentials');",
+          "const isProtectedWrite = method === 'PUT' || method === 'PATCH';",
+          "if (isRegistration || isProtectedWrite) {",
+          "  (async function () {",
+          "    const issuer = pm.variables.get('issuer_id');",
+          "    if (!issuer) throw new Error('Set issuer_id before registering credentials or writing status lists.');",
+          "    const keys = JSON.parse(pm.environment.get('issuer_private_jwks') || '{}');",
+          "    let privateJwk = Object.prototype.hasOwnProperty.call(keys, issuer) ? keys[issuer] : null;",
+          "    if (!privateJwk && isRegistration) {",
+          "      const storedToken = pm.environment.get('token');",
+          "      const storedPublicKey = pm.environment.get('issuer_public_key');",
+          "      if (storedToken && storedPublicKey && Object.keys(keys).length === 0) return;",
+          "      const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);",
+          "      privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);",
+          "      Object.defineProperty(keys, issuer, { value: privateJwk, enumerable: true, configurable: true, writable: true });",
+          "      pm.environment.set('issuer_private_jwks', JSON.stringify(keys));",
+          "      pm.environment.set('issuer_public_key', JSON.stringify({ kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, kid: issuer, alg: 'ES256' }));",
+          "    }",
+          "    if (!privateJwk) {",
+          "      const existingToken = pm.environment.get('token') || pm.collectionVariables.get('token');",
+          "      if (isProtectedWrite && existingToken) {",
+          "        pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${existingToken}` });",
+          "        return;",
+          "      }",
+          "      throw new Error('No issuer signing key found. Send Register issuer credentials first.');",
+          "    }",
+          "    pm.environment.set('issuer_public_key', JSON.stringify({ kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, kid: issuer, alg: 'ES256' }));",
+          "    const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);",
+          "    const base64url = value => {",
+          "      const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);",
+          "      let binary = '';",
+          "      bytes.forEach(byte => { binary += String.fromCharCode(byte); });",
+          "      return btoa(binary).replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+          "    };",
+          "    const now = Math.floor(Date.now() / 1000);",
+          "    const header = base64url(JSON.stringify({ alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuer }));",
+          "    const payloadClaims = { iss: issuer, iat: now, exp: now + 300 };",
+          "    const audience = pm.environment.get('issuer_audience');",
+          "    if (audience) payloadClaims.aud = audience;",
+          "    const payload = base64url(JSON.stringify(payloadClaims));",
+          "    const signingInput = header + '.' + payload;",
+          "    const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(signingInput));",
+          "    const token = signingInput + '.' + base64url(signature);",
+          "    pm.environment.set('token', token);",
+          "    pm.collectionVariables.set('token', token);",
+          "    if (isProtectedWrite) pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });",
+          "  })().catch(error => {",
+          "    pm.environment.unset('token');",
+          "    pm.collectionVariables.unset('token');",
+          "    throw error;",
+          "  });",
+          "}"
+        ]
+      }
+    },
     {
       "listen": "test",
       "script": {
@@ -189,46 +252,6 @@
           "response": [],
           "event": [
             {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "packages": {},
-                "exec": [
-                  "const issuer = pm.variables.get('issuer_id');",
-                  "const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
-                  "const storedKeyOwner = pm.environment.get('issuer_key_owner');",
-                  "const storedToken = pm.environment.get('token');",
-                  "(async function () {",
-                  "  if (!issuer) { throw new Error('Set issuer_id before registering credentials.'); }",
-                  "  const keys = JSON.parse(pm.environment.get('issuer_private_jwks') || '{}');",
-                  "  if (storedPrivateJwk && storedKeyOwner) {",
-                  "    Object.defineProperty(keys, storedKeyOwner, { value: JSON.parse(storedPrivateJwk), enumerable: true, configurable: true, writable: true });",
-                  "  }",
-                  "  let privateJwk = Object.prototype.hasOwnProperty.call(keys, issuer) ? keys[issuer] : null;",
-                  "  if (!privateJwk && !storedPrivateJwk && storedToken) {",
-                  "    console.log('Using the preconfigured issuer token and public key.');",
-                  "    return;",
-                  "  }",
-                  "  pm.environment.unset('token');",
-                  "  pm.collectionVariables.unset('token');",
-                  "  if (!privateJwk) {",
-                  "    const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);",
-                  "    privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);",
-                  "    Object.defineProperty(keys, issuer, { value: privateJwk, enumerable: true, configurable: true, writable: true });",
-                  "  }",
-                  "  pm.environment.set('issuer_private_jwks', JSON.stringify(keys));",
-                  "  pm.environment.set('issuer_private_jwk', JSON.stringify(privateJwk));",
-                  "  pm.environment.set('issuer_key_owner', issuer);",
-                  "  pm.environment.set('issuer_public_key', JSON.stringify({ kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, kid: issuer, alg: 'ES256' }));",
-                  "})().catch(error => {",
-                  "  pm.environment.unset('token');",
-                  "  pm.collectionVariables.unset('token');",
-                  "  throw error;",
-                  "});"
-                ]
-              }
-            },
-            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -245,28 +268,11 @@
                   "  pm.collectionVariables.unset('token');",
                   "  if (![202, 409].includes(pm.response.code)) { throw new Error('Issuer registration failed. Fix the registration error before publishing.'); }",
                   "  const issuer = pm.variables.get('issuer_id');",
-                  "  const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
-                  "  if (storedPrivateJwk && pm.environment.get('issuer_key_owner') === issuer) {",
-                  "    const privateJwk = JSON.parse(storedPrivateJwk);",
-                  "    const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);",
-                  "    const base64url = value => {",
-                  "      const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);",
-                  "      let binary = '';",
-                  "      bytes.forEach(byte => { binary += String.fromCharCode(byte); });",
-                  "      return btoa(binary).replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
-                  "    };",
-                  "    const now = Math.floor(Date.now() / 1000);",
-                  "    const header = base64url(JSON.stringify({ alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuer }));",
-                  "    const payload = base64url(JSON.stringify({ iss: issuer, iat: now, exp: now + 300 }));",
-                  "    const signingInput = header + '.' + payload;",
-                  "    const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(signingInput));",
-                  "    token = signingInput + '.' + base64url(signature);",
-                  "  }",
                   "  if (!token) { throw new Error('No issuer signing key or preconfigured token is available. Register issuer credentials first.'); }",
                   "  if (pm.response.code === 409) {",
                   "    await new Promise((resolve, reject) => {",
                   "      pm.sendRequest({",
-                  "        url: pm.variables.replaceIn('{{baseUrl}}/api/v1/credentials'),",
+                  "        url: pm.variables.replaceIn('{{managementUrl}}/api/v1/credentials'),",
                   "        method: 'GET',",
                   "        header: { Authorization: 'Bearer ' + token }",
                   "      }, (error, response) => {",
@@ -336,44 +342,6 @@
           },
           "response": [],
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "(async function () {",
-                  "const issuer = pm.variables.get('issuer_id');",
-                  "const storedPrivateJwk = pm.environment.get('issuer_private_jwk');",
-                  "const storedKeyOwner = pm.environment.get('issuer_key_owner');",
-                  "let token = pm.environment.get('token') || pm.collectionVariables.get('token');",
-                  "if (issuer && storedPrivateJwk && storedKeyOwner === issuer) {",
-                  "  const privateJwk = JSON.parse(storedPrivateJwk);",
-                  "  const privateKey = await crypto.subtle.importKey('jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);",
-                  "  const base64url = value => {",
-                  "    const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);",
-                  "    let binary = '';",
-                  "    bytes.forEach(byte => { binary += String.fromCharCode(byte); });",
-                  "    return btoa(binary).replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
-                  "  };",
-                  "  const now = Math.floor(Date.now() / 1000);",
-                  "  const header = base64url(JSON.stringify({ alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuer }));",
-                  "  const payload = base64url(JSON.stringify({ iss: issuer, iat: now, exp: now + 300 }));",
-                  "  const signingInput = header + '.' + payload;",
-                  "  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(signingInput));",
-                  "  token = signingInput + '.' + base64url(signature);",
-                  "  pm.environment.set('token', token);",
-                  "  pm.collectionVariables.set('token', token);",
-                  "} else if (!token) {",
-                  "  throw new Error('No issuer JWT or matching private key found. Send Register issuer credentials first.');",
-                  "}",
-                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });",
-                  "})().catch(error => {",
-                  "  console.error('Failed to prepare issuer JWT:', error);",
-                  "  throw error;",
-                  "});"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
@@ -631,18 +599,6 @@
           },
           "response": [],
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "setTimeout(function () {}, 1200);",
-                  "const token = pm.environment.get('token') || pm.collectionVariables.get('token');",
-                  "if (!token) { throw new Error('No issuer JWT found. Send Register issuer credentials first.'); }",
-                  "pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
