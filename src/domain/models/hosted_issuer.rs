@@ -52,9 +52,8 @@ impl HostedIssuer {
     }
 }
 
-/// A hosted issuer's signing key, mirroring one `issuer_keys` row. The public
-/// key is validated by [`PublicJwk`], the same contract used for every trust
-/// source.
+/// A hosted issuer's signing key mirroring one `issuer_keys` row, with the
+/// public key validated by [`PublicJwk`] like every trust source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostedIssuerKey {
     pub kid: String,
@@ -107,16 +106,14 @@ pub enum HostedIssuerError {
     NotFound,
     #[error("a hosted issuer or key with this id or kid already exists")]
     AlreadyExists,
-    /// RFC 7638 §7: equivalencing key material by thumbprint is unsound, so
-    /// reuse is detected by comparing normalized key parameters instead. The
-    /// owner is logged server-side and never returned to the caller.
+    /// RFC 7638 §7: reuse is rejected by comparing normalized key parameters;
+    /// the owner is logged server-side, never returned to the caller.
     #[error("key material was already registered by another issuer")]
     KeyMaterialReused,
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
-    /// A persisted hosted row is malformed and can never parse. A permanent
-    /// data fault: authentication fails closed for that key but the backend
-    /// itself is healthy, so this is not a retryable 503.
+    /// A persisted hosted row is malformed and can never parse: a permanent
+    /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]
     Corrupt(String),
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]

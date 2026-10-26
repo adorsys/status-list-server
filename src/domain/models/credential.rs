@@ -50,9 +50,7 @@ impl Principal {
 /// Why a key could not be used to authenticate a request.
 ///
 /// The response to a client is identical for every variant except
-/// [`BackendUnavailable`](KeyResolveError::BackendUnavailable), which is a
-/// retryable 503; the discriminant exists so operators can log the real reason
-/// instead of a generic "unknown kid".
+/// [`BackendUnavailable`](KeyResolveError::BackendUnavailable), a retryable 503.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeyResolveError {
     #[error("unknown kid")]
@@ -65,10 +63,8 @@ pub enum KeyResolveError {
     Expired,
     #[error("key has been revoked")]
     Revoked,
-    /// A persisted dynamic key row is malformed (bad state, timestamp, or JWK)
-    /// and can never authenticate. Non-retryable: unlike a backend outage it
-    /// will not clear on its own, so it must not become a 503 that clients
-    /// retry forever.
+    /// A malformed stored key row that can never authenticate: non-retryable,
+    /// so it fails closed as a 401 rather than a retryable 503.
     #[error("stored key data is corrupt")]
     Corrupt,
     #[error("the trust backend is unavailable")]
@@ -319,10 +315,8 @@ impl PublicJwk {
     }
 }
 
-/// `jsonwebtoken` checks JWK shape and curve names, but point membership is a
-/// cryptographic property. Parse the uncompressed SEC 1 point with AWS-LC and
-/// check coordinate length so off-curve, malformed, or wrong-length EC keys —
-/// and wrong-length OKP keys — cannot enter any trust source.
+/// Verify EC point membership and coordinate/OKP length so malformed or
+/// off-curve keys cannot enter any trust source.
 fn validate_curve_point(jwk: &Jwk) -> Result<(), CredentialError> {
     use aws_lc_rs::agreement::{ECDH_P256, ECDH_P384, ParsedPublicKey, UnparsedPublicKey};
     use base64::Engine as _;

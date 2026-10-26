@@ -982,9 +982,8 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
                         let active = registry_handle.snapshot();
-                        // Cross-source checks are read-only and run before the
-                        // immutable aggregation rows are written, so a rejected
-                        // candidate leaves no adoption side effects.
+                        // Read-only cross-source checks run before the immutable
+                        // aggregation rows are written, so rejection leaves none.
                         if let Some(dynamic_store) = &dynamic_issuer_store {
                             crate::server::auth::hosted::validate_static_candidate_against_dynamic(
                                 dynamic_store,

@@ -1,9 +1,5 @@
-//! Composition of both trust sources (ADR 0002, "Sources of trust"): the
-//! static operator registry stays authoritative, hosted-profile issuers
-//! resolve through durable storage, and ids and key material are unique across
-//! sources. A static candidate that collides with a hosted id or material
-//! fails closed; a static candidate kid that equals a hosted kid wins (the
-//! hosted key is shadowed and warned), because the authoritative source wins.
+//! Composes both trust sources static-first: the operator registry wins, and
+//! ids and material are unique across sources (a static kid shadows a hosted kid).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,13 +13,8 @@ use crate::domain::models::hosted_issuer::{HostedIssuer, HostedIssuerError, Host
 use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
 use crate::server::auth::issuer_registry::{RegistryError, RegistryHandle, ValidatedRegistry};
 
-/// static-first key resolution. A kid owned by both sources resolves to the
-/// static side only. Dynamic candidates that collide with the registry are
-/// rejected at their write point by
-/// [`register_hosted_issuer`]/[`register_hosted_issuer_key`]; in the reverse
-/// direction [`validate_static_candidate_against_dynamic`] rejects id and
-/// material collisions but lets a static kid shadow an existing hosted kid,
-/// since the authoritative source wins.
+/// Static-first resolution: a kid owned by both sources resolves to static.
+/// Dynamic writes reject registry collisions; a static kid may shadow a hosted kid.
 pub struct CompositeIssuerKeyResolver {
     static_registry: Arc<RegistryHandle>,
     dynamic: Option<Arc<dyn HostedIssuerStore>>,
@@ -124,9 +115,8 @@ async fn validate_dynamic_write(
     let Some(key) = key else {
         return Ok(());
     };
-    // `resolve` is O(1) and complete: it keys on kid alone, so a key whose
-    // material normalization fails is still caught, unlike iterating
-    // `all_principal_keys`.
+    // `resolve` is O(1) and complete, catching a kid whose material
+    // normalization fails, unlike iterating `all_principal_keys`.
     if snapshot.resolve(&key.kid).is_some() {
         return Err(hosted_conflict(
             "kid is already owned by the static registry",
@@ -146,11 +136,8 @@ async fn validate_dynamic_write(
     Ok(())
 }
 
-/// Validate a static registry candidate against durable dynamic state before
-/// it may replace the active snapshot. Only *new* ids, kids, and key material
-/// (issuer or admin) are cross-checked against hosted state: a collision keeps
-/// the last-known-good snapshot in force (fails closed), while a removal or a
-/// tightening of existing entries applies without touching the hosted store.
+/// Cross-check only *new* candidate ids/kids/materials against hosted state;
+/// collisions fail closed, while a removal applies without touching the store.
 pub async fn validate_static_candidate_against_dynamic(
     store: &Arc<dyn HostedIssuerStore>,
     active: &ValidatedRegistry,
@@ -180,9 +167,7 @@ pub async fn validate_static_candidate_against_dynamic(
         }
     }
     // A kid the hosted source already owns is not a startup blocker: the
-    // resolver is static-first, so the candidate static key wins and the
-    // hosted key with the same kid is shadowed (unreachable) for this
-    // deployment. Only warn about newly introduced kids.
+    // static key wins (shadowed), so only warn about newly introduced kids.
     let active_kids: HashSet<&str> = active_keys.iter().map(|(_, kid, _)| *kid).collect();
     for (_, kid, _) in &candidate_keys {
         if active_kids.contains(kid) {
@@ -201,9 +186,8 @@ pub async fn validate_static_candidate_against_dynamic(
             );
         }
     }
-    // A candidate key whose material is already registered to a hosted key must
-    // not be introduced. The match runs in SQL against the stored material hash
-    // (RFC 7638 §7 parameters), so the reload never loads every hosted key.
+    // Reject a candidate key whose material is already registered to a hosted
+    // key; the match runs in SQL against the stored material hash.
     for (_, _, material) in &candidate_keys {
         if active_materials.contains(material.as_str()) {
             continue;
@@ -754,9 +738,8 @@ mod tests {
         ));
     }
 
-    /// A removal-only registry edit must apply even while the hosted store is
-    /// unreachable: only *new* ids, kids, and materials are cross-checked, so
-    /// retiring a compromised static key never blocks on the dynamic source.
+    /// A removal-only edit must apply even while the hosted store is down:
+    /// only *new* entries are cross-checked, so retirement never blocks.
     #[tokio::test]
     async fn removal_only_reload_applies_without_touching_a_down_hosted_store() {
         let store: Arc<dyn HostedIssuerStore> = Arc::new(FailingHostedStore);

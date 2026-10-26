@@ -479,9 +479,8 @@ impl SeaOrmStore<HostedIssuerRow> {
     }
 }
 
-/// Untagged driver errors cannot be reopened, so the typed material-reuse and
-/// invalid-key variants produced by `add_key` are the only client-visible
-/// discriminations recoverable here; everything else keeps the shared mapping.
+/// Only the typed material-reuse and invalid-key variants from `add_key` are
+/// recoverable here; everything else keeps the shared mapping.
 fn hosted_error(err: RepositoryError) -> HostedIssuerError {
     match &err {
         RepositoryError::KeyMaterialReused => HostedIssuerError::KeyMaterialReused,
