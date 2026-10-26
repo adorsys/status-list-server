@@ -405,11 +405,18 @@ impl Service {
         &self,
         credential: Credential,
     ) -> Result<AggregationId, CredentialError> {
-        let aggregation_id = AggregationId::generate();
+        self.publish_credential_with_aggregation_id(credential, AggregationId::generate())
+            .await
+    }
+
+    pub async fn publish_credential_with_aggregation_id(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<AggregationId, CredentialError> {
         self.credential_repo
             .insert(credential, aggregation_id)
-            .await?;
-        Ok(aggregation_id)
+            .await
     }
 
     /// The issuer's aggregation ID, or `None` for an unknown issuer.
