@@ -498,7 +498,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ctutils]]
-version = "0.4.2"
+version = "0.4.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.darling]]
@@ -2032,10 +2032,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tinystr]]
 version = "0.8.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.tokio]]
-version = "1.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio-cron-scheduler]]

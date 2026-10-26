@@ -1305,7 +1305,11 @@ mod tests {
             ))
         }
 
-        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+        async fn insert(
+            &self,
+            _: Credential,
+            _: AggregationId,
+        ) -> Result<AggregationId, CredentialError> {
             Err(CredentialError::Backend(
                 "credential store unavailable".into(),
             ))

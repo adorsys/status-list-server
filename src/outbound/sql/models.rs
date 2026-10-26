@@ -96,16 +96,17 @@ impl From<Credentials> for credentials::ActiveModel {
     }
 }
 
-/// Durable identity history for issuers trusted through the operator registry.
-pub(crate) mod issuer_aggregations {
+/// Durable issuer ownership, list quota, and registry aggregation identity.
+pub(crate) mod issuers {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-    #[sea_orm(table_name = "issuer_aggregations")]
+    #[sea_orm(table_name = "issuers")]
     pub(crate) struct Model {
         #[sea_orm(primary_key)]
         pub issuer: String,
-        pub aggregation_id: String,
+        pub aggregation_id: Option<String>,
+        pub list_count: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
