@@ -24,7 +24,7 @@ async fn insert_legacy_key(db: &DatabaseConnection, issuer: &str, key: &serde_js
         [issuer.into(), key.to_string().into()],
     ))
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("inserting legacy key for {issuer}: {error}"));
 }
 
 fn migration_index() -> usize {
@@ -228,6 +228,11 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
     // A collision must fail closed without assigning a different ID to an issuer.
     let mut colliding_key = template.clone();
     colliding_key.as_object_mut().unwrap().remove("kid");
+    db.execute_unprepared(
+        "INSERT INTO issuers (issuer, aggregation_id, list_count) VALUES ('collision', NULL, 0)",
+    )
+    .await
+    .unwrap();
     insert_legacy_key(&db, "collision", &colliding_key).await;
     let error = Migrator::migrations()[migration_index()]
         .up(&SchemaManager::new(db.as_ref()))

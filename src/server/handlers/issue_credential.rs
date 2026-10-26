@@ -66,7 +66,14 @@ pub async fn credential_handler(
         issuer: issuer.clone(),
         public_key: PublicJwk::try_new(public_key_bytes)?,
     };
-    let aggregation_id = state.service.publish_credential(credential).await?;
+    let aggregation_id = state
+        .issuer_registry
+        .issuer_aggregation_id(&issuer.0)
+        .unwrap_or_else(AggregationId::generate);
+    let aggregation_id = state
+        .service
+        .publish_credential_with_aggregation_id(credential, aggregation_id)
+        .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(CredentialsResponse {
@@ -255,6 +262,86 @@ mod tests {
             registration.aggregation_uri.as_deref(),
             Some(expected_uri.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn registering_a_credential_for_a_registry_issuer_keeps_its_aggregation_id() {
+        let mut app_state = test_app_state(None).await;
+        let aggregation_id = uuid::Uuid::new_v4();
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "static-issuer",
+                "aggregation_id": aggregation_id,
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": test_jwk()}],
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        app_state.set_issuer_registry(Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
+
+        let response = credential_handler(
+            State(app_state),
+            Json(CredentialsRequest {
+                issuer: "static-issuer".into(),
+                public_key: test_jwk(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let registration: CredentialsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(registration.aggregation_id.0, aggregation_id);
+    }
+
+    #[cfg(all(feature = "history", feature = "sqlite"))]
+    #[tokio::test]
+    async fn re_registering_a_persisted_issuer_reuses_its_aggregation_id() {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        let aggregation_id = uuid::Uuid::new_v4();
+        db.execute_unprepared(&format!(
+            "INSERT INTO issuers (issuer, aggregation_id, list_count) \
+             VALUES ('removed-registry-issuer', '{aggregation_id}', 0)"
+        ))
+        .await
+        .unwrap();
+        let app_state = test_app_state(Some(db.clone())).await;
+
+        let response = credential_handler(
+            State(app_state),
+            Json(CredentialsRequest {
+                issuer: "removed-registry-issuer".into(),
+                public_key: test_jwk(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let registration: CredentialsResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(registration.aggregation_id.0, aggregation_id);
+        let stored_credential_id = db
+            .query_one_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT aggregation_id FROM credentials WHERE issuer = 'removed-registry-issuer'",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "aggregation_id")
+            .unwrap();
+        assert_eq!(stored_credential_id, aggregation_id.to_string());
     }
 
     #[tokio::test]
