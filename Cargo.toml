@@ -163,29 +163,29 @@ optional = true
 
 # AWS related libraries
 [dependencies.aws-config]
-version = "1"
+version = "1.12"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
 [dependencies.aws-sdk-route53]
-version = "1"
+version = "1.122"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
 [dependencies.aws-sdk-secretsmanager]
-version = "1"
+version = "1.115"
 default-features = false
 features = ["default-https-client", "rt-tokio"]
 optional = true
 
 [dependencies.google-cloud-secretmanager-v1]
-version = "1"
+version = "1.14"
 optional = true
 
 [dependencies.google-cloud-auth]
-version = "1"
+version = "1.18"
 optional = true
 
 [dependencies.azure_security_keyvault_secrets]
