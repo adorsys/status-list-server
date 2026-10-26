@@ -99,6 +99,8 @@ impl HostedIssuerKey {
 /// identifier clashes, `Contention { code }` carries the driver discriminator
 /// for a retryable lock race, and `Backend` wraps everything else. Uniqueness
 /// is enforced by storage keys and constraints, never by a pre-check.
+///
+/// [`CredentialError`]: crate::domain::models::credential::CredentialError
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum HostedIssuerError {

@@ -863,6 +863,7 @@ mod tests {
 
     /// A portal-signed management JWT for `issuer_id`, using the private half of
     /// `test_fixtures::TEST_EC_PUBLIC_JWK` (kid `portal-key`).
+    #[cfg(all(feature = "memory", feature = "sqlite"))]
     fn portal_token(issuer_id: &str) -> String {
         let private_pem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsJyilHyjhzXDVU2A\n5ud6kfXPktY7wx5d8CQFe1nMzK2hRANCAAQ17IW//Yvrs4SmU1smlHTYgWKzj+UV\nb0diaF8Xk6vqb3gB9qnvD4NxkNvLsQPPqjQKncEP831drigLydrC6WPT\n-----END PRIVATE KEY-----";
         let now = std::time::SystemTime::now()
