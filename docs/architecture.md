@@ -127,12 +127,6 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
 - **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
-#### Deployment profiles
-
-`server.profile` selects the trust sources behind authentication (ADR 0002):
-
-- **private** (default): only issuers listed in the operator-managed registry (`management_auth.issuers_file`) are trusted. Management-token `kid`s resolve against that registry alone.
-- **hosted**: additionally trusts portal-registered issuers persisted in the `issuers`/`issuer_keys` SQL tables (hosted profile only — this requires a durable SQL backend, and startup refuses the memory backend). A portal issuer is an `issuers` row keyed by its server-assigned UUID with hosted metadata added by the `hosted_issuers` migration, so it reuses the same ownership and list-quota record every issuer publishes against, and it can publish its first list without a `credentials` row. Key resolution is composed: the static registry first, then the dynamic store by `kid` primary key with no cache, so revocation takes effect on the next request. Issuer ids, `kid`s and normalized key material are unique across both sources; a candidate that collides with the other source fails closed at its write point (registry reload keeps the last-known-good snapshot, dynamic writes are rejected).
 
 ### Data Flow
 
