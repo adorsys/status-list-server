@@ -358,7 +358,7 @@ impl CredentialRepo for MemoryCredentials {
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
-    ) -> Result<(), CredentialError> {
+    ) -> Result<AggregationId, CredentialError> {
         let mut values = self.values.write().await;
         if values.by_issuer.contains_key(&credential.issuer.0) {
             return Err(CredentialError::AlreadyExists);
@@ -378,7 +378,7 @@ impl CredentialRepo for MemoryCredentials {
         values
             .issuers_by_aggregation_id
             .insert(aggregation_id, issuer);
-        Ok(())
+        Ok(aggregation_id)
     }
 
     async fn find_aggregation_id(
