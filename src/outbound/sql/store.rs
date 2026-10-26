@@ -84,6 +84,11 @@ impl<T> SeaOrmStore<T> {
         }
     }
 
+    /// The active pooled connection, for adapters that issue their own reads.
+    pub(crate) fn current(&self) -> Arc<DatabaseConnection> {
+        self.db.current()
+    }
+
     /// Begins a transaction pinned to READ COMMITTED, so PostgreSQL and MySQL
     /// run at the same level rather than at their differing defaults (READ
     /// COMMITTED and REPEATABLE READ).

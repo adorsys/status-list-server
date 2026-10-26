@@ -294,6 +294,67 @@ impl PublicJwk {
     pub fn jwk(&self) -> &Jwk {
         &self.jwk
     }
+
+    /// Canonical string form of this key's normalized parameters
+    /// (RFC 7638 §7): per-type members decoded and compared byte-for-byte,
+    /// JWK member order ignored. Key-material reuse is decided against this,
+    /// never against a thumbprint.
+    pub fn normalized_material(&self) -> Result<String, CredentialError> {
+        let value =
+            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&self.bytes))
+                .map_err(|err| CredentialError::InvalidPublicJwk(format!("invalid JWK: {err}")))?;
+        canonical_jwk_material(&value).map_err(CredentialError::InvalidPublicJwk)
+    }
+}
+
+/// Per-type normalized key parameters: `EC` → `crv|x|y`, `RSA` → `n|e` with
+/// leading zero bytes stripped, `OKP` → `crv|x`. `kty=oct` never passes
+/// [`PublicJwk`] validation, so it has no normal form here.
+pub(crate) fn canonical_jwk_material(jwk: &serde_json::Value) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let object = jwk
+        .as_object()
+        .ok_or_else(|| "JWK must be a JSON object".to_string())?;
+    let string = |field: &str| -> Result<&str, String> {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("JWK is missing {field}"))
+    };
+    let decode = |field: &str| -> Result<Vec<u8>, String> {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(string(field)?)
+            .map_err(|error| format!("invalid JWK {field}: {error}"))
+    };
+    let normalized = |field: &str| -> Result<Vec<u8>, String> {
+        let mut bytes = decode(field)?;
+        let first = bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(bytes.len());
+        bytes.drain(..first);
+        Ok(bytes)
+    };
+    match string("kty")? {
+        "EC" => Ok(format!(
+            "EC|{}|{}|{}",
+            string("crv")?,
+            hex::encode(decode("x")?),
+            hex::encode(decode("y")?)
+        )),
+        "RSA" => Ok(format!(
+            "RSA|{}|{}",
+            hex::encode(normalized("n")?),
+            hex::encode(normalized("e")?)
+        )),
+        "OKP" => Ok(format!(
+            "OKP|{}|{}",
+            string("crv")?,
+            hex::encode(decode("x")?)
+        )),
+        other => Err(format!("unsupported JWK kty `{other}`")),
+    }
 }
 
 /// Domain entity representing an issuer's registered public key credentials.

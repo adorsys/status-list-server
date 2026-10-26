@@ -2,13 +2,53 @@
 
 use std::{fmt, sync::Arc};
 
+use async_trait::async_trait;
+
 use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
 };
+use crate::domain::models::hosted_issuer::{
+    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+};
 
-/// Resolve a trusted signing key without exposing the backing trust source to authentication.
+/// Resolve a trusted signing key without exposing the backing trust source to
+/// authentication.
+///
+/// Resolution may consult durable storage (hosted-profile issuers), so it is
+/// asynchronous; callers in the auth middleware await it.
+#[async_trait]
 pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
-    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
+    async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
+}
+
+/// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
+/// is looked up by its `kid` primary key with no cache: every resolution reads
+/// the row, so revocation takes effect on the next request (ADR 0002, no
+/// cached authorization outlives a change).
+#[async_trait]
+pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// The issuer owning a registered management-token key ID.
+    async fn find_key_by_kid(
+        &self,
+        kid: &str,
+    ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError>;
+
+    /// One hosted issuer by its assigned identifier.
+    async fn find_issuer(&self, id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError>;
+
+    /// Persist a new hosted issuer together with its immutable aggregation
+    /// mapping in one unit; both rows commit or neither does. Returns the
+    /// stored issuer: an aggregation ID that collided with one already in use
+    /// was regenerated server-side, because identifiers are server-assigned.
+    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError>;
+
+    /// Register a signing key for an existing hosted issuer.
+    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
+
+    /// Every registered hosted key row, for cross-source uniqueness checks
+    /// that compare normalized key parameters (RFC 7638 §7) rather than
+    /// thumbprints.
+    async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.
@@ -20,7 +60,6 @@ use crate::domain::models::status_list::{
     StatusListError, StatusListRecord, StatusListSnapshot, StatusListUriPage,
 };
 pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
-use async_trait::async_trait;
 
 /// Pluggable cache interface for recently used status-list records.
 #[async_trait]

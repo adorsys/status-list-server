@@ -701,6 +701,9 @@ here; a test fails until it does.
 | `m20260929_000002_status_lists_issuer_list_id_index` | Yes: an index | None | None |
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
+| `m20261021_000001_issuers` | Yes: the tables are empty until the hosted onboarding surface writes them, and an older release ignores them | None; keep the tables | Empty tables |
+| `m20261021_000002_issuer_keys` | Yes, as above | None; keep the tables | Empty tables |
+| `m20261021_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty tables |
 
 ### Preparing existing management credentials
 

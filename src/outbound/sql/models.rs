@@ -114,6 +114,64 @@ pub(crate) mod issuer_aggregations {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Hosted-profile issuer rows (`issuers` table, ADR 0002 hosted profile).
+pub(crate) mod hosted_issuers {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "issuers")]
+    pub(crate) struct Model {
+        /// Server-assigned UUID v4; identifiers are never chosen by an issuer.
+        #[sea_orm(primary_key, column_type = "String(StringLen::N(36))")]
+        pub id: String,
+        pub display_name: Option<String>,
+        pub source: String,
+        pub tier: String,
+        pub state: String,
+        pub owner: Option<String>,
+        /// Unix seconds.
+        pub created_at: i64,
+        /// Unix seconds.
+        pub expires_at: Option<i64>,
+        /// Optimistic-concurrency version.
+        pub version: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub(crate) enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// Hosted issuer public signing keys; `kid` is the PK used to resolve JWTs.
+pub(crate) mod hosted_issuer_keys {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "issuer_keys")]
+    pub(crate) struct Model {
+        #[sea_orm(primary_key, column_type = "String(StringLen::N(255))")]
+        pub kid: String,
+        #[sea_orm(column_type = "String(StringLen::N(36))")]
+        pub issuer_id: String,
+        pub alg: String,
+        #[sea_orm(column_type = "Json")]
+        pub jwk: PublicKey,
+        pub state: String,
+        /// Unix seconds.
+        pub not_before: Option<i64>,
+        /// Unix seconds.
+        pub not_after: Option<i64>,
+        /// Unix seconds.
+        pub created_at: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub(crate) enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Statuses entries
 pub(crate) mod status_lists {
     use super::*;

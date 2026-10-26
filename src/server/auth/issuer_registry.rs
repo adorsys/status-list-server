@@ -226,8 +226,9 @@ impl RegistryHandle {
     }
 }
 
+#[async_trait::async_trait]
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+    async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         self.resolve_with_reason(kid)
     }
 }
@@ -576,62 +577,11 @@ fn validate_ec_point(jwk: &Value) -> Result<(), RegistryError> {
     Ok(())
 }
 
+/// Canonical string form of a JWK's normalized key parameters (RFC 7638 §7),
+/// per-type members decoded and rendered byte-for-byte, member order ignored.
+/// Uniqueness checks compare this, never a thumbprint.
 fn canonical_public_material(jwk: &Value) -> Result<String, RegistryError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let object = jwk
-        .as_object()
-        .ok_or_else(|| RegistryError::Semantic("JWK must be an object".into()))?;
-    let kty = object
-        .get("kty")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RegistryError::Semantic("JWK is missing kty".into()))?;
-    let string = |field: &str| {
-        object
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| RegistryError::Semantic(format!("JWK is missing {field}")))
-    };
-    let decode = |field: &str| {
-        URL_SAFE_NO_PAD
-            .decode(string(field)?)
-            .map_err(|error| RegistryError::Semantic(format!("invalid JWK {field}: {error}")))
-    };
-    match kty {
-        "EC" => Ok(format!(
-            "EC|{}|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?),
-            hex::encode(decode("y")?)
-        )),
-        "RSA" => {
-            let mut modulus = decode("n")?;
-            let mut exponent = decode("e")?;
-            let first_modulus_byte = modulus
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(modulus.len());
-            let first_exponent_byte = exponent
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(exponent.len());
-            modulus.drain(..first_modulus_byte);
-            exponent.drain(..first_exponent_byte);
-            Ok(format!(
-                "RSA|{}|{}",
-                hex::encode(modulus),
-                hex::encode(exponent)
-            ))
-        }
-        "OKP" => Ok(format!(
-            "OKP|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?)
-        )),
-        _ => Err(RegistryError::Semantic(format!(
-            "unsupported JWK kty `{kty}`"
-        ))),
-    }
+    crate::domain::models::credential::canonical_jwk_material(jwk).map_err(RegistryError::Semantic)
 }
 
 fn default_tier() -> String {

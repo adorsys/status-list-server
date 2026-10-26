@@ -1,6 +1,7 @@
 //! Authentication middleware validating bearer JWTs against registered issuer credentials.
 
 pub mod errors;
+pub mod hosted;
 pub mod issuer_registry;
 
 use axum::{
@@ -235,6 +236,7 @@ pub async fn auth(
     let resolved = state
         .issuer_key_resolver
         .resolve(&kid)
+        .await
         .map_err(|reason| invalid_auth(Some(&kid), None, reason))?;
     let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
         Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
@@ -574,6 +576,7 @@ mod tests {
         crate::setup::spawn_issuer_registry_watcher(
             handle.clone(),
             state.service,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -1324,6 +1327,7 @@ mod tests {
             crate::setup::spawn_issuer_registry_watcher(
                 registry.clone(),
                 state.service,
+                None,
                 file.clone(),
                 Duration::from_secs(1),
             );

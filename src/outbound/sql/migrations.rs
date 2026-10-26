@@ -22,6 +22,9 @@ impl MigratorTrait for Migrator {
             Box::new(status_lists_issuer_list_id_index::Migration),
             Box::new(credentials_key_id::Migration),
             Box::new(issuer_aggregations::Migration),
+            Box::new(issuers::Migration),
+            Box::new(issuer_keys::Migration),
+            Box::new(issuer_audit_events::Migration),
         ]
     }
 
@@ -128,7 +131,10 @@ fn forward_only(refused: &str) -> DbErr {
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
+    "issuer_audit_events",
     "issuer_aggregations",
+    "issuer_keys",
+    "issuers",
     "status_lists",
     "status_list_history",
     "status_list_allocations",
@@ -1404,5 +1410,226 @@ pub(crate) mod issuer_aggregations {
         Table,
         Issuer,
         AggregationId,
+    }
+}
+
+/// Hosted-profile issuers registered through onboarding (ADR 0002). `id` is a
+/// server-assigned UUID; `version` is the optimistic-concurrency counter the
+/// admin surface bumps on every write.
+pub(crate) mod issuers {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261021_000001_issuers"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuers").await? {
+                let mut table = Table::create();
+                table
+                    .table(Issuers::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Issuers::Id)
+                            .string_len(36)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Issuers::DisplayName).string().null())
+                    .col(ColumnDef::new(Issuers::Source).string().not_null())
+                    .col(ColumnDef::new(Issuers::Tier).string().not_null())
+                    .col(ColumnDef::new(Issuers::State).string().not_null())
+                    .col(ColumnDef::new(Issuers::Owner).string().null())
+                    .col(ColumnDef::new(Issuers::CreatedAt).big_integer().not_null())
+                    .col(ColumnDef::new(Issuers::ExpiresAt).big_integer().null())
+                    .col(
+                        ColumnDef::new(Issuers::Version)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    );
+                pin_innodb_on_mysql(manager, &mut table);
+                manager.create_table(table).await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Issuers {
+        Table,
+        Id,
+        DisplayName,
+        Source,
+        Tier,
+        State,
+        Owner,
+        CreatedAt,
+        ExpiresAt,
+        Version,
+    }
+}
+
+/// Hosted-profile issuer public keys; `kid` is the PK used to resolve JWTs.
+pub(crate) mod issuer_keys {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261021_000002_issuer_keys"
+        }
+    }
+
+    const FK: &str = "fk_issuer_keys_issuer_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuer_keys").await? {
+                let mut table = Table::create();
+                table
+                    .table(IssuerKeys::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(IssuerKeys::Kid)
+                            .string_len(255)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerKeys::IssuerId)
+                            .string_len(36)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(IssuerKeys::Alg).string().not_null())
+                    .col(ColumnDef::new(IssuerKeys::Jwk).json().not_null())
+                    .col(ColumnDef::new(IssuerKeys::State).string().not_null())
+                    .col(ColumnDef::new(IssuerKeys::NotBefore).big_integer().null())
+                    .col(ColumnDef::new(IssuerKeys::NotAfter).big_integer().null())
+                    .col(
+                        ColumnDef::new(IssuerKeys::CreatedAt)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name(FK)
+                            .from(IssuerKeys::Table, IssuerKeys::IssuerId)
+                            .to(Issuers::Table, Issuers::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    );
+                pin_innodb_on_mysql(manager, &mut table);
+                manager.create_table(table).await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum Issuers {
+        Table,
+        Id,
+    }
+
+    #[derive(Iden)]
+    enum IssuerKeys {
+        Table,
+        Kid,
+        IssuerId,
+        Alg,
+        Jwk,
+        State,
+        NotBefore,
+        NotAfter,
+        CreatedAt,
+    }
+}
+
+/// Append-only audit of hosted-profile issuer changes; no FK so it survives
+/// issuer removal. `id` is a UUID to avoid backend-specific auto-increment.
+pub(crate) mod issuer_audit_events {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261021_000003_issuer_audit_events"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuer_audit_events").await? {
+                let mut table = Table::create();
+                table
+                    .table(IssuerAuditEvents::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::Id)
+                            .string_len(36)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::IssuerId)
+                            .string_len(36)
+                            .null(),
+                    )
+                    .col(ColumnDef::new(IssuerAuditEvents::Actor).string().null())
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::Action)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(IssuerAuditEvents::Before).json().null())
+                    .col(ColumnDef::new(IssuerAuditEvents::After).json().null())
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::CreatedAt)
+                            .big_integer()
+                            .not_null(),
+                    );
+                pin_innodb_on_mysql(manager, &mut table);
+                manager.create_table(table).await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum IssuerAuditEvents {
+        Table,
+        Id,
+        IssuerId,
+        Actor,
+        Action,
+        Before,
+        After,
+        CreatedAt,
     }
 }

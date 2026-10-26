@@ -81,8 +81,8 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection,
+    SeaOrmStore, SqlCredentialRepo, SqlHostedIssuerStore, SqlStatusListRepo,
+    SqlStatusListSnapshotRepo, SwappableDatabaseConnection,
     list_quota::{self, StartupState},
     run_migrations, verify_binlog_format, verify_innodb_engines,
 };
@@ -431,6 +431,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         allow(unused_variables)
     )]
     let aggregation_withheld: Option<String>;
+    // The dynamic trust source behind the composite resolver: `Some` only in
+    // the hosted profile, where registrations live in durable SQL storage.
+    let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -445,6 +448,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             }
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
+            dynamic_issuer_store = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -536,6 +540,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
+            dynamic_issuer_store = config.server.profile.is_hosted().then_some({
+                let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone());
+                Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
+            });
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
                     db_handle.clone(),
@@ -863,6 +871,17 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
     validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
         .await?;
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        // In both directions of a collision the registry wins
+        // (composite resolution is static-first), so a candidate colliding
+        // with durable dynamic state must keep the last-known-good snapshot
+        // in force rather than silently absorb or shadow it.
+        crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
     tracing::info!(
         fingerprint = %issuer_registry.snapshot().fingerprint(),
@@ -882,7 +901,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
-        issuer_key_resolver: issuer_registry.clone(),
+        issuer_key_resolver: build_issuer_key_resolver(
+            issuer_registry.clone(),
+            dynamic_issuer_store.clone(),
+        ),
         issuer_registry: issuer_registry.clone(),
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
@@ -903,6 +925,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         spawn_issuer_registry_watcher(
             issuer_registry.clone(),
             state.service.clone(),
+            dynamic_issuer_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
         );
@@ -918,9 +941,25 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
+/// A hosted deployment resolves through the composite: the static registry
+/// first, then the dynamic store behind the same port. Private deployments
+/// resolve against the registry only, exactly as before.
+pub(crate) fn build_issuer_key_resolver(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    dynamic: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Arc<dyn crate::domain::ports::IssuerKeyResolver> {
+    if dynamic.is_some() {
+        return Arc::new(
+            crate::server::auth::hosted::CompositeIssuerKeyResolver::new(registry, dynamic),
+        );
+    }
+    registry
+}
+
 pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
+    dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
 ) {
@@ -928,6 +967,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
         .spawn_with_initial_reconcile("issuer_registry", move || {
             let registry_handle = registry_handle.clone();
             let service = service.clone();
+            let dynamic_issuer_store = dynamic_issuer_store.clone();
             let retry_interval = poll_interval;
             async move {
                 loop {
@@ -939,6 +979,13 @@ pub(crate) fn spawn_issuer_registry_watcher(
                         registry_handle.validate_candidate(&candidate)?;
                         let active = registry_handle.snapshot();
                         validate_registry_aggregation_ids(&service, &active, &candidate).await?;
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+                                dynamic_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         registry_handle.replace(candidate)
                     }
                     .await;
@@ -1689,6 +1736,7 @@ mod general_tests {
         spawn_issuer_registry_watcher(
             registry.clone(),
             state.service,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );

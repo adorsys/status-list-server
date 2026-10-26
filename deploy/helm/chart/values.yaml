@@ -255,6 +255,11 @@ statuslist:
     # APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
     # Telemetry / OpenTelemetry
     APP_SERVER__ENABLE_METRICS: "true"
+    # Deployment profile (ADR 0002): `private` (default) trusts only issuers
+    # listed in the operator registry; `hosted` additionally trusts
+    # portal-registered issuers persisted in SQL and requires a durable SQL
+    # backend (the memory backend refuses to start).
+    # APP_SERVER__PROFILE: "private"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
   # Optional AWS configuration for the application. The base chart is provider-neutral:
