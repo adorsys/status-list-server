@@ -1,7 +1,7 @@
 ARG APP_NAME=status-list-server
 
-FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl@sha256:875ccf23ed478f7edee9be54d3dd6556dbca067e9af8e33f22f6b316226a5d5e AS builder-amd64
-FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl@sha256:9f1f5a00c2ef54ab851b8cbf4e5a843c74314679a2f7f4af5664b3a7ce21bce8 AS builder-arm64
+FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl@sha256:7a7608c1e7aa31cdc6e78ce1c0ecae5683ce0831daef77d89f9c756505431f78 AS builder-amd64
+FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl@sha256:d5d5c9f3d4c8e54e1b6c36e560c123e49451f5a2c27454586f8e6a073b956df2 AS builder-arm64
 
 FROM builder-${TARGETARCH} AS builder
 ARG APP_NAME
