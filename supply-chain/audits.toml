@@ -25,6 +25,11 @@ criteria = "safe-to-deploy"
 delta = "1.3.0 -> 2.0.0"
 notes = "Delta 1.3.0 -> 2.0.0. Verified 2.0.0 still has forbid(unsafe_code), no build script, no proc macro, no native/network code. DuplicateKeyPolicy remains default-rejecting (rejects_duplicate_yaml_fields passes). Used only via from_str for the operator-managed issuer registry."
 
+[[audits.tokio]]
+who = "Ngha-Boris <borisngha6@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.53.3"
+
 [[trusted.aws-config]]
 criteria = "safe-to-deploy"
 user-id = 160111 # AWS SDK Rust Bot (aws-sdk-rust-ci)
