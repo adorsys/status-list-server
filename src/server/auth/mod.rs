@@ -183,18 +183,18 @@ pub async fn auth(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     let Some(auth_header) = auth_header else {
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
+        crate::utils::metrics::record_management_auth_request(None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     let Some((scheme, token)) = auth_header.split_once(char::is_whitespace) else {
         if auth_header.eq_ignore_ascii_case("Bearer") {
             return Err(invalid_auth(None, None, "empty Bearer token"));
         }
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
+        crate::utils::metrics::record_management_auth_request(None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     if !scheme.eq_ignore_ascii_case("Bearer") {
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
+        crate::utils::metrics::record_management_auth_request(None, "missing_token");
         return Err(AuthenticationError::MissingToken);
     }
     if token.trim().is_empty() {
@@ -235,12 +235,7 @@ pub async fn auth(
 
     let resolved = match state.issuer_key_resolver.resolve(&kid).await {
         Err(KeyResolveError::BackendUnavailable) => {
-            let kid_metric = bounded_identifier(Some(&kid));
-            crate::utils::metrics::record_management_auth_request(
-                None,
-                Some(&kid_metric),
-                "backend_unavailable",
-            );
+            crate::utils::metrics::record_management_auth_request(None, "backend_unavailable");
             tracing::warn!(
                 kid = %bounded_identifier(Some(&kid)),
                 "management JWT rejected: the trust backend is unavailable"
@@ -317,12 +312,7 @@ pub async fn auth(
             registered_aggregation_id,
         ));
     let metric_issuer = bounded_identifier(Some(registered_issuer));
-    let metric_kid = bounded_identifier(Some(&kid));
-    crate::utils::metrics::record_management_auth_request(
-        Some(&metric_issuer),
-        Some(&metric_kid),
-        "success",
-    );
+    crate::utils::metrics::record_management_auth_request(Some(&metric_issuer), "success");
     Ok(next.run(request).await)
 }
 
@@ -332,7 +322,7 @@ fn invalid_auth(
     reason: impl std::fmt::Display,
 ) -> AuthenticationError {
     let metric_issuer = bounded_identifier(iss);
-    crate::utils::metrics::record_management_auth_request(Some(&metric_issuer), None, "rejected");
+    crate::utils::metrics::record_management_auth_request(Some(&metric_issuer), "rejected");
     tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason = %reason, "Management JWT rejected");
     AuthenticationError::InvalidToken
 }

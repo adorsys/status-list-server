@@ -869,8 +869,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
     let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
-    validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
-        .await?;
+    // Cross-source checks are read-only and run before the immutable aggregation
+    // rows are written, so a rejected registry leaves no adoption side effects.
     if let Some(dynamic_store) = &dynamic_issuer_store {
         // In both directions of a collision the registry wins
         // (composite resolution is static-first), so a candidate colliding
@@ -878,10 +878,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         // in force rather than silently absorb or shadow it.
         crate::server::auth::hosted::validate_static_candidate_against_dynamic(
             dynamic_store,
+            &empty_registry,
             &issuer_registry.snapshot(),
         )
         .await?;
     }
+    validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
+        .await?;
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
     tracing::info!(
         fingerprint = %issuer_registry.snapshot().fingerprint(),
@@ -979,14 +982,18 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
                         let active = registry_handle.snapshot();
-                        validate_registry_aggregation_ids(&service, &active, &candidate).await?;
+                        // Cross-source checks are read-only and run before the
+                        // immutable aggregation rows are written, so a rejected
+                        // candidate leaves no adoption side effects.
                         if let Some(dynamic_store) = &dynamic_issuer_store {
                             crate::server::auth::hosted::validate_static_candidate_against_dynamic(
                                 dynamic_store,
+                                &active,
                                 &candidate,
                             )
                             .await?;
                         }
+                        validate_registry_aggregation_ids(&service, &active, &candidate).await?;
                         registry_handle.replace(candidate)
                     }
                     .await;

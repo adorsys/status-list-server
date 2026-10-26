@@ -145,14 +145,14 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
     assert!(
         matches!(
             store.add_key(key(&second.id, "second-key")).await,
-            Err(HostedIssuerError::KeyMaterialReused(_))
+            Err(HostedIssuerError::KeyMaterialReused)
         ),
         "reused material across issuers must fail closed on {backend}"
     );
     assert!(
         matches!(
             store.add_key(key(&first.id, "first-key-duplicate")).await,
-            Err(HostedIssuerError::KeyMaterialReused(_))
+            Err(HostedIssuerError::KeyMaterialReused)
         ),
         "reused material within one issuer must fail closed on {backend}"
     );
@@ -293,7 +293,7 @@ async fn test_sqlite_concurrent_same_material_adds_allow_exactly_one() {
     assert!(
         outcomes
             .iter()
-            .any(|result| matches!(result, Err(HostedIssuerError::KeyMaterialReused(_)))),
+            .any(|result| matches!(result, Err(HostedIssuerError::KeyMaterialReused))),
         "the losing registration must be a typed KeyMaterialReused"
     );
 }

@@ -45,10 +45,17 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Register a signing key for an existing hosted issuer.
     async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
 
-    /// Every registered hosted key row, for cross-source uniqueness checks
-    /// that compare normalized key parameters (RFC 7638 §7) rather than
-    /// thumbprints.
+    /// Every registered hosted key row. Used by the adapter's quarantine scan
+    /// and by tests; resolution and cross-source checks use
+    /// [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid) and
+    /// [`key_material_in_use`](HostedIssuerStore::key_material_in_use) instead.
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
+
+    /// Whether the given normalized key material (RFC 7638 §7 parameters) is
+    /// already registered to any hosted key. The adapter decides the match
+    /// against its stored material hash in SQL, so cross-source uniqueness
+    /// checks do not have to load every hosted key into memory.
+    async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.

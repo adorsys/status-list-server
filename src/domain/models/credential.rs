@@ -49,9 +49,10 @@ impl Principal {
 
 /// Why a key could not be used to authenticate a request.
 ///
-/// The response to a client is identical for every variant; the discriminant
-/// exists so operators can log the real reason instead of a generic "unknown
-/// kid".
+/// The response to a client is identical for every variant except
+/// [`BackendUnavailable`](KeyResolveError::BackendUnavailable), which is a
+/// retryable 503; the discriminant exists so operators can log the real reason
+/// instead of a generic "unknown kid".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeyResolveError {
     #[error("unknown kid")]
@@ -64,6 +65,12 @@ pub enum KeyResolveError {
     Expired,
     #[error("key has been revoked")]
     Revoked,
+    /// A persisted dynamic key row is malformed (bad state, timestamp, or JWK)
+    /// and can never authenticate. Non-retryable: unlike a backend outage it
+    /// will not clear on its own, so it must not become a 503 that clients
+    /// retry forever.
+    #[error("stored key data is corrupt")]
+    Corrupt,
     #[error("the trust backend is unavailable")]
     BackendUnavailable,
 }
@@ -272,6 +279,7 @@ impl PublicJwk {
             }
         };
         let kid = key_id.to_owned();
+        validate_curve_point(&jwk)?;
         jsonwebtoken::DecodingKey::from_jwk(&jwk).map_err(|err| {
             CredentialError::InvalidPublicJwk(format!("invalid verification key: {err}"))
         })?;
@@ -309,6 +317,66 @@ impl PublicJwk {
                 .map_err(|err| CredentialError::InvalidPublicJwk(format!("invalid JWK: {err}")))?;
         canonical_jwk_material(&value).map_err(CredentialError::InvalidPublicJwk)
     }
+}
+
+/// `jsonwebtoken` checks JWK shape and curve names, but point membership is a
+/// cryptographic property. Parse the uncompressed SEC 1 point with AWS-LC and
+/// check coordinate length so off-curve, malformed, or wrong-length EC keys —
+/// and wrong-length OKP keys — cannot enter any trust source.
+fn validate_curve_point(jwk: &Jwk) -> Result<(), CredentialError> {
+    use aws_lc_rs::agreement::{ECDH_P256, ECDH_P384, ParsedPublicKey, UnparsedPublicKey};
+    use base64::Engine as _;
+    match &jwk.algorithm {
+        AlgorithmParameters::EllipticCurve(params) => {
+            let (algorithm, coordinate_len) = match params.curve {
+                jsonwebtoken::jwk::EllipticCurve::P256 => (&ECDH_P256, 32),
+                jsonwebtoken::jwk::EllipticCurve::P384 => (&ECDH_P384, 48),
+                _ => return Ok(()),
+            };
+            let coordinate = |field: &str, value: &str| {
+                URL_SAFE_NO_PAD
+                    .decode(value)
+                    .map_err(|_| {
+                        CredentialError::InvalidPublicJwk(format!("invalid EC JWK {field}"))
+                    })
+                    .and_then(|bytes| {
+                        if bytes.len() != coordinate_len {
+                            return Err(CredentialError::InvalidPublicJwk(format!(
+                                "EC JWK {field} must be {coordinate_len} bytes for its curve"
+                            )));
+                        }
+                        Ok(bytes)
+                    })
+            };
+            let x = coordinate("x", &params.x)?;
+            let y = coordinate("y", &params.y)?;
+            let mut point = Vec::with_capacity(1 + x.len() + y.len());
+            point.push(0x04);
+            point.extend(x);
+            point.extend(y);
+            let _: ParsedPublicKey = UnparsedPublicKey::new(algorithm, point)
+                .try_into()
+                .map_err(|_| {
+                    CredentialError::InvalidPublicJwk("EC JWK point is not on its curve".into())
+                })?;
+        }
+        AlgorithmParameters::OctetKeyPair(params) => {
+            let expected = match params.curve {
+                jsonwebtoken::jwk::EllipticCurve::Ed25519 => 32,
+                _ => return Ok(()),
+            };
+            let x = URL_SAFE_NO_PAD
+                .decode(&params.x)
+                .map_err(|_| CredentialError::InvalidPublicJwk("invalid OKP x encoding".into()))?;
+            if x.len() != expected {
+                return Err(CredentialError::InvalidPublicJwk(format!(
+                    "OKP x must be {expected} bytes for its curve"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Per-type normalized key parameters: `EC` → `crv|x|y`, `RSA` → `n|e` with

@@ -81,9 +81,9 @@ async fn classify_after_rollback(
     map_insert_err(insert_err)
 }
 
-fn tried_from_unix(seconds: i64) -> Result<OffsetDateTime, RepositoryError> {
+fn try_from_unix(seconds: i64) -> Result<OffsetDateTime, RepositoryError> {
     OffsetDateTime::from_unix_timestamp(seconds)
-        .map_err(|e| RepositoryError::FindError(e.to_string()))
+        .map_err(|e| RepositoryError::DataError(e.to_string()))
 }
 
 /// A hosted `issuers` row must carry its aggregation ID and a source of
@@ -94,28 +94,28 @@ fn parse_issuer(row: issuers::Model) -> Result<HostedIssuer, RepositoryError> {
     let aggregation_id = match row.aggregation_id.as_deref().map(str::parse) {
         Some(Ok(uuid)) => AggregationId(uuid),
         Some(Err(e)) => {
-            return Err(RepositoryError::FindError(format!(
+            return Err(RepositoryError::DataError(format!(
                 "hosted issuer `{}` has an unusable aggregation mapping: {e}",
                 row.issuer
             )));
         }
         None => {
-            return Err(RepositoryError::FindError(format!(
+            return Err(RepositoryError::DataError(format!(
                 "hosted issuer `{}` has no aggregation mapping",
                 row.issuer
             )));
         }
     };
-    let created_at = tried_from_unix(row.created_at)?;
+    let created_at = try_from_unix(row.created_at)?;
     let expires_at = match row.expires_at {
-        Some(seconds) => Some(tried_from_unix(seconds)?),
+        Some(seconds) => Some(try_from_unix(seconds)?),
         None => None,
     };
     let state = match row.state.as_str() {
         value if value == HostedIssuerState::Active.as_str() => HostedIssuerState::Active,
         value if value == HostedIssuerState::Disabled.as_str() => HostedIssuerState::Disabled,
         other => {
-            return Err(RepositoryError::FindError(format!(
+            return Err(RepositoryError::DataError(format!(
                 "hosted issuer `{}` has unknown state `{other}`",
                 row.issuer
             )));
@@ -136,30 +136,30 @@ fn parse_issuer(row: issuers::Model) -> Result<HostedIssuer, RepositoryError> {
 
 fn parse_key(row: hosted_issuer_keys::Model) -> Result<HostedIssuerKey, RepositoryError> {
     let not_before = match row.not_before {
-        Some(seconds) => Some(tried_from_unix(seconds)?),
+        Some(seconds) => Some(try_from_unix(seconds)?),
         None => None,
     };
     let not_after = match row.not_after {
-        Some(seconds) => Some(tried_from_unix(seconds)?),
+        Some(seconds) => Some(try_from_unix(seconds)?),
         None => None,
     };
     let state = match row.state.as_str() {
         value if value == HostedIssuerKeyState::Active.as_str() => HostedIssuerKeyState::Active,
         value if value == HostedIssuerKeyState::Revoked.as_str() => HostedIssuerKeyState::Revoked,
         other => {
-            return Err(RepositoryError::FindError(format!(
+            return Err(RepositoryError::DataError(format!(
                 "issuer key `{}` has unknown state `{other}`",
                 row.kid
             )));
         }
     };
     let bytes = serde_json::to_vec(&row.jwk)
-        .map_err(|e| RepositoryError::FindError(format!("stored hosted JWK serialization: {e}")))?;
+        .map_err(|e| RepositoryError::DataError(format!("stored hosted JWK serialization: {e}")))?;
     Ok(HostedIssuerKey {
         kid: row.kid,
         issuer_id: row.issuer_id,
-        jwk: PublicJwk::try_new(bytes).map_err(|e| RepositoryError::FindError(e.to_string()))?,
-        created_at: tried_from_unix(row.created_at)?,
+        jwk: PublicJwk::try_new(bytes).map_err(|e| RepositoryError::DataError(e.to_string()))?,
+        created_at: try_from_unix(row.created_at)?,
         not_before,
         not_after,
         state,
@@ -176,12 +176,8 @@ fn parse_entry(
     })
 }
 
-/// The fill-in for a corrupted or host-error `not_before`-style failure is
-/// deliberately missing: malformed stored timestamps surface as FindError and
-/// fail closed.
-///
-/// Reads join `issuer_keys.kid` with its `issuers` row. An orphaned row is a
-/// data fault (the FK only covers one direction), not an empty result.
+/// Resolve a key row together with its portal issuer. Malformed stored data is
+/// a permanent fault (`DataError`), never an empty result or a transient error.
 async fn load_entry(
     kid: &str,
     db: &sea_orm::DatabaseConnection,
@@ -199,7 +195,7 @@ async fn load_entry(
         .await
         .map_err(find_err)?
         .ok_or_else(|| {
-            RepositoryError::FindError(format!("issuer key `{kid}` has no issuer row"))
+            RepositoryError::DataError(format!("issuer key `{kid}` has no issuer row"))
         })?;
     Some(parse_entry(issuer, key)).transpose()
 }
@@ -302,6 +298,15 @@ impl SeaOrmStore<HostedIssuerRow> {
                 match insert_issuer_row(&txn, &stored).await {
                     Ok(()) => {
                         txn.commit().await.map_err(map_insert_err)?;
+                        // The row stores whole-second timestamps; return what was
+                        // persisted so the returned issuer matches a re-read.
+                        stored.created_at = stored
+                            .created_at
+                            .replace_nanosecond(0)
+                            .unwrap_or(stored.created_at);
+                        stored.expires_at = stored
+                            .expires_at
+                            .map(|value| value.replace_nanosecond(0).unwrap_or(value));
                         return Ok(stored);
                     }
                     Err(err) if is_unique_violation(&err) => {
@@ -339,7 +344,7 @@ impl SeaOrmStore<HostedIssuerRow> {
         // rule): a key whose embedded `kid` disagrees with its row never
         // enters storage.
         if key.jwk.key_id() != key.kid {
-            return Err(RepositoryError::InsertError(format!(
+            return Err(RepositoryError::InvalidKey(format!(
                 "key `{}` has conflicting JWK kid metadata",
                 key.kid
             )));
@@ -351,14 +356,14 @@ impl SeaOrmStore<HostedIssuerRow> {
             .zip(key.not_after)
             .is_some_and(|(before, after)| before >= after)
         {
-            return Err(RepositoryError::InsertError(format!(
+            return Err(RepositoryError::InvalidKey(format!(
                 "key `{}` has not_before >= not_after",
                 key.kid
             )));
         }
         time_query("insert", "issuer_key", async {
             let material = serde_json::from_slice::<serde_json::Value>(key.jwk.as_bytes())
-                .map_err(|err| RepositoryError::InsertError(err.to_string()))
+                .map_err(|err| RepositoryError::InvalidKey(err.to_string()))
                 .and_then(|value| canonical_jwk_material(&value).map_err(err_jwk))?;
             let hash = material_hash(&material);
             let db = self.current();
@@ -408,9 +413,14 @@ impl SeaOrmStore<HostedIssuerRow> {
                         if let Some(owner) =
                             find_material_owner(&material_hash(&material), &db).await?
                         {
-                            return Err(RepositoryError::InsertError(format!(
-                                "key material reused by issuer {owner}"
-                            )));
+                            // Log the owner server-side; never return it, so one
+                            // tenant cannot learn another tenant's id.
+                            tracing::warn!(
+                                kid = %key.kid,
+                                owner = %owner,
+                                "rejecting a hosted key whose material is already registered"
+                            );
+                            return Err(RepositoryError::KeyMaterialReused);
                         }
                         return Err(classified);
                     }
@@ -457,18 +467,26 @@ impl SeaOrmStore<HostedIssuerRow> {
         })
         .await
     }
+
+    async fn key_material_in_use(&self, material: &str) -> Result<bool, RepositoryError> {
+        time_query("find_material", "issuer_key", async {
+            let hash = material_hash(material);
+            Ok(find_material_owner(&hash, self.current().as_ref())
+                .await?
+                .is_some())
+        })
+        .await
+    }
 }
 
-/// Untagged driver errors cannot be reopened, so the material-reuse sentinel
-/// produced by `add_key` is the one place a client-visible discrimination is
-/// recoverable; everything else keeps the shared mapping.
+/// Untagged driver errors cannot be reopened, so the typed material-reuse and
+/// invalid-key variants produced by `add_key` are the only client-visible
+/// discriminations recoverable here; everything else keeps the shared mapping.
 fn hosted_error(err: RepositoryError) -> HostedIssuerError {
     match &err {
-        RepositoryError::InsertError(message) => {
-            match message.strip_prefix("key material reused by issuer ") {
-                Some(issuer_id) => HostedIssuerError::KeyMaterialReused(issuer_id.to_string()),
-                None => err.into(),
-            }
+        RepositoryError::KeyMaterialReused => HostedIssuerError::KeyMaterialReused,
+        RepositoryError::InvalidKey(message) => {
+            HostedIssuerError::InvalidPublicJwk(message.clone())
         }
         _ => err.into(),
     }
@@ -479,7 +497,7 @@ fn err_txn(e: DbErr) -> RepositoryError {
 }
 
 fn err_jwk(message: String) -> RepositoryError {
-    RepositoryError::InsertError(format!("invalid public JWK: {message}"))
+    RepositoryError::InvalidKey(format!("invalid public JWK: {message}"))
 }
 
 fn insert_first_err(e: DbErr) -> RepositoryError {
@@ -515,6 +533,13 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
         self.store.all_keys().await.map_err(Into::into)
     }
+
+    async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
+        self.store
+            .key_material_in_use(material)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl From<RepositoryError> for HostedIssuerError {
@@ -523,6 +548,7 @@ impl From<RepositoryError> for HostedIssuerError {
             RepositoryError::DuplicateEntry => HostedIssuerError::AlreadyExists,
             RepositoryError::NotFound => HostedIssuerError::NotFound,
             RepositoryError::Contention { code } => HostedIssuerError::Contention { code },
+            RepositoryError::DataError(message) => HostedIssuerError::Corrupt(message),
             other => HostedIssuerError::Backend(Box::new(other)),
         }
     }

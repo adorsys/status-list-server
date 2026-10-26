@@ -719,9 +719,8 @@ here; a test fails until it does.
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
 | `m20261022_000001_issuer_ownership` | **No**: the previous release does not update the new quota counter and cannot create issuer-owner rows | Run `list-quota disable` before deleting its migration record; the old release can publish only for existing owners and cannot register new issuers | Recreate the new release; the migration safely reruns, preserves owner IDs and recomputes counts from `status_lists`. If it reports conflicting aggregation IDs, follow [the repair steps](troubleshooting.md#resolving-issuer-aggregation-id-conflicts) first |
 | `m20261023_000001_hosted_issuers` | Yes: the columns carry defaults, so rows created without them load unchanged, and an older release ignores them | None; keep the columns | Hosted metadata is additive; registry-created rows keep their defaults |
-| `m20261023_000002_issuer_keys` | Yes: the table is empty until the hosted onboarding surface writes keys, and an older release ignores it | None; keep the table | Empty table |
+| `m20261023_000002_issuer_keys` | Yes: the table is empty until the hosted onboarding surface writes keys, and an older release ignores it | None; keep the table | Empty table; carries the unique `key_material` index that rejects reused key parameters |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
-| `m20261024_000001_issuer_keys_key_material` | Yes: the column defaults to empty and the unique index is a hardening step an older release ignores | None; keep the column and index | Additive; new writes populate it |
 
 ### Preparing existing management credentials
 

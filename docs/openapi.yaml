@@ -925,6 +925,12 @@ components:
         Bearer`; invalid credentials return identical `401 invalid_token`
         responses with `WWW-Authenticate: Bearer error="invalid_token"`.
 
+        In the `hosted` profile a management key may resolve from the durable
+        `issuer_keys` store. If that store is unreachable, authentication
+        returns a retryable `503 backend_unavailable` (with `Retry-After`)
+        rather than a `401`, so a transient backend fault is never mistaken for
+        a bad key.
+
   schemas:
     CredentialsRequest:
       type: object
@@ -1359,6 +1365,9 @@ components:
             # 500 / 503
             - internal_error
             - service_unavailable
+            # 503 — emitted by the authentication middleware when the hosted
+            # trust backend is unavailable; retryable, no Bearer challenge
+            - backend_unavailable
           example: "status_list_already_exists"
         error_description:
           type: string

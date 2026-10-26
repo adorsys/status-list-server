@@ -93,8 +93,7 @@ impl ServerProfile {
         }
     }
 
-    /// The hosted profile requires durable shared SQL storage, so the memory
-    /// backend refuses to start rather than drop registrations on restart.
+    /// Whether the hosted deployment profile is selected.
     pub fn is_hosted(self) -> bool {
         self == ServerProfile::Hosted
     }

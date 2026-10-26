@@ -6,7 +6,9 @@
 use std::sync::Arc;
 use time::OffsetDateTime;
 
-pub use crate::domain::models::credential::*;
+use crate::domain::models::credential::{
+    AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
+};
 
 /// Lifecycle of a hosted issuer row. Stored as a string in `issuers.state`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,14 +48,13 @@ impl HostedIssuer {
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.state.as_str() == HostedIssuerState::Active.as_str()
-            && self.expires_at.is_none_or(|expiry| now < expiry)
+        self.state == HostedIssuerState::Active && self.expires_at.is_none_or(|expiry| now < expiry)
     }
 }
 
-/// A hosted issuer's signing key, mirroring one `issuer_keys` row. The
-/// polynomial-modulus details live in [`PublicJwk`], which validates the same
-/// management-key contract for every trust source.
+/// A hosted issuer's signing key, mirroring one `issuer_keys` row. The public
+/// key is validated by [`PublicJwk`], the same contract used for every trust
+/// source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostedIssuerKey {
     pub kid: String,
@@ -87,7 +88,7 @@ impl HostedIssuerKeyState {
 impl HostedIssuerKey {
     /// Whether the key is inside its validity window at `now`.
     pub fn is_currently_valid(&self, now: OffsetDateTime) -> bool {
-        self.state.as_str() == HostedIssuerKeyState::Active.as_str()
+        self.state == HostedIssuerKeyState::Active
             && self.not_before.is_none_or(|start| now >= start)
             && self.not_after.is_none_or(|end| now < end)
     }
@@ -107,11 +108,17 @@ pub enum HostedIssuerError {
     #[error("a hosted issuer or key with this id or kid already exists")]
     AlreadyExists,
     /// RFC 7638 §7: equivalencing key material by thumbprint is unsound, so
-    /// reuse is detected by comparing normalized key parameters instead.
-    #[error("key material was already registered by issuer `{0}`")]
-    KeyMaterialReused(String),
+    /// reuse is detected by comparing normalized key parameters instead. The
+    /// owner is logged server-side and never returned to the caller.
+    #[error("key material was already registered by another issuer")]
+    KeyMaterialReused,
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
+    /// A persisted hosted row is malformed and can never parse. A permanent
+    /// data fault: authentication fails closed for that key but the backend
+    /// itself is healthy, so this is not a retryable 503.
+    #[error("stored hosted issuer data is corrupt: {0}")]
+    Corrupt(String),
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
     #[error("storage error: {0}")]

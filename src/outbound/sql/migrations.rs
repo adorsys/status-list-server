@@ -25,7 +25,6 @@ impl MigratorTrait for Migrator {
             Box::new(issuer_ownership::Migration),
             Box::new(hosted_issuers::Migration),
             Box::new(issuer_keys::Migration),
-            Box::new(issuer_keys_key_material::Migration),
             Box::new(issuer_audit_events::Migration),
         ]
     }
@@ -1984,6 +1983,9 @@ pub(crate) mod hosted_issuers {
 }
 
 /// Hosted-profile issuer public keys; `kid` is the PK used to resolve JWTs.
+/// `key_material` holds a SHA-256 of the canonical key parameters (RFC 7638
+/// §7) and is uniquely indexed so key-material reuse is rejected by a
+/// database constraint, not a race-prone application scan.
 pub(crate) mod issuer_keys {
     use super::*;
 
@@ -1996,6 +1998,8 @@ pub(crate) mod issuer_keys {
     }
 
     const FK: &str = "fk_issuer_keys_issuer";
+    const KEY_MATERIAL_INDEX: &str = "idx_issuer_keys_key_material";
+    const ISSUER_ID_INDEX: &str = "idx_issuer_keys_issuer_id";
 
     #[async_trait::async_trait]
     #[allow(elided_lifetimes_in_paths)]
@@ -2015,6 +2019,11 @@ pub(crate) mod issuer_keys {
                     .col(
                         ColumnDef::new(IssuerKeys::IssuerId)
                             .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerKeys::KeyMaterial)
+                            .string_len(64)
                             .not_null(),
                     )
                     .col(ColumnDef::new(IssuerKeys::Alg).string().not_null())
@@ -2038,79 +2047,14 @@ pub(crate) mod issuer_keys {
                 pin_innodb_on_mysql(manager, &mut table);
                 manager.create_table(table).await?;
             }
-            Ok(())
-        }
-
-        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-            refuse_down(self.name())
-        }
-    }
-
-    // Local Iden view of the ownership table's PK for the FK target; the
-    // canonical `Issuers` enum is scoped to the ownership migration.
-    #[derive(Iden)]
-    enum IssuersFk {
-        #[iden = "issuers"]
-        Table,
-        Issuer,
-    }
-
-    #[derive(Iden)]
-    enum IssuerKeys {
-        Table,
-        Kid,
-        IssuerId,
-        Alg,
-        Jwk,
-        State,
-        NotBefore,
-        NotAfter,
-        CreatedAt,
-    }
-}
-
-/// Uniquely indexes each hosted key's canonical material hash so key-material
-/// reuse is rejected by a database constraint, not a race-prone application
-/// scan. Additive so it applies on top of the `issuer_keys` table regardless of
-/// whether that migration already shipped.
-pub(crate) mod issuer_keys_key_material {
-    use super::*;
-
-    pub(crate) struct Migration;
-
-    impl MigrationName for Migration {
-        fn name(&self) -> &str {
-            "m20261024_000001_issuer_keys_key_material"
-        }
-    }
-
-    const INDEX: &str = "idx_issuer_keys_key_material";
-    const ISSUER_ID_INDEX: &str = "idx_issuer_keys_issuer_id";
-
-    #[async_trait::async_trait]
-    #[allow(elided_lifetimes_in_paths)]
-    impl MigrationTrait for Migration {
-        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if !manager.has_column("issuer_keys", "key_material").await? {
-                manager
-                    .alter_table(
-                        Table::alter()
-                            .table(IssuerKeys::Table)
-                            .add_column(
-                                ColumnDef::new(IssuerKeys::KeyMaterial)
-                                    .string_len(64)
-                                    .not_null()
-                                    .default(""),
-                            )
-                            .to_owned(),
-                    )
-                    .await?;
-            }
-            if !manager.has_index("issuer_keys", INDEX).await? {
+            // The table is created empty, so the unique index is added in the
+            // same migration; folding it in avoids a later migration that adds
+            // a UNIQUE index over a defaulted column that may already have rows.
+            if !manager.has_index("issuer_keys", KEY_MATERIAL_INDEX).await? {
                 manager
                     .create_index(
                         Index::create()
-                            .name(INDEX)
+                            .name(KEY_MATERIAL_INDEX)
                             .table(IssuerKeys::Table)
                             .col(IssuerKeys::KeyMaterial)
                             .unique()
@@ -2139,11 +2083,27 @@ pub(crate) mod issuer_keys_key_material {
         }
     }
 
+    // Local Iden view of the ownership table's PK for the FK target; the
+    // canonical `Issuers` enum is scoped to the ownership migration.
+    #[derive(Iden)]
+    enum IssuersFk {
+        #[iden = "issuers"]
+        Table,
+        Issuer,
+    }
+
     #[derive(Iden)]
     enum IssuerKeys {
         Table,
+        Kid,
         IssuerId,
         KeyMaterial,
+        Alg,
+        Jwk,
+        State,
+        NotBefore,
+        NotAfter,
+        CreatedAt,
     }
 }
 
@@ -2196,6 +2156,19 @@ pub(crate) mod issuer_audit_events {
                 pin_innodb_on_mysql(manager, &mut table);
                 manager.create_table(table).await?;
             }
+            // Audit queries filter by issuer; the table is created empty in the
+            // same migration, so this index ships before any rows exist.
+            if !manager.has_index("issuer_audit_events", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(IssuerAuditEvents::Table)
+                            .col(IssuerAuditEvents::IssuerId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
             Ok(())
         }
 
@@ -2203,6 +2176,8 @@ pub(crate) mod issuer_audit_events {
             refuse_down(self.name())
         }
     }
+
+    const INDEX: &str = "idx_issuer_audit_events_issuer_id";
 
     #[derive(Iden)]
     enum IssuerAuditEvents {
