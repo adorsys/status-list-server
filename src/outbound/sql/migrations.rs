@@ -2482,7 +2482,6 @@ mod carry_over_tests {
     const KEY_1: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-1","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
     const KEY_2: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-2","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
     const OCT: &str = r#"{"kty":"oct","kid":"oct-1","alg":"HS256","k":"c2VjcmV0"}"#;
-    /// A valid PS256 RSA key, distinct material from the EC keys.
     const RSA_PS256: &str = r#"{"kty":"RSA","kid":"rsa-1","alg":"PS256","n":"uNtunrvdLa-WuK-VpCwiEUXlOCmPNEmo0ZYQ424NsGns0OVnu1T9hL4M_UODdKhz-_mXHvqsBxS-PZe0OMmdo9QrGWwnS4H8IX5c_fKZ01AX21_hJoQY6SMLUVGVbElqNW032v-LliC7-dTB0YeTg_wmbAN1uGkPr202k3c_18gVGvpa8B7Ri8Ytowl6WzpiVZ3VyP3HIQQuhrAXN0B1BatWpv4GwLXr-ihCmFgbS2RHm5TIkoap2yXw2p488RFgrnacRGj9QhN4p9HIMuYeLkoeClMS2ZQD2d9holRyRCUsARh8IvSf9DZVmDGwd5kqpHqT3GkZ8o8kdGAQTq53Nw","e":"AQAB"}"#;
     /// A third distinct EC key, used only for the shared-material pair.
     const KEY_DUP: &str = r#"{"kty":"EC","crv":"P-256","kid":"dup-x","alg":"ES256","x":"w0Nc9y5IMwcWV08tC3KtnukblytlN1HTOFngG8U6d60","y":"UklyBhY4aZvUS9aJDifOAiLMj1LVwNmhA8AXRvcs3f8"}"#;
