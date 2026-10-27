@@ -34,17 +34,17 @@ matches the issuer public JWK registered through `POST /api/v1/credentials`.
 For fully automated local collection testing, use the Newman script below; it
 generates and registers a temporary issuer for the run.
 
-In Postman, select the included environment and send **Register issuer
-credentials** before publishing. Generated keys are saved per issuer in that
-environment; switching `issuer_id` back to an earlier issuer reuses its key.
-Keep the private key cache secret when backing up your local environment. Older
-environments with `issuer_private_jwk` and `issuer_key_owner` values migrate that
-key into the cache on the next registration or protected write, then clear the
-old values.
+In Postman, select the included environment, send **Start new test run**, then
+send **Register issuer credentials** before publishing. The first request creates
+a fresh `list_id`; generated private keys are saved per issuer in the environment,
+so switching `issuer_id` back to an earlier issuer reuses its key. Keep the private
+key cache secret when backing up your local environment. Generated JWTs stay in the
+current request scope; the environment `token` value is only used by Newman when
+it supplies a preconfigured token.
 
 A registration conflict (`409`) is accepted only after an authenticated
 `GET {{managementUrl}}/api/v1/credentials` confirms the saved key works for that
-issuer. If it fails, the collection clears `token` and reports a failed test.
+issuer. If it fails, the collection reports a failed test and blocks the workflow.
 Restore the issuer's original private key/environment, or choose a new
 `issuer_id` and register again. Reimporting an empty environment cannot recover
 the private key of an issuer already registered on the server.
@@ -86,7 +86,9 @@ Then run the same collection check used by CI:
 The script generates a temporary P-256 issuer key, patches a temporary copy of
 the collection so `POST /api/v1/credentials` registers the matching public JWK,
 and runs Newman with a temporary environment containing `baseUrl`,
-`managementUrl`, `list_id`, `issuer_id`, `token`, and `historical_time`. No
+`managementUrl`, `list_id`, `issuer_id`, `token`, and `historical_time`. The CI
+workflow also reruns registration against the same issuer to cover both `202` and
+`409` responses and checks the JWT readiness assertion in the Newman report. No
 generated collection or environment is written into the repository. Set
 `NEWMAN_RUNNER=docker` to use the pinned Newman container instead of a locally
 installed Newman binary.

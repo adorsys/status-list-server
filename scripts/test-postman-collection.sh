@@ -15,6 +15,7 @@ POSTMAN_ENVIRONMENT="${POSTMAN_ENVIRONMENT:-postman/status-list-server.postman_e
 NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
 NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
+NEWMAN_VERIFY_REGISTRATION_MODES="${NEWMAN_VERIFY_REGISTRATION_MODES:-false}"
 MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
 POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
@@ -106,7 +107,7 @@ function siblingUrl(baseUrl, port) {
   return url.toString().replace(/\/$/, '');
 }
 
-const now = Math.floor(Date.now() / 1000);
+const now = Math.floor(Date.now() / 1000) - 5;
 const issuerId = `newman-issuer-${Date.now()}`;
 const listId = crypto.randomUUID();
 
@@ -205,6 +206,8 @@ collection_artifact="$tmp_dir/status-list-server.postman_collection.json"
 environment_artifact="$tmp_dir/status-list-server.postman_environment.json"
 collection_mount="/etc/newman/status-list-server.postman_collection.json"
 environment_mount="/etc/newman/status-list-server.postman_environment.json"
+newman_202_report="$tmp_dir/newman-202-report.json"
+newman_409_report="$tmp_dir/newman-409-report.json"
 
 # Resolve management/admin URLs: use the override when set, otherwise fall back
 # to the sibling-port URLs derived from API_ENDPOINT. The fallback keeps
@@ -253,18 +256,55 @@ if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
 fi
 
 
-if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
-  "$NEWMAN_COMMAND" run "$collection_artifact" \
-    --environment "$environment_artifact" \
-    --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
-    --color off
-else
-  docker run --rm \
-    --add-host=host.docker.internal:host-gateway \
-    --mount "type=bind,source=${tmp_dir},target=/etc/newman,readonly" \
-    "$NEWMAN_DOCKER_IMAGE" \
-    run "$collection_mount" \
-    --environment "$environment_mount" \
-    --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
-    --color off
+run_newman() {
+  local report_path="$1"
+  shift
+  if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
+    "$NEWMAN_COMMAND" run "$collection_artifact" "$@" \
+      --environment "$environment_artifact" \
+      --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
+      --reporters cli,json \
+      --reporter-json-export "$report_path" \
+      --color off
+  else
+    local report_name
+    report_name="${report_path##*/}"
+    docker run --rm \
+      --add-host=host.docker.internal:host-gateway \
+      --mount "type=bind,source=${tmp_dir},target=/etc/newman" \
+      "$NEWMAN_DOCKER_IMAGE" \
+      run "$collection_mount" "$@" \
+      --environment "$environment_mount" \
+      --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
+      --reporters cli,json \
+      --reporter-json-export "/etc/newman/$report_name" \
+      --color off
+  fi
+}
+
+verify_registration_report() {
+  local report_path="$1" expected_code="$2"
+  node - "$report_path" "$expected_code" <<'NODE'
+const fs = require('node:fs');
+const [reportPath, expectedCode] = process.argv.slice(2);
+const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+const registration = report.run.executions.find(({ item }) => item.name === 'Register issuer credentials');
+if (!registration) throw new Error('Newman report does not contain issuer registration.');
+const mode = registration.assertions.find(({ assertion }) => assertion === 'Newman registration status matches expected response');
+if (!mode || mode.skipped === true || mode.error != null) throw new Error(`Newman did not confirm an HTTP ${expectedCode} registration response.`);
+const ready = registration.assertions.find(({ assertion }) => assertion === 'issuer JWT is ready for protected requests');
+if (!ready || ready.skipped === true || ready.error != null) throw new Error(`Newman did not pass the issuer JWT readiness assertion for HTTP ${expectedCode}.`);
+NODE
+}
+
+run_newman "$newman_202_report" --env-var expected_registration_status=202
+if [[ "$NEWMAN_VERIFY_REGISTRATION_MODES" == "true" ]]; then
+  verify_registration_report "$newman_202_report" 202
+  # The first run registers the generated issuer. Replaying only that folder
+  # exercises the real Newman 409 path without republishing its status list.
+  run_newman "$newman_409_report" --env-var expected_registration_status=409 --folder "Issuer Management"
+  verify_registration_report "$newman_409_report" 409
+elif [[ "$NEWMAN_VERIFY_REGISTRATION_MODES" != "false" ]]; then
+  echo "NEWMAN_VERIFY_REGISTRATION_MODES must be true or false" >&2
+  exit 1
 fi
