@@ -143,6 +143,7 @@ async fn export_issuers(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 fn write_issuer_export(output: &str, yaml: &str, force: bool) -> Result<()> {
     use std::io::Write;
 
@@ -169,7 +170,7 @@ async fn export_issuers(_: &[String]) -> Result<()> {
     Err(eyre!("issuer export requires a SQL database feature"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 mod issuer_export_tests {
     use super::write_issuer_export;
 
