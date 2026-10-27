@@ -2203,10 +2203,16 @@ pub(crate) mod issuer_audit_events {
 /// issuers. Issuers whose aggregation ID is still NULL are assigned one, so
 /// the carried key does not resolve to a corrupt row.
 ///
+/// Only registry-backed credentials are carried (`source = 'registry'`): a
+/// credential someone attaches to a portal issuer's id must not be picked up.
+///
 /// Idempotent: a row already carried identically is skipped, so a re-run after
-/// a partial MySQL failure resumes. Conflicts are reported in full before any
-/// write. Rows that cannot be valid management keys are skipped with a
-/// warning; they could not authenticate before either.
+/// a partial MySQL failure resumes. Carried keys land `reserved`, so they hold
+/// the kid and material but authenticate nothing until an operator adopts or
+/// activates the key. Data conflicts never fail the migration: rows whose
+/// material is shared by several credentials, and rows that would collide with
+/// an existing `issuer_keys` row, are skipped with a warning. Only real
+/// database errors return `Err`.
 pub(crate) mod issuer_keys_carry_over {
     use super::*;
     use crate::domain::models::credential::{PublicJwk, canonical_jwk_material};
@@ -2267,26 +2273,23 @@ pub(crate) mod issuer_keys_carry_over {
         }
     }
 
-    /// Callable outside the migration: after a rolling deploy, pods of the
-    /// previous release may still have inserted credentials, and this picks
-    /// them up. Returns how many keys were newly carried.
-    pub(crate) async fn carry_over_credential_keys<C: ConnectionTrait>(
-        conn: &C,
-    ) -> Result<usize, DbErr> {
+    /// The migration's private carry-over; not callable elsewhere. Runs once
+    /// at upgrade; re-running it would be unsafe while credentials can still
+    /// be created against an issuer's id.
+    async fn carry_over_credential_keys<C: ConnectionTrait>(conn: &C) -> Result<usize, DbErr> {
         let backend = conn.get_database_backend();
         let rows = conn
             .query_all_raw(Statement::from_string(
                 backend,
                 "SELECT c.issuer AS issuer, c.public_key AS public_key, c.key_id AS key_id, \
-                 i.aggregation_id AS aggregation_id \
-                 FROM credentials c JOIN issuers i ON i.issuer = c.issuer \
-                 WHERE c.key_id IS NOT NULL ORDER BY c.issuer",
+                     i.aggregation_id AS aggregation_id \
+                     FROM credentials c JOIN issuers i ON i.issuer = c.issuer \
+                     WHERE c.key_id IS NOT NULL AND i.source = 'registry' \
+                     ORDER BY c.issuer",
             ))
             .await?;
 
-        let mut plan = Vec::new();
-        let mut by_material = BTreeMap::<String, String>::new();
-        let mut conflicts = Vec::new();
+        let mut candidates = Vec::new();
         for row in rows {
             let issuer: String = row.try_get("", "issuer")?;
             let kid: String = row.try_get("", "key_id")?;
@@ -2312,13 +2315,7 @@ pub(crate) mod issuer_keys_carry_over {
             let material = canonical_jwk_material(&public_key)
                 .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
             let hash = hex::encode(Sha256::digest(material.as_bytes()));
-            if let Some(other) = by_material.insert(hash.clone(), kid.clone()) {
-                conflicts.push(format!(
-                    "kids {other:?} and {kid:?} (issuer {issuer:?}) share key material"
-                ));
-                continue;
-            }
-            plan.push(Planned {
+            candidates.push(Planned {
                 issuer,
                 kid,
                 hash,
@@ -2328,15 +2325,34 @@ pub(crate) mod issuer_keys_carry_over {
             });
         }
 
-        // Check the whole plan against what is already in issuer_keys before
-        // writing anything.
+        // Skip every credential whose material is shared by several
+        // credentials: their ownership is ambiguous, so none is carried.
+        let mut counts = BTreeMap::<String, usize>::new();
+        for candidate in &candidates {
+            *counts.entry(candidate.hash.clone()).or_default() += 1;
+        }
+        let (shared, plan): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|candidate| counts[&candidate.hash] > 1);
+        for candidate in &shared {
+            tracing::warn!(
+                issuer = %candidate.issuer,
+                kid = %candidate.kid,
+                "not carrying credential key: its key material is shared by several credentials"
+            );
+        }
+
+        // Skip any remaining row that would collide with an existing
+        // `issuer_keys` row it is not identical to. Data conflicts must not
+        // fail the upgrade; only real database errors do.
         let lookup = format!(
             "SELECT kid, issuer_id, key_material FROM issuer_keys WHERE kid = {} OR key_material = {}",
             ph(backend, 1),
             ph(backend, 2)
         );
         let mut already = Vec::new();
-        for planned in &plan {
+        let mut carrying = Vec::new();
+        for planned in plan {
             let existing = conn
                 .query_all_raw(Statement::from_sql_and_values(
                     backend,
@@ -2345,6 +2361,7 @@ pub(crate) mod issuer_keys_carry_over {
                 ))
                 .await?;
             let mut identical = false;
+            let mut skip = false;
             for row in existing {
                 let kid: String = row.try_get("", "kid")?;
                 let issuer_id: String = row.try_get("", "issuer_id")?;
@@ -2352,19 +2369,20 @@ pub(crate) mod issuer_keys_carry_over {
                 if kid == planned.kid && issuer_id == planned.issuer && hash == planned.hash {
                     identical = true;
                 } else {
-                    conflicts.push(format!(
-                        "credential key {:?} (issuer {:?}) collides with existing issuer key {kid:?} (issuer {issuer_id:?})",
-                        planned.kid, planned.issuer
-                    ));
+                    tracing::warn!(
+                        issuer = %planned.issuer,
+                        kid = %planned.kid,
+                        existing_kid = %kid,
+                        existing_issuer = %issuer_id,
+                        "not carrying credential key: it collides with an existing issuer key"
+                    );
+                    skip = true;
                 }
             }
-            already.push(identical);
-        }
-        if !conflicts.is_empty() {
-            return Err(DbErr::Migration(format!(
-                "credential key carry-over conflicts; repair these registrations before retrying: {}",
-                conflicts.join("; ")
-            )));
+            if !skip {
+                already.push(identical);
+                carrying.push(planned);
+            }
         }
 
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -2375,8 +2393,8 @@ pub(crate) mod issuer_keys_carry_over {
         };
         let insert = format!(
             "INSERT INTO issuer_keys \
-             (kid, issuer_id, key_material, alg, jwk, state, not_before, not_after, created_at) \
-             VALUES ({}, {}, {}, {}, {jwk_value}, 'active', NULL, NULL, {})",
+                 (kid, issuer_id, key_material, alg, jwk, state, not_before, not_after, created_at) \
+                 VALUES ({}, {}, {}, {}, {jwk_value}, 'reserved', NULL, NULL, {})",
             ph(backend, 1),
             ph(backend, 2),
             ph(backend, 3),
@@ -2384,21 +2402,21 @@ pub(crate) mod issuer_keys_carry_over {
             ph(backend, 6)
         );
         let mut carried = 0;
-        for (planned, skip) in plan.iter().zip(already) {
+        for (planned, skip) in carrying.iter().zip(already) {
             if planned.needs_aggregation_id {
                 conn.execute_raw(Statement::from_sql_and_values(
-                    backend,
-                    format!(
-                        "UPDATE issuers SET aggregation_id = {} WHERE issuer = {} AND aggregation_id IS NULL",
-                        ph(backend, 1),
-                        ph(backend, 2)
-                    ),
-                    [
-                        uuid::Uuid::new_v4().to_string().into(),
-                        planned.issuer.clone().into(),
-                    ],
-                ))
-                .await?;
+                        backend,
+                        format!(
+                            "UPDATE issuers SET aggregation_id = {} WHERE issuer = {} AND aggregation_id IS NULL",
+                            ph(backend, 1),
+                            ph(backend, 2)
+                        ),
+                        [
+                            uuid::Uuid::new_v4().to_string().into(),
+                            planned.issuer.clone().into(),
+                        ],
+                    ))
+                    .await?;
             }
             if skip {
                 continue;
@@ -2436,14 +2454,18 @@ pub(crate) mod issuer_keys_carry_over {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(all(
+    test,
+    any(feature = "sqlite", feature = "mysql", feature = "postgres-tests")
+))]
 mod carry_over_tests {
     use super::*;
-    use crate::domain::models::hosted_issuer::HostedIssuerKeyState;
-    use crate::domain::ports::HostedIssuerStore;
+    use crate::domain::models::credential::KeyResolveError;
+    use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
     use crate::outbound::sql::SqlHostedIssuerStore;
-    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, Statement};
-    use sha2::Digest;
+    use crate::outbound::sql::models::{Credentials, credentials, issuers};
+    use jsonwebtoken::jwk::Jwk;
+    use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, Set, Statement};
     use std::sync::Arc;
 
     /// The release before the carry-over migration.
@@ -2460,106 +2482,214 @@ mod carry_over_tests {
     const KEY_1: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-1","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
     const KEY_2: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-2","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
     const OCT: &str = r#"{"kty":"oct","kid":"oct-1","alg":"HS256","k":"c2VjcmV0"}"#;
+    /// A valid PS256 RSA key, distinct material from the EC keys.
+    const RSA_PS256: &str = r#"{"kty":"RSA","kid":"rsa-1","alg":"PS256","n":"uNtunrvdLa-WuK-VpCwiEUXlOCmPNEmo0ZYQ424NsGns0OVnu1T9hL4M_UODdKhz-_mXHvqsBxS-PZe0OMmdo9QrGWwnS4H8IX5c_fKZ01AX21_hJoQY6SMLUVGVbElqNW032v-LliC7-dTB0YeTg_wmbAN1uGkPr202k3c_18gVGvpa8B7Ri8Ytowl6WzpiVZ3VyP3HIQQuhrAXN0B1BatWpv4GwLXr-ihCmFgbS2RHm5TIkoap2yXw2p488RFgrnacRGj9QhN4p9HIMuYeLkoeClMS2ZQD2d9holRyRCUsARh8IvSf9DZVmDGwd5kqpHqT3GkZ8o8kdGAQTq53Nw","e":"AQAB"}"#;
+    /// A third distinct EC key, used only for the shared-material pair.
+    const KEY_DUP: &str = r#"{"kty":"EC","crv":"P-256","kid":"dup-x","alg":"ES256","x":"w0Nc9y5IMwcWV08tC3KtnukblytlN1HTOFngG8U6d60","y":"UklyBhY4aZvUS9aJDifOAiLMj1LVwNmhA8AXRvcs3f8"}"#;
+    /// A kid shaped like an RFC 7638 thumbprint, carried unchanged like any other.
+    const THUMBPRINT_KID: &str = "tlBOuPIle0dk1Dbs1lKHGJS5yMXswT8QXuVO4RWwxgg";
 
-    async fn db() -> sea_orm::DatabaseConnection {
+    /// Seeds one legacy credential and its issuer row. `source` is the
+    /// `issuers.source` the carry-over migration filters on.
+    async fn seed(db: &DatabaseConnection, issuer: &str, kid: &str, jwk: &str, source: &str) {
+        let mut key: Jwk = serde_json::from_str(jwk).unwrap();
+        key.common.key_id = Some(kid.to_string());
+        let issuer_row = issuers::ActiveModel {
+            issuer: Set(issuer.to_string()),
+            aggregation_id: Set(None),
+            list_count: Set(0),
+            display_name: Set(None),
+            source: Set(source.to_string()),
+            tier: Set("standard".to_string()),
+            state: Set("active".to_string()),
+            owner: Set(None),
+            created_at: Set(0),
+            expires_at: Set(None),
+            version: Set(1),
+        };
+        issuers::Entity::insert(issuer_row)
+            .exec_without_returning(db)
+            .await
+            .unwrap();
+        let credential: credentials::ActiveModel = Credentials::new(issuer.to_string(), key).into();
+        credentials::Entity::insert(credential)
+            .exec_without_returning(db)
+            .await
+            .unwrap();
+    }
+
+    /// A static registry that has adopted the carried identity `legacy-1` /
+    /// `key-1`, so its key now authenticates through the static-first resolver.
+    fn registry_with_static_adoption() -> Arc<crate::server::auth::issuer_registry::RegistryHandle>
+    {
+        let jwk: serde_json::Value = serde_json::from_str(KEY_1).unwrap();
+        Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(
+                &serde_saphyr::to_string(&serde_json::json!({
+                    "version": 1,
+                    "issuers": [{
+                        "id": "legacy-1",
+                        "aggregation_id": uuid::Uuid::new_v4(),
+                        "keys": [{ "kid": "key-1", "alg": "ES256", "jwk": jwk }],
+                    }],
+                    "admins": [],
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The full upgrade scenario, run from an unmigrated database: an earlier
+    /// release's legacy credentials are seeded, then the current migrator runs.
+    /// Postgres exercises the `$n` numbering and `CAST($5 AS JSON)`; on MySQL a
+    /// partial failure leaves partial inserts, so the idempotency check matters
+    /// there too.
+    async fn upgrade_scenario(db: Arc<DatabaseConnection>) {
+        let backend = db.get_database_backend();
+        apply_migrations::<Before>(db.as_ref()).await.unwrap();
+
+        seed(&db, "legacy-1", "key-1", KEY_1, "registry").await; // human-chosen EC kid
+        seed(
+            &db,
+            "legacy-thumb",
+            THUMBPRINT_KID,
+            &KEY_2.replace("key-2", THUMBPRINT_KID),
+            "registry",
+        )
+        .await; // thumbprint kid
+        seed(&db, "legacy-rsa", "rsa-1", RSA_PS256, "registry").await; // RSA key
+        seed(&db, "legacy-oct", "oct-1", OCT, "registry").await; // oct: not a valid management key
+        seed(
+            &db,
+            "dup-a",
+            "dup-a",
+            &KEY_DUP.replace("dup-x", "dup-a"),
+            "registry",
+        )
+        .await; // shared material
+        seed(
+            &db,
+            "dup-b",
+            "dup-b",
+            &KEY_DUP.replace("dup-x", "dup-b"),
+            "registry",
+        )
+        .await; // shared material
+        // A credential attached to a portal issuer's id must not be carried.
+        seed(&db, "portal-issuer", "portal-key", KEY_2, "portal").await;
+
+        run_migrations(&db).await.unwrap();
+
+        // Carried kids: key-1, the thumbprint kid, and rsa-1. The oct key, the
+        // shared-material duplicates, and the portal-attached key are skipped.
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT kid, state FROM issuer_keys ORDER BY kid",
+            ))
+            .await
+            .unwrap();
+        let mut kids: Vec<String> = rows.iter().map(|r| r.try_get("", "kid").unwrap()).collect();
+        let mut expected = vec![
+            "key-1".to_string(),
+            THUMBPRINT_KID.to_string(),
+            "rsa-1".to_string(),
+        ];
+        expected.sort();
+        kids.sort();
+        assert_eq!(kids, expected, "carried kids on {backend:?}");
+        let states: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get("", "state").unwrap())
+            .collect();
+        assert!(
+            states.iter().all(|state| state == "reserved"),
+            "carried keys must land reserved on {backend:?}: {states:?}"
+        );
+
+        // A NULL-aggregation-id issuer was assigned one so its carried key does
+        // not resolve to a corrupt row.
+        let agg = db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT aggregation_id FROM issuers WHERE issuer = 'legacy-1'",
+            ))
+            .await
+            .unwrap()
+            .expect("legacy-1 must exist")
+            .try_get::<Option<String>>("", "aggregation_id")
+            .unwrap();
+        assert!(
+            agg.is_some(),
+            "NULL aggregation id must be assigned on {backend:?}"
+        );
+
+        // A reserved carried key must never authenticate, until adopted.
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(SqlHostedIssuerStore::new(db.clone()));
+        let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
+            Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+            Some(store.clone()),
+        );
+        assert!(
+            matches!(
+                resolver.resolve("key-1").await,
+                Err(KeyResolveError::Reserved)
+            ),
+            "a reserved carried key must not authenticate on {backend:?}"
+        );
+        let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
+            registry_with_static_adoption(),
+            Some(store),
+        );
+        let resolved = resolver.resolve("key-1").await.unwrap();
+        assert_eq!(resolved.principal.id(), "legacy-1");
+
+        // Idempotency: re-running the carry-over migration is a no-op (this is
+        // what a partial MySQL failure resumes from).
+        issuer_keys_carry_over::Migration
+            .up(&SchemaManager::new(db.as_ref()))
+            .await
+            .unwrap();
+        let rows_after = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT kid FROM issuer_keys ORDER BY kid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows_after.len(),
+            kids.len(),
+            "a re-run must not change rows on {backend:?}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_carry_over_upgrade_scenario() {
+        use sea_orm::{ConnectOptions, Database};
         let mut options = ConnectOptions::new("sqlite::memory:");
         options
             .max_connections(1)
             .map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
-        Database::connect(options).await.unwrap()
+        let db = Database::connect(options).await.unwrap();
+        upgrade_scenario(Arc::new(db)).await;
     }
 
-    async fn seed(db: &sea_orm::DatabaseConnection, issuer: &str, kid: &str, jwk: &str) {
-        let backend = DatabaseBackend::Sqlite;
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO issuers (issuer, aggregation_id, list_count) VALUES (?, NULL, 0)",
-            [issuer.into()],
-        ))
-        .await
-        .unwrap();
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO credentials (issuer, public_key, key_id, list_count, aggregation_id) \
-             VALUES (?, ?, ?, 0, NULL)",
-            [issuer.into(), jwk.into(), kid.into()],
-        ))
-        .await
-        .unwrap();
-    }
-
+    #[cfg(feature = "mysql")]
     #[tokio::test]
-    async fn upgrade_carries_chosen_kids_unchanged_and_they_resolve() {
-        let db = db().await;
-        apply_migrations::<Before>(&db).await.unwrap();
-        seed(&db, "legacy-1", "key-1", KEY_1).await; // human-chosen kid
-        seed(&db, "legacy-2", "key-2", KEY_2).await;
-        seed(&db, "legacy-oct", "oct-1", OCT).await; // not a valid management key
-
-        run_migrations(&db).await.unwrap();
-
-        let rows = db
-            .query_all_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT kid, issuer_id, alg, key_material FROM issuer_keys ORDER BY kid",
-            ))
-            .await
-            .unwrap();
-        let kids: Vec<String> = rows.iter().map(|r| r.try_get("", "kid").unwrap()).collect();
-        assert_eq!(
-            kids,
-            ["key-1", "key-2"],
-            "kids are carried byte for byte; oct is skipped"
-        );
-        let alg: String = rows[0].try_get("", "alg").unwrap();
-        assert_eq!(alg, "ES256");
-        let material: String = rows[0].try_get("", "key_material").unwrap();
-        let expected = hex::encode(sha2::Sha256::digest(
-            crate::domain::models::credential::canonical_jwk_material(
-                &serde_json::from_str(KEY_1).unwrap(),
-            )
-            .unwrap()
-            .as_bytes(),
-        ));
-        assert_eq!(material, expected);
-
-        let store = SqlHostedIssuerStore::new(Arc::new(db));
-        let entry = store
-            .find_key_by_kid("key-1")
-            .await
-            .unwrap()
-            .expect("carried kid resolves");
-        assert_eq!(entry.issuer.id, "legacy-1");
-        assert_eq!(entry.key.state, HostedIssuerKeyState::Active);
-        // legacy-1's aggregation ID was NULL before the upgrade.
-        let _ = entry.issuer.aggregation_id;
+    async fn mysql_carry_over_upgrade_scenario() {
+        use crate::outbound::sql::test_containers::mysql_helpers;
+        let test_db = mysql_helpers::MysqlTestDb::start_unmigrated().await;
+        upgrade_scenario(test_db.connection().await).await;
     }
 
+    #[cfg(feature = "postgres-tests")]
     #[tokio::test]
-    async fn carry_over_is_idempotent() {
-        let db = db().await;
-        apply_migrations::<Before>(&db).await.unwrap();
-        seed(&db, "legacy-1", "key-1", KEY_1).await;
-        run_migrations(&db).await.unwrap();
-        assert_eq!(
-            issuer_keys_carry_over::carry_over_credential_keys(&db)
-                .await
-                .unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn credentials_sharing_key_material_abort_with_a_report() {
-        let db = db().await;
-        apply_migrations::<Before>(&db).await.unwrap();
-        seed(&db, "a", "dup-a", &KEY_1.replace("key-1", "dup-a")).await;
-        seed(&db, "b", "dup-b", &KEY_1.replace("key-1", "dup-b")).await;
-        let error = run_migrations(&db).await.unwrap_err().to_string();
-        assert!(error.contains("share key material"), "{error}");
-        assert!(
-            error.contains("dup-a") && error.contains("dup-b"),
-            "{error}"
-        );
+    async fn postgres_carry_over_upgrade_scenario() {
+        use crate::outbound::sql::test_containers::postgres_helpers;
+        let test_db = postgres_helpers::postgres_connection_unmigrated().await;
+        upgrade_scenario(test_db.db.clone()).await;
     }
 }

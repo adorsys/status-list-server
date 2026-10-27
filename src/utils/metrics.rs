@@ -66,13 +66,16 @@ pub(crate) fn record_issuer_registry_reload_failure() {
     issuer_registry_metrics().reload_failures.add(1, &[]);
 }
 
-pub(crate) fn record_management_auth_request(issuer: Option<&str>, outcome: &'static str) {
-    // No `kid` label: it is attacker-controlled and unauthenticated on the
-    // failure paths, so labeling on it would be unbounded cardinality.
+pub(crate) fn record_management_auth_request(
+    issuer: Option<&str>,
+    kid: Option<&str>,
+    outcome: &'static str,
+) {
     issuer_registry_metrics().auth_requests.add(
         1,
         &[
             KeyValue::new("issuer", issuer.unwrap_or("-").to_owned()),
+            KeyValue::new("kid", kid.unwrap_or("-").to_owned()),
             KeyValue::new("outcome", outcome),
         ],
     );

@@ -52,6 +52,30 @@ impl HostedIssuer {
     }
 }
 
+/// Input to create a hosted issuer through the public surface. Identifiers
+/// (`id`, `aggregation_id`, `created_at`, `version`) are assigned by the
+/// server, never by the caller (ADR 0002, Identifiers), so this carries only
+/// operator-supplied metadata. `expires_at` is required: onboarding-registered
+/// credentials always expire (ADR 0002, Limits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewHostedIssuer {
+    pub display_name: Option<String>,
+    pub tier: String,
+    pub owner: Option<String>,
+    pub expires_at: OffsetDateTime,
+}
+
+/// Input to register a hosted issuer key through the public surface. The kid
+/// is assigned by the server, so `jwk` carries no `kid`; `created_at` is
+/// assigned too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewHostedIssuerKey {
+    pub issuer_id: String,
+    pub jwk: serde_json::Value,
+    pub not_before: Option<OffsetDateTime>,
+    pub not_after: Option<OffsetDateTime>,
+}
+
 /// A hosted issuer's signing key mirroring one `issuer_keys` row, with the
 /// public key validated by [`PublicJwk`] like every trust source.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,11 +91,14 @@ pub struct HostedIssuerKey {
 }
 
 /// Lifecycle of a hosted issuer key row. Stored as a string in
-/// `issuer_keys.state`; a revoked key makes resolution fail closed.
+/// `issuer_keys.state`; a revoked key makes resolution fail closed. `Reserved`
+/// holds a carried-over legacy kid and material so the identifier is kept but
+/// nothing authenticates until an operator adopts or activates the key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HostedIssuerKeyState {
     Active,
+    Reserved,
     Revoked,
 }
 
@@ -79,6 +106,7 @@ impl HostedIssuerKeyState {
     pub fn as_str(&self) -> &'static str {
         match self {
             HostedIssuerKeyState::Active => "active",
+            HostedIssuerKeyState::Reserved => "reserved",
             HostedIssuerKeyState::Revoked => "revoked",
         }
     }
@@ -139,8 +167,10 @@ impl HostedIssuerKeyEntry {
         if !self.issuer.is_currently_enabled(now) {
             return Err(KeyResolveError::PrincipalDisabled);
         }
-        if self.key.state != HostedIssuerKeyState::Active {
-            return Err(KeyResolveError::Revoked);
+        match self.key.state {
+            HostedIssuerKeyState::Active => {}
+            HostedIssuerKeyState::Reserved => return Err(KeyResolveError::Reserved),
+            HostedIssuerKeyState::Revoked => return Err(KeyResolveError::Revoked),
         }
         if !self.key.is_currently_valid(now) {
             if self.key.not_before.is_some_and(|start| now < start) {

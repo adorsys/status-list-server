@@ -6,7 +6,7 @@
 //! ownership on every hosted hit so a registration/reload race can never leave
 //! one key trusted under two identities.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -83,7 +83,18 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                             );
                             return Err(KeyResolveError::SourceConflict);
                         }
-                        entry.resolved_key(time::OffsetDateTime::now_utc())
+                        match entry.resolved_key(time::OffsetDateTime::now_utc()) {
+                            Err(KeyResolveError::Reserved) => {
+                                tracing::warn!(
+                                    kid = %entry.key.kid,
+                                    issuer = %entry.issuer.id,
+                                    "hosted key is reserved and does not authenticate; \
+                                     adopt or activate it in the registry to enable it"
+                                );
+                                Err(KeyResolveError::Reserved)
+                            }
+                            result => result,
+                        }
                     }
                     Ok(None) => Err(KeyResolveError::UnknownKid),
                     Err(error) => {
@@ -113,12 +124,6 @@ fn material_of(jwk: &PublicJwk) -> Option<String> {
         .and_then(|value| canonical_jwk_material(&value).ok())
 }
 
-fn hosted_conflict(message: &str) -> HostedIssuerError {
-    HostedIssuerError::Backend(Box::new(std::io::Error::other(format!(
-        "hosted issuer conflict: {message}"
-    ))))
-}
-
 /// Validate a dynamic write (issuer creation or key registration) against the
 /// active static snapshot before touching storage. The storage adapter
 /// enforces dynamic-vs-dynamic uniqueness; this covers dynamic-vs-static. A
@@ -131,11 +136,10 @@ async fn validate_dynamic_write(
 ) -> Result<(), HostedIssuerError> {
     let snapshot = registry.snapshot();
     // A hosted issuer may not reuse any static principal's id — issuer or
-    // admin — nor a static kid, nor static key material.
+    // admin — nor a static kid, nor static key material. Conflicts are typed
+    // so the admin surface maps them to 4xx instead of retrying a 5xx forever.
     if snapshot.has_principal_id(issuer_id) {
-        return Err(hosted_conflict(
-            "issuer id is already owned by the static registry",
-        ));
+        return Err(HostedIssuerError::AlreadyExists);
     }
     let Some(key) = key else {
         return Ok(());
@@ -143,16 +147,15 @@ async fn validate_dynamic_write(
     // `resolve` is O(1) and complete, catching a kid whose material
     // normalization fails, unlike iterating `all_principal_keys`.
     if snapshot.resolve(&key.kid).is_some() {
-        return Err(hosted_conflict(
-            "kid is already owned by the static registry",
-        ));
+        return Err(HostedIssuerError::AlreadyExists);
     }
-    let registers = material_of(&key.jwk)
-        .ok_or_else(|| hosted_conflict("the requested issuer key has malformed JWK parameters"))?;
+    let registers = material_of(&key.jwk).ok_or_else(|| {
+        HostedIssuerError::InvalidPublicJwk(
+            "the requested issuer key has malformed JWK parameters".into(),
+        )
+    })?;
     if snapshot.has_key_material(&registers) {
-        return Err(hosted_conflict(
-            "key material is owned by the static registry",
-        ));
+        return Err(HostedIssuerError::KeyMaterialReused);
     }
     // Dynamic-vs-dynamic material uniqueness is enforced by the `key_material`
     // unique index in storage, not here: a pre-check here would be racy and
@@ -169,8 +172,10 @@ pub async fn validate_static_candidate_against_dynamic(
 ) -> Result<(), RegistryError> {
     let candidate_keys = candidate.all_principal_keys();
     let active_keys = active.all_principal_keys();
-    let active_kids: HashSet<&str> = active_keys.iter().map(|(_, kid, _)| *kid).collect();
-    let active_materials: HashSet<&str> = active_keys.iter().map(|(_, _, m)| m.as_str()).collect();
+    let active_material_by_kid: HashMap<&str, &str> = active_keys
+        .iter()
+        .map(|(_, kid, m)| (*kid, m.as_str()))
+        .collect();
     let mut checked_ids: HashSet<&str> = HashSet::new();
 
     for (principal_id, kid, material) in &candidate_keys {
@@ -186,34 +191,41 @@ pub async fn validate_static_candidate_against_dynamic(
                 "principal id `{principal_id}` collides with a hosted issuer"
             )));
         }
-        if active_kids.contains(kid) {
+        // A candidate entry whose kid and material are both unchanged from the
+        // active snapshot was already admitted; no hosted cross-check is needed.
+        if active_material_by_kid.get(kid) == Some(&material.as_str()) {
             continue;
         }
-        match store
-            .find_key_by_kid(kid)
-            .await
-            .map_err(dynamic_check_failed)?
-        {
-            Some(entry)
-                if entry.issuer.id == *principal_id
-                    && entry.key.jwk.normalized_material().ok().as_deref()
-                        == Some(material.as_str()) =>
-            {
-                continue; // the same identity, adopted into the registry
-            }
-            Some(_) => {
-                return Err(RegistryError::Semantic(format!(
-                    "candidate key `{kid}` collides with a hosted issuer key with the same kid; \
-                     kids are unique across trust sources, so the candidate is rejected"
-                )));
-            }
-            None => {}
-        }
-        if !active_materials.contains(material.as_str())
-            && store
-                .key_material_in_use(material)
+        // A new kid (absent from the active snapshot) must not collide with a
+        // hosted kid, unless it is the same identity adopted into the registry.
+        if !active_material_by_kid.contains_key(kid) {
+            match store
+                .find_key_by_kid(kid)
                 .await
                 .map_err(dynamic_check_failed)?
+            {
+                Some(entry)
+                    if entry.issuer.id == *principal_id
+                        && entry.key.jwk.normalized_material().ok().as_deref()
+                            == Some(material.as_str()) =>
+                {
+                    continue; // the same identity, adopted into the registry
+                }
+                Some(_) => {
+                    return Err(RegistryError::Semantic(format!(
+                        "candidate key `{kid}` collides with a hosted issuer key with the same kid; \
+                         kids are unique across trust sources, so the candidate is rejected"
+                    )));
+                }
+                None => {}
+            }
+        }
+        // New or changed material: always re-check it against the hosted store,
+        // even when the kid was already admitted with different material.
+        if store
+            .key_material_in_use(material)
+            .await
+            .map_err(dynamic_check_failed)?
         {
             return Err(RegistryError::Semantic(
                 "a candidate registry key reuses hosted issuer key material".into(),
@@ -228,14 +240,15 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 }
 
 /// Runs a hosted write through the cross-source checks before handing it to
-/// storage. The future admin surface builds on these; hosted tests use them
-/// to exercise the same path production would.
+/// storage. Crate-private: the public surface builds on [`HostedIssuerService`]
+/// (which assigns identifiers) rather than accepting whole entities; hosted
+/// tests use this to exercise the same path production would.
 ///
 /// The registry write lock is held across the check and the commit so a racing
 /// reload cannot install a conflicting static snapshot in between: whichever
 /// critical section runs first wins, and the loser is rejected. This keeps a
 /// cross-source-conflicting row out of storage entirely.
-pub async fn register_hosted_issuer(
+pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     issuer: HostedIssuer,
@@ -245,7 +258,7 @@ pub async fn register_hosted_issuer(
     store.create_issuer(issuer).await
 }
 
-pub async fn register_hosted_issuer_key(
+pub(crate) async fn register_hosted_issuer_key(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     key: HostedIssuerKey,
@@ -351,6 +364,18 @@ mod tests {
             Ok(keys
                 .values()
                 .any(|key| material_of(&key.jwk).as_deref() == Some(material)))
+        }
+
+        async fn find_issuer_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            let stored = self.issuer.as_ref().map(|hosted| hosted.id.clone());
+            Ok(ids
+                .iter()
+                .filter(|id| stored.as_deref() == Some(id.as_str()))
+                .cloned()
+                .collect())
         }
     }
 
@@ -470,9 +495,11 @@ mod tests {
         let mut hosted = issuer();
         hosted.id = "static-issuer".into();
         assert!(
-            register_hosted_issuer(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer(&registry, &store, hosted).await,
+                Err(HostedIssuerError::AlreadyExists)
+            ),
+            "an id collision with the static registry must be a typed AlreadyExists, not Backend"
         );
     }
 
@@ -485,9 +512,11 @@ mod tests {
         let mut hosted = key_with_material("static-key", DISTINCT_EC_JWK);
         hosted.issuer_id = "00000000-0000-4000-8000-000000000003".into();
         assert!(
-            register_hosted_issuer_key(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer_key(&registry, &store, hosted).await,
+                Err(HostedIssuerError::AlreadyExists)
+            ),
+            "a kid collision with the static registry must be a typed AlreadyExists, not Backend"
         );
     }
 
@@ -513,9 +542,11 @@ mod tests {
         }
         hosted.jwk = PublicJwk::try_new(serde_json::to_vec(&candidate).unwrap()).unwrap();
         assert!(
-            register_hosted_issuer_key(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer_key(&registry, &store, hosted).await,
+                Err(HostedIssuerError::KeyMaterialReused)
+            ),
+            "material reuse against the static registry must be typed KeyMaterialReused, not Backend"
         );
     }
 
@@ -527,9 +558,11 @@ mod tests {
         let mut hosted = key_with_material("admin-key", EC_JWK);
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
-            register_hosted_issuer_key(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer_key(&registry, &store, hosted).await,
+                Err(HostedIssuerError::AlreadyExists)
+            ),
+            "an admin kid collision must be a typed AlreadyExists, not Backend"
         );
     }
 
@@ -541,9 +574,11 @@ mod tests {
         let mut hosted = key_with_material("hosted-key", DISTINCT_EC_JWK);
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
-            register_hosted_issuer_key(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer_key(&registry, &store, hosted).await,
+                Err(HostedIssuerError::KeyMaterialReused)
+            ),
+            "admin material reuse must be typed KeyMaterialReused, not Backend"
         );
     }
 
@@ -554,9 +589,11 @@ mod tests {
         let mut hosted = issuer();
         hosted.id = "admin-1".into();
         assert!(
-            register_hosted_issuer(&registry, &store, hosted)
-                .await
-                .is_err()
+            matches!(
+                register_hosted_issuer(&registry, &store, hosted).await,
+                Err(HostedIssuerError::AlreadyExists)
+            ),
+            "an admin id collision must be a typed AlreadyExists, not Backend"
         );
     }
 
@@ -645,6 +682,12 @@ mod tests {
         async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
             self.inner.key_material_in_use(material).await
         }
+        async fn find_issuer_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            self.inner.find_issuer_ids(ids).await
+        }
     }
 
     /// Forces the interleaving from the review: registration validates against
@@ -732,6 +775,56 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    /// A candidate may keep a kid across reloads only if its material is
+    /// unchanged: swapping the JWK under a known kid to material a hosted key
+    /// holds must still be rejected (the old `continue` skipped this check).
+    #[tokio::test]
+    async fn static_candidate_swapping_material_under_a_known_kid_is_rejected() {
+        let mut jwk_a: serde_json::Value = serde_json::from_str(EC_JWK).unwrap();
+        jwk_a["kid"] = "k".into();
+        let mut jwk_b: serde_json::Value = serde_json::from_str(DISTINCT_EC_JWK).unwrap();
+        jwk_b["kid"] = "k".into();
+        let active = RegistryHandle::from_yaml(
+            &serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "static-issuer",
+                    "aggregation_id": uuid::Uuid::new_v4(),
+                    "keys": [{ "kid": "k", "alg": "ES256", "jwk": jwk_a }],
+                }],
+                "admins": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // A hosted key already holds material B (under a different kid).
+        let store: Arc<dyn HostedIssuerStore> =
+            InMemoryHostedStore::with_keys(&[key_with_material("hosted-kid", DISTINCT_EC_JWK)]);
+        let candidate = RegistryHandle::from_yaml(
+            &serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "static-issuer",
+                    "aggregation_id": uuid::Uuid::new_v4(),
+                    "keys": [{ "kid": "k", "alg": "ES256", "jwk": jwk_b }],
+                }],
+                "admins": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_static_candidate_against_dynamic(
+                &store,
+                &active.snapshot(),
+                &candidate.snapshot()
+            )
+            .await
+            .is_err(),
+            "a reload that swaps a known kid's material to hosted-held material must be rejected"
         );
     }
 
@@ -836,6 +929,14 @@ mod tests {
                 "backend down",
             ))))
         }
+        async fn find_issuer_ids(
+            &self,
+            _ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
     }
 
     /// A trust-backend fault must not masquerade as an unknown kid: operators
@@ -881,6 +982,12 @@ mod tests {
         }
         async fn key_material_in_use(&self, _material: &str) -> Result<bool, HostedIssuerError> {
             Ok(false)
+        }
+        async fn find_issuer_ids(
+            &self,
+            _ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            Ok(HashSet::new())
         }
     }
 

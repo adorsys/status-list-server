@@ -30,7 +30,7 @@ impl AuthenticationError {
             AuthenticationError::InternalServer => Cow::Borrowed("internal_error"),
             AuthenticationError::MissingToken => Cow::Borrowed("missing_token"),
             AuthenticationError::InvalidToken => Cow::Borrowed("invalid_token"),
-            AuthenticationError::BackendUnavailable => Cow::Borrowed("backend_unavailable"),
+            AuthenticationError::BackendUnavailable => Cow::Borrowed("service_unavailable"),
         }
     }
 
@@ -62,13 +62,27 @@ impl IntoApiError for AuthenticationError {
             None => error,
         };
         // A transient trust-backend fault is retryable: tell clients when to
-        // try again rather than letting them rotate a perfectly good key.
+        // try again rather than letting them rotate a perfectly good key. The
+        // delay is jittered so clients do not all retry in step against a
+        // database trying to recover.
         if matches!(self, AuthenticationError::BackendUnavailable) {
-            error.retry_after(1)
+            error.retry_after(retry_after_secs())
         } else {
             error
         }
     }
+}
+
+/// A random 1–5 s `Retry-After`. Derived from the clock's subsecond
+/// nanoseconds to avoid a `rand` dependency; distribution shape does not matter
+/// for de-synchronising retries.
+fn retry_after_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    1 + u64::from(nanos % 5)
 }
 
 impl IntoResponse for AuthenticationError {
@@ -110,14 +124,18 @@ mod tests {
                 .is_none(),
             "a backend fault must not issue a Bearer challenge"
         );
-        assert_eq!(
-            response.headers()[hyper::header::RETRY_AFTER],
-            "1",
-            "a transient trust-backend fault must be retryable"
+        let retry_after: u64 = response.headers()[hyper::header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (1..=5).contains(&retry_after),
+            "a transient trust-backend fault must advertise a jittered 1-5 s Retry-After, got {retry_after}"
         );
 
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "backend_unavailable");
+        assert_eq!(json["error"], "service_unavailable");
     }
 }

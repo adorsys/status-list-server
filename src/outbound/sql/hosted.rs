@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set};
+use std::collections::HashSet;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -145,6 +146,7 @@ fn parse_key(row: hosted_issuer_keys::Model) -> Result<HostedIssuerKey, Reposito
     };
     let state = match row.state.as_str() {
         value if value == HostedIssuerKeyState::Active.as_str() => HostedIssuerKeyState::Active,
+        value if value == HostedIssuerKeyState::Reserved.as_str() => HostedIssuerKeyState::Reserved,
         value if value == HostedIssuerKeyState::Revoked.as_str() => HostedIssuerKeyState::Revoked,
         other => {
             return Err(RepositoryError::DataError(format!(
@@ -480,6 +482,25 @@ impl SeaOrmStore<HostedIssuerRow> {
         })
         .await
     }
+
+    async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, RepositoryError> {
+        time_query("find_ids", "hosted_issuer", async {
+            let db = self.current();
+            let mut found = HashSet::new();
+            // Chunked to stay under each backend's bind-variable limit.
+            for chunk in ids.chunks(500) {
+                let rows = issuers::Entity::find()
+                    .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+                    .filter(issuers::Column::Issuer.is_in(chunk.iter().cloned()))
+                    .all(db.as_ref())
+                    .await
+                    .map_err(find_err)?;
+                found.extend(rows.into_iter().map(|row| row.issuer));
+            }
+            Ok(found)
+        })
+        .await
+    }
 }
 
 /// Only the typed material-reuse and invalid-key variants from `add_key` are
@@ -541,6 +562,10 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .key_material_in_use(material)
             .await
             .map_err(Into::into)
+    }
+
+    async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError> {
+        self.store.find_issuer_ids(ids).await.map_err(Into::into)
     }
 }
 

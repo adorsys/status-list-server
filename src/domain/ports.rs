@@ -1,6 +1,6 @@
 //! Outbound secondary ports defining contracts.
 
-use std::{fmt, sync::Arc};
+use std::{collections::HashSet, fmt, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -52,6 +52,11 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Whether the given normalized key material (RFC 7638 §7 parameters) is
     /// already registered to any hosted key, matched by its stored hash in SQL.
     async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError>;
+
+    /// Which of the given ids name a portal issuer, in one batched query.
+    /// Used by the startup/reload warning path so it does not run one
+    /// `find_issuer` per owner.
+    async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.

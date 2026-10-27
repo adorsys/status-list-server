@@ -159,6 +159,16 @@ pub(crate) mod mysql_helpers {
 
         /// Applies only the first `steps` migrations (`None` applies all).
         pub(crate) async fn start_migrated(steps: Option<u32>) -> Self {
+            let db = Self::start_unmigrated().await;
+            crate::outbound::sql::Migrator::up(db.connection().await.as_ref(), steps)
+                .await
+                .expect("Failed to run migrations on MySQL");
+            db
+        }
+
+        /// Starts a fresh test database with no migrations applied, so a test
+        /// can stand in for an earlier release and upgrade it itself.
+        pub(crate) async fn start_unmigrated() -> Self {
             let node = super::lifecycle::start_with_retry("MySQL", || {
                 MysqlImage::default().with_tag("26.7")
             })
@@ -192,11 +202,7 @@ pub(crate) mod mysql_helpers {
                 .expect("Failed to create test database");
 
             let url = format!("mysql://{host}:{port}/{db_name}");
-            let db = Self::connect_pinned(&url).await;
-            crate::outbound::sql::Migrator::up(db.as_ref(), steps)
-                .await
-                .expect("Failed to run migrations on MySQL");
-
+            let _ = Self::connect_pinned(&url).await;
             Self {
                 container: node,
                 url,
@@ -294,6 +300,16 @@ pub(crate) mod postgres_helpers {
 
     /// Applies only the first `steps` migrations (`None` applies all).
     pub(crate) async fn postgres_connection_migrated(steps: Option<u32>) -> PostgresTestDb {
+        let test_db = postgres_connection_unmigrated().await;
+        crate::outbound::sql::Migrator::up(test_db.db.as_ref(), steps)
+            .await
+            .expect("Failed to run migrations on Postgres");
+        test_db
+    }
+
+    /// Connects to a fresh database with no migrations applied, so a test can
+    /// stand in for an earlier release and upgrade it itself.
+    pub(crate) async fn postgres_connection_unmigrated() -> PostgresTestDb {
         let node =
             super::lifecycle::start_with_retry("Postgres", || PostgresImage::default().into())
                 .await;
@@ -328,9 +344,6 @@ pub(crate) mod postgres_helpers {
         let db = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to connect to Postgres");
-        crate::outbound::sql::Migrator::up(&db, steps)
-            .await
-            .expect("Failed to run migrations on Postgres");
 
         PostgresTestDb {
             container: node,

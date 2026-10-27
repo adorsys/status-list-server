@@ -257,6 +257,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
     post:
       operationId: registerIssuer
@@ -554,6 +556,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
     patch:
       operationId: updateStatusList
@@ -604,6 +608,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /api/v1/status-lists/{list_id}/allocations:
     parameters:
@@ -659,6 +665,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -927,7 +935,7 @@ components:
 
         In the `hosted` profile a management key may resolve from the durable
         `issuer_keys` store. If that store is unreachable, authentication
-        returns a retryable `503 backend_unavailable` (with `Retry-After`)
+        returns a retryable `503 service_unavailable` (with `Retry-After`)
         rather than a `401`, so a transient backend fault is never mistaken for
         a bad key.
 
@@ -1365,9 +1373,6 @@ components:
             # 500 / 503
             - internal_error
             - service_unavailable
-            # 503 — emitted by the authentication middleware when the hosted
-            # trust backend is unavailable; retryable, no Bearer challenge
-            - backend_unavailable
           example: "status_list_already_exists"
         error_description:
           type: string
@@ -1758,7 +1763,23 @@ components:
             error_description: "The server encountered an unexpected error."
 
     ServiceUnavailable:
-      description: Service temporarily unavailable
+      description: |
+        Service temporarily unavailable. On authenticated management operations
+        in the `hosted` profile this also occurs when the durable trust backend
+        that resolves management keys is unreachable: the request is rejected
+        with a retryable `503` rather than a `401`, so a transient backend fault
+        is never mistaken for a bad key. A `Retry-After` header (jittered 1–5 s)
+        tells the client when to try again.
+      headers:
+        Retry-After:
+          description: |
+            Seconds to wait before retrying — a minimum, not a schedule; clients
+            should add their own jitter so retries do not re-synchronise.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
       content:
         application/json:
           schema:

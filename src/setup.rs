@@ -1151,27 +1151,54 @@ async fn warn_missing_registry_issuers(
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
     dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
 ) {
-    match service.issuers_with_status_lists().await {
-        Ok(owners) => {
-            for issuer in owners {
-                if registry.issuer(&issuer).is_some() {
-                    continue;
-                }
-                // A hosted (portal) issuer owns its lists legitimately and is
-                // not expected to appear in the static registry; skip it so the
-                // warning keeps meaning "an operator-backed issuer is missing".
-                if let Some(store) = dynamic_issuer_store
-                    && store.find_issuer(&issuer).await.ok().flatten().is_some()
-                {
-                    continue;
-                }
-                tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not check status-list owners against issuer registry")
-        }
+    let Ok(owners) = service.issuers_with_status_lists().await else {
+        tracing::warn!("could not check status-list owners against issuer registry");
+        return;
+    };
+    let missing: Vec<String> = owners
+        .into_iter()
+        .filter(|issuer| registry.issuer(issuer).is_none())
+        .collect();
+    if missing.is_empty() {
+        return;
     }
+    // A hosted (portal) issuer owns its lists legitimately and is not expected
+    // to appear in the static registry; skip it so the warning keeps meaning
+    // "an operator-backed issuer is missing". One batched query for the portal
+    // ids instead of one find_issuer per owner; a database error must not fall
+    // through to the false "missing from the registry" warning.
+    let to_warn = match missing_registry_issuers(&missing, dynamic_issuer_store).await {
+        Ok(to_warn) => to_warn,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not check hosted issuers; skipping the missing-issuer warnings"
+            );
+            return;
+        }
+    };
+    for issuer in to_warn {
+        tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry");
+    }
+}
+
+/// Which of the owners missing from the static registry are not portal issuers
+/// and should be warned about. A single batched `find_issuer_ids` call handles
+/// all of them; a store error is returned so the caller skips the warnings
+/// rather than emitting a false "missing from the registry" per owner.
+async fn missing_registry_issuers(
+    missing: &[String],
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Result<Vec<String>, crate::domain::models::hosted_issuer::HostedIssuerError> {
+    let Some(store) = dynamic_issuer_store else {
+        return Ok(missing.to_vec());
+    };
+    let hosted = store.find_issuer_ids(missing).await?;
+    Ok(missing
+        .iter()
+        .filter(|issuer| !hosted.contains(*issuer))
+        .cloned()
+        .collect())
 }
 
 /// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
@@ -1601,10 +1628,17 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    use crate::domain::models::hosted_issuer::{
+        HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    };
+    use crate::domain::ports::HostedIssuerStore;
     use crate::{
         domain::models::credential::{AggregationId, Credential, CredentialError},
         test_utils::test_app_state,
     };
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Debug)]
     struct UnavailableCredentials;
@@ -2680,5 +2714,107 @@ mod general_tests {
                 "APP_ENV={raw:?} must be treated as production for the base-URL guard"
             );
         }
+    }
+
+    /// A `HostedIssuerStore` double for the missing-issuer warning path: records
+    /// every `find_issuer_ids` call and can be made to fail.
+    #[derive(Default)]
+    struct ProbeStore {
+        portal: Mutex<HashSet<String>>,
+        calls: Mutex<Vec<Vec<String>>>,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl HostedIssuerStore for ProbeStore {
+        async fn find_issuer_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            self.calls.lock().unwrap().push(ids.to_vec());
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                    "backend down",
+                ))));
+            }
+            Ok(self.portal.lock().unwrap().clone())
+        }
+        async fn find_key_by_kid(
+            &self,
+            _kid: &str,
+        ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn find_issuer(&self, _id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn create_issuer(
+            &self,
+            _issuer: HostedIssuer,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
+        async fn key_material_in_use(&self, _material: &str) -> Result<bool, HostedIssuerError> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_batches_one_call_for_many_owners() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.portal.lock().unwrap().insert("portal-1".into());
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "portal-1".into(), "b".into(), "c".into()];
+
+        let to_warn = missing_registry_issuers(&missing, &Some(store))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            to_warn,
+            vec!["a", "b", "c"],
+            "portal owners must be excluded from the missing-issuer warnings"
+        );
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one batched call, not one per owner");
+        assert_eq!(
+            calls[0].len(),
+            missing.len(),
+            "the batched call carries every owner"
+        );
+        for id in &missing {
+            assert!(calls[0].contains(id), "missing {id:?} in the batched call");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_skips_warnings_on_store_error() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.fail.store(true, Ordering::SeqCst);
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "b".into()];
+
+        let result = missing_registry_issuers(&missing, &Some(store)).await;
+
+        assert!(
+            result.is_err(),
+            "a store error must skip the warnings, never fall through to a false per-owner warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_without_dynamic_store_warns_all() {
+        let missing = vec!["a".into(), "b".into()];
+        let to_warn = missing_registry_issuers(&missing, &None).await.unwrap();
+        assert_eq!(
+            to_warn, missing,
+            "no dynamic store means every missing owner is warned"
+        );
     }
 }
