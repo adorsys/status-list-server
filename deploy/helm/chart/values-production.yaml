@@ -62,4 +62,5 @@ grafanaDashboard:
 #   labels:
 #     release: kube-prometheus-stack
 #   existingSecret: statuslist-alerting-credentials
+#   dmsEnabled: true    # only if that Secret also has dms-webhook-url
 

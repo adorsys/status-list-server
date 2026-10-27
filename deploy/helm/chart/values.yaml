@@ -1,8 +1,7 @@
 global:
   # Sets the default ingress host (statuslist.<domain>) and TLS host (*.<domain>).
   domain: ""
-  # Backends the bundled OpenTelemetry collector exports to. The defaults assume
-  # Tempo and Loki run in a "monitoring" namespace (kube-prometheus-stack layout).
+  # Collector export targets; the defaults assume Tempo and Loki in the "monitoring" namespace.
   observability:
     tempo:
       # OTLP/gRPC endpoint (host:port, no scheme) for traces.
@@ -112,11 +111,11 @@ statuslist:
     # The chart rejects APP_DATABASE__URL and APP_DATABASE__PASSWORD here; use APP_DATABASE__PASSWORD_FILE.
     # Cache backend: memory or redis (redis needs APP_CACHE__HOST).
     APP_CACHE__BACKEND: "memory"
-    # Seconds; "0" disables it.
+    # Status-list cache TTL in seconds; "0" disables the cache.
     APP_CACHE__TTL: "300"
     # Memory backend only; Redis expires keys by TTL.
     APP_CACHE__MAX_CAPACITY: "1000"
-    # Bytes, not entries (64 MiB). "0" disables it and every request re-signs.
+    # Signed-token cache size in bytes (64 MiB); "0" turns the cache off and every request re-signs.
     APP_TOKEN_BYTES_CACHE__MAX_CAPACITY: "67108864"
     APP_CACHE__TLS: "false"
     # Redis: passwords go in secretEnv or secretMounts; scope its ACL user to APP_CACHE__KEY_PREFIX.
@@ -244,8 +243,8 @@ statuslist:
       memory: "512Mi"
       cpu: "500m"
 
-# Workload Identity needs these annotations plus a cloud-side trust bound to this SA's name;
-# renaming the SA breaks that trust. Per-cloud details: deploy/helm/README.md.
+# Workload Identity also needs a cloud-side trust for system:serviceaccount:<namespace>:<name>,
+# so renaming the SA breaks it. Annotation examples: deploy/helm/README.md.
 serviceAccount:
   # create=false with no name runs pods as the namespace default SA, which may hold its own cloud role.
   create: true
