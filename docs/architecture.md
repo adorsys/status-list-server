@@ -127,6 +127,24 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
 - **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
+#### Deployment profiles
+
+`server.profile` (`APP_SERVER__PROFILE`, default `private`) selects one of two
+deployment profiles (ADR 0002). A profile only adds trust sources and limits; it
+never relaxes a rule:
+
+- **private** (default): only issuers an operator has listed in the operator
+  trust registry are trusted. The hosted issuer store is not built, so a
+  registry-only deployment is unaffected by the hosted key resolution path.
+- **hosted**: the server additionally trusts issuers registered through
+  self-service onboarding, held in durable SQL storage (see
+  [database-backends.md](database-backends.md)). The composite key resolver
+  serves static keys first, then the hosted store, and fails closed on any
+  cross-source collision.
+
+Both profiles share the same three listeners; the profile changes which trust
+sources back the management listener's authentication, not which routes exist.
+
 ### Data Flow
 
 The data flow in the Status List Server is as follows:
