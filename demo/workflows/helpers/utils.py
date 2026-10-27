@@ -8,7 +8,6 @@ import zlib
 import base64
 
 
-# Handy handle for test-like assertions
 tc = unittest.TestCase()
 
 # RFC 9052 §4.2
@@ -19,23 +18,13 @@ CWT_STATUS_LIST_CLAIM = 65533
 
 
 class Status(IntEnum):
-    """Token status values as sent to the server."""
     VALID = 0
     INVALID = 1
     SUSPENDED = 2
 
 
 def get_base_url():
-    """
-    Discovers the base URL for the server from the APP_SERVER__PORT variable.
-
-    The variable is read from the environment first, then from a .env file at
-    the project root, mirroring how the server resolves it. Without either, it
-    defaults to port 8000.
-
-    Returns:
-        str: The determined base URL (e.g., "http://localhost:8000").
-    """
+    """Port from APP_SERVER__PORT (env, then .env), default 8000, like the server."""
     project_root = Path(__file__).resolve().parents[3]
     port = (
         os.environ.get("APP_SERVER__PORT")
@@ -47,18 +36,8 @@ def get_base_url():
 
 
 def get_management_url():
-    """
-    Discovers the management base URL from the APP_SERVER__MANAGEMENT__PORT.
-
-    The management listener is where authenticated issuer writes and credential
-    registration live (public reads are separate). The port is read from the
-    environment first, then a .env file at the project root, mirroring how the
-    server resolves it. Without either it defaults to port 8001. The host is
-    always localhost: the server's bind address (e.g. 0.0.0.0) is not something
-    the demo should connect to.
-
-    Returns:
-        str: The determined management base URL (e.g., "http://localhost:8001").
+    """Port from APP_SERVER__MANAGEMENT__PORT (env, then .env), default 8001.
+    Always localhost: the server's bind address isn't something to connect to.
     """
     project_root = Path(__file__).resolve().parents[3]
     port = (
@@ -71,21 +50,8 @@ def get_management_url():
 
 
 def decode_cwt_status_list(cwt_data: bytes) -> dict:
-    """
-    Decodes the `status_list` claim from a status list CWT.
-
-    Verifies the payload is a tagged COSE_Sign1 structure (RFC 9052 §4.2) whose
-    payload carries a `status_list` claim of the expected shape, and returns that
-    claim as a dict with `bits` (int) and `lst` (raw zlib-compressed bytes)
-    keys.
-
-    Note: unlike the JWT representation, the CWT carries `lst` as the raw
-    compressed bytes (not a base64url string), so callers should decompress it
-    with `decompress_bytes`, not `decode_and_decompress`.
-
-    Raises:
-        ValueError: if the data is not a status list CWT or lacks a valid
-            `status_list` claim.
+    """The status_list claim of a COSE_Sign1 CWT, as {bits, lst}.
+    lst is raw zlib bytes here, not base64url: use decompress_bytes.
     """
     decoded = cbor2.loads(cwt_data)
 
@@ -117,12 +83,7 @@ def decode_cwt_status_list(cwt_data: bytes) -> dict:
 
 
 def get_status(statuses: bytes, index: int, bits: int) -> int:
-    """
-    Reads the status at a given index from a decompressed status list.
-
-    Statuses are packed `bits` wide, least significant bit first
-    (draft-ietf-oauth-status-list §4.1).
-    """
+    """Statuses are packed bits wide, least significant bit first (§4.1)."""
     max_index = len(statuses) * 8 // bits - 1
     if not 0 <= index <= max_index:
         raise IndexError(f"index {index} out of range (0..{max_index})")
@@ -131,12 +92,11 @@ def get_status(statuses: bytes, index: int, bits: int) -> int:
 
 
 def decompress_bytes(compressed: bytes) -> bytes:
-    """Decompresses the raw zlib stream used by the CWT status list `lst` value."""
     return zlib.decompress(compressed)
 
 
 def decode_and_decompress(encoded: str) -> bytes:
     padded_encoded = encoded + '=' * \
-        (-len(encoded) % 4)  # Add padding if necessary
+        (-len(encoded) % 4)
     compressed = base64.urlsafe_b64decode(padded_encoded)
     return zlib.decompress(compressed)

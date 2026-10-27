@@ -21,9 +21,7 @@ function checkMatch(content, filename, pattern, description) {
   }
 }
 
-// Parse the scalar `slo:` block in deploy/helm/chart/values.yaml into { key: number }.
-// The block is a flat, 2-space-indented set of `key: <number>` lines, so this
-// avoids pulling a YAML parser into the lint (the CI step has no npm deps).
+// A regex, not a YAML parser: this CI step has no npm deps.
 function parseHelmSlo() {
   const match = helmValues.match(/^\s*slo:\s*\n([\s\S]*?)(?=\n\S|\n\z)/m);
   if (!match) return {};
@@ -37,10 +35,7 @@ function parseHelmSlo() {
 
 const helmSlo = parseHelmSlo();
 
-// The Helm chart's configurable SLO targets are a second consumer of the same
-// source of truth (thresholds.json). Assert the values.yaml `slo.*` defaults
-// stay in lockstep so a Helm deployment cannot diverge from the standalone
-// Prometheus always-on stack.
+// values.yaml slo.* defaults must match thresholds.json too.
 const helmSloMap = {
   errorRateTarget: "error_rate_target_ratio",
   fastBurnMultiplier: "fast_burn_multiplier",
@@ -63,11 +58,9 @@ for (const [helmKey, thresholdsKey] of Object.entries(helmSloMap)) {
   }
 }
 
-// 1. Request Latency (0.3s)
 checkMatch(alertingRules, "alerting.rules.yml", /> 0\.3/, `request latency p95 threshold of ${thresholds.request_latency_p95_seconds}s`);
 checkMatch(readme, "slo/README.md", /300 ms/, "documented 300 ms request latency target");
 
-// 2. Error Rate (0.005 budget, 0.072 fast burn, 0.030 slow burn)
 const errTargetRegex = new RegExp(`sli:error_budget:success:30d[\\s\\S]*?\\/ ${thresholds.error_rate_target_ratio}`);
 checkMatch(recordingRules, "recording.rules.yml", errTargetRegex, `HTTP error budget denominator ${thresholds.error_rate_target_ratio}`);
 checkMatch(alertingRules, "alerting.rules.yml", />= 0\.072/, `error rate fast burn ${thresholds.fast_burn_threshold}`);
@@ -76,18 +69,12 @@ checkMatch(alertingRules, "alerting.rules.yml", /sli:error_rate:5m >= 0\.072/, `
 checkMatch(alertingRules, "alerting.rules.yml", /sli:error_rate:30m >= 0\.030/, `error rate slow-burn short window (${thresholds.slow_burn_short_window}) at ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /99\.5%/, "documented 99.5% error budget target");
 
-// 3. DB Latency (0.05s)
 checkMatch(alertingRules, "alerting.rules.yml", /> 0\.05/, `DB query latency threshold of ${thresholds.db_query_latency_p95_seconds}s`);
 checkMatch(readme, "slo/README.md", /50 ms/, "documented 50 ms DB latency target");
 
-// 4. Cache Hit Ratio (0.85)
 checkMatch(alertingRules, "alerting.rules.yml", /< 0\.85/, `cache hit ratio threshold of ${thresholds.cache_hit_ratio_min}`);
 checkMatch(readme, "slo/README.md", /85%/, "documented 85% cache hit ratio target");
 
-// 5. Cert Renewal — expiry-driven (warn <=14d, page <=7d). The old failure-rate
-//    ratio alerts were removed because `rate()` over a fixed window is 0/0 = NaN
-//    when no renewal happened in the window and could never fire; the alertable
-//    signal is the continuous `cert_time_to_expiry_seconds` gauge.
 const certExpiryWarn = thresholds.cert_expiry_warn_seconds;
 const certExpiryCritical = thresholds.cert_expiry_critical_seconds;
 checkMatch(
@@ -102,7 +89,6 @@ checkMatch(
 );
 checkMatch(readme, "slo/README.md", /14 days/, "documented 14-day cert expiry warn target");
 
-// 6. Token Generation Failure Rate (0.005 budget, 0.072 fast burn, 0.030 slow burn)
 const tokenErrTargetRegex = new RegExp(`sli:token_gen_error_budget:30d[\\s\\S]*?\\/ ${thresholds.token_gen_failure_rate_max}`);
 checkMatch(recordingRules, "recording.rules.yml", tokenErrTargetRegex, `token gen error budget denominator ${thresholds.token_gen_failure_rate_max}`);
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:1h >= 0\.072/, `token gen fast burn ${thresholds.fast_burn_threshold}`);
@@ -111,7 +97,6 @@ checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:6h >
 checkMatch(alertingRules, "alerting.rules.yml", /sli:token_gen_failure_rate:30m >= 0\.030/, `token gen slow-burn short window (${thresholds.slow_burn_short_window}) at ${thresholds.slow_burn_threshold}`);
 checkMatch(readme, "slo/README.md", /0\.5%/, "documented 0.5% token gen failure target");
 
-// 7. Budget-critical gates (0.1 remaining-error-budget)
 const errBudgetCritThreshold = thresholds.error_budget_critical_threshold;
 checkMatch(
   alertingRules,

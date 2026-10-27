@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
-# ensure-trivy-db.sh -- refresh or degrade the Trivy vulnerability database.
-#
-# This script is shared between deploy.yml's scan-image job and
-# scheduled-image-scan.yml's rescan job so both workflows make the same
-# freshness decision from the same code. It must stay in sync with the
-# cache-key strategy used in those workflows.
-#
-# Usage: ensure-trivy-db.sh <cache-dir> <staleness-bound-hours>
-#
-# The cache directory is the Trivy cache dir (TRIVY_CACHE_DIR) that
-# actions/cache restores/saves. It must be absolute: Trivy does not expand
-# `~`. The staleness bound is the maximum age of a cached DB before a fetch
-# failure becomes fatal instead of a loud warning + stale scan.
-#
-# Exit codes:
-#   0 = DB refreshed, or stale DB accepted with warning
-#   1 = fetch failed and no cached DB within the bound (hard failure)
+# Refresh the Trivy DB, or fall back to a cached one younger than the bound.
+# Usage: ensure-trivy-db.sh <cache-dir> <staleness-bound-hours> (cache-dir must be absolute).
+# Shared by deploy.yml and the nightly scan; keep it in step with their cache keys.
 
 set -euo pipefail
 
@@ -36,9 +22,7 @@ esac
 
 mkdir -p "${CACHE_DIR}"
 
-# Trivy keeps exactly one DB per cache dir: <cache-dir>/db/trivy.db, with
-# metadata.json beside it. A scan with --skip-db-update refuses to run if
-# either is missing, so both are required for the cached DB to count.
+# --skip-db-update needs both files, so both must exist for the cache to count.
 DB_FILE="${CACHE_DIR}/db/trivy.db"
 META_FILE="${CACHE_DIR}/db/metadata.json"
 
@@ -50,8 +34,7 @@ summary() {
   } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
-# Trivy downloads into a temp dir before touching the cache dir, so a failed
-# fetch leaves any cached DB intact for the fallback below.
+# Trivy downloads to a temp dir first, so a failed fetch leaves the cache intact.
 echo "Refreshing Trivy vulnerability database..."
 if trivy image --download-db-only --cache-dir "${CACHE_DIR}" 2>&1; then
   summary "Database refreshed successfully."
@@ -67,8 +50,7 @@ if [ ! -f "${DB_FILE}" ] || [ ! -f "${META_FILE}" ]; then
   exit 1
 fi
 
-# GNU stat takes -c '%Y'; BSD/macOS stat takes -f '%m'. `-printf` on find is
-# GNU-only too, which is why the DB path is fixed rather than searched for.
+# GNU stat takes -c %Y, BSD takes -f %m.
 if db_mtime=$(stat -c '%Y' "${DB_FILE}" 2>/dev/null); then
   :
 else
@@ -81,8 +63,7 @@ age_hours=$((age_seconds / 3600))
 
 echo "Found cached Trivy DB (age: ${age_hours}h)."
 
-# Compared in seconds: truncated hours would accept a DB up to 59 minutes past
-# the bound.
+# Seconds, not hours: truncation would allow 59 extra minutes.
 if [ "${age_seconds}" -le $((STALE_HOURS * 3600)) ]; then
   echo "::warning::Using cached Trivy vulnerability database (${age_hours} hours old, within ${STALE_HOURS}h bound)."
   summary "**Warning:** Using cached vulnerability database (${age_hours} hours old)." \

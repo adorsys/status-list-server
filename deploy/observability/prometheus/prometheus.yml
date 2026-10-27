@@ -1,20 +1,12 @@
 global:
-  # DEV ONLY — 2s makes recording rules (5m/30m/1h/6h) resolve quickly for local
-  # review demos. It generates ~7.5x the TSDB samples of Prometheus' 15s default,
-  # inflating memory/disk. Production: use 15s (Prometheus default) or 30s.
-  # Change here and reload Prometheus.
+  # Dev only: 2s makes the rule windows fill fast. Use 15s or more in production.
   scrape_interval: 2s
-  # Evaluated frequently so burn-rate windows (5m/30m/1h/6h) resolve promptly.
   evaluation_interval: 15s
 
 rule_files:
   - /etc/prometheus/rules/recording.rules.yml
   - /etc/prometheus/rules/alerting.rules.yml
 
-# Forward fired/resolved alerts to Alertmanager for webhook-based
-# notifications. In the docker-compose dev stack the compose
-# service is named `alertmanager` on the same network; change this target if
-# you run Alertmanager elsewhere.
 alerting:
   alertmanagers:
     - static_configs:
@@ -23,11 +15,7 @@ alerting:
 
 scrape_configs:
   - job_name: 'status_list_server'
-    # The app runs as the compose service 'app' on the ADMIN port 8002, which
-    # serves /metrics (and /health/ready) on a dedicated listener. It is scraped
-    # by DNS name on the compose network. For local / non-dockerised
-    # development (binary run on the host), point this at the host gateway
-    # instead, e.g. 'host.docker.internal:8002'.
+    # Running the binary on the host? Use host.docker.internal:8002.
     static_configs:
       - targets: ['app:8002']
 

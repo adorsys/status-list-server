@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
-"""Generate a self-signed certificate and signing key for a local Status List Server.
-
-The server signs status list tokens with an ECDSA P-256 key and refuses to start
-without a certificate whose public key matches it. This writes such a pair as
-`tls.crt` (PEM certificate) and `tls.key` (PKCS#8 PEM private key), for local
-development only.
-
-Existing files are left untouched unless --force is given.
-
-Usage: generate-dev-cert.py [--out-dir PATH] [--force]
+"""Write a self-signed P-256 tls.crt and PKCS#8 tls.key for local development.
+Existing files are kept unless --force is given.
 """
 
 from __future__ import annotations
@@ -62,11 +54,7 @@ def build_certificate(key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
 
 
 def write_temp_file(path: pathlib.Path, data: bytes, mode: int) -> pathlib.Path:
-    """Write data to a fresh temporary file next to path and return the temporary path.
-
-    The file is created with the given mode, which os.replace keeps when it moves the
-    file into place. The mode takes effect on POSIX only; Windows applies inherited ACLs.
-    """
+    """The mode only applies on POSIX; Windows uses inherited ACLs."""
     temp_path = path.with_name(f".{path.name}.tmp")
     temp_path.unlink(missing_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -110,8 +98,7 @@ def main() -> int:
     )
     cert_pem = build_certificate(key).public_bytes(serialization.Encoding.PEM)
 
-    # Both files are fully written before either replaces an existing one, so a failed
-    # write leaves the previous pair intact instead of a new key next to an old certificate.
+    # Write both first so a failure can't leave a new key beside an old cert.
     temp_paths = []
     try:
         temp_paths.append(write_temp_file(key_path, key_pem, 0o600))
