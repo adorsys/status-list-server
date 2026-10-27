@@ -240,7 +240,8 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 }
 
 /// Runs a hosted write through the cross-source checks before handing it to
-/// storage. Crate-private: the public surface builds on [`HostedIssuerService`]
+/// storage. Crate-private: the public surface builds on
+/// [`HostedIssuerService`](crate::server::auth::hosted_service::HostedIssuerService)
 /// (which assigns identifiers) rather than accepting whole entities; hosted
 /// tests use this to exercise the same path production would.
 ///
