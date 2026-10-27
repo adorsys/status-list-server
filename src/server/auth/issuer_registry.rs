@@ -104,6 +104,7 @@ pub struct RegistryHandle {
     active: ArcSwap<ValidatedRegistry>,
     aggregation_history: Mutex<AggregationHistory>,
     reload_failures: AtomicU64,
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -146,7 +147,12 @@ impl RegistryHandle {
             }),
             reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
+            write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub async fn write_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().await
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {

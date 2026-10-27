@@ -230,11 +230,17 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 /// Runs a hosted write through the cross-source checks before handing it to
 /// storage. The future admin surface builds on these; hosted tests use them
 /// to exercise the same path production would.
+///
+/// The registry write lock is held across the check and the commit so a racing
+/// reload cannot install a conflicting static snapshot in between: whichever
+/// critical section runs first wins, and the loser is rejected. This keeps a
+/// cross-source-conflicting row out of storage entirely.
 pub async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     issuer: HostedIssuer,
 ) -> Result<HostedIssuer, HostedIssuerError> {
+    let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &issuer.id, None).await?;
     store.create_issuer(issuer).await
 }
@@ -244,6 +250,7 @@ pub async fn register_hosted_issuer_key(
     store: &Arc<dyn HostedIssuerStore>,
     key: HostedIssuerKey,
 ) -> Result<(), HostedIssuerError> {
+    let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
     store.add_key(key).await
 }
@@ -641,11 +648,10 @@ mod tests {
     }
 
     /// Forces the interleaving from the review: registration validates against
-    /// the old snapshot, a reload checks the store before the key commits,
-    /// then both complete. The same material must never authenticate under
-    /// both kids.
+    /// the empty snapshot and parks inside `add_key` while still holding the
+    /// registry write lock.
     #[tokio::test]
-    async fn registration_racing_a_reload_cannot_trust_one_key_twice() {
+    async fn registration_racing_a_reload_commits_at_most_one_source() {
         let registry = Arc::new(RegistryHandle::empty());
         let gated = Arc::new(GatedStore {
             inner: InMemoryHostedStore::with_keys(&[]),
@@ -667,27 +673,46 @@ mod tests {
         });
         gated.reached.notified().await; // validated against the empty snapshot
 
+        // The reload's critical section is serialized behind the write lock:
+        // it cannot install the static snapshot until the write commits.
         let candidate = (*static_registry().snapshot()).clone(); // static-key, same material
-        validate_static_candidate_against_dynamic(&store, &registry.snapshot(), &candidate)
-            .await
-            .expect("the hosted key is not committed yet, so the reload passes");
-        registry.replace(candidate).unwrap();
+        let reload = tokio::spawn({
+            let (registry, store) = (registry.clone(), store.clone());
+            async move {
+                let _guard = registry.write_lock().await;
+                let active = registry.snapshot();
+                validate_static_candidate_against_dynamic(&store, &active, &candidate).await
+            }
+        });
 
+        // Let the write commit, then the reload runs and must be rejected.
         gated.release.notify_one();
         registration
             .await
             .unwrap()
             .expect("the hosted write commits");
-
-        let resolver = CompositeIssuerKeyResolver::new(registry, Some(store));
-        assert!(resolver.resolve("static-key").await.is_ok());
         assert!(
-            matches!(
-                resolver.resolve("hosted-kid").await,
-                Err(KeyResolveError::SourceConflict)
-            ),
-            "one key material must not authenticate under two kids"
+            reload.await.unwrap().is_err(),
+            "a static candidate reusing committed hosted material must be rejected"
         );
+
+        // The conflicting static snapshot was never installed, so the hosted
+        // key resolves on its own and no cross-source duplicate is persisted.
+        assert!(
+            !registry.snapshot().has_key_material(
+                &canonical_jwk_material(
+                    &serde_json::from_str::<serde_json::Value>(EC_JWK).unwrap()
+                )
+                .unwrap()
+            ),
+            "the static snapshot must not own the hosted key's material"
+        );
+        let resolver = CompositeIssuerKeyResolver::new(registry, Some(store));
+        assert!(resolver.resolve("hosted-kid").await.is_ok());
+        assert!(matches!(
+            resolver.resolve("static-key").await,
+            Err(KeyResolveError::UnknownKid)
+        ));
     }
 
     #[tokio::test]

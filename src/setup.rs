@@ -981,6 +981,9 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 registry_handle.path(),
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
+                        // Hold the registry write lock across the cross-source
+                        // check and the snapshot swap so a dynamic write cannot
+                        let _guard = registry_handle.write_lock().await;
                         let active = registry_handle.snapshot();
                         // Read-only cross-source checks run before the immutable
                         // aggregation rows are written, so rejection leaves none.
