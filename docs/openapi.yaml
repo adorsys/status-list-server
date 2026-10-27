@@ -1336,7 +1336,7 @@ components:
             - duplicate_index
             - list_quota_exceeded
             - invalid_aggregation_id
-            # 401 — emitted by the authentication middleware
+            # 401, from the auth middleware
             - missing_token
             - invalid_token
             # 403

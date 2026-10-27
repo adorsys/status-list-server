@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
-"""Assert every workflow that enumerates the image variants enumerates the same ones.
-
-The variant list is structurally duplicated. `deploy.yml` names it three times -- once
-per matrix in `build-and-push`, `scan-image` and `promote-tags` -- because GitHub does
-not expose the `env` context to `strategy`, so a matrix cannot read a shared value.
-`scheduled-image-scan.yml` names it a fourth time for the same reason.
-
-The drift that creates is asymmetric, and only one direction is visible:
-
-- Forget a matrix in `deploy.yml` and the variant is never built or promoted. The next
-  release fails loudly, or ships an obviously missing image.
-- Forget the list in `scheduled-image-scan.yml` and the variant is built, promoted and
-  deployed, and then **never re-scanned**. Nothing fails. The nightly stays green and
-  reports on the variants it does know about, which is indistinguishable from covering
-  everything.
-
-The second is the one worth a script. A green nightly that silently excludes a
-published variant is exactly the absence-reads-as-success failure the re-scan exists
-to prevent, reached through the one gap the re-scan cannot see: it has no way to know
-what it was supposed to cover.
-
-Run on every pull request, so drift is caught by whoever adds the variant rather than
-by nobody at 03:37 the following night.
-
-Exit status is 0 when every source agrees, 1 otherwise.
-
-Usage: check-variant-parity.py [--deploy PATH] [--scheduled PATH]
+"""Fail if the workflows that list image variants disagree.
+A variant missing from scheduled-image-scan.yml would deploy but never be re-scanned, silently.
 """
 
 from __future__ import annotations
@@ -39,8 +14,7 @@ try:
 except ImportError:  # pragma: no cover - depends on the runner image
     sys.exit("PyYAML is required: pip install pyyaml")
 
-# The matrices in deploy.yml that must enumerate every variant. `deploy` is absent on
-# purpose: it deploys one variant chosen by `vars.IMAGE_VARIANT`, it does not fan out.
+# deploy is left out: it ships one variant and doesn't fan out.
 DEPLOY_MATRIX_JOBS = ("build-and-push", "scan-image", "promote-tags")
 
 
@@ -62,7 +36,6 @@ def _load(path: pathlib.Path) -> tuple[dict | None, str | None]:
 
 
 def deploy_variants(path: pathlib.Path) -> tuple[dict[str, set[str]], list[str]]:
-    """The variant suffixes each fan-out matrix in deploy.yml enumerates."""
     doc, problem = _load(path)
     if problem is not None:
         return {}, [problem]
@@ -87,8 +60,7 @@ def deploy_variants(path: pathlib.Path) -> tuple[dict[str, set[str]], list[str]]
 
         suffixes = set()
         for index, entry in enumerate(entries):
-            # Every matrix entry is a mapping carrying at least `suffix`; a bare string
-            # would mean the matrix shape changed and this comparison is now guessing.
+            # A bare string means the matrix shape changed; refuse to guess.
             if not isinstance(entry, dict) or not entry.get("suffix"):
                 errors.append(f"{path}: {job}.strategy.matrix.variant[{index}] has no 'suffix'")
                 continue
@@ -101,12 +73,7 @@ def deploy_variants(path: pathlib.Path) -> tuple[dict[str, set[str]], list[str]]
 
 
 def scheduled_variants(path: pathlib.Path) -> tuple[dict[str, set[str]], list[str]]:
-    """The variant list the scheduled re-scan publishes to its matrix.
-
-    Read from the `VARIANTS` step environment rather than from a matrix, because the
-    scheduled workflow resolves its matrix at runtime from this one space-separated
-    value -- which is the whole reason it can drift from deploy.yml unnoticed.
-    """
+    """Read from the VARIANTS step env: the nightly builds its matrix from it at runtime."""
     doc, problem = _load(path)
     if problem is not None:
         return {}, [problem]
@@ -132,7 +99,6 @@ def scheduled_variants(path: pathlib.Path) -> tuple[dict[str, set[str]], list[st
 
 
 def compare(sources: dict[str, set[str]]) -> list[str]:
-    """Every source must enumerate the same set. Reports each disagreement by name."""
     if len(sources) < 2:
         return ["fewer than two variant lists were found; there is nothing to compare"]
 
@@ -175,8 +141,7 @@ def main() -> int:
     sources.update(scheduled)
     errors.extend(scheduled_errors)
 
-    # Only compare once every list was read. Comparing a partial set would report a
-    # spurious disagreement on top of the real "could not read it" error.
+    # Comparing a partial set would add a spurious mismatch.
     if not errors:
         errors.extend(compare(sources))
 

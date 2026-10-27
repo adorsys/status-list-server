@@ -7,7 +7,7 @@ import yaml
 root = Path.cwd()
 work = Path(os.environ['RUNNER_TEMP'])
 model = yaml.safe_load((root / 'docker-compose.yml').read_text())
-# CI runs without a developer .env file. Remove optional .env file references.
+# CI has no .env file, so drop references to it.
 for service in model['services'].values():
     if 'env_file' in service:
         service['env_file'] = [entry for entry in service['env_file']
