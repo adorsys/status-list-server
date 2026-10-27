@@ -114,9 +114,12 @@ enum IssuerTask {
     /// Export stored issuer identities as a registry draft.
     Export {
         #[arg(long)]
-        database_url: String,
+        database_url: Option<String>,
         #[arg(long, default_value = "issuers.yaml")]
         output: PathBuf,
+        /// Replace the output file if it already exists.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -178,24 +181,29 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
         IssuerTask::Export {
             database_url,
             output,
+            force,
         } => {
             let workspace = workspace_root()?;
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = Command::new(cargo)
-                .args([
-                    "run",
-                    "--quiet",
-                    "--features",
-                    "postgres,mysql,sqlite",
-                    "--bin",
-                    "status-list-server",
-                    "--",
-                    "issuer-export",
-                    "--database-url",
-                ])
-                .arg(database_url)
-                .arg("--output")
-                .arg(&output)
+            let mut command = Command::new(cargo);
+            command.args([
+                "run",
+                "--quiet",
+                "--features",
+                "postgres,mysql,sqlite",
+                "--bin",
+                "status-list-server",
+                "--",
+                "issuer-export",
+            ]);
+            if let Some(database_url) = database_url {
+                command.arg("--database-url").arg(database_url);
+            }
+            command.arg("--output").arg(&output);
+            if force {
+                command.arg("--force");
+            }
+            let status = command
                 .current_dir(workspace)
                 .status()
                 .wrap_err("run issuer registry exporter")?;

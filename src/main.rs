@@ -120,8 +120,12 @@ async fn export_issuers(args: &[String]) -> Result<()> {
             .find(|pair| pair[0] == name)
             .map(|pair| pair[1].as_str())
     };
-    let url = value("--database-url").ok_or_else(|| eyre!("--database-url is required"))?;
+    let url = value("--database-url")
+        .map(str::to_owned)
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .ok_or_else(|| eyre!("set DATABASE_URL or pass --database-url"))?;
     let output = value("--output").unwrap_or("issuers.yaml");
+    let force = args.iter().any(|arg| arg == "--force");
     let db = Database::connect(url).await?;
     let credentials =
         status_list_server::outbound::sql::issuer_export::legacy_issuer_credentials(&db)
@@ -134,12 +138,63 @@ async fn export_issuers(args: &[String]) -> Result<()> {
                 .into_iter()
                 .map(|row| (row.issuer, row.aggregation_id, row.public_key)),
         )?;
-    std::fs::write(output, yaml)?;
+    write_issuer_export(output, &yaml, force)?;
     println!("exported {} issuer(s) to {}", issuer_count, output);
+    Ok(())
+}
+
+fn write_issuer_export(output: &str, yaml: &str, force: bool) -> Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options.open(output).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            eyre!("{output} already exists; pass --force to replace it")
+        } else {
+            eyre!(error)
+        }
+    })?;
+    file.write_all(yaml.as_bytes())?;
     Ok(())
 }
 
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 async fn export_issuers(_: &[String]) -> Result<()> {
     Err(eyre!("issuer export requires a SQL database feature"))
+}
+
+#[cfg(test)]
+mod issuer_export_tests {
+    use super::write_issuer_export;
+
+    #[test]
+    fn export_does_not_replace_an_existing_file_without_force() {
+        let path =
+            std::env::temp_dir().join(format!("issuer-export-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "existing registry").unwrap();
+
+        let error = write_issuer_export(path.to_str().unwrap(), "new registry", false).unwrap_err();
+
+        assert!(error.to_string().contains("--force"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing registry");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn export_replaces_an_existing_file_with_force() {
+        let path =
+            std::env::temp_dir().join(format!("issuer-export-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "existing registry").unwrap();
+
+        write_issuer_export(path.to_str().unwrap(), "new registry", true).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new registry");
+        std::fs::remove_file(path).unwrap();
+    }
 }

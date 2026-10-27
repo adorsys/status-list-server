@@ -252,38 +252,59 @@ impl IssuerRegistry {
         credentials: impl IntoIterator<Item = (String, String, Value)>,
     ) -> Result<String, RegistryError> {
         let mut issuers = Vec::new();
+        let mut errors = Vec::new();
         for (id, aggregation_id, key) in credentials {
-            let jwk: jsonwebtoken::jwk::Jwk =
-                serde_json::from_value(key.clone()).map_err(|err| {
-                    RegistryError::Semantic(format!(
-                        "issuer `{id}` has an invalid public JWK: {err}"
-                    ))
-                })?;
-            let kid = jwk
-                .thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
-                .map_err(|err| {
-                    RegistryError::Semantic(format!("issuer `{id}` JWK thumbprint failed: {err}"))
-                })?;
-            let alg = key
-                .get("alg")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RegistryError::Semantic(format!("issuer `{id}` public key has no alg"))
-                })?
-                .to_owned();
-            let mut public_key = key;
-            let object = public_key.as_object_mut().ok_or_else(|| {
-                RegistryError::Semantic(format!("issuer `{id}` public key is not an object"))
-            })?;
-            for field in ["kid", "alg", "use", "key_ops"] {
-                object.remove(field);
+            let mut issuer_errors = Vec::new();
+            if uuid::Uuid::parse_str(&aggregation_id).is_err() {
+                issuer_errors.push(format!("issuer `{id}` has an invalid aggregation ID"));
             }
-            issuers.push(serde_json::json!({
-                "id": id,
-                "aggregation_id": aggregation_id,
-                "tier": "standard",
-                "keys": [{"kid": kid, "alg": alg, "jwk": public_key}],
-            }));
+            let jwk: Option<jsonwebtoken::jwk::Jwk> = match serde_json::from_value(key.clone()) {
+                Ok(jwk) => Some(jwk),
+                Err(err) => {
+                    issuer_errors.push(format!("issuer `{id}` has an invalid public JWK: {err}"));
+                    None
+                }
+            };
+            let kid = jwk.and_then(|jwk| {
+                match jwk.thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256) {
+                    Ok(kid) => Some(kid),
+                    Err(err) => {
+                        issuer_errors.push(format!("issuer `{id}` JWK thumbprint failed: {err}"));
+                        None
+                    }
+                }
+            });
+            let alg = key.get("alg").and_then(Value::as_str).map(str::to_owned);
+            if alg.is_none() {
+                issuer_errors.push(format!("issuer `{id}` public key has no alg"));
+            }
+            let mut public_key = key;
+            if let Some(object) = public_key.as_object_mut() {
+                for field in ["kid", "alg", "use", "key_ops"] {
+                    object.remove(field);
+                }
+            } else {
+                issuer_errors.push(format!("issuer `{id}` public key is not an object"));
+            }
+            if !issuer_errors.is_empty() {
+                errors.extend(issuer_errors);
+                continue;
+            }
+            if let (Some(kid), Some(alg)) = (kid, alg) {
+                issuers.push(serde_json::json!({
+                    "id": id,
+                    "aggregation_id": aggregation_id,
+                    "tier": "standard",
+                    "keys": [{"kid": kid, "alg": alg, "jwk": public_key}],
+                }));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(RegistryError::Semantic(format!(
+                "issuer export found {} problem(s):\n - {}",
+                errors.len(),
+                errors.join("\n - ")
+            )));
         }
         serde_saphyr::to_string(&serde_json::json!({
             "version": 1,
@@ -716,6 +737,23 @@ mod tests {
                 .id(),
             "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
         );
+    }
+
+    #[test]
+    fn legacy_export_reports_every_invalid_key() {
+        let mut key: Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        key.as_object_mut().unwrap().remove("alg");
+        let error = IssuerRegistry::export_legacy_issuers([
+            ("issuer-one".into(), "invalid-id".into(), key.clone()),
+            ("issuer-two".into(), uuid::Uuid::new_v4().to_string(), key),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("issuer-one"));
+        assert!(error.contains("issuer-two"));
+        assert!(error.contains("issuer `issuer-one` has an invalid aggregation ID"));
+        assert!(error.contains("3 problem(s)"));
     }
 
     #[test]
