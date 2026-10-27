@@ -721,6 +721,7 @@ here; a test fails until it does.
 | `m20261023_000001_hosted_issuers` | Yes: the columns carry defaults, so rows created without them load unchanged, and an older release ignores them | None; keep the columns | Hosted metadata is additive; registry-created rows keep their defaults |
 | `m20261023_000002_issuer_keys` | Yes: the table is empty until the hosted onboarding surface writes keys, and an older release ignores it | None; keep the table | Empty table; carries the unique `key_material` index that rejects reused key parameters |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
+| `m20261024_000001_issuer_keys_carry_over` | **No**: the previous release still resolves via `credentials`, and a rollback would lose the carried `issuer_keys` rows without a `credentials` equivalent | Keep the `issuer_keys` rows and the `source='credential'` issuer markers; re-running the migration is idempotent and skips already-carried keys | Keys already carried are preserved; credentials inserted after the migration are picked up by re-running it or the `list-quota`-style carry-over command |
 
 ### Preparing existing management credentials
 

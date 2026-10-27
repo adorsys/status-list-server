@@ -5,7 +5,7 @@
 
 use arc_swap::ArcSwap;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -94,6 +94,7 @@ pub struct ValidatedRegistry {
     keys: HashMap<String, Arc<ResolvedKey>>,
     issuer_aggregations: HashMap<String, AggregationId>,
     aggregation_issuers: HashMap<AggregationId, String>,
+    materials: HashSet<String>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -308,12 +309,21 @@ impl IssuerRegistry {
             }
         }
 
-        Ok(ValidatedRegistry {
+        let validated = ValidatedRegistry {
             registry,
             fingerprint: hex::encode(Sha256::digest(content.as_bytes())),
             keys,
             issuer_aggregations,
             aggregation_issuers,
+            materials: HashSet::new(),
+        };
+        Ok(ValidatedRegistry {
+            materials: validated
+                .all_principal_keys()
+                .into_iter()
+                .map(|(_, _, material)| material)
+                .collect(),
+            ..validated
         })
     }
 }
@@ -412,6 +422,12 @@ impl ValidatedRegistry {
     pub fn has_principal_id(&self, id: &str) -> bool {
         self.registry.issuers.iter().any(|i| i.id == id)
             || self.registry.admins.iter().any(|a| a.id == id)
+    }
+
+    /// Whether any principal's key material matches `material`. Precomputed in
+    /// `from_yaml`, so the resolver's per-request recheck is O(1).
+    pub fn has_key_material(&self, material: &str) -> bool {
+        self.materials.contains(material)
     }
 }
 

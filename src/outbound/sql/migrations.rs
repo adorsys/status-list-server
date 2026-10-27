@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(hosted_issuers::Migration),
             Box::new(issuer_keys::Migration),
             Box::new(issuer_audit_events::Migration),
+            Box::new(issuer_keys_carry_over::Migration),
         ]
     }
 
@@ -2189,5 +2190,376 @@ pub(crate) mod issuer_audit_events {
         Before,
         After,
         CreatedAt,
+    }
+}
+
+/// Carries every usable `credentials` key into `issuer_keys` unchanged, so
+/// issuers keep the kid they chose (#688 → #369). The material hash is computed
+/// in Rust because it needs base64url decoding and zero stripping, which
+/// portable SQL cannot do.
+///
+/// Carried issuers get `source = 'credential'`, which the hosted key lookup
+/// accepts and `find_issuer` does not: they resolve by key, but are not portal
+/// issuers. Issuers whose aggregation ID is still NULL are assigned one, so
+/// the carried key does not resolve to a corrupt row.
+///
+/// Idempotent: a row already carried identically is skipped, so a re-run after
+/// a partial MySQL failure resumes. Conflicts are reported in full before any
+/// write. Rows that cannot be valid management keys are skipped with a
+/// warning; they could not authenticate before either.
+pub(crate) mod issuer_keys_carry_over {
+    use super::*;
+    use crate::domain::models::credential::{PublicJwk, canonical_jwk_material};
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261024_000001_issuer_keys_carry_over"
+        }
+    }
+
+    /// The `issuers.source` of an issuer whose keys came from `credentials`.
+    pub(crate) const CARRIED_SOURCE: &str = "credential";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            carry_over_credential_keys(manager.get_connection())
+                .await
+                .map(|_| ())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    struct Planned {
+        issuer: String,
+        kid: String,
+        hash: String,
+        alg: &'static str,
+        jwk_json: String,
+        needs_aggregation_id: bool,
+    }
+
+    fn ph(backend: DatabaseBackend, n: usize) -> String {
+        if backend == DatabaseBackend::Postgres {
+            format!("${n}")
+        } else {
+            "?".to_string()
+        }
+    }
+
+    fn jose_alg(algorithm: jsonwebtoken::Algorithm) -> Option<&'static str> {
+        use jsonwebtoken::Algorithm::*;
+        match algorithm {
+            ES256 => Some("ES256"),
+            ES384 => Some("ES384"),
+            EdDSA => Some("EdDSA"),
+            PS256 => Some("PS256"),
+            _ => None,
+        }
+    }
+
+    /// Callable outside the migration: after a rolling deploy, pods of the
+    /// previous release may still have inserted credentials, and this picks
+    /// them up. Returns how many keys were newly carried.
+    pub(crate) async fn carry_over_credential_keys<C: ConnectionTrait>(
+        conn: &C,
+    ) -> Result<usize, DbErr> {
+        let backend = conn.get_database_backend();
+        let rows = conn
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT c.issuer AS issuer, c.public_key AS public_key, c.key_id AS key_id, \
+                 i.aggregation_id AS aggregation_id \
+                 FROM credentials c JOIN issuers i ON i.issuer = c.issuer \
+                 WHERE c.key_id IS NOT NULL ORDER BY c.issuer",
+            ))
+            .await?;
+
+        let mut plan = Vec::new();
+        let mut by_material = BTreeMap::<String, String>::new();
+        let mut conflicts = Vec::new();
+        for row in rows {
+            let issuer: String = row.try_get("", "issuer")?;
+            let kid: String = row.try_get("", "key_id")?;
+            let public_key: serde_json::Value = row.try_get("", "public_key")?;
+            let aggregation_id: Option<String> = row.try_get("", "aggregation_id")?;
+
+            let bytes = serde_json::to_vec(&public_key)
+                .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
+            let jwk = match PublicJwk::try_new(bytes) {
+                Ok(jwk) if jwk.key_id() == kid => jwk,
+                Ok(_) => {
+                    tracing::warn!(%issuer, %kid, "skipping credential key: JWK kid differs from key_id");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%issuer, %kid, %error, "skipping credential key: not a valid management key");
+                    continue;
+                }
+            };
+            let Some(alg) = jose_alg(jwk.algorithm()) else {
+                continue;
+            };
+            let material = canonical_jwk_material(&public_key)
+                .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
+            let hash = hex::encode(Sha256::digest(material.as_bytes()));
+            if let Some(other) = by_material.insert(hash.clone(), kid.clone()) {
+                conflicts.push(format!(
+                    "kids {other:?} and {kid:?} (issuer {issuer:?}) share key material"
+                ));
+                continue;
+            }
+            plan.push(Planned {
+                issuer,
+                kid,
+                hash,
+                alg,
+                jwk_json: jwk_to_string(&jwk)?,
+                needs_aggregation_id: aggregation_id.is_none(),
+            });
+        }
+
+        // Check the whole plan against what is already in issuer_keys before
+        // writing anything.
+        let lookup = format!(
+            "SELECT kid, issuer_id, key_material FROM issuer_keys WHERE kid = {} OR key_material = {}",
+            ph(backend, 1),
+            ph(backend, 2)
+        );
+        let mut already = Vec::new();
+        for planned in &plan {
+            let existing = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    backend,
+                    &lookup,
+                    [planned.kid.clone().into(), planned.hash.clone().into()],
+                ))
+                .await?;
+            let mut identical = false;
+            for row in existing {
+                let kid: String = row.try_get("", "kid")?;
+                let issuer_id: String = row.try_get("", "issuer_id")?;
+                let hash: String = row.try_get("", "key_material")?;
+                if kid == planned.kid && issuer_id == planned.issuer && hash == planned.hash {
+                    identical = true;
+                } else {
+                    conflicts.push(format!(
+                        "credential key {:?} (issuer {:?}) collides with existing issuer key {kid:?} (issuer {issuer_id:?})",
+                        planned.kid, planned.issuer
+                    ));
+                }
+            }
+            already.push(identical);
+        }
+        if !conflicts.is_empty() {
+            return Err(DbErr::Migration(format!(
+                "credential key carry-over conflicts; repair these registrations before retrying: {}",
+                conflicts.join("; ")
+            )));
+        }
+
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let jwk_value = if backend == DatabaseBackend::Postgres {
+            "CAST($5 AS JSON)".to_string()
+        } else {
+            "?".to_string() // CAST(? AS JSON) would give SQLite a numeric affinity.
+        };
+        let insert = format!(
+            "INSERT INTO issuer_keys \
+             (kid, issuer_id, key_material, alg, jwk, state, not_before, not_after, created_at) \
+             VALUES ({}, {}, {}, {}, {jwk_value}, 'active', NULL, NULL, {})",
+            ph(backend, 1),
+            ph(backend, 2),
+            ph(backend, 3),
+            ph(backend, 4),
+            ph(backend, 6)
+        );
+        let mut carried = 0;
+        for (planned, skip) in plan.iter().zip(already) {
+            if planned.needs_aggregation_id {
+                conn.execute_raw(Statement::from_sql_and_values(
+                    backend,
+                    format!(
+                        "UPDATE issuers SET aggregation_id = {} WHERE issuer = {} AND aggregation_id IS NULL",
+                        ph(backend, 1),
+                        ph(backend, 2)
+                    ),
+                    [
+                        uuid::Uuid::new_v4().to_string().into(),
+                        planned.issuer.clone().into(),
+                    ],
+                ))
+                .await?;
+            }
+            if skip {
+                continue;
+            }
+            conn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                &insert,
+                [
+                    planned.kid.clone().into(),
+                    planned.issuer.clone().into(),
+                    planned.hash.clone().into(),
+                    planned.alg.into(),
+                    planned.jwk_json.clone().into(),
+                    now.into(),
+                ],
+            ))
+            .await?;
+            conn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "UPDATE issuers SET source = {} WHERE issuer = {} AND source = 'registry'",
+                    ph(backend, 1),
+                    ph(backend, 2)
+                ),
+                [CARRIED_SOURCE.into(), planned.issuer.clone().into()],
+            ))
+            .await?;
+            carried += 1;
+        }
+        Ok(carried)
+    }
+
+    fn jwk_to_string(jwk: &PublicJwk) -> Result<String, DbErr> {
+        serde_json::to_string(jwk.jwk()).map_err(|e| DbErr::Migration(e.to_string()))
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod carry_over_tests {
+    use super::*;
+    use crate::domain::models::hosted_issuer::HostedIssuerKeyState;
+    use crate::domain::ports::HostedIssuerStore;
+    use crate::outbound::sql::SqlHostedIssuerStore;
+    use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, Statement};
+    use sha2::Digest;
+    use std::sync::Arc;
+
+    /// The release before the carry-over migration.
+    struct Before;
+    #[async_trait::async_trait]
+    impl MigratorTrait for Before {
+        fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+            let mut all = Migrator::migrations();
+            all.pop();
+            all
+        }
+    }
+
+    const KEY_1: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-1","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
+    const KEY_2: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-2","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
+    const OCT: &str = r#"{"kty":"oct","kid":"oct-1","alg":"HS256","k":"c2VjcmV0"}"#;
+
+    async fn db() -> sea_orm::DatabaseConnection {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options
+            .max_connections(1)
+            .map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+        Database::connect(options).await.unwrap()
+    }
+
+    async fn seed(db: &sea_orm::DatabaseConnection, issuer: &str, kid: &str, jwk: &str) {
+        let backend = DatabaseBackend::Sqlite;
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO issuers (issuer, aggregation_id, list_count) VALUES (?, NULL, 0)",
+            [issuer.into()],
+        ))
+        .await
+        .unwrap();
+        db.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO credentials (issuer, public_key, key_id, list_count, aggregation_id) \
+             VALUES (?, ?, ?, 0, NULL)",
+            [issuer.into(), jwk.into(), kid.into()],
+        ))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_carries_chosen_kids_unchanged_and_they_resolve() {
+        let db = db().await;
+        apply_migrations::<Before>(&db).await.unwrap();
+        seed(&db, "legacy-1", "key-1", KEY_1).await; // human-chosen kid
+        seed(&db, "legacy-2", "key-2", KEY_2).await;
+        seed(&db, "legacy-oct", "oct-1", OCT).await; // not a valid management key
+
+        run_migrations(&db).await.unwrap();
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT kid, issuer_id, alg, key_material FROM issuer_keys ORDER BY kid",
+            ))
+            .await
+            .unwrap();
+        let kids: Vec<String> = rows.iter().map(|r| r.try_get("", "kid").unwrap()).collect();
+        assert_eq!(
+            kids,
+            ["key-1", "key-2"],
+            "kids are carried byte for byte; oct is skipped"
+        );
+        let alg: String = rows[0].try_get("", "alg").unwrap();
+        assert_eq!(alg, "ES256");
+        let material: String = rows[0].try_get("", "key_material").unwrap();
+        let expected = hex::encode(sha2::Sha256::digest(
+            crate::domain::models::credential::canonical_jwk_material(
+                &serde_json::from_str(KEY_1).unwrap(),
+            )
+            .unwrap()
+            .as_bytes(),
+        ));
+        assert_eq!(material, expected);
+
+        let store = SqlHostedIssuerStore::new(Arc::new(db));
+        let entry = store
+            .find_key_by_kid("key-1")
+            .await
+            .unwrap()
+            .expect("carried kid resolves");
+        assert_eq!(entry.issuer.id, "legacy-1");
+        assert_eq!(entry.key.state, HostedIssuerKeyState::Active);
+        // legacy-1's aggregation ID was NULL before the upgrade.
+        let _ = entry.issuer.aggregation_id;
+    }
+
+    #[tokio::test]
+    async fn carry_over_is_idempotent() {
+        let db = db().await;
+        apply_migrations::<Before>(&db).await.unwrap();
+        seed(&db, "legacy-1", "key-1", KEY_1).await;
+        run_migrations(&db).await.unwrap();
+        assert_eq!(
+            issuer_keys_carry_over::carry_over_credential_keys(&db)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_sharing_key_material_abort_with_a_report() {
+        let db = db().await;
+        apply_migrations::<Before>(&db).await.unwrap();
+        seed(&db, "a", "dup-a", &KEY_1.replace("key-1", "dup-a")).await;
+        seed(&db, "b", "dup-b", &KEY_1.replace("key-1", "dup-b")).await;
+        let error = run_migrations(&db).await.unwrap_err().to_string();
+        assert!(error.contains("share key material"), "{error}");
+        assert!(
+            error.contains("dup-a") && error.contains("dup-b"),
+            "{error}"
+        );
     }
 }

@@ -190,7 +190,10 @@ async fn load_entry(
         return Ok(None);
     };
     let issuer = issuers::Entity::find_by_id(&key.issuer_id)
-        .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+        .filter(issuers::Column::Source.is_in([
+            PORTAL_SOURCE,
+            super::migrations::issuer_keys_carry_over::CARRIED_SOURCE,
+        ]))
         .one(db)
         .await
         .map_err(find_err)?

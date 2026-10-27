@@ -67,6 +67,8 @@ pub enum KeyResolveError {
     /// so it fails closed as a 401 rather than a retryable 503.
     #[error("stored key data is corrupt")]
     Corrupt,
+    #[error("a hosted key collides with the static registry")]
+    SourceConflict,
     #[error("the trust backend is unavailable")]
     BackendUnavailable,
 }

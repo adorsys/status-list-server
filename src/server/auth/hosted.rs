@@ -1,5 +1,10 @@
-//! Composes both trust sources static-first: the operator registry wins, and
-//! ids and material are unique across sources (a static kid shadows a hosted kid).
+//! Composes both trust sources static-first: the operator registry is
+//! authoritative, and ids, kids and key material are unique across sources.
+//! Collisions fail closed: a hosted write that collides with the registry is
+//! rejected, a registry candidate that collides with hosted state is rejected
+//! (the last-known-good snapshot stays in force), and the resolver rechecks
+//! ownership on every hosted hit so a registration/reload race can never leave
+//! one key trusted under two identities.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -9,12 +14,15 @@ use async_trait::async_trait;
 use crate::domain::models::credential::{
     KeyResolveError, PublicJwk, ResolvedKey, canonical_jwk_material,
 };
-use crate::domain::models::hosted_issuer::{HostedIssuer, HostedIssuerError, HostedIssuerKey};
+use crate::domain::models::hosted_issuer::{
+    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+};
 use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
 use crate::server::auth::issuer_registry::{RegistryError, RegistryHandle, ValidatedRegistry};
 
-/// Static-first resolution: a kid owned by both sources resolves to static.
-/// Dynamic writes reject registry collisions; a static kid may shadow a hosted kid.
+/// Static-first resolution. A hosted key is served only while the static
+/// registry owns neither its issuer id nor its key material; otherwise the
+/// request fails closed with `SourceConflict` (a uniform 401 at the edge).
 pub struct CompositeIssuerKeyResolver {
     static_registry: Arc<RegistryHandle>,
     dynamic: Option<Arc<dyn HostedIssuerStore>>,
@@ -39,6 +47,22 @@ impl CompositeIssuerKeyResolver {
             dynamic,
         }
     }
+
+    /// Why a hosted entry must not be served right now, if the *current*
+    /// static snapshot owns something it claims.
+    fn static_conflict(&self, entry: &HostedIssuerKeyEntry) -> Option<&'static str> {
+        let snapshot = self.static_registry.snapshot();
+        if snapshot.has_principal_id(&entry.issuer.id) {
+            return Some("issuer id is owned by the static registry");
+        }
+        match entry.key.jwk.normalized_material() {
+            Ok(material) if snapshot.has_key_material(&material) => {
+                Some("key material is owned by the static registry")
+            }
+            Ok(_) => None,
+            Err(_) => Some("stored key material cannot be normalized"),
+        }
+    }
 }
 
 #[async_trait]
@@ -49,11 +73,20 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
             Err(KeyResolveError::UnknownKid) => match &self.dynamic {
                 None => Err(KeyResolveError::UnknownKid),
                 Some(store) => match store.find_key_by_kid(kid).await {
-                    Ok(Some(entry)) => entry.resolved_key(time::OffsetDateTime::now_utc()),
+                    Ok(Some(entry)) => {
+                        if let Some(reason) = self.static_conflict(&entry) {
+                            tracing::error!(
+                                kid = %kid,
+                                issuer = %entry.issuer.id,
+                                reason,
+                                "hosted key collides with the static registry; failing closed"
+                            );
+                            return Err(KeyResolveError::SourceConflict);
+                        }
+                        entry.resolved_key(time::OffsetDateTime::now_utc())
+                    }
                     Ok(None) => Err(KeyResolveError::UnknownKid),
                     Err(error) => {
-                        // A corrupt stored row is a permanent data fault: fail
-                        // closed with the uniform 401 rather than a retryable 503.
                         if matches!(error, HostedIssuerError::Corrupt(_)) {
                             tracing::warn!(
                                 error = %error,
@@ -80,14 +113,6 @@ fn material_of(jwk: &PublicJwk) -> Option<String> {
         .and_then(|value| canonical_jwk_material(&value).ok())
 }
 
-fn static_materials(snapshot: &ValidatedRegistry) -> HashSet<String> {
-    snapshot
-        .all_principal_keys()
-        .into_iter()
-        .map(|(_, _, material)| material)
-        .collect()
-}
-
 fn hosted_conflict(message: &str) -> HostedIssuerError {
     HostedIssuerError::Backend(Box::new(std::io::Error::other(format!(
         "hosted issuer conflict: {message}"
@@ -97,8 +122,8 @@ fn hosted_conflict(message: &str) -> HostedIssuerError {
 /// Validate a dynamic write (issuer creation or key registration) against the
 /// active static snapshot before touching storage. The storage adapter
 /// enforces dynamic-vs-dynamic uniqueness; this covers dynamic-vs-static. A
-/// racing static reload is covered by the reverse direction
-/// ([`validate_static_candidate_against_dynamic`]).
+/// racing static reload is covered by the resolver's per-request recheck
+/// (`static_conflict`).
 async fn validate_dynamic_write(
     registry: &RegistryHandle,
     issuer_id: &str,
@@ -124,8 +149,7 @@ async fn validate_dynamic_write(
     }
     let registers = material_of(&key.jwk)
         .ok_or_else(|| hosted_conflict("the requested issuer key has malformed JWK parameters"))?;
-    let statics = static_materials(&snapshot);
-    if statics.contains(&registers) {
+    if snapshot.has_key_material(&registers) {
         return Err(hosted_conflict(
             "key material is owned by the static registry",
         ));
@@ -136,8 +160,8 @@ async fn validate_dynamic_write(
     Ok(())
 }
 
-/// Cross-check only *new* candidate ids/kids/materials against hosted state;
-/// collisions fail closed, while a removal applies without touching the store.
+/// Cross-check only *new* candidate ids and kids, and materials not already
+/// admitted, against hosted state.
 pub async fn validate_static_candidate_against_dynamic(
     store: &Arc<dyn HostedIssuerStore>,
     active: &ValidatedRegistry,
@@ -145,57 +169,51 @@ pub async fn validate_static_candidate_against_dynamic(
 ) -> Result<(), RegistryError> {
     let candidate_keys = candidate.all_principal_keys();
     let active_keys = active.all_principal_keys();
-    let active_materials: HashSet<&str> = active_keys
-        .iter()
-        .map(|(_, _, material)| material.as_str())
-        .collect();
-    // Only candidate ids that are not already in the active snapshot could
-    // shadow a hosted issuer; an id the static source already owns is stable.
-    for (principal_id, _, _) in &candidate_keys {
-        if active.has_principal_id(principal_id) {
-            continue;
-        }
-        if store
-            .find_issuer(principal_id)
-            .await
-            .map_err(dynamic_check_failed)?
-            .is_some()
+    let active_kids: HashSet<&str> = active_keys.iter().map(|(_, kid, _)| *kid).collect();
+    let active_materials: HashSet<&str> = active_keys.iter().map(|(_, _, m)| m.as_str()).collect();
+    let mut checked_ids: HashSet<&str> = HashSet::new();
+
+    for (principal_id, kid, material) in &candidate_keys {
+        if !active.has_principal_id(principal_id)
+            && checked_ids.insert(principal_id)
+            && store
+                .find_issuer(principal_id)
+                .await
+                .map_err(dynamic_check_failed)?
+                .is_some()
         {
             return Err(RegistryError::Semantic(format!(
                 "principal id `{principal_id}` collides with a hosted issuer"
             )));
         }
-    }
-    // A kid the hosted source already owns is not a startup blocker: the
-    // static key wins (shadowed), so only warn about newly introduced kids.
-    let active_kids: HashSet<&str> = active_keys.iter().map(|(_, kid, _)| *kid).collect();
-    for (_, kid, _) in &candidate_keys {
         if active_kids.contains(kid) {
             continue;
         }
-        if store
+        match store
             .find_key_by_kid(kid)
             .await
             .map_err(dynamic_check_failed)?
-            .is_some()
         {
-            tracing::warn!(
-                kid = %kid,
-                "static registry key shadows a hosted issuer key with the same kid; \
-                 the hosted key is unreachable for this deployment"
-            );
+            Some(entry)
+                if entry.issuer.id == *principal_id
+                    && entry.key.jwk.normalized_material().ok().as_deref()
+                        == Some(material.as_str()) =>
+            {
+                continue; // the same identity, adopted into the registry
+            }
+            Some(_) => {
+                return Err(RegistryError::Semantic(format!(
+                    "candidate key `{kid}` collides with a hosted issuer key with the same kid; \
+                     kids are unique across trust sources, so the candidate is rejected"
+                )));
+            }
+            None => {}
         }
-    }
-    // Reject a candidate key whose material is already registered to a hosted
-    // key; the match runs in SQL against the stored material hash.
-    for (_, _, material) in &candidate_keys {
-        if active_materials.contains(material.as_str()) {
-            continue;
-        }
-        if store
-            .key_material_in_use(material)
-            .await
-            .map_err(dynamic_check_failed)?
+        if !active_materials.contains(material.as_str())
+            && store
+                .key_material_in_use(material)
+                .await
+                .map_err(dynamic_check_failed)?
         {
             return Err(RegistryError::Semantic(
                 "a candidate registry key reuses hosted issuer key material".into(),
@@ -536,14 +554,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_candidate_kid_collision_with_dynamic_state_warns_and_static_wins() {
+    async fn static_candidate_kid_collision_with_dynamic_state_fails_closed() {
         let registry = static_registry();
-        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[
-            // The candidate's kid with distinct material: resolution is
-            // static-first, so the candidate static key wins and the hosted
-            // key is shadowed rather than crashing the reload.
-            key_with_material("static-key", DISTINCT_EC_JWK),
-        ]);
+        // Same kid, distinct material, different issuer: the material check
+        // passes, so only the kid rule can reject this.
+        let store: Arc<dyn HostedIssuerStore> =
+            InMemoryHostedStore::with_keys(&[key_with_material("static-key", DISTINCT_EC_JWK)]);
+        let error = validate_static_candidate_against_dynamic(
+            &store,
+            &RegistryHandle::empty().snapshot(),
+            &registry.snapshot(),
+        )
+        .await
+        .expect_err("a kid owned by a hosted key must reject the candidate");
+        assert!(error.to_string().contains("static-key"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn static_candidate_matching_a_hosted_identity_is_adopted_not_rejected() {
+        let registry = static_registry();
+        let mut carried = key_with_material("static-key", EC_JWK);
+        carried.issuer_id = "static-issuer".into();
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[carried]);
         assert!(
             validate_static_candidate_against_dynamic(
                 &store,
@@ -552,6 +584,109 @@ mod tests {
             )
             .await
             .is_ok()
+        );
+    }
+
+    /// An operator who removed a key from the registry must not see it come
+    /// back through a carried-over hosted row for the same issuer.
+    #[tokio::test]
+    async fn hosted_key_for_a_statically_owned_issuer_never_resolves() {
+        let registry = Arc::new(static_registry());
+        let mut stale = key_with_material("rotated-out", DISTINCT_EC_JWK);
+        stale.issuer_id = "static-issuer".into();
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[stale]);
+        let resolver = CompositeIssuerKeyResolver::new(registry, Some(store));
+        assert!(matches!(
+            resolver.resolve("rotated-out").await,
+            Err(KeyResolveError::SourceConflict)
+        ));
+    }
+
+    /// Wraps a store and parks inside `add_key` so a reload can run to
+    /// completion while the hosted write is uncommitted.
+    struct GatedStore {
+        inner: Arc<InMemoryHostedStore>,
+        reached: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl HostedIssuerStore for GatedStore {
+        async fn find_key_by_kid(
+            &self,
+            kid: &str,
+        ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError> {
+            self.inner.find_key_by_kid(kid).await
+        }
+        async fn find_issuer(&self, id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError> {
+            self.inner.find_issuer(id).await
+        }
+        async fn create_issuer(
+            &self,
+            issuer: HostedIssuer,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            self.inner.create_issuer(issuer).await
+        }
+        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+            self.reached.notify_one();
+            self.release.notified().await;
+            self.inner.add_key(key).await
+        }
+        async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            self.inner.all_keys().await
+        }
+        async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
+            self.inner.key_material_in_use(material).await
+        }
+    }
+
+    /// Forces the interleaving from the review: registration validates against
+    /// the old snapshot, a reload checks the store before the key commits,
+    /// then both complete. The same material must never authenticate under
+    /// both kids.
+    #[tokio::test]
+    async fn registration_racing_a_reload_cannot_trust_one_key_twice() {
+        let registry = Arc::new(RegistryHandle::empty());
+        let gated = Arc::new(GatedStore {
+            inner: InMemoryHostedStore::with_keys(&[]),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let store: Arc<dyn HostedIssuerStore> = gated.clone();
+
+        let registration = tokio::spawn({
+            let (registry, store) = (registry.clone(), store.clone());
+            async move {
+                register_hosted_issuer_key(
+                    &registry,
+                    &store,
+                    key_with_material("hosted-kid", EC_JWK),
+                )
+                .await
+            }
+        });
+        gated.reached.notified().await; // validated against the empty snapshot
+
+        let candidate = (*static_registry().snapshot()).clone(); // static-key, same material
+        validate_static_candidate_against_dynamic(&store, &registry.snapshot(), &candidate)
+            .await
+            .expect("the hosted key is not committed yet, so the reload passes");
+        registry.replace(candidate).unwrap();
+
+        gated.release.notify_one();
+        registration
+            .await
+            .unwrap()
+            .expect("the hosted write commits");
+
+        let resolver = CompositeIssuerKeyResolver::new(registry, Some(store));
+        assert!(resolver.resolve("static-key").await.is_ok());
+        assert!(
+            matches!(
+                resolver.resolve("hosted-kid").await,
+                Err(KeyResolveError::SourceConflict)
+            ),
+            "one key material must not authenticate under two kids"
         );
     }
 
