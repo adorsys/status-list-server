@@ -4,7 +4,7 @@
 use crate::outbound::sql::models::Credentials;
 use crate::outbound::sql::{Migrator, SeaOrmStore};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
-use sea_orm_migration::{MigratorTrait, SchemaManager};
+use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 use std::sync::Arc;
 
 // Independently calculated from the fixture's RFC 7638 canonical public members.
@@ -32,6 +32,20 @@ fn migration_index() -> usize {
         .iter()
         .position(|m| m.name() == "m20261014_000001_credentials_key_id")
         .unwrap()
+}
+
+/// The migration suite up to (but excluding) the credential-key carry-over, so
+/// this `credentials_key_id` backfill test can bring the schema current without
+/// tripping the carry-over's cross-source material check over its shared-material
+/// legacy fixtures (which are deliberately outside that migration's scope).
+struct BeforeCarryOver;
+#[async_trait::async_trait]
+impl MigratorTrait for BeforeCarryOver {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        let mut all = Migrator::migrations();
+        all.pop();
+        all
+    }
 }
 
 async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
@@ -140,7 +154,7 @@ async fn assert_key_id_backfill(db: Arc<DatabaseConnection>) {
     db.execute_unprepared("DELETE FROM credentials WHERE issuer IN ('missing-twin', 'reserved')")
         .await
         .unwrap();
-    Migrator::up(db.as_ref(), None).await.unwrap();
+    BeforeCarryOver::up(db.as_ref(), None).await.unwrap();
     let store = SeaOrmStore::<Credentials>::new(db.clone());
     let found = store.find_credentials_by_kid("existing-key").await.unwrap();
     assert_eq!(found.len(), 1);
