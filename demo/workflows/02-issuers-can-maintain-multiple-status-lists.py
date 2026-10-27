@@ -27,7 +27,7 @@ scott_holdings = fixtures.get_scott_holdings_issuer()
 # Each issuer publishes three status lists
 for issuer_data in [gondwana_digital_pole, scott_holdings]:
     bearer_token = fixtures.create_bearer_jwt_token(issuer_data)
-    for _ in range(3):  # each issuer publishes three lists
+    for _ in range(3):
         status_list_id = str(uuid.uuid4())
         status_publish_endpoint = f"{MANAGEMENT_URL}/api/v1/status-lists/{status_list_id}/statuses"
         print(f"Testing PUT: {status_publish_endpoint}")

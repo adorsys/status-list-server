@@ -1,5 +1,3 @@
-"""Render backend overrides without starting containers or reading developer secrets."""
-
 import json
 import os
 from pathlib import Path

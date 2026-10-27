@@ -5,7 +5,6 @@ formatter:
 gitignore_excludes: true
 
 exclude:
-  # Local builds and bootstrapped tools are not present in CI lint checkouts.
   - target/
   - .git/
   - deploy/helm/chart/templates/

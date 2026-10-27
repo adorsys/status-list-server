@@ -30,13 +30,11 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # The issuer is registered and seed lists are published once before the run by
-  # scripts/setup.js (invoked by `npm run test:stress*`), so authenticated flows
-  # start with a valid issuer and reads hit real lists.
+  # scripts/setup.js registers the issuer and seeds lists before the run.
 
   ensure:
-    maxErrorRate: 25 # Lenient for stress test
-    p99: 3000 # 99th percentile < 3s
+    maxErrorRate: 25
+    p99: 3000
 
 scenarios:
   - name: "Health Check - Lightweight"
@@ -94,7 +92,6 @@ scenarios:
       - function: "loadTestData"
       - function: "selectRandomToken"
       - function: "generateUUID"
-      # First publish
       - put:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
@@ -106,7 +103,6 @@ scenarios:
           expect:
             - statusCode: 201
           afterResponse: "handlePublishResponse"
-      # Then update
       - think: 0.5
       - patch:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"

@@ -47,7 +47,6 @@ unused_lifetimes = "warn"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
-## lint groups.
 complexity = { level = "warn", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 perf = { level = "deny", priority = -1 }
@@ -71,13 +70,11 @@ inherits = "dev"
 opt-level = 1
 
 [dependencies]
-# Async runtime and utilities
 tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 arc-swap = "1.9"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 
-# Web frameworks
 hyper = "1.12"
 hyper-util = "0.1"
 reqwest = { version = "0.13", features = ["form", "json", "query"] }
@@ -90,7 +87,6 @@ governor = "0.10"
 
 moka = { version = "0.12", features = ["future"] }
 
-# Cryptography and Security
 aws-lc-rs = "1"
 pem = "4.0"
 pkcs8 = { version = "0.11", features = ["std"] }
@@ -107,22 +103,18 @@ jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 sha2 = "0.11"
 hex = "0.4"
 
-# Serialization
 serde_json = "1.0"
 serde-saphyr = "2.0"
 serde-aux = "4.7"
 serde = { version = "1.0", features = ["derive", "rc"] }
 jsonschema = { version = "0.60", default-features = false }
 
-# Configuration and Environment
 config = "0.15"
 dotenvy = "0.15"
 
-# Logging and Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# OpenTelemetry
 opentelemetry = "0.33"
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
@@ -132,11 +124,9 @@ opentelemetry-prometheus = "0.33"
 prometheus = "0.14"
 metrics-process = { version = "2.4", default-features = false }
 
-# Error handling
 thiserror = "2.0"
 color-eyre = "0.6"
 
-# Utility Libraries
 uuid = { version = "1.28", features = ["serde", "v4"] }
 base64 = "0.23"
 time = { version = "0.3", features = ["formatting", "macros"] }
@@ -148,7 +138,6 @@ tokio-cron-scheduler = "0.15"
 url = { version = "2.5", features = ["serde"] }
 dashmap = "6.2"
 
-# Database and ORM
 [dependencies.sea-orm]
 version = "2.0"
 default-features = false
@@ -161,7 +150,6 @@ default-features = false
 features = ["runtime-tokio-rustls"]
 optional = true
 
-# AWS related libraries
 [dependencies.aws-config]
 version = "1"
 default-features = false

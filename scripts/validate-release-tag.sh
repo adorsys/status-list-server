@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-#
-# Assert that a pushed ref is a semver release tag.
-#
-# deploy.yml's push filter is `v*.*.*`, which is a refspec glob rather than semver:
-# `v2024.01.release` matches it. On such a tag docker/metadata-action drops every
-# `type=semver` entry, `promote-tags` produces no tags, and the deploy would fall
-# through to the mutable `latest` instead of failing. This rejects them at the top
-# of the release, in seconds, before the ~40 minute two-arch build.
-#
-# Lives here rather than inline in deploy.yml so the contract has one definition and
-# scripts/tests/test_validate_release_tag.py can exercise it.
-#
+# Fail unless the pushed ref is a semver tag: v*.*.* also matches v2024.01.release,
+# which would make the deploy fall through to latest.
 # Usage: validate-release-tag.sh <ref_name> <is_tag>
-#   ref_name  github.ref_name
-#   is_tag    "true" when github.ref starts with refs/tags/v; anything else is a
-#             non-tag run (workflow_dispatch), which has no tag to validate.
 
 set -euo pipefail
 
@@ -26,9 +13,7 @@ if [ "$IS_TAG" != "true" ]; then
   exit 0
 fi
 
-# Build metadata (`+...`) is deliberately absent from the alternation: `+` is not a
-# legal character in a Docker image tag, so a `v1.2.3+meta` release could never be
-# published under its own version.
+# No build metadata: + isn't allowed in Docker tags.
 semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
 
 if [[ ! "$REF_NAME" =~ $semver ]]; then
