@@ -20,8 +20,8 @@ pub struct RegistrationResponse {
     pub aggregation_uri: Option<String>,
 }
 
-/// Handle GET /credentials: the calling issuer's aggregation ID and URI. The
-/// Returns the aggregation identity provisioned for the authenticated issuer.
+/// Handle GET /credentials: the aggregation ID and URI provisioned for the
+/// authenticated issuer.
 #[tracing::instrument(skip_all, fields(issuer = %issuer), err(level = "info", Debug))]
 pub async fn get_credential(
     State(state): State<AppState>,
