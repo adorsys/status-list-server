@@ -981,12 +981,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 registry_handle.path(),
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
-                        // Hold the write lock across the cross-source check and
-                        // snapshot swap. Cross-pod races (hosted write on one
-                        // pod vs reload on another) are impossible in this PR —
-                        // nothing outside tests calls HostedIssuerService — and
-                        // static_conflict fails the hosted key closed if one
-                        // ever occurs. Database-backed guard tracked in #626.
+                        // Serializes with hosted writes in this process; see register_hosted_issuer for the cross-pod case.
                         let _guard = registry_handle.write_lock().await;
                         let active = registry_handle.snapshot();
                         // Read-only cross-source checks run before the immutable

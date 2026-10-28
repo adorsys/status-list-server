@@ -257,14 +257,10 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 /// (which assigns identifiers) rather than accepting whole entities; hosted
 /// tests use this to exercise the same path production would.
 ///
-/// The registry write lock is held across the check and the commit so a racing
-/// reload cannot install a conflicting static snapshot in between within this
-/// process: whichever critical section runs first wins, and the loser is
-/// rejected. The cross-pod variant — a hosted write on one pod racing with a
-/// reload on another — cannot happen yet because `HostedIssuerService` has no
-/// production caller in this PR; a database-backed guard is tracked in #626.
-/// The per-request `static_conflict` recheck means the worst case if the race
-/// did occur is `SourceConflict`, not a key trusted twice.
+/// The registry write lock serializes this with a reload in the same process.
+/// Nothing serializes it across pods yet: no production code writes hosted keys,
+/// and #626 adds a database-backed guard. If the race happens, `static_conflict`
+/// fails the hosted key closed rather than trusting it twice.
 pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
