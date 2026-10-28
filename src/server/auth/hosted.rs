@@ -74,6 +74,20 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                 None => Err(KeyResolveError::UnknownKid),
                 Some(store) => match store.find_key_by_kid(kid).await {
                     Ok(Some(entry)) => {
+                        // Reject a reserved key first: the kid is known but
+                        // never authenticates, and checking before
+                        // static_conflict avoids a spurious error-level
+                        // collision log for adopted legacy issuers whose old
+                        // reserved row is still present.
+                        if entry.key.state == crate::domain::models::hosted_issuer::HostedIssuerKeyState::Reserved {
+                            tracing::debug!(
+                                kid = %entry.key.kid,
+                                issuer = %entry.issuer.id,
+                                "hosted key is reserved and does not authenticate; \
+                                 adopt it into the registry to enable it"
+                            );
+                            return Err(KeyResolveError::Reserved);
+                        }
                         if let Some(reason) = self.static_conflict(&entry) {
                             tracing::error!(
                                 kid = %kid,
@@ -83,18 +97,7 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                             );
                             return Err(KeyResolveError::SourceConflict);
                         }
-                        match entry.resolved_key(time::OffsetDateTime::now_utc()) {
-                            Err(KeyResolveError::Reserved) => {
-                                tracing::warn!(
-                                    kid = %entry.key.kid,
-                                    issuer = %entry.issuer.id,
-                                    "hosted key is reserved and does not authenticate; \
-                                     adopt or activate it in the registry to enable it"
-                                );
-                                Err(KeyResolveError::Reserved)
-                            }
-                            result => result,
-                        }
+                        entry.resolved_key(time::OffsetDateTime::now_utc())
                     }
                     Ok(None) => Err(KeyResolveError::UnknownKid),
                     Err(error) => {

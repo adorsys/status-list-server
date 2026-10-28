@@ -67,11 +67,13 @@ pub struct NewHostedIssuer {
 
 /// Input to register a hosted issuer key through the public surface. The kid
 /// is assigned by the server, so `jwk` carries no `kid`; `created_at` is
-/// assigned too.
+/// assigned too. Typed as a JSON object map so that a non-object body is
+/// rejected before it reaches `register_key`, ruling out the `IndexMut` panic
+/// that `serde_json::Value` would cause on strings, arrays, and numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewHostedIssuerKey {
     pub issuer_id: String,
-    pub jwk: serde_json::Value,
+    pub jwk: serde_json::Map<String, serde_json::Value>,
     pub not_before: Option<OffsetDateTime>,
     pub not_after: Option<OffsetDateTime>,
 }
@@ -142,6 +144,8 @@ pub enum HostedIssuerError {
     KeyMaterialReused,
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
+    #[error("invalid expiry: {0}")]
+    InvalidExpiry(String),
     /// A persisted hosted row is malformed and can never parse: a permanent
     /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]

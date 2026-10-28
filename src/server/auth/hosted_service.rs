@@ -46,19 +46,27 @@ impl HostedIssuerService {
     }
 
     /// Create a hosted issuer, assigning a UUIDv4 id, an immutable aggregation
-    /// id, `created_at`, and `version`.
+    /// id, `created_at`, and `version`. Returns `HostedIssuerError::InvalidExpiry`
+    /// if `expires_at` is already in the past so a caller cannot onboard an
+    /// issuer that is immediately unusable.
     pub async fn create_issuer(
         &self,
         registry: &RegistryHandle,
         input: NewHostedIssuer,
     ) -> Result<HostedIssuer, HostedIssuerError> {
+        let now = (self.clock)();
+        if input.expires_at <= now {
+            return Err(HostedIssuerError::InvalidExpiry(
+                "expires_at must be in the future".into(),
+            ));
+        }
         let issuer = HostedIssuer {
             id: (self.new_id)().to_string(),
             display_name: input.display_name,
             tier: input.tier,
             state: HostedIssuerState::Active,
             owner: input.owner,
-            created_at: (self.clock)(),
+            created_at: now,
             expires_at: Some(input.expires_at),
             version: 1,
             aggregation_id: AggregationId((self.new_id)()),
@@ -74,9 +82,9 @@ impl HostedIssuerService {
         input: NewHostedIssuerKey,
     ) -> Result<HostedIssuerKey, HostedIssuerError> {
         let kid = (self.new_id)().to_string();
-        let mut jwk = input.jwk;
-        jwk["kid"] = serde_json::Value::String(kid.clone());
-        let bytes = serde_json::to_vec(&jwk)
+        let mut map = input.jwk;
+        map.insert("kid".into(), serde_json::Value::String(kid.clone()));
+        let bytes = serde_json::to_vec(&map)
             .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
         let jwk = PublicJwk::try_new(bytes)
             .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
@@ -234,7 +242,10 @@ mod tests {
                         "kty": "EC", "crv": "P-256", "alg": "ES256",
                         "x": "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8",
                         "y": "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M",
-                    }),
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
                     not_before: None,
                     not_after: None,
                 },
@@ -251,5 +262,38 @@ mod tests {
         let stored = store.all_keys().await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].kid, key.kid);
+    }
+
+    #[tokio::test]
+    async fn create_issuer_rejects_already_expired_expiry() {
+        let store = Arc::new(RecordingStore::default()) as Arc<dyn HostedIssuerStore>;
+        let (service, _counter) = deterministic_service(store.clone());
+        let registry = RegistryHandle::empty();
+
+        // The deterministic clock is pinned at UNIX_EPOCH; any expires_at at or
+        // before that instant must be rejected so an issuer cannot be created
+        // already expired.
+        for expires in [
+            OffsetDateTime::UNIX_EPOCH,
+            OffsetDateTime::UNIX_EPOCH - time::Duration::seconds(1),
+        ] {
+            assert!(
+                matches!(
+                    service
+                        .create_issuer(
+                            &registry,
+                            NewHostedIssuer {
+                                display_name: None,
+                                tier: "standard".into(),
+                                owner: None,
+                                expires_at: expires,
+                            },
+                        )
+                        .await,
+                    Err(HostedIssuerError::InvalidExpiry(_))
+                ),
+                "expires_at={expires:?} must be rejected as already in the past"
+            );
+        }
     }
 }

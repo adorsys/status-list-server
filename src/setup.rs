@@ -983,6 +983,10 @@ pub(crate) fn spawn_issuer_registry_watcher(
                         registry_handle.validate_candidate(&candidate)?;
                         // Hold the registry write lock across the cross-source
                         // check and the snapshot swap so a dynamic write cannot
+                        // race the reload inside this process. Cross-pod
+                        // consistency (two pods racing on the same registry
+                        // file) is left for the admin surface PR, which will
+                        // own distributed coordination.
                         let _guard = registry_handle.write_lock().await;
                         let active = registry_handle.snapshot();
                         // Read-only cross-source checks run before the immutable
