@@ -59,7 +59,7 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
         material: &str,
     ) -> Result<Option<HostedIssuerKey>, HostedIssuerError>;
 
-    /// Which of the given ids name a portal issuer, in one batched query.
+    /// Which of the given ids name a hosted issuer, in one batched query.
     /// Used by the startup/reload warning path so it does not run one
     /// `find_issuer` per owner.
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;

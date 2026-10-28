@@ -97,9 +97,9 @@ impl From<Credentials> for credentials::ActiveModel {
 }
 
 /// Durable issuer ownership, list quota, and registry aggregation identity.
-/// A portal issuer (hosted profile) is *this* row, keyed in `issuer` by its
-/// server-assigned UUID, with the hosted metadata columns added by the
-/// `hosted_issuers` migration, not a second ownership model.
+/// A hosted issuer is *this* row, keyed in `issuer` by its server-assigned
+/// UUID, with the hosted metadata columns added by the `hosted_issuers`
+/// migration, not a second ownership model.
 pub(crate) mod issuers {
     use super::*;
 
@@ -115,10 +115,10 @@ pub(crate) mod issuers {
         pub tier: String,
         pub state: String,
         pub owner: Option<String>,
-        /// Unix seconds of portal registration; 0 for rows created by
+        /// Unix seconds of hosted registration; 0 for rows created by
         /// another trust source.
         pub created_at: i64,
-        /// Unix seconds; until when the portal issuer may authenticate.
+        /// Unix seconds; until when the hosted issuer may authenticate.
         pub expires_at: Option<i64>,
         /// Optimistic-concurrency version of hosted-profile writes.
         pub version: i64,
@@ -139,7 +139,7 @@ pub(crate) mod hosted_issuer_keys {
     pub(crate) struct Model {
         #[sea_orm(primary_key, column_type = "String(StringLen::N(255))")]
         pub kid: String,
-        /// The owning `issuers.issuer` (a server-assigned UUID for portal
+        /// The owning `issuers.issuer` (a server-assigned UUID for hosted
         /// issuers); text to match the unrestricted PK column.
         #[sea_orm(column_type = "Text")]
         pub issuer_id: String,

@@ -1,4 +1,4 @@
-//! The public surface for creating hosted-profile issuers and keys. Callers
+//! The public API for creating hosted-profile issuers and keys. Callers
 //! supply operator metadata only; the server assigns `id`, `aggregation_id`,
 //! `created_at`, `version`, and the key `kid` (ADR 0002, Identifiers). The
 //! entity-taking registration functions are crate-private.
@@ -47,7 +47,7 @@ impl HostedIssuerService {
 
     /// Create a hosted issuer, assigning a UUIDv4 id, an immutable aggregation
     /// id, `created_at`, and `version`. Returns `HostedIssuerError::InvalidExpiry`
-    /// if `expires_at` is already in the past so a caller cannot onboard an
+    /// if `expires_at` is already in the past so a caller cannot create an
     /// issuer that is immediately unusable.
     pub async fn create_issuer(
         &self,

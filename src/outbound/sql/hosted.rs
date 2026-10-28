@@ -1,4 +1,4 @@
-//! SQL adapter for the hosted-profile issuer store. A portal issuer is a
+//! SQL adapter for the hosted-profile issuer store. A hosted issuer is a
 //! row of the shared ownership table (`issuers`, expanded by the
 //! `hosted_issuers` migration), so creating one records its aggregation ID
 //! and its ownership/quota slot in the same unit; keys live in
@@ -27,7 +27,7 @@ use crate::utils::metrics_db::time_query;
 /// loop bound.
 const AGGREGATION_ID_RETRIES: u32 = 3;
 
-/// The `source` value marking a row as a hosted-profile (portal) issuer. Rows
+/// The `source` value marking a row as a hosted-profile issuer. Rows
 /// written by the registry or credential paths carry the migration default and
 /// must never be treated as hosted.
 const PORTAL_SOURCE: &str = "portal";
@@ -178,7 +178,7 @@ fn parse_entry(
     })
 }
 
-/// Resolve a key row together with its portal issuer. Malformed stored data is
+/// Resolve a key row together with its hosted issuer. Malformed stored data is
 /// a permanent fault (`DataError`), never an empty result or a transient error.
 async fn load_entry(
     kid: &str,

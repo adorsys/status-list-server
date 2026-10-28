@@ -52,10 +52,10 @@ impl HostedIssuer {
     }
 }
 
-/// Input to create a hosted issuer through the public surface. Identifiers
+/// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
 /// (`id`, `aggregation_id`, `created_at`, `version`) are assigned by the
 /// server, never by the caller (ADR 0002, Identifiers), so this carries only
-/// operator-supplied metadata. `expires_at` is required: onboarding-registered
+/// operator-supplied metadata. `expires_at` is required: hosted issuer
 /// credentials always expire (ADR 0002, Limits).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewHostedIssuer {
@@ -65,7 +65,7 @@ pub struct NewHostedIssuer {
     pub expires_at: OffsetDateTime,
 }
 
-/// Input to register a hosted issuer key through the public surface. The kid
+/// Input to register a hosted issuer key through `HostedIssuerService`. The kid
 /// is assigned by the server, so `jwk` carries no `kid`; `created_at` is
 /// assigned too. Typed as a JSON object map so that a non-object body is
 /// rejected before it reaches `register_key`, ruling out the `IndexMut` panic

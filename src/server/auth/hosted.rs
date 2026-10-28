@@ -252,7 +252,7 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 }
 
 /// Runs a hosted write through the cross-source checks before handing it to
-/// storage. Crate-private: the public surface builds on
+/// storage. Crate-private: the public API builds on
 /// [`HostedIssuerService`](crate::server::auth::hosted_service::HostedIssuerService)
 /// (which assigns identifiers) rather than accepting whole entities; hosted
 /// tests use this to exercise the same path production would.
@@ -764,7 +764,7 @@ mod tests {
         }
     }
 
-    /// Forces the interleaving from the review: registration validates against
+    /// Forces the interleaving where registration validates against
     /// the empty snapshot and parks inside `add_key` while still holding the
     /// registry write lock.
     #[tokio::test]
@@ -1153,7 +1153,7 @@ mod tests {
             Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
 
         // The private half of `test_fixtures::TEST_EC_PUBLIC_JWK` (which also
-        // carries kid `test-key`); the portal key embeds kid `portal-key`.
+        // carries kid `test-key`); the hosted key embeds kid `portal-key`.
         let private_pem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsJyilHyjhzXDVU2A\n5ud6kfXPktY7wx5d8CQFe1nMzK2hRANCAAQ17IW//Yvrs4SmU1smlHTYgWKzj+UV\nb0diaF8Xk6vqb3gB9qnvD4NxkNvLsQPPqjQKncEP831drigLydrC6WPT\n-----END PRIVATE KEY-----";
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1206,7 +1206,7 @@ mod tests {
         );
     }
 
-    /// A portal-signed management JWT for `issuer_id`, using the private half of
+    /// A hosted-signed management JWT for `issuer_id`, using the private half of
     /// `test_fixtures::TEST_EC_PUBLIC_JWK` (kid `portal-key`).
     #[cfg(all(feature = "memory", feature = "sqlite"))]
     fn portal_token(issuer_id: &str) -> String {

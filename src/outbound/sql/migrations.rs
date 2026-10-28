@@ -1937,7 +1937,7 @@ pub(crate) mod issuer_ownership {
 
 /// Adds the hosted-profile metadata columns to the issuer ownership record
 /// (`issuers`, ADR 0002 hosted profile) rather than introducing a second
-/// ownership model: a portal issuer *is* an `issuers` row, created before it
+/// ownership model: a hosted issuer *is* an `issuers` row, created before it
 /// can publish, keyed by its server-assigned UUID in the `issuer` column.
 /// Managed columns carry defaults so rows created by the registry path or by
 /// credential registration keep loading untouched.
@@ -2199,12 +2199,12 @@ pub(crate) mod issuer_audit_events {
 /// cannot do.
 ///
 /// Carried issuers get `source = 'credential'`, which the hosted key lookup
-/// accepts and `find_issuer` does not: they resolve by key, but are not portal
+/// accepts and `find_issuer` does not: they resolve by key, but are not hosted
 /// issuers. Issuers whose aggregation ID is still NULL are assigned one, so
 /// the carried key does not resolve to a corrupt row.
 ///
 /// Only registry-backed credentials are carried (`source = 'registry'`): a
-/// credential someone attaches to a portal issuer's id must not be picked up.
+/// credential someone attaches to a hosted issuer's id must not be picked up.
 ///
 /// Idempotent: a row already carried identically is skipped, so a re-run after
 /// a partial MySQL failure resumes. Carried keys land `reserved`, so they hold
@@ -2575,13 +2575,13 @@ mod carry_over_tests {
             "registry",
         )
         .await; // shared material
-        // A credential attached to a portal issuer's id must not be carried.
+        // A credential attached to a hosted issuer's id must not be carried.
         seed(&db, "portal-issuer", "portal-key", KEY_2, "portal").await;
 
         run_migrations(&db).await.unwrap();
 
         // Carried kids: key-1, the thumbprint kid, and rsa-1. The oct key, the
-        // shared-material duplicates, and the portal-attached key are skipped.
+        // shared-material duplicates, and the hosted-attached key are skipped.
         let rows = db
             .query_all_raw(Statement::from_string(
                 backend,

@@ -225,7 +225,7 @@ async fn test_sqlite_non_portal_issuer_is_invisible() {
 
     let db = fixtures::sqlite_connection().await;
     let store = SqlHostedIssuerStore::new(db.clone());
-    // A registry/credential row in the shared table, without the portal source.
+    // A registry/credential row in the shared table, without the `portal` source.
     issuers::Entity::insert(issuers::ActiveModel {
         issuer: Set("credential-issuer".to_string()),
         aggregation_id: Set(Some(

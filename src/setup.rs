@@ -1162,9 +1162,9 @@ async fn warn_missing_registry_issuers(
     if missing.is_empty() {
         return;
     }
-    // A hosted (portal) issuer owns its lists legitimately and is not expected
+    // A hosted issuer owns its lists legitimately and is not expected
     // to appear in the static registry; skip it so the warning keeps meaning
-    // "an operator-backed issuer is missing". One batched query for the portal
+    // "an operator-backed issuer is missing". One batched query for the hosted
     // ids instead of one find_issuer per owner; a database error must not fall
     // through to the false "missing from the registry" warning.
     let to_warn = match missing_registry_issuers(&missing, dynamic_issuer_store).await {
@@ -1182,7 +1182,7 @@ async fn warn_missing_registry_issuers(
     }
 }
 
-/// Which of the owners missing from the static registry are not portal issuers
+/// Which of the owners missing from the static registry are not hosted issuers
 /// and should be warned about. A single batched `find_issuer_ids` call handles
 /// all of them; a store error is returned so the caller skips the warnings
 /// rather than emitting a false "missing from the registry" per owner.

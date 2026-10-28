@@ -134,7 +134,7 @@ deployment profiles (ADR 0002). A profile only adds trust sources and limits; it
 never relaxes a rule:
 
 - **private** (default): only issuers an operator has listed in the operator
-  trust registry are trusted. The hosted issuer store is not built, so a
+  trust registry are trusted. The hosted issuer store is not constructed, so a
   registry-only deployment is unaffected by the hosted key resolution path.
 - **hosted**: the server also trusts issuer keys held in the SQL hosted issuer
   store (see [database-backends.md](database-backends.md)). The composite key resolver
