@@ -69,7 +69,7 @@ fn fixture_config() -> Config {
         "cache": {"backend": "memory", "ttl": 300, "max_capacity": 100},
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
-        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": []},
+        "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
@@ -82,7 +82,7 @@ fn fixture_config() -> Config {
 }
 
 fn fixture_state(config: &Config) -> AppState {
-    use base64::prelude::BASE64_STANDARD;
+    use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD};
     let snapshots = MemoryStatusListSnapshotRepo::default();
     let lists = MemoryStatusLists::default().with_snapshot(&snapshots);
     let material = SigningMaterial::new(
@@ -92,6 +92,19 @@ fn fixture_state(config: &Config) -> AppState {
         Arc::new(SigningKey::from_pem(KEY).unwrap()),
     )
     .unwrap();
+    let signing_key = SigningKey::from_pem(KEY).unwrap();
+    let public = signing_key.public_key_bytes();
+    let issuer_registry = format!(
+        "version: 1\nissuers:\n  - id: {ISSUER}\n    aggregation_id: {AGGREGATION_ID}\n    keys:\n      - kid: {KEY_ID}\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: {KEY_ID}\n          alg: ES256\n          x: {}\n          y: {}\nadmins: []\n",
+        BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
+        BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
+    );
+    let registry = Arc::new(
+        status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(
+            &issuer_registry,
+        )
+        .unwrap(),
+    );
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -117,6 +130,8 @@ fn fixture_state(config: &Config) -> AppState {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        issuer_registry: registry.clone(),
+        issuer_key_resolver: registry,
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -127,6 +142,7 @@ fn fixture_state(config: &Config) -> AppState {
 }
 const ISSUER: &str = "conformance-issuer";
 const KEY_ID: &str = "conformance-key";
+const AGGREGATION_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 pub(super) struct TestServer {
     pub(super) base_url: String,
@@ -192,11 +208,11 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let mut app = Self {
+        let app = Self {
             base_url,
             management_url,
             client,
-            aggregation_id: String::new(),
+            aggregation_id: AGGREGATION_ID.to_owned(),
         };
         let key = SigningKey::from_pem(KEY).unwrap();
         let public = key.public_key_bytes();
@@ -213,8 +229,7 @@ impl TestServer {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
         let registration: serde_json::Value = response.json().await.unwrap();
-        app.aggregation_id = registration["aggregation_id"].as_str().unwrap().to_owned();
-        uuid::Uuid::parse_str(&app.aggregation_id).unwrap();
+        uuid::Uuid::parse_str(registration["aggregation_id"].as_str().unwrap()).unwrap();
         app
     }
 

@@ -1,12 +1,4 @@
-"""Tests for scripts/check-trivyignore.py.
-
-The script decides which security findings may be suppressed, so every rejection
-path needs to be exercised. An untested validator guarding an ignore file has the
-same problem as an untested vulnerability gate: it looks identical whether it works
-or does nothing.
-
-Run: python3 -m unittest discover -s scripts/tests -t .
-"""
+"""Run: python3 -m unittest discover -s scripts/tests -t ."""
 
 from __future__ import annotations
 
@@ -40,8 +32,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
             f"expected {needle!r} in {errors}",
         )
 
-    # --- accepted shapes -------------------------------------------------
-
     def test_repository_file_is_valid(self):
         repo_file = pathlib.Path(__file__).resolve().parents[2] / ".trivyignore.yaml"
         self.assertEqual(checker.check(repo_file), [])
@@ -64,7 +54,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         )
 
     def test_unscoped_vulnerability_is_valid(self):
-        # A scratch image has no meaningful path to scope a crate advisory to.
         self.assertEqual(
             self.check(
                 """
@@ -93,7 +82,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
                 )
 
     def test_duplicate_ids_are_allowed(self):
-        # The same rule legitimately appears twice scoped to different paths.
         self.assertEqual(
             self.check(
                 """
@@ -110,7 +98,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         )
 
     def test_expired_entry_warns_but_does_not_fail(self):
-        # An expired entry has already stopped suppressing anything.
         self.assertEqual(
             self.check(
                 """
@@ -123,8 +110,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
             [],
         )
 
-    # --- rejected shapes -------------------------------------------------
-
     def test_rejects_invalid_yaml(self):
         self.assertRejects("vulnerabilities: [\n", "not valid YAML")
 
@@ -132,7 +117,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         self.assertRejects("- just\n- a\n- list\n", "top level must be a mapping")
 
     def test_rejects_unknown_section(self):
-        # `vulnerability` parses fine and suppresses nothing.
         self.assertRejects(
             """
             vulnerability:
@@ -213,7 +197,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         )
 
     def test_rejects_unknown_entry_key(self):
-        # Trivy silently ignores unrecognised keys, so this is a scope change.
         self.assertRejects(
             """
             vulnerabilities:
@@ -238,7 +221,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         self.assertTrue(any("Did you mean 'paths'?" in error for error in errors), errors)
 
     def test_rejects_unscoped_misconfiguration(self):
-        # The same widening as the `path:` typo, reached by omission.
         self.assertRejects(
             """
             misconfigurations:
@@ -284,7 +266,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
         )
 
     def test_rejects_purls_scalar_on_vulnerability(self):
-        # Not required there, but must be well-formed when present.
         self.assertRejects(
             """
             vulnerabilities:
@@ -299,12 +280,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
     def test_missing_file_is_an_error(self):
         errors = checker.check(pathlib.Path("does-not-exist.yaml"))
         self.assertTrue(any("not found" in error for error in errors), errors)
-
-    # --- id character set -------------------------------------------------
-    #
-    # These ids are written to a tab-separated stream by --expiring-within and read
-    # back by the scheduled re-scan with `IFS=$'\t' read`, then rendered into a GitHub
-    # issue body. A tab or newline desynchronises that parse.
 
     def test_accepts_the_real_world_id_schemes(self):
         for identifier in (
@@ -370,13 +345,6 @@ class CheckTrivyignoreTest(unittest.TestCase):
 
 
 class ExpiringEntriesTest(unittest.TestCase):
-    """Tests for `--expiring-within`.
-
-    This is the only thing that gives notice before an exception lapses, and the file
-    it reads is empty of vulnerability entries today. Untested, it would ship as a
-    feature nobody has ever seen fire -- the same problem the gate self-test exists
-    to prevent one layer down.
-    """
 
     def entries(self, text: str, days: int):
         with tempfile.TemporaryDirectory() as tmp:
@@ -386,7 +354,6 @@ class ExpiringEntriesTest(unittest.TestCase):
 
     @staticmethod
     def _in_days(offset: int) -> str:
-        # Relative to today, so these tests do not start failing on a fixed date.
         return (datetime.date.today() + datetime.timedelta(days=offset)).isoformat()
 
     def ledger(self, *offsets: int) -> str:
@@ -408,7 +375,6 @@ class ExpiringEntriesTest(unittest.TestCase):
         self.assertEqual(self.entries(self.ledger(10), 1), [])
 
     def test_boundary_exactly_at_the_window_is_included(self):
-        # `remaining <= within_days`, so the last day of notice still gives notice.
         self.assertEqual(len(self.entries(self.ledger(30), 30)), 1)
 
     def test_expiring_today_is_included_with_zero_remaining(self):
@@ -416,8 +382,6 @@ class ExpiringEntriesTest(unittest.TestCase):
         self.assertEqual(found[0][2], 0)
 
     def test_already_lapsed_entry_is_listed_with_negative_remaining(self):
-        # A lapsed entry has stopped suppressing anything, which is worth surfacing
-        # even though check() only warns about it.
         found = self.entries(self.ledger(-5), 30)
         self.assertEqual(found[0][2], -5)
 
@@ -426,7 +390,6 @@ class ExpiringEntriesTest(unittest.TestCase):
         self.assertEqual([item[2] for item in found], [-1, 5, 20])
 
     def test_misconfigurations_are_never_listed(self):
-        # They require no expired_at, because they do not rot on a schedule.
         self.assertEqual(
             self.entries(
                 f"""
@@ -442,7 +405,6 @@ class ExpiringEntriesTest(unittest.TestCase):
         )
 
     def test_malformed_date_is_skipped_not_guessed(self):
-        # check() rejects it; this must not invent a date for it.
         self.assertEqual(
             self.entries(
                 """
@@ -461,13 +423,10 @@ class ExpiringEntriesTest(unittest.TestCase):
         self.assertEqual(checker.expiring_entries(pathlib.Path("does-not-exist.yaml"), 30), [])
 
     def test_repository_file_is_accepted(self):
-        # Whatever the ledger holds today, asking must not raise.
         repo_file = pathlib.Path(__file__).resolve().parents[2] / ".trivyignore.yaml"
         self.assertIsInstance(checker.expiring_entries(repo_file, 30), list)
 
     def test_expiry_window_does_not_affect_validation(self):
-        # The pull request path must keep behaving identically; an approaching date is
-        # not a malformed file.
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / ".trivyignore.yaml"
             path.write_text(self.ledger(1), encoding="utf-8")
@@ -475,7 +434,6 @@ class ExpiringEntriesTest(unittest.TestCase):
 
 
 class ExpiringWindowArgumentTest(unittest.TestCase):
-    """`--expiring-within` must refuse a window that inverts its own meaning."""
 
     def run_main(self, argv: list[str]) -> int:
         argv_backup = sys.argv
@@ -486,8 +444,6 @@ class ExpiringWindowArgumentTest(unittest.TestCase):
             sys.argv = argv_backup
 
     def test_negative_window_is_rejected(self):
-        # A negative window lists only entries that have already lapsed, which reads
-        # as "nothing is expiring soon" to whoever asked for a warning.
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / ".trivyignore.yaml"
             path.write_text("vulnerabilities: []\n", encoding="utf-8")
@@ -496,7 +452,6 @@ class ExpiringWindowArgumentTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
 
     def test_zero_window_is_allowed(self):
-        # Zero is a meaningful question: what lapses today or has already lapsed.
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / ".trivyignore.yaml"
             path.write_text("vulnerabilities: []\n", encoding="utf-8")

@@ -106,12 +106,19 @@ impl CredentialRepo for SqlCredentialRepo {
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
-    ) -> Result<(), CredentialError> {
+    ) -> Result<AggregationId, CredentialError> {
         let public_key = serde_json::from_slice(credential.public_key.as_bytes())
             .map_err(|e| CredentialError::InvalidPublicJwk(format!("parse failed: {e}")))?;
         let entity = models::Credentials::new(credential.issuer.0, public_key)
             .with_aggregation_id(aggregation_id.to_string());
-        self.store.insert_one(entity).await.map_err(Into::into)
+        let stored_id = self
+            .store
+            .insert_one(entity)
+            .await
+            .map_err(CredentialError::from)?;
+        stored_id
+            .parse()
+            .map_err(|error| CredentialError::Backend(std::io::Error::other(error).into()))
     }
 
     async fn find_aggregation_id(
@@ -138,6 +145,35 @@ impl CredentialRepo for SqlCredentialRepo {
             .transpose()
     }
 
+    async fn find_stored_aggregation_id(
+        &self,
+        issuer: &str,
+    ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+        self.store
+            .find_aggregation_id(issuer)
+            .await?
+            .map(|value| {
+                value
+                    .map(|id| {
+                        id.parse()
+                            .map_err(|error| CredentialError::Backend(Box::new(error)))
+                    })
+                    .transpose()
+            })
+            .transpose()
+    }
+
+    async fn assign_aggregation_id(
+        &self,
+        issuer: &str,
+        aggregation_id: AggregationId,
+    ) -> Result<(), CredentialError> {
+        self.store
+            .assign_aggregation_id(issuer, &aggregation_id.to_string())
+            .await?;
+        Ok(())
+    }
+
     async fn find_issuer_by_aggregation_id(
         &self,
         aggregation_id: AggregationId,
@@ -147,6 +183,16 @@ impl CredentialRepo for SqlCredentialRepo {
             .find_issuer_by_aggregation_id(&aggregation_id.to_string())
             .await?;
         Ok(issuer.map(Issuer))
+    }
+
+    async fn record_registry_aggregation_ids(
+        &self,
+        mappings: &[(String, AggregationId)],
+    ) -> Result<(), CredentialError> {
+        self.store
+            .record_registry_aggregation_ids(mappings)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -210,6 +256,13 @@ impl StatusListRepo for SqlStatusListRepo {
             .find_status_list_uris_after(issuer, after, (limit as u64).saturating_add(1))
             .await?;
         Ok(StatusListUriPage::from_rows(rows, limit))
+    }
+
+    async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        self.store
+            .find_status_list_issuers()
+            .await
+            .map_err(Into::into)
     }
 
     async fn allocate_indices(

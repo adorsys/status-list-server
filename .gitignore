@@ -1,5 +1,7 @@
 /target
 .env
+# Operator-managed issuer trust registry; never committed.
+issuer-registry/
 .debug/
 .vscode/
 cert.yml
@@ -7,7 +9,6 @@ cert.yml
 tls.crt
 tls.key
 
-### Python ###
 __pycache__
 .venv/
 *.pyc
@@ -15,8 +16,6 @@ __pycache__
 # Helm chart dependency archives (helm dependency update)
 *.tgz
 
-# MacOs store files
 **/.DS_Store
 
-# Locally installed JavaScript dependencies
 node_modules/

@@ -1,5 +1,3 @@
-"""Regression tests for local bootstrap and fail-closed command execution."""
-
 import os
 from pathlib import Path
 import shlex
@@ -148,7 +146,7 @@ exit 14
         self.stub("npm", """
 [[ "$*" == *'ci --prefix'* ]] || exit 90
 mkdir -p "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin"
-printf '#!/bin/sh\\necho tombi 1.8.4\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
+printf '#!/bin/sh\\necho tombi 1.8.9\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 chmod +x "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 """)
         result = self.shell('install_node_bin tombi "$TOMBI_VERSION"')
@@ -381,8 +379,6 @@ done
                 for step in job.get('steps', []):
                     if step.get('uses', '').startswith('azure/setup-helm@'):
                         self.assertEqual(step['with']['version'], pins['HELM_VERSION'])
-        # The Helm/observability image pins live in the path-gated helm-checks.yml,
-        # not CI.yml, since the extraction moved those jobs out of the Rust lifecycle.
         self.assertIn(pins['ZIZMOR_IMAGE'], workflow)
         self.assertIn(pins['OTEL_COLLECTOR_IMAGE'], helm_checks)
         self.assertIn(pins['PROMETHEUS_IMAGE'], helm_checks)
@@ -395,18 +391,16 @@ done
         package = json.loads((ROOT / 'scripts/local-ci/node/package.json').read_text())
         self.assertEqual(package['dependencies']['tombi'], pins['TOMBI_VERSION'])
         self.assertEqual(package['dependencies']['markdownlint-cli2'], pins['MARKDOWNLINT_VERSION'])
-        # These versions are embedded by Actions, not explicit workflow inputs.
-        # An action upgrade must review these local defaults as well.
         for reference in [
             'EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25',
             'DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff',
-            'tombi-toml/setup-tombi@ebc771afde2bfb9192c91338a71b2c5d6152e2c3',
+            'tombi-toml/setup-tombi@dbb85e6c7616772f590af0db4a7c455dfe61fec7',
             'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25',
         ]:
             self.assertIn(reference, workflow + helm_checks + deny)
         self.assertEqual(pins['DENY_VERSION'], '0.20.2')
         self.assertEqual(pins['TRIVY_VERSION'], '0.70.0')
-        self.assertEqual(pins['TOMBI_VERSION'], '1.8.4')
+        self.assertEqual(pins['TOMBI_VERSION'], '1.8.9')
         self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.2')
         self.assertIn(pins['KUBE_LINTER_VERSION'], helm_checks)
         self.assertTrue(pins['TRIVY_IMAGE'].startswith('aquasec/trivy:' + pins['TRIVY_VERSION'] + '@sha256:'))

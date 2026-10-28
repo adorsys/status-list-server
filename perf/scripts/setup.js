@@ -1,19 +1,6 @@
-// Setup helper for the performance suites.
-//
-// Runs once before an Artillery test and does two things against the live
-// server:
-//   1. Registers the test issuer (from scripts/test-tokens.json) so the
-//      token's `kid` resolves to its registered public key. Otherwise authenticated
-//      requests return `401 invalid_token`. This used to be done
-//      with an Artillery `before:` hook, but that hook does not execute
-//      processor `function:` steps, so the registration silently never ran and
-//      every authenticated request returned 401.
-//   2. Publishes a set of seed status lists and writes their IDs to
-//      scripts/seed-lists.json. The read scenarios (`selectPublishedListId`)
-//      pick from these real IDs instead of random IDs that always 404.
-//
-// It is idempotent: a 409 from an already-registered issuer is treated as
-// success, and re-publishing seed lists simply replaces the previous set.
+// Runs once before an Artillery test: registers the test issuer and publishes seed lists.
+// Not an Artillery before: hook, which never runs processor function: steps (every request got 401).
+// Idempotent: a 409 for the issuer counts as success.
 
 const http = require('http');
 const https = require('https');
@@ -24,10 +11,7 @@ const path = require('path');
 
 const scriptsDir = __dirname;
 const seedFile = path.join(scriptsDir, 'seed-lists.json');
-// Writes (credential registration, seed status-list publishing) go to the
-// management listener at :8001 by default, matching the MANAGEMENT_TARGET
-// default the npm test:* scripts pass to Artillery. Override with
-// MANAGEMENT_TARGET for a separate management host.
+// Writes go to the management listener; keep this default in step with the npm test:* scripts.
 const MANAGEMENT_TARGET = process.env.MANAGEMENT_TARGET || 'http://localhost:8001';
 const SEED_LISTS = Number(process.env.SEED_LISTS || 50);
 

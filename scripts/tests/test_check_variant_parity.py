@@ -1,15 +1,4 @@
-"""Tests for scripts/check-variant-parity.py.
-
-This checker is the only thing standing between "a variant was added to deploy.yml"
-and "the nightly re-scan silently stops covering a deployed image". Untested, it has
-the same problem as an untested vulnerability gate: a checker that always passes and
-a checker that works look identical on a repository that happens to be consistent.
-
-So the repository's real workflows are asserted to agree, and every rejection path is
-exercised against synthetic ones.
-
-Run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
-"""
+"""Run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'"""
 
 from __future__ import annotations
 
@@ -93,10 +82,7 @@ class VariantParityTest(unittest.TestCase):
             errors.extend(parity.compare(sources))
         return errors
 
-    # --- the real repository ---------------------------------------------
-
     def test_repository_workflows_agree(self):
-        # The assertion that actually protects the pipeline; the rest is scaffolding.
         deploy = _ROOT / ".github" / "workflows" / "deploy.yml"
         scheduled = _ROOT / ".github" / "workflows" / "scheduled-image-scan.yml"
 
@@ -106,11 +92,8 @@ class VariantParityTest(unittest.TestCase):
         errors.extend(more)
 
         self.assertEqual(errors, [])
-        # Three deploy matrices plus the scheduled list.
         self.assertEqual(len(sources), 4)
         self.assertEqual(parity.compare(sources), [])
-
-    # --- agreement --------------------------------------------------------
 
     def test_identical_lists_pass(self):
         names = ["aws", "gcp", "azure"]
@@ -125,10 +108,7 @@ class VariantParityTest(unittest.TestCase):
             [],
         )
 
-    # --- disagreement -----------------------------------------------------
-
     def test_variant_missing_from_the_scheduled_list_is_rejected(self):
-        # The failure this script exists for: built and deployed, never re-scanned.
         errors = self.errors(
             [["aws", "gcp"], ["aws", "gcp"], ["aws", "gcp"]],
             ["aws"],
@@ -156,8 +136,6 @@ class VariantParityTest(unittest.TestCase):
             ["aws", "gcp"],
         )
         self.assertEqual(len(errors), 2, errors)
-
-    # --- malformed inputs -------------------------------------------------
 
     def test_missing_deploy_job_is_an_error(self):
         tmp = tempfile.TemporaryDirectory()
@@ -211,7 +189,6 @@ class VariantParityTest(unittest.TestCase):
         self.assertTrue(any("does not look like a workflow" in error for error in errors), errors)
 
     def test_a_single_source_is_not_silently_compared(self):
-        # Comparing one list against itself would pass and prove nothing.
         self.assertTrue(parity.compare({"only": {"aws"}}))
 
 

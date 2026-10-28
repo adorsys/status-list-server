@@ -326,6 +326,10 @@ impl Service {
         self.status_list_repo.list_uris(None, after, limit).await
     }
 
+    pub async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
+        self.status_list_repo.issuers_with_status_lists().await
+    }
+
     /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
     /// `None` when no issuer has it.
     pub async fn list_issuer_uris(
@@ -346,6 +350,19 @@ impl Service {
             .list_uris(Some(&issuer.0), after, limit)
             .await
             .map(Some)
+    }
+
+    /// List one page of an issuer's status lists when its public aggregation
+    /// identity was resolved outside the credential database.
+    pub async fn list_issuer_uris_by_issuer(
+        &self,
+        issuer: &Issuer,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -388,11 +405,18 @@ impl Service {
         &self,
         credential: Credential,
     ) -> Result<AggregationId, CredentialError> {
-        let aggregation_id = AggregationId::generate();
+        self.publish_credential_with_aggregation_id(credential, AggregationId::generate())
+            .await
+    }
+
+    pub async fn publish_credential_with_aggregation_id(
+        &self,
+        credential: Credential,
+        aggregation_id: AggregationId,
+    ) -> Result<AggregationId, CredentialError> {
         self.credential_repo
             .insert(credential, aggregation_id)
-            .await?;
-        Ok(aggregation_id)
+            .await
     }
 
     /// The issuer's aggregation ID, or `None` for an unknown issuer.
@@ -623,6 +647,10 @@ mod tests {
                 .status_lists
                 .len(),
             2
+        );
+        assert_eq!(
+            service.issuers_with_status_lists().await.unwrap(),
+            ["one", "two"]
         );
     }
 

@@ -6,6 +6,8 @@
 use std::sync::Arc;
 
 use jsonwebtoken::jwk::Jwk;
+#[cfg(feature = "sqlite")]
+use sea_orm::Database;
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
@@ -49,9 +51,98 @@ fn credential(issuer: &str) -> Credential {
     }
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn registry_aggregation_mappings_survive_database_restart() {
+    use crate::domain::ports::CredentialRepo;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("registry.db");
+    let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
+    let first_connection = Database::connect(&database_url).await.unwrap();
+    Migrator::up(&first_connection, None).await.unwrap();
+    let expected = AggregationId::generate();
+    let first_repo = SqlCredentialRepo::new(SeaOrmStore::new(Arc::new(first_connection)));
+    first_repo
+        .record_registry_aggregation_ids(&[("issuer-restart".into(), expected)])
+        .await
+        .unwrap();
+    drop(first_repo);
+
+    let restarted_connection = Database::connect(&database_url).await.unwrap();
+    let restarted_repo = SqlCredentialRepo::new(SeaOrmStore::new(Arc::new(restarted_connection)));
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("issuer-restart".into(), expected)])
+            .await
+            .is_ok()
+    );
+    let changed = AggregationId::generate();
+    assert_ne!(expected, changed);
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("issuer-restart".into(), changed)])
+            .await
+            .is_err(),
+        "a restarted server must reject a changed registry mapping"
+    );
+    assert!(
+        restarted_repo
+            .record_registry_aggregation_ids(&[("another-issuer".into(), expected)])
+            .await
+            .is_err(),
+        "a restarted server must reject reusing a registry aggregation ID"
+    );
+}
+
 async fn assert_aggregation_id_round_trip(db: Arc<DatabaseConnection>, backend: &str) {
     let repo = SqlCredentialRepo::new(SeaOrmStore::new(db.clone()));
     let aggregation_id = AggregationId::generate();
+    let registry_id = AggregationId::generate();
+    repo.record_registry_aggregation_ids(&[("registry-issuer".into(), registry_id)])
+        .await
+        .unwrap_or_else(|e| panic!("recording a registry mapping on {backend}: {e}"));
+    repo.record_registry_aggregation_ids(&[("registry-issuer".into(), registry_id)])
+        .await
+        .unwrap_or_else(|e| panic!("reloading an unchanged registry mapping on {backend}: {e}"));
+    assert_eq!(
+        repo.find_issuer_by_aggregation_id(registry_id)
+            .await
+            .unwrap(),
+        Some(Issuer("registry-issuer".into())),
+        "registry-only mappings remain resolvable from durable ownership on {backend}"
+    );
+    assert!(
+        repo.record_registry_aggregation_ids(&[(
+            "registry-issuer".into(),
+            AggregationId::generate(),
+        )])
+        .await
+        .is_err(),
+        "an issuer cannot change its registry ID on {backend}"
+    );
+    assert!(
+        repo.record_registry_aggregation_ids(&[("different-issuer".into(), registry_id)])
+            .await
+            .is_err(),
+        "a registry ID cannot change issuers on {backend}"
+    );
+    let mut registry_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    registry_key.common.key_id = Some("registry-key".into());
+    SeaOrmStore::<Credentials>::new(db.clone())
+        .insert_one(
+            Credentials::new("registry-issuer".into(), registry_key)
+                .with_aggregation_id(registry_id.to_string()),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("registering credentials for a registry-only issuer on {backend}: {e}")
+        });
+    assert_eq!(
+        repo.find_aggregation_id("registry-issuer").await.unwrap(),
+        Some(registry_id),
+        "credential registration preserves the registry ID on {backend}"
+    );
     repo.insert(credential("issuer-agg"), aggregation_id)
         .await
         .unwrap();
@@ -110,16 +201,35 @@ async fn assert_migration_and_backfill(
         panic!("migrating (already_applied={already_applied}) on {backend}: {e}")
     });
 
-    db.execute_unprepared(
-        "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-via-old-pod', '{}')",
-    )
-    .await
-    .unwrap_or_else(|e| {
-        panic!("a nullable column must let old pods keep registering on {backend}: {e}")
-    });
+    assert!(
+        db.execute_unprepared(
+            "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-via-old-pod', '{}')",
+        )
+        .await
+        .is_err(),
+        "the ownership foreign key must reject registrations that omit the owner row on {backend}"
+    );
 
     let store = SeaOrmStore::<Credentials>::new(db);
     let repo = SqlCredentialRepo::new(store.clone());
+    let registry_id = AggregationId::generate();
+    assert_eq!(
+        repo.find_stored_aggregation_id("issuer-before")
+            .await
+            .unwrap(),
+        Some(None),
+        "the registry validation lookup must preserve a legacy NULL on {backend}"
+    );
+    repo.assign_aggregation_id("issuer-before", registry_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.find_stored_aggregation_id("issuer-before")
+            .await
+            .unwrap(),
+        Some(Some(registry_id)),
+        "the accepted registry ID must be adopted on {backend}"
+    );
     let assigned = AggregationId::generate();
     repo.insert(credential("issuer-current"), assigned)
         .await
@@ -130,8 +240,11 @@ async fn assert_migration_and_backfill(
         .find_aggregation_id("issuer-via-old-pod")
         .await
         .unwrap();
-    assert!(before.is_some() && via_old_pod.is_some(), "on {backend}");
-    assert_ne!(before, via_old_pod, "on {backend}");
+    assert!(before.is_some(), "on {backend}");
+    assert_eq!(
+        via_old_pod, None,
+        "old-pod registration must not persist on {backend}"
+    );
     assert_eq!(
         repo.find_aggregation_id("issuer-before").await.unwrap(),
         before,
@@ -170,11 +283,12 @@ async fn assert_rollback_keeps_aggregation_ids(db: Arc<DatabaseConnection>, back
     repo.insert(credential("issuer-registered"), registered)
         .await
         .unwrap();
-    db.execute_unprepared(
-        "INSERT INTO credentials (issuer, public_key) VALUES ('issuer-looked-up', '{}')",
-    )
-    .await
-    .unwrap();
+    let mut legacy_key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
+    legacy_key.common.key_id = Some("looked-up-key".into());
+    SeaOrmStore::<Credentials>::new(db.clone())
+        .insert_one(Credentials::new("issuer-looked-up".into(), legacy_key))
+        .await
+        .unwrap();
     let looked_up = repo
         .find_aggregation_id("issuer-looked-up")
         .await

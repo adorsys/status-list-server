@@ -206,12 +206,9 @@ mod database_implementation {
             a_releasing_lock
         );
 
-        // The CRITICAL assertion: B should NOT have won
-        // B's guard was base_timestamp, but A changed updated_at to base_timestamp + 1
-        // So B's WHERE updated_at = base_timestamp should affect 0 rows
         assert!(
             !b_won,
-            "B should lose (0 rows affected) because A already advanced updated_at. \
+            "B should lose (0 rows affected) because A already advanced the version. \
          B blocked, then got a stale guard"
         );
 
@@ -277,7 +274,7 @@ mod database_implementation {
         let store_b = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_b));
         let store_verify = SeaOrmStore::<StatusListRecord>::new(Arc::new(pool_verify));
 
-        // status_lists.issuer is a foreign key onto credentials.issuer, so the
+        // status_lists.issuer is a foreign key onto issuers.issuer, so the
         // credential has to be committed before either writer starts.
         SeaOrmStore::<Credentials>::from_handle(store_verify.db.clone())
             .insert_one(Credentials::new(
@@ -890,8 +887,20 @@ mod database_implementation {
         let issuer = "issuer-contention-credential";
         let key: Jwk = serde_json::from_str(fixtures::TEST_EC_JWK).unwrap();
 
+        // The ownership row must exist before testing a credential write, since
+        // registration creates it before inserting the credential.
+        conn_a
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::MySql,
+                "INSERT INTO issuers (issuer, list_count) VALUES (?, 0)",
+                vec![Value::from(issuer)],
+            ))
+            .await
+            .expect("failed to seed the issuer owner");
+
         // A holds the primary-key entry uncommitted, so B's insert of the same
-        // issuer blocks on it rather than failing fast as a duplicate.
+        // issuer blocks on it rather than failing fast as a duplicate. B's
+        // ownership upsert succeeds against the already committed owner row.
         let txn_a = conn_a.begin().await.expect("failed to begin A");
         txn_a
             .execute_raw(Statement::from_sql_and_values(

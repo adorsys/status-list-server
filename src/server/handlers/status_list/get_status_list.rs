@@ -223,11 +223,7 @@ async fn get_status_list_at(
             (cached.bytes.clone(), None, cached.identity_etag.clone())
         };
 
-    // Recheck the clock after async work. If the request crossed the token's
-    // expiry boundary, we must recompute the window and validator for the
-    // current window to avoid certifying a 304 for an expired token. The
-    // request-time `now` is used so tests can advance the clock deterministically
-    // (see `get_status_list`); in production it is the request's entry time.
+    // Never certify a 304 for a token that has already expired.
     let now_after = now;
     let exp_after = if now_after >= exp {
         let window_start_after = token_window(now_after, validity).0;
@@ -1191,6 +1187,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_token_preserves_the_existing_aggregation_id_in_the_registry() {
+        let mut app_state = test_app_state(None).await;
+        app_state.aggregation_uri = Some(AGGREGATION_BASE.parse().unwrap());
+        let aggregation_id = register_issuer(&app_state.service, "issuer1").await.0;
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [{
+                "id": "issuer1",
+                "aggregation_id": aggregation_id,
+                "keys": [{
+                    "kid": "static-key",
+                    "alg": "ES256",
+                    "jwk": {
+                        "kty": "EC", "crv": "P-256",
+                        "x": "chypcSL_5pNDkx4dzv1dppYLpI_bYISWR_aw4JARneY",
+                        "y": "YwrO4sum6xF2PMUqSshAKVzLPJ-Ul87HgD7NGTo-oMA"
+                    }
+                }]
+            }],
+            "admins": []
+        }))
+        .unwrap();
+        app_state.set_issuer_registry(Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
+
+        assert_eq!(
+            served_aggregation_uri(app_state, ACCEPT_STATUS_LISTS_HEADER_JWT).await,
+            Some(format!("{AGGREGATION_BASE}/{aggregation_id}"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_token_omits_aggregation_uri_when_not_configured() {
         let app_state = test_app_state(None).await;
         register_issuer(&app_state.service, "issuer1").await;
@@ -1276,7 +1305,11 @@ mod tests {
             ))
         }
 
-        async fn insert(&self, _: Credential, _: AggregationId) -> Result<(), CredentialError> {
+        async fn insert(
+            &self,
+            _: Credential,
+            _: AggregationId,
+        ) -> Result<AggregationId, CredentialError> {
             Err(CredentialError::Backend(
                 "credential store unavailable".into(),
             ))
@@ -1291,10 +1324,38 @@ mod tests {
             ))
         }
 
+        async fn find_stored_aggregation_id(
+            &self,
+            _: &str,
+        ) -> Result<Option<Option<AggregationId>>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn assign_aggregation_id(
+            &self,
+            _: &str,
+            _: AggregationId,
+        ) -> Result<(), CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
         async fn find_issuer_by_aggregation_id(
             &self,
             _: AggregationId,
         ) -> Result<Option<Issuer>, CredentialError> {
+            Err(CredentialError::Backend(
+                "credential store unavailable".into(),
+            ))
+        }
+
+        async fn record_registry_aggregation_ids(
+            &self,
+            _: &[(String, AggregationId)],
+        ) -> Result<(), CredentialError> {
             Err(CredentialError::Backend(
                 "credential store unavailable".into(),
             ))

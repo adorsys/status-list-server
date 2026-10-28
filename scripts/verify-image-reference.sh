@@ -1,27 +1,14 @@
 #!/usr/bin/env bash
-# Verify that the chart resolves image references the way the deploy path depends on.
-#
-# The `image` / `imagePullPolicy` conditionals in `deploy/helm/chart/templates/deployment.yaml`
-# are what make "production runs the artifact CI scanned" true: `deploy.yml` passes the
-# scanned digest as `statuslist.image.digest`, and the chart must prefer it over any tag.
-# Every other Helm render in CI uses default values, so without this only the tag branch
-# would ever be exercised -- the digest branch would ship untested.
-#
-# This is a script rather than an inline workflow step so it can be run locally against a
-# working tree before pushing, and so the workflow reads as one named check rather than
-# seventy lines of shell. Same reasoning as scripts/vuln-gate.sh.
-#
-# Requires `helm` and Python 3 with PyYAML. Run from the repository root; takes no arguments.
-# Exit status is 0 when every expectation holds, 1 when any does not.
+# Check the chart prefers the scanned digest over any tag, which deploy.yml relies on.
+# Needs helm and Python 3 with PyYAML. Run from the repo root.
 set -euo pipefail
 
-# These checks render production profiles with an explicit test-only audience.
-# Keep the actual chart default unset so deployments must choose their own.
+# Adds test-only audience and issuer-registry values: the chart has no defaults, so deployments must choose their own.
 helm() {
   local action="$1"
   shift
   if [[ "$action" == template || "$action" == lint ]]; then
-    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 "$@"
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers "$@"
   else
     command helm "$action" "$@"
   fi
@@ -44,8 +31,7 @@ digest="sha256:$(printf 'a%.0s' $(seq 1 64))"
 app_version=$(helm show chart deploy/helm/chart | sed -nE 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/p')
 echo "chart appVersion: ${app_version}"
 
-# Selected by container name rather than by whether the image happens to be
-# quoted, so adding or quoting an initContainer cannot silently retarget it.
+# Pick the container by name so an initContainer can't be matched instead.
 render() {
     helm template status-list-server deploy/helm/chart -s templates/deployment.yaml "$@" \
         | python3 -c '
@@ -90,11 +76,7 @@ expect_failure() {
     echo "ok: rejected $* -> ${want}"
 }
 
-# appVersion is the provider-neutral default image tag basis. Release tags are
-# variant-suffixed, so the base chart must resolve to the filesystem-certificate
-# variant while AWS overlays derive the matching AWS tag without hardcoding the
-# release version.
-# First `version = ` line is [package]; later ones are deps.
+# The first version line in Cargo.toml is the package's; later ones are deps.
 crate_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
 default_tag="${crate_version}-fscert"
 if [ "${app_version}" != "${default_tag}" ]; then
@@ -108,26 +90,20 @@ expect "${repo}@${digest}|IfNotPresent|" \
     --set-string statuslist.image.digest="${digest}"
 expect "${repo}:test-tag|Always|" \
     --set-string statuslist.image.tag=test-tag
-# Digest wins over a tag supplied alongside it, which is what deploy.yml does.
 expect "${repo}@${digest}|IfNotPresent|" \
     --set-string statuslist.image.tag=test-tag \
     --set-string statuslist.image.digest="${digest}"
-# No tag and no digest falls back to the published appVersion, never to "latest".
 expect "${repo}:${app_version}|Always|"
-# Variant derives a suffixed tag from the chart appVersion without duplicating the release version.
 expect "${repo}:${crate_version}-aws|Always|" \
     --set-string statuslist.image.variant=aws
-# An explicit pullPolicy still overrides the derived one.
 expect "${repo}@${digest}|Always|" \
     --set-string statuslist.image.digest="${digest}" \
     --set-string statuslist.image.pullPolicy=Always
-# `--set x=null` is the documented way to clear a value; it must fall back to the tag,
-# not render `repo@<nil>`.
+# --set x=null must clear the digest, not render repo@<nil>.
 expect "${repo}:test-tag|Always|" \
     --set-string statuslist.image.tag=test-tag \
     --set statuslist.image.digest=null
 
-# A malformed digest must fail at template time with the digest validation error.
 expect_failure "sha256:\\[a-f0-9\\]{64}" \
     --set-string statuslist.image.digest=not-a-digest
 

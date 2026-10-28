@@ -1,20 +1,7 @@
 name: "Helm Checks"
 
-# Helm chart rendering, linting and Kubernetes templating validation. Extracted
-# from CI.yml so that pure Rust changes do not pay for Helm/observability
-# feedback, and so Helm failures surface on the PRs that touch the chart.
-#
-# The workflow runs on *every* pull request -- not path-gated -- so that the
-# `helm-success` aggregate always reports and can be a required branch-protection
-# check. A path-filtered trigger would leave a pure-Rust PR with `helm-success`
-# stuck in "Expected -- Waiting for status to be reported", blocking the merge.
-# The expensive jobs are gated on the `changes` job instead, so a PR that touches
-# none of the inputs they consume skips them (GitHub treats skipped jobs as
-# non-blocking) while `helm-success` still reports a green aggregate. Pushes stay
-# path-gated: they are not a required check, and a push that touches none of these
-# inputs has no Helm/observability feedback to give. `workflow_call` (from
-# deploy.yml) must always run Helm checks, which is why the job gates are
-# `helm changed OR event is not pull_request`.
+# Runs on every PR so helm-success can be a required check; the heavy jobs skip
+# when the changes job finds no Helm or observability edits. workflow_call always runs them.
 on:
   workflow_dispatch:
   workflow_call:
@@ -47,12 +34,6 @@ env:
   CHART_DIR: deploy/helm/chart
 
 jobs:
-  # Lightweight gate that decides whether the expensive Helm jobs below run. It
-  # always executes and always reports, so the `helm-success` aggregate can depend
-  # on it and be a required check without a path-filtered trigger withholding it.
-  # On a pull_request it detects changes against the PR base; on push, workflow_call
-  # and workflow_dispatch it runs too, but its output only gates the PR case (the
-  # jobs below force-run whenever the event is not a pull_request).
   changes:
     name: Detect Helm Changes
     runs-on: ubuntu-latest
@@ -71,12 +52,7 @@ jobs:
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          # Every input consumed by the validation jobs below. A change to the
-          # chart, the observability configs (otel-collector, prometheus rules,
-          # alertmanager, dashboards, slo), the render action, or the helper
-          # scripts must run the jobs that validate that config -- otherwise a
-          # broken config or a broken validator could merge while `helm-success`
-          # reports green. Keep this in sync with the `push.paths` trigger above.
+          # Every input the jobs below read; keep in sync with push.paths above.
           filters: |
             helm:
               - 'deploy/helm/**'
@@ -110,8 +86,6 @@ jobs:
 
       - name: Build Helm dependencies
         run: |
-          # Upstream chart default values:
-          # https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build "$CHART_DIR"
 
@@ -121,8 +95,6 @@ jobs:
         uses: ./.github/workflows/render-helm-templates
 
       - name: Verify image reference resolution
-        # Runs here rather than in its own workflow because it asserts against the
-        # rendered chart this job already built.
         run: bash scripts/verify-image-reference.sh
 
       - name: Run Trivy config scan
@@ -164,14 +136,12 @@ jobs:
           output_file="/tmp/statuslist-local-rendered.yaml"
           helm template statuslist-local "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --namespace local > "$output_file"
 
-          # Verify APP_ENV is set to "development" as expected for local values
-          # The pattern matches the multi-line YAML structure: - name: APP_ENV followed by value: "development"
+          # APP_ENV's value is on the line after its name.
           if ! grep -A1 'name: APP_ENV' "$output_file" | grep -q 'value: "development"'; then
             echo "ERROR: APP_ENV=development not found in rendered template"
             exit 1
           fi
 
-          # Verify init container uses pinned busybox tag
           if ! grep -q 'image: busybox:1.38' "$output_file"; then
             echo "ERROR: init container image 'busybox:1.38' not found in rendered template"
             exit 1
@@ -186,8 +156,7 @@ jobs:
     if: ${{ needs.changes.outputs.helm == 'true' || github.event_name != 'pull_request' }}
     permissions:
       contents: read
-      # For the SARIF upload below. deploy.yml's `ci` job must grant this too -- a
-      # called workflow can only narrow the caller's token.
+      # For the SARIF upload; deploy.yml must grant it too.
       security-events: write
 
     steps:
@@ -212,12 +181,7 @@ jobs:
         uses: ./.github/workflows/render-helm-templates
 
       - name: Install KubeLinter
-        # Fetched directly rather than through stackrox/kube-linter-action, which
-        # makes an unretried api.github.com release lookup plus an unretried
-        # download, so a single 504 from either failed CI. The release URL needs no
-        # API call, `--retry` covers transient 5xx responses, and the checksum pins
-        # the exact binary (the asset digest GitHub publishes for v0.8.3), which a
-        # mutable release asset would not.
+        # Fetched directly: the stackrox action's unretried API calls failed CI on a single 504.
         env:
           KUBE_LINTER_VERSION: v0.8.3
           KUBE_LINTER_SHA256: 1a6d8419b11971372971fdbc22682b684ebfb7cf1c39591662d1b6ca736c41df
@@ -240,18 +204,16 @@ jobs:
           kube-linter --config .kube-linter.yaml lint /tmp/rendered --format sarif | tee kube-linter-results.sarif
 
       - name: Upload KubeLinter SARIF to code scanning
-        # `always()` so the SARIF survives the failing run it matters for.
-        # `continue-on-error` because fork PRs withhold write scopes.
+        # continue-on-error: fork PRs don't get write scopes.
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: kube-linter-results.sarif
           category: kube-linter
 
       - name: Upload KubeLinter SARIF artifact
-        # Kept alongside the code-scanning upload rather than instead of it: alerts on
-        # a fork pull request go nowhere, and this is the only copy that run keeps.
+        # The only copy a fork PR keeps.
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -305,6 +267,7 @@ jobs:
         run: |
           helm template statuslist "$CHART_DIR" \
             --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 \
+            --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml
@@ -377,12 +340,7 @@ jobs:
             prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 check rules /etc/prometheus/rules/alerting.rules.yml
 
       - name: Validate rendered Helm PrometheusRule (no drift / no template errors)
-        # The Helm chart ships the DEPLOYED copy of the recording+alerting rule set
-        # as a PrometheusRule CRD. Assert (a) it renders to rule-valid PromQL, (b) it
-        # is unit-tested with promtool `test rules` -- mirroring the standalone
-        # suite -- so the artifact that actually reaches production is behaviorally
-        # verified, not just syntactically checked, and (c) it defines exactly the
-        # same rule names as the standalone tested rules so neither copy can drift.
+        # The chart's rule copy is what ships, so test it too and match its rule names to the standalone set.
         run: bash scripts/check-helm-prometheus.sh
 
       - name: Validate Prometheus config (dev and production)
@@ -411,10 +369,6 @@ jobs:
             prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 test rules /etc/prometheus/tests/alerting.test.yml
 
       - name: Validate Alertmanager config generation + webhook delivery
-        # Proves (a) generate-alertmanager-config.sh emits an amtool-valid config
-        # for every supported platform and (b) a real Alertmanager delivers both
-        # firing and resolved notifications to a (mock) webhook endpoint — the
-        # webhook notification mechanism (ticket #446).
         run: |
           bash deploy/observability/alertmanager/tests/test-alertmanager-config.sh
 
@@ -424,26 +378,12 @@ jobs:
           python3 -c "import json; json.load(open('deploy/observability/dashboards/generated/status-list-slo.json'))"
 
       - name: Verify dashboard matches generator (no drift)
-        # Regenerates both committed artifacts and fails if either differs from
-        # what the generator produces, so a panel-intent change without a
-        # regenerated artifact cannot land silently. The generator writes the
-        # canonical JSON AND the chart-local copy the Helm ConfigMap embeds; a
-        # byte-for-byte comparison of both guards against a deployed dashboard
-        # that drifts from the reviewed source.
+        # Both the canonical JSON and the chart's embedded copy must match the generator.
         run: bash scripts/check-dashboard-drift.sh
         env:
-          # The generator has no side effects beyond writing this directory.
           NODE_ENV: production
 
-  # The single required status check for this workflow, mirroring CI.yml's
-  # ci-success so branch protection keeps a one-check-per-workflow model.
-  #
-  # `if: always()` plus `if: ${{ contains(...) }}` below keeps this reporting on
-  # every PR, including a pure-Rust one: the five Helm jobs are gated on the
-  # `changes` job, so on a PR that touches no Helm file they are skipped, and
-  # `contains(needs.*.result, ...)` treats a `skipped` job as neither a failure
-  # nor a cancellation. That is what lets `Helm Checks Success` be a required
-  # check without a path-filtered trigger leaving it in "Expected -- Waiting".
+  # The required check: with if: always(), skipped Helm jobs count as passing.
   helm-success:
     name: Helm Checks Success
     if: always()

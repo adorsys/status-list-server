@@ -1,19 +1,17 @@
 [advisories]
 ignore = [
-  # rkyv 0.7.46 (via rust_decimal) has no patched 0.7.x release and is not
-  # activated in the build. We temporarily ignore it until upstream bumps rkyv.
+  # rkyv 0.7.46 via rust_decimal: no patched 0.7.x and not built; drop once upstream bumps it.
   "RUSTSEC-2026-0235",
-]  # advisory IDs to ignore
+]
 
 informational_warnings = ["unmaintained"]
 severity_threshold = "low"
 
-# Output Configuration
 [output]
-deny = ["unmaintained"]  # exit on error if unmaintained dependencies are found
-format = "terminal"  # "terminal" (human readable report) or "json"
-quiet = false  # Only print information on error
+deny = ["unmaintained"]
+format = "terminal"
+quiet = false
 
 [yanked]
-enabled = true  # Warn for yanked crates in Cargo.lock
-update_index = true  # Auto-update the crates.io index
+enabled = true
+update_index = true

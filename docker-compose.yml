@@ -132,6 +132,9 @@ services:
         required: false
     environment:
       APP_ENV: ${APP_ENV:-development}
+      # Override the .env value for local Compose: environment wins over
+      # env_file, and an empty path means "no issuer registry" at startup.
+      APP_MANAGEMENT_AUTH__ISSUERS_FILE: ""
       APP_SERVER__HOST: "0.0.0.0"
       APP_SERVER__ENABLE_METRICS: ${APP_SERVER__ENABLE_METRICS:-true}
       APP_SERVER__MANAGEMENT__HOST: ${APP_SERVER__MANAGEMENT__HOST:-0.0.0.0}
@@ -226,7 +229,6 @@ services:
         condition: service_started
     networks:
       - status-list-network
-    # Only scrape metrics if endpoint is exposed
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -243,16 +245,7 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:9093:9093"
     environment:
-      # Webhook-based alert notifications (ticket #446). Select the target
-      # channel with ALERTMANAGER_PLATFORM (webhook|discord|slack|teams|
-      # mattermost|email) and supply that platform's credential below. The
-      # entrypoint renders deploy/observability/prometheus/generate-alertmanager-config.sh,
-      # which emits the native receiver config, so no repo code is platform
-      # specific and no webhook URL is committed. We recommend the generic
-      # `webhook` platform for a Discord/Slack-compatible endpoint.
-      # ALERTMANAGER_DMS_WEBHOOK_URL is optional: when set, the always-firing
-      # Watchdog (severity=none) pings a dead-man's-switch instead of a human
-      # channel; when unset it is absorbed silently (never spams a human channel).
+      # generate-alertmanager-config.sh builds the receivers from these; the DMS URL is optional.
       ALERTMANAGER_PLATFORM: ${ALERTMANAGER_PLATFORM:-webhook}
       ALERTMANAGER_WEBHOOK_URL: ${ALERTMANAGER_WEBHOOK_URL:-}
       ALERTMANAGER_DMS_WEBHOOK_URL: ${ALERTMANAGER_DMS_WEBHOOK_URL:-}

@@ -27,14 +27,11 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # The issuer is registered once before the run by scripts/setup.js (invoked by
-  # `npm run test:auth*`). Registration used to run as a low-weight scenario
-  # alongside the authenticated flows; until it landed, every authenticated
-  # request returned 401.
+  # scripts/setup.js registers the issuer before the run (npm run test:auth*).
 
   ensure:
-    maxErrorRate: 5 # Max 5% error rate (excluding expected 401s)
-    p95: 2000 # 95th percentile < 2s
+    maxErrorRate: 5
+    p95: 2000
 
 scenarios:
   - name: "Authenticated Publish Flow"
@@ -66,7 +63,6 @@ scenarios:
       - function: "loadTestData"
       - function: "selectRandomToken"
       - function: "generateUUID"
-      # First publish
       - put:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
           headers:
@@ -78,7 +74,6 @@ scenarios:
           expect:
             - statusCode: 201
           afterResponse: "handlePublishResponse"
-      # Then update
       - think: 0.5
       - patch:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
@@ -101,12 +96,11 @@ scenarios:
       - function: "generateUUID"
       - put:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/status-lists/{{ listId }}/statuses"
-          # NO Authorization header
           json:
             statuses:
               - index: 0
                 status: 0
           expect:
-            - statusCode: 401 # Expected!
+            - statusCode: 401
           afterResponse: "handleUnauthorizedResponse"
       - think: 1

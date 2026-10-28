@@ -1,7 +1,5 @@
 name: Release-plz
 
-# Set the permissions of the github token to the minimum and only enable what is needed
-# See https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions
 permissions: {}
 
 on:
@@ -11,8 +9,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Release unpublished packages: creates git tags and GitHub Releases
-  # when a release PR is merged.
   release-plz-release:
     name: Release-plz release
     environment: release
@@ -21,8 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.repository == 'adorsys/status-list-server' }}
     steps:
-      # Without a `permission-*` input the token silently inherits every scope the App
-      # installation holds.
+      # Without permission-* inputs the token gets every scope the App has.
       - name: Generate GitHub App Token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
@@ -43,15 +38,13 @@ jobs:
           toolchain: stable
           rustflags: ''
       - name: Run release-plz
-        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
         with:
           command: release
         env:
-          # Must be an App token: tags created by GITHUB_TOKEN do not trigger other
-          # workflows, so deploy.yml would never run. https://release-plz.dev/docs/github/output#workflow-not-triggered
+          # App token: tags pushed with GITHUB_TOKEN don't trigger deploy.yml.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-  # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:
     name: Release-plz PR
     permissions:
@@ -63,14 +56,12 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      # Scoped as above; `release-pr` pushes the release branch and opens the PR.
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          # As above; `release-pr` also opens the PR, hence pull-requests.
           permission-contents: write
           permission-pull-requests: write
       - name: Checkout repository
@@ -85,7 +76,7 @@ jobs:
           toolchain: stable
           rustflags: ''
       - name: Run release-plz
-        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
         with:
           command: release-pr
         env:
