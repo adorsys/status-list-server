@@ -70,16 +70,17 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
     async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         match self.static_registry.resolve_with_reason(kid) {
             Ok(resolved) => Ok(resolved),
-            Err(KeyResolveError::UnknownKid) => match &self.dynamic {
-                None => Err(KeyResolveError::UnknownKid),
-                Some(store) => match store.find_key_by_kid(kid).await {
-                    Ok(Some(entry)) => {
-                        // Reject a reserved key first: the kid is known but
-                        // never authenticates, and checking before
-                        // static_conflict avoids a spurious error-level
-                        // collision log for adopted legacy issuers whose old
-                        // reserved row is still present.
-                        if entry.key.state == crate::domain::models::hosted_issuer::HostedIssuerKeyState::Reserved {
+            Err(KeyResolveError::UnknownKid) => {
+                match &self.dynamic {
+                    None => Err(KeyResolveError::UnknownKid),
+                    Some(store) => match store.find_key_by_kid(kid).await {
+                        Ok(Some(entry)) => {
+                            // Reject a reserved key first: the kid is known but
+                            // never authenticates, and checking before
+                            // static_conflict avoids a spurious error-level
+                            // collision log for adopted legacy issuers whose old
+                            // reserved row is still present.
+                            if entry.key.state == crate::domain::models::hosted_issuer::HostedIssuerKeyState::Reserved {
                             tracing::debug!(
                                 kid = %entry.key.kid,
                                 issuer = %entry.issuer.id,
@@ -88,34 +89,35 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                             );
                             return Err(KeyResolveError::Reserved);
                         }
-                        if let Some(reason) = self.static_conflict(&entry) {
+                            if let Some(reason) = self.static_conflict(&entry) {
+                                tracing::error!(
+                                    kid = %kid,
+                                    issuer = %entry.issuer.id,
+                                    reason,
+                                    "hosted key collides with the static registry; failing closed"
+                                );
+                                return Err(KeyResolveError::SourceConflict);
+                            }
+                            entry.resolved_key(time::OffsetDateTime::now_utc())
+                        }
+                        Ok(None) => Err(KeyResolveError::UnknownKid),
+                        Err(error) => {
+                            if matches!(error, HostedIssuerError::Corrupt(_)) {
+                                tracing::warn!(
+                                    error = %error,
+                                    "hosted issuer key row is corrupt; failing closed"
+                                );
+                                return Err(KeyResolveError::Corrupt);
+                            }
                             tracing::error!(
-                                kid = %kid,
-                                issuer = %entry.issuer.id,
-                                reason,
-                                "hosted key collides with the static registry; failing closed"
-                            );
-                            return Err(KeyResolveError::SourceConflict);
-                        }
-                        entry.resolved_key(time::OffsetDateTime::now_utc())
-                    }
-                    Ok(None) => Err(KeyResolveError::UnknownKid),
-                    Err(error) => {
-                        if matches!(error, HostedIssuerError::Corrupt(_)) {
-                            tracing::warn!(
                                 error = %error,
-                                "hosted issuer key row is corrupt; failing closed"
+                                "hosted issuer key resolution failed; the trust backend is unavailable"
                             );
-                            return Err(KeyResolveError::Corrupt);
+                            Err(KeyResolveError::BackendUnavailable)
                         }
-                        tracing::error!(
-                            error = %error,
-                            "hosted issuer key resolution failed; the trust backend is unavailable"
-                        );
-                        Err(KeyResolveError::BackendUnavailable)
-                    }
-                },
-            },
+                    },
+                }
+            }
             Err(reason) => Err(reason),
         }
     }
