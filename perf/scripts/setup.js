@@ -1,6 +1,5 @@
-// Runs once before an Artillery test: registers the test issuer and publishes seed lists.
-// Not an Artillery before: hook, which never runs processor function: steps (every request got 401).
-// Idempotent: a 409 for the issuer counts as success.
+// Runs once before Artillery and publishes seed lists for the issuer in the configured registry.
+// Not an Artillery before: hook, which does not run processor function: steps.
 
 const http = require('http');
 const https = require('https');
@@ -60,20 +59,6 @@ function loadTestData() {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function registerIssuer(data) {
-  return request(MANAGEMENT_TARGET, {
-    method: 'POST',
-    path: '/api/v1/credentials',
-    body: { issuer: data.issuerId, public_key: data.publicKeyJwk }
-  }).then(({ statusCode, body }) => {
-    if (statusCode === 202 || statusCode === 409) {
-      console.log(`✓ Issuer registered (${statusCode}): ${data.issuerId}`);
-    } else {
-      throw new Error(`Registration failed (${statusCode}): ${body}`);
-    }
-  });
-}
-
 async function seedStatusLists(data) {
   let token = data.tokens[0];
   const now = Math.floor(Date.now() / 1000);
@@ -103,7 +88,6 @@ async function seedStatusLists(data) {
 
 async function main() {
   const data = loadTestData();
-  await registerIssuer(data);
   await seedStatusLists(data);
 }
 

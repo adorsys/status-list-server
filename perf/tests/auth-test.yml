@@ -27,7 +27,7 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # scripts/setup.js registers the issuer before the run (npm run test:auth*).
+  # scripts/setup.js publishes seed lists for the issuer loaded from the registry.
 
   ensure:
     maxErrorRate: 5

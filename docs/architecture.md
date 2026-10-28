@@ -222,20 +222,20 @@ exclusive lock while it checks, so a publish in flight is either counted by
 the check or refused by the enforced quota. The memory backend enforces the
 quota from startup.
 
-It bounds lists **per issuer**, not in total: while
-Issuer registration is operator-managed; a new trusted issuer must be added to the registry. Lists cannot be deleted through the API, so an issuer at
-its quota stays there until the operator raises it, which is possible only up
-to the aggregation page size (see
+It bounds lists **per issuer**, not in total. Only the operator can add an
+issuer, so the registry bounds the number of issuers. Lists cannot be deleted
+through the API, so an issuer at its quota stays there until the operator
+raises it, which is possible only up to the aggregation page size (see
 [troubleshooting](troubleshooting.md#status-list-quota)).
 
 ### Status list aggregation
 
 `GET /api/v1/aggregation/{aggregation_id}` returns one issuer's status list URIs
-(draft-21 §9). Each issuer gets a random `aggregation_id` at registration,
-returned in the registration response and by the authenticated
-`GET /api/v1/credentials`. An issuer registered before aggregation IDs existed
-gets one the first time it is looked up. Public URIs name the issuer by that ID,
-so tokens never disclose the issuer identifier, which may be an internal tenant
+(draft-21 §9). The operator-managed registry assigns each issuer a random
+`aggregation_id`; the authenticated `GET /api/v1/credentials` returns that ID
+and its URI to the issuer. Legacy issuers without an ID receive the registry's
+ID when migrated or first looked up. Public URIs name the issuer by that ID, so
+tokens never disclose the issuer identifier, which may be an internal tenant
 name. With `server.aggregation_uri` set, each status list token carries its
 issuer's URI, `<aggregation_uri>/<aggregation_id>`.
 

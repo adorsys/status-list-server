@@ -477,8 +477,8 @@ mod tests {
         )
         .await
         .unwrap();
-        // The shared path is owned by authenticated GET; the removed POST has
-        // no handler and must never accept an unauthenticated registration.
+        // No POST handler is registered on this path; it must never accept an
+        // unauthenticated registration.
         assert_eq!(registration.status(), StatusCode::UNAUTHORIZED);
 
         let unauthenticated = send(

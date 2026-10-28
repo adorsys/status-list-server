@@ -65,20 +65,17 @@ scenarios:
             - statusCode: 200
           afterResponse: "handleStatusListResponse"
 
-  - name: "Credential Registration Flow"
+  - name: "Issuer Identity Lookup Flow"
     weight: 20
     flow:
-      - function: "generateIssuerPayload"
-      - post:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - get:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
-          json:
-            issuer: "{{ issuer }}"
-            public_key: "{{ publicKeyJwk }}"
+          headers:
+            Authorization: "Bearer {{ token }}"
           expect:
-            - statusCode:
-                - 202
-                - 409
-          afterResponse: "handleCredentialResponse"
+            - statusCode: 200
 
   - name: "Authenticated Update Flow"
     weight: 40
