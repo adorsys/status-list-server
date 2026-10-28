@@ -69,6 +69,10 @@ Provider-specific setup is described in the [database](docs/database-backends.md
 `release-plz` is the single source of release versions and changelog entries. It
 uses the Conventional Commit history and the configuration in `release-plz.toml`
 and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
+Release-plz uses one release-branch prefix across target branches, so only one
+branch may have an open release-plz PR at a time. The workflow refuses to run
+when another target branch already has one; close that PR before dispatching
+for `develop` or a `hotfix/*` branch. A later dispatch recreates it if needed.
 
 The normal promotion path is:
 

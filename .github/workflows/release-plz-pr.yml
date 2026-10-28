@@ -26,6 +26,16 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+      - name: Refuse while another branch has an open release PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          other=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 \
+            --json number,headRefName,baseRefName \
+            --jq '.[] | select((.headRefName | startswith("release-plz-")) and .baseRefName != env.BRANCH) | "#\(.number) -> \(.baseRefName)"')
+          [ -z "$other" ] \
+            || { echo "::error::Close the open release PR first: $other"; exit 1; }
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
