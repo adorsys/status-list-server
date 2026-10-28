@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests.",
+    "description": "Ready-to-run API workflow for a non-production server configured with postman/test-issuer-registry.yaml. The collection signs a short-lived management JWT automatically for the pre-registered test issuer. Never point this collection's test credentials at production.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,
@@ -21,6 +21,48 @@
     ]
   },
   "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const hasWebCrypto = typeof TextEncoder !== 'undefined' && typeof crypto !== 'undefined' && crypto.subtle;",
+          "if (!hasWebCrypto) {",
+          "  const preparedToken = pm.variables.get('token');",
+          "  if (!preparedToken) throw new Error('This runtime needs a locally prepared token; run the Newman helper or use Postman.');",
+          "  pm.variables.set('token', preparedToken);",
+          "} else {",
+          "const encoder = new TextEncoder();",
+          "const toBase64Url = (bytes) => {",
+          "  let binary = '';",
+          "  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });",
+          "  return btoa(binary).replace(/=/g, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+          "};",
+          "",
+          "await (async () => {",
+          "  const privateJwk = JSON.parse(pm.variables.get('issuer_private_jwk') || '{}');",
+          "  const key = await crypto.subtle.importKey(",
+          "    'jwk', privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']",
+          "  );",
+          "  const now = Math.floor(Date.now() / 1000);",
+          "  const kid = pm.environment.get('issuer_kid') || 'postman-test-key';",
+          "  const header = { alg: 'ES256', typ: 'statuslist-management+jwt', kid };",
+          "  const payload = { iss: pm.environment.get('issuer_id'), iat: now, exp: now + 300 };",
+          "  const audience = pm.environment.get('managementAudience');",
+          "  if (audience) payload.aud = audience;",
+          "  const signingInput = `${toBase64Url(encoder.encode(JSON.stringify(header)))}.${toBase64Url(encoder.encode(JSON.stringify(payload)))}`;",
+          "  const signature = await crypto.subtle.sign(",
+          "    { name: 'ECDSA', hash: 'SHA-256' }, key, encoder.encode(signingInput)",
+          "  );",
+          "  pm.variables.set('token', `${signingInput}.${toBase64Url(new Uint8Array(signature))}`);",
+          "})().catch((error) => {",
+          "  console.error('Could not sign the test management JWT:', error.message);",
+          "  pm.execution.skipRequest();",
+          "});",
+          "}"
+        ]
+      }
+    },
     {
       "listen": "test",
       "script": {
@@ -154,7 +196,7 @@
       "name": "Issuer Management",
       "item": [
         {
-          "name": "Register issuer credentials",
+          "name": "Register test issuer credentials (first run)",
           "request": {
             "auth": {
               "type": "noauth"
@@ -172,7 +214,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\",\n    \"kid\": \"{{issuer_id}}\",\n    \"alg\": \"ES256\"\n  }\n}"
+              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"x\": \"-8LJXSTpywq-Kem2YxSXk-1wLfD_9II909PCunqhcx0\",\n    \"y\": \"8koOpNXRscRbln28eDuDk8z8dbS756ZsndtB4az6O0s\",\n    \"crv\": \"P-256\",\n    \"kid\": \"{{issuer_kid}}\",\n    \"alg\": \"ES256\"\n  }\n}"
             },
             "url": {
               "raw": "{{managementUrl}}/api/v1/credentials",
@@ -193,11 +235,13 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('credentials are accepted', function () { pm.response.to.have.status(202); });",
-                  "pm.test('response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
-                  "pm.test('response body matches expected shape', function () {",
+                  "pm.test('a management JWT was generated', function () { pm.expect(pm.variables.get('token') || '').to.match(/^[^.]+\\.[^.]+\\.[^.]+$/); });",
+                  "pm.test('registration succeeds or the test issuer is already registered', function () { pm.expect([202, 409]).to.include(pm.response.code); });",
+                  "pm.test('registration response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
+                  "pm.test('registration response has the expected body', function () {",
                   "  var body = pm.response.json();",
-                  "  pm.expect(body).to.have.property('status');",
+                  "  if (pm.response.code === 202) pm.expect(body).to.have.property('status');",
+                  "  else pm.expect(body).to.have.property('error');",
                   "});"
                 ]
               }
@@ -243,6 +287,15 @@
           },
           "response": [],
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('list_id', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -788,7 +841,7 @@
     },
     {
       "key": "issuer_id",
-      "value": "my-issuer"
+      "value": "postman-test-issuer"
     },
     {
       "key": "token",
@@ -797,6 +850,19 @@
     {
       "key": "historical_time",
       "value": "1686925000"
+    },
+    {
+      "key": "issuer_kid",
+      "value": "postman-test-key"
+    },
+    {
+      "key": "managementAudience",
+      "value": ""
+    },
+    {
+      "key": "issuer_private_jwk",
+      "value": "{\"kty\":\"EC\",\"x\":\"-8LJXSTpywq-Kem2YxSXk-1wLfD_9II909PCunqhcx0\",\"y\":\"8koOpNXRscRbln28eDuDk8z8dbS756ZsndtB4az6O0s\",\"crv\":\"P-256\",\"d\":\"b01Ymi4u9lb7gARNUwMYXulcdoqnD-ocCU9fwXV03kE\",\"kid\":\"postman-test-key\",\"alg\":\"ES256\"}",
+      "description": "TEST ONLY signing key for the pre-registered test issuer. Never use against production."
     }
   ]
 }

@@ -1,0 +1,16 @@
+# Test-only trust entry for the Postman collection. Never use this key in production.
+version: 1
+issuers:
+  - id: postman-test-issuer
+    aggregation_id: d48f795a-919c-433c-9acf-51ab9167f262
+    display_name: Postman test issuer (non-production)
+    tier: standard
+    keys:
+      - kid: postman-test-key
+        alg: ES256
+        jwk:
+          kty: EC
+          crv: P-256
+          x: -8LJXSTpywq-Kem2YxSXk-1wLfD_9II909PCunqhcx0
+          y: 8koOpNXRscRbln28eDuDk8z8dbS756ZsndtB4az6O0s
+admins: []

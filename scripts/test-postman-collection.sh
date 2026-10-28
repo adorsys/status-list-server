@@ -159,7 +159,7 @@ function visitItems(items, visitor) {
 }
 
 visitItems(collection.item, (item) => {
-  if (item.name === 'Register issuer credentials' && item.request?.body?.raw) {
+  if (item.name === 'Register test issuer credentials (first run)' && item.request?.body?.raw) {
     item.request.body.raw = JSON.stringify({
       issuer: issuerId,
       public_key: publicKeyJwk,
@@ -184,6 +184,12 @@ for (const variable of environment.values || []) {
   if (values.has(variable.key)) {
     variable.value = values.get(variable.key);
     variable.enabled = true;
+  }
+}
+
+for (const key of ['list_id', 'token']) {
+  if (!(environment.values || []).some((variable) => variable.key === key)) {
+    environment.values.push({ key, value: values.get(key), type: 'default', enabled: true });
   }
 }
 
@@ -214,13 +220,17 @@ _sibling_url() {
 }
 if [[ -z "$MANAGEMENT_URL" ]]; then
   RESOLVED_MANAGEMENT_URL="$(_sibling_url "$COLLECTION_ENDPOINT" 8001)"
-else
+elif [[ "$SELECTED_NEWMAN_RUNNER" == "docker" ]]; then
   RESOLVED_MANAGEMENT_URL="$(endpoint_for_container "$MANAGEMENT_URL")"
+else
+  RESOLVED_MANAGEMENT_URL="$MANAGEMENT_URL"
 fi
 if [[ -z "$ADMIN_URL" ]]; then
   RESOLVED_ADMIN_URL="$(_sibling_url "$COLLECTION_ENDPOINT" 8002)"
-else
+elif [[ "$SELECTED_NEWMAN_RUNNER" == "docker" ]]; then
   RESOLVED_ADMIN_URL="$(endpoint_for_container "$ADMIN_URL")"
+else
+  RESOLVED_ADMIN_URL="$ADMIN_URL"
 fi
 
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
