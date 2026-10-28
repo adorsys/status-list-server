@@ -77,8 +77,7 @@ async function register(environment, server, { status, crypto = webcrypto, looku
   };
   // Separate script contexts model Postman's prerequest/response sandbox scopes.
   const globals = { pm, crypto, TextEncoder, Uint8Array, btoa, atob, setTimeout, console };
-  const awaitedPrerequest = scripts.collectionPrerequest.replace('  (async function () {', '  await (async function () {');
-  await vm.runInNewContext(`(async function () { ${awaitedPrerequest} })()`, globals);
+  await vm.runInNewContext(`(async function () { ${scripts.collectionPrerequest} })()`, globals);
   const issuer = environment.get('issuer_id');
   const code = status || (server.has(issuer) ? 409 : 202);
   if (code === 202) server.set(issuer, JSON.parse(environment.get('issuer_public_key')));

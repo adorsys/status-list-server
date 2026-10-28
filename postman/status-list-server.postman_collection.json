@@ -34,7 +34,7 @@
           "if (signWithIssuer) pm.request.headers.remove('X-Postman-Sign-With-Issuer');",
           "const isProtectedWrite = signWithIssuer;",
           "if (isRegistration || isProtectedWrite) {",
-          "  (async function () {",
+          "  await (async function () {",
           "    const issuer = pm.variables.get('issuer_id');",
           "    if (!issuer) throw new Error('Set issuer_id before registering credentials or writing status lists.');",
           "    function decodePayload(token) {",
