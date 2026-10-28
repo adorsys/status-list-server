@@ -51,6 +51,7 @@ jobs:
             docs/openapi.yaml \
             postman \
             scripts/test-postman-collection.sh \
+            scripts/tests/test_postman_registration.cjs \
             scripts/check-api-test-images.sh \
             src/config.rs \
             src/startup.rs \
@@ -89,6 +90,10 @@ jobs:
         if: steps.api-changes.outputs.changed == 'true'
         run: ./scripts/check-api-test-images.sh
 
+      - name: Test Postman registration scripts
+        if: steps.api-changes.outputs.changed == 'true'
+        run: node --test scripts/tests/test_postman_registration.cjs
+
       - name: Start in-memory server and run collection
         if: steps.api-changes.outputs.changed == 'true'
         run: |
@@ -115,7 +120,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          if ! POSTMAN_ISSUER_REGISTRY_FILE="$issuer_registry_file" NEWMAN_RUNNER=docker ./scripts/test-postman-collection.sh; then
+          if ! POSTMAN_ISSUER_REGISTRY_FILE="$issuer_registry_file" NEWMAN_RUNNER=docker NEWMAN_VERIFY_REGISTRATION_MODES=true ./scripts/test-postman-collection.sh; then
             echo "::group::status-list-server logs"
             cat /tmp/status-list-server.log
             echo "::endgroup::"

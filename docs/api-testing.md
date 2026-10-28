@@ -13,13 +13,17 @@ Collection v2.1 exports:
 
 The environment exposes these variables:
 
-| Variable          | Default                                | Purpose                                                               |
-| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
-| `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
-| `issuer_id`       | `my-issuer`                            | Issuer identifier used for credential registration.                   |
-| `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
-| `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
+| Variable              | Default                                | Purpose                                                               |
+| --------------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `baseUrl`             | `http://localhost:8000`                | Public status-list-server endpoint.                                   |
+| `managementUrl`       | `http://localhost:8001`                | Management endpoint for issuer and status-list writes.                |
+| `list_id`             | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
+| `issuer_id`           | `my-issuer`                            | Issuer identifier used for credential registration.                   |
+| `issuer_audience`     | empty                                  | Optional audience claim for deployments that require one.             |
+| `token`               | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
+| `issuer_private_jwks` | empty                                  | Secret key cache indexed by issuer, retained when switching issuers.  |
+| `issuer_public_key`   | empty                                  | Public JWK generated for issuer registration.                         |
+| `historical_time`     | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
 The collection is organized into Health & Metrics, Issuer Management, Status
 Lists, and Aggregation folders. Requests include Postman test scripts that check
@@ -29,6 +33,27 @@ Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK registered through `POST /api/v1/credentials`.
 For fully automated local collection testing, use the Newman script below; it
 generates and registers a temporary issuer for the run.
+
+In Postman, select the included environment, send **Start new test run**, then
+send **Register issuer credentials** before publishing. The first request creates
+a fresh `list_id`; generated private keys are saved per issuer in the environment,
+so switching `issuer_id` back to an earlier issuer reuses its key. Keep the private
+key cache secret when backing up your local environment. Generated JWTs stay in the
+current request scope; the environment `token` value is only used by Newman when
+it supplies a preconfigured token.
+
+A registration conflict (`409`) is accepted only after an authenticated
+`GET {{managementUrl}}/api/v1/credentials` confirms the saved key works for that
+issuer. If it fails, the collection reports a failed test and blocks the workflow.
+Restore the issuer's original private key/environment, or choose a new
+`issuer_id` and register again. Reimporting an empty environment cannot recover
+the private key of an issuer already registered on the server.
+
+Run the registration-script regression checks with:
+
+```bash
+node --test scripts/tests/test_postman_registration.cjs
+```
 
 ## Local Prerequisites
 
@@ -60,10 +85,13 @@ Then run the same collection check used by CI:
 
 The script generates a temporary P-256 issuer key, patches a temporary copy of
 the collection so `POST /api/v1/credentials` registers the matching public JWK,
-and runs Newman with a temporary environment containing `baseUrl`, `list_id`,
-`issuer_id`, `token`, and `historical_time`. No generated collection or
-environment is written into the repository. Set `NEWMAN_RUNNER=docker` to use
-the pinned Newman container instead of a locally installed Newman binary.
+and runs Newman with a temporary environment containing `baseUrl`,
+`managementUrl`, `list_id`, `issuer_id`, `token`, and `historical_time`. The CI
+workflow also reruns registration against the same issuer to cover both `202` and
+`409` responses and checks the JWT readiness assertion in the Newman report. No
+generated collection or environment is written into the repository. Set
+`NEWMAN_RUNNER=docker` to use the pinned Newman container instead of a locally
+installed Newman binary.
 
 Useful environment overrides:
 
