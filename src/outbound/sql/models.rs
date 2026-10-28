@@ -97,6 +97,9 @@ impl From<Credentials> for credentials::ActiveModel {
 }
 
 /// Durable issuer ownership, list quota, and registry aggregation identity.
+/// A hosted issuer is *this* row, keyed in `issuer` by its server-assigned
+/// UUID, with the hosted metadata columns added by the `hosted_issuers`
+/// migration, not a second ownership model.
 pub(crate) mod issuers {
     use super::*;
 
@@ -107,6 +110,54 @@ pub(crate) mod issuers {
         pub issuer: String,
         pub aggregation_id: Option<String>,
         pub list_count: i64,
+        pub display_name: Option<String>,
+        pub source: String,
+        pub tier: String,
+        pub state: String,
+        pub owner: Option<String>,
+        /// Unix seconds of hosted registration; 0 for rows created by
+        /// another trust source.
+        pub created_at: i64,
+        /// Unix seconds; until when the hosted issuer may authenticate.
+        pub expires_at: Option<i64>,
+        /// Optimistic-concurrency version of hosted-profile writes.
+        pub version: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub(crate) enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+// Hosted issuer public signing keys; `kid` is the PK used to resolve JWTs.
+pub(crate) mod hosted_issuer_keys {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "issuer_keys")]
+    pub(crate) struct Model {
+        #[sea_orm(primary_key, column_type = "String(StringLen::N(255))")]
+        pub kid: String,
+        /// The owning `issuers.issuer` (a server-assigned UUID for hosted
+        /// issuers); text to match the unrestricted PK column.
+        #[sea_orm(column_type = "Text")]
+        pub issuer_id: String,
+        /// SHA-256 of the canonical key material (RFC 7638 §7 parameters),
+        /// uniquely indexed so material reuse is a database constraint instead
+        /// of a race-prone application scan.
+        #[sea_orm(column_type = "String(StringLen::N(64))")]
+        pub key_material: String,
+        pub alg: String,
+        #[sea_orm(column_type = "Json")]
+        pub jwk: PublicKey,
+        pub state: String,
+        /// Unix seconds.
+        pub not_before: Option<i64>,
+        /// Unix seconds.
+        pub not_after: Option<i64>,
+        /// Unix seconds.
+        pub created_at: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

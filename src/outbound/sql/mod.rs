@@ -1,6 +1,7 @@
 //! Relational database outbound adapters implementing domain ports via SeaORM.
 
 mod error;
+pub mod hosted;
 pub mod list_quota;
 mod migrations;
 mod models;
@@ -11,6 +12,7 @@ mod store;
 pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
+pub use hosted::SqlHostedIssuerStore;
 pub use migrations::{Migrator, run_migrations};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};

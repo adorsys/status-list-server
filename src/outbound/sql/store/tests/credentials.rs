@@ -48,6 +48,14 @@ async fn test_seaorm_store() {
                 issuer: entity.issuer.clone(),
                 aggregation_id: Some("00000000-0000-4000-8000-000000000001".to_string()),
                 list_count: 0,
+                display_name: None,
+                source: "registry".to_string(),
+                tier: "standard".to_string(),
+                state: "active".to_string(),
+                owner: None,
+                created_at: 0,
+                expires_at: None,
+                version: 0,
             }]])
             .append_query_results::<credentials::Model, Vec<_>, _>(vec![
                 vec![credentials::Model {
