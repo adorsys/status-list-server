@@ -26,21 +26,14 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"
-    # Redis cache backend. Production requires TLS + a password (CacheConfig::validate);
-    # the password comes via secretEnv below. APP_CACHE__HOST is injected by deploy.yml
-    # from the APP_CACHE_HOST var (bare hostname), so keep it empty here to avoid
-    # committing an endpoint and to fail fast when the var is unset.
+    # APP_CACHE__HOST is set by deploy.yml so no endpoint is committed.
     APP_CACHE__BACKEND: "redis"
     APP_CACHE__HOST: ""
     APP_CACHE__PORT: "6379"
     APP_CACHE__TLS: "true"
     APP_CACHE__DATABASE: "0"
     APP_CACHE__KEY_PREFIX: "status-list-server:status-list:"
-    # APP_CACHE__MAX_CAPACITY (inherited from the base values) applies only to the
-    # in-memory backend; Redis uses native key expiration from APP_CACHE__TTL.
-  # Redis password from the ESO-provisioned redis-credentials Secret. The name must
-  # match externalSecret.spec.extraExternalSecrets[].spec.target.name below; a mismatch
-  # only surfaces as CreateContainerConfigError. Read once at pod start.
+  # Must match the ExternalSecret target below.
   secretEnv:
     APP_CACHE__PASSWORD:
       name: redis-credentials
@@ -52,15 +45,6 @@ statuslist:
     limits:
       memory: "1Gi"
       cpu: "1000m"
-
-# NetworkPolicy is OFF by default. If enabled, cacheEgress is required for the Redis
-# backend (the chart hard-fails otherwise); the rule port derives from APP_CACHE__PORT
-# (6379 here). ElastiCache is external, so select its subnets via ipBlock:
-# networkPolicy:
-#   enabled: true
-#   cacheEgress:
-#     - ipBlock:
-#         cidr: 10.0.x.0/24   # one entry per ElastiCache subnet
 
 # Horizontal Pod Autoscaling for production workloads.
 autoscaling:
@@ -113,10 +97,8 @@ grafanaDashboard:
 #   existingSecret: statuslist-alerting-credentials   # pre-existing Secret; chart does not render its own
 #   # dmsWebhookUrl: ""  # set via existingSecret key "dms-webhook-url" instead
 
-# Provision the redis-credentials Secret from the secret manager via ESO. The remote
-# secret must already exist (AWS Secrets Manager key statuslist-redis-password, JSON
-# PASSWORD field) and the ClusterSecretStore role (datev-secret-store) must be able to
-# read it; secretStoreRef is inherited from externalSecret.spec (overridden by deploy.yml).
+# The remote secret must exist before the first deploy; see the runbook. The key name
+# and property are in the YAML below, and the store name is inherited.
 externalSecret:
   spec:
     extraExternalSecrets:

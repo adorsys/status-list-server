@@ -134,72 +134,22 @@ When migrating an issuer with a stored credential, preserve its existing issuer 
 
 ## Redis Status-List Cache
 
-Redis is an optional runtime cache backend. Production uses a **managed cloud Redis**
-service (ElastiCache / Memorystore / Azure Cache for Redis) because it provides TLS,
-authentication, and durability out of the box. The chart does not deploy Redis; you
-provision the managed instance and point the application at it.
+Redis is an optional runtime cache backend; the chart does not deploy it. In
+production use a managed Redis with TLS and a password: set
+`APP_CACHE__BACKEND=redis`, `APP_CACHE__HOST` and `APP_CACHE__TLS=true`, and
+deliver `APP_CACHE__PASSWORD` through `statuslist.secretEnv`. For a private CA,
+mount it with `statuslist.secretMounts` and set `APP_CACHE__CA_FILE`. With
+NetworkPolicy enabled, set `statuslist.networkPolicy.cacheEgress`, or the chart
+refuses to render.
 
-### Provisioning a managed Redis instance
+The password is read at pod start, so a rotation needs a rollout restart. Use
+the service's dual-token rotation, if it has one, to avoid auth errors in
+between. Readiness doesn't depend on Redis and the server keeps serving
+without it, so watch the `RedisCacheErrors` alert.
 
-1. Create a managed Redis instance (e.g. ElastiCache for Redis on the production AWS
-   account) with TLS enabled and an authentication token. Note its endpoint host, port,
-   and whether the TLS certificate is a private CA (ElastiCache serves a public CA on
-   port 6379 by default).
-2. Store the Redis password in the secret manager so External Secrets Operator (ESO) can
-   sync it (see the production `externalSecret.spec.extraExternalSecrets` entry, which
-   provisions a `redis-credentials` Secret). The application reads it via
-   `statuslist.secretEnv` -> `APP_CACHE__PASSWORD`, never as a plain env value.
-
-   **Prerequisite before the first deploy:** the remote secret must already exist in the
-   secret manager - for AWS, a Secrets Manager entry named `statuslist-redis-password`
-   with a JSON `PASSWORD` field - and the ClusterSecretStore role (`datev-secret-store`)
-   must be allowed to read it. If it is missing, the `redis-credentials` ExternalSecret
-   never becomes Ready, the pod cannot start (`CreateContainerConfigError`), and
-   `helm upgrade --install --rollback-on-failure` rolls back the **entire** release,
-   including the database and primary-secret changes.
-3. Point the app at the instance: set `APP_CACHE__BACKEND=redis`, `APP_CACHE__HOST` (the
-   managed endpoint), `APP_CACHE__TLS=true`, and a password (via `secretEnv`). The
-   production overlay `deploy/helm/chart/values-production.yaml` already wires these;
-   override `APP_CACHE__HOST` per environment. Set `APP_CACHE__CA_FILE` (mounted via
-   `statuslist.secretMounts`) only if the managed service uses a private CA.
-4. When `statuslist.networkPolicy.enabled=true`, set
-   `statuslist.networkPolicy.cacheEgress` to allow egress to the managed Redis, otherwise
-   the chart fails to render (see `deploy/helm/chart/values-production.yaml`). The rule
-   port is derived from `APP_CACHE__PORT`, or 6379/6380 from `APP_CACHE__TLS`.
-
-### Rotating the Redis password
-
-`APP_CACHE__PASSWORD` is delivered as a `secretKeyRef` env var, so it is read **once at
-pod start**. Rotating the Redis password therefore requires a rollout restart:
-
-1. Update the password in the secret manager (e.g. the `PASSWORD` field of the
-   `statuslist-redis-password` Secrets Manager entry), then update the Redis instance's
-   auth token to match.
-2. Force ESO to re-sync the `redis-credentials` ExternalSecret, or wait for its
-   `refreshInterval` (30m).
-3. Trigger a rollout restart (`kubectl rollout restart
-   deployment/statuslist-status-list-server-deployment -n <namespace>`) so pods pick up
-   the new password. Until all pods restart, a mix of old/new credentials is expected and
-   may briefly log Redis auth errors.
-
-The application requires `APP_CACHE__TLS=true` and a password whenever `APP_ENV=production`
-(validated in `src/config.rs` `CacheConfig::validate`), so a plaintext unauthenticated
-Redis is never accepted in production.
-
-### Verifying the cache at deploy time
-
-The production deploy (`.github/workflows/deploy.yml`, "Verify the Redis cache connected
-at startup") inspects **every** app pod's startup log and fails if any pod logged the
-"Redis status-list cache unavailable at startup" warning. Because Redis is not part of the
-readiness probe and `warm_up()` failure is non-fatal, this is the only automated gate that
-a misconfigured Redis would otherwise slip past.
-
-That gate proves the cache **connected at startup only**; it does not cover runtime
-health. If Redis becomes unreachable after startup (egress/security-group drift, an AZ or
-instance failure), the app degrades gracefully and fires the `RedisCacheErrors` alert
-(`status_list_cache_errors_total`, shipped in the chart's PrometheusRule). Monitor that
-alert and the `/metrics` cache-hit ratio (`status_list_cache_hits_total` /
-`status_list_cache_misses_total`) as the ongoing health signal.
+Our EKS pipeline needs the `APP_CACHE_HOST` environment variable and a
+`statuslist-redis-password` Secrets Manager entry with a `PASSWORD` field
+before the first deploy.
 
 Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
 write-capable Redis user with other applications. For the default prefix, create one with:

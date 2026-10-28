@@ -114,10 +114,8 @@ FEATURES=mysql docker compose --profile mysql up --build
 ```
 
 The `redis` profile adds Redis. Set `FEATURES=redis` and
-`APP_CACHE__BACKEND=redis` when the server should use that cache. For production, use a
-managed cloud Redis service (ElastiCache / Memorystore / Azure Cache for Redis) with TLS
-and a password, and point the app at it via `APP_CACHE__HOST`/`APP_CACHE__TLS`; see
-[`deployment-runbook.md`](deployment-runbook.md#redis-status-list-cache).
+`APP_CACHE__BACKEND=redis` when the server should use that cache. For production,
+see [Redis status-list cache](deployment-runbook.md#redis-status-list-cache).
 
 There is no separate MariaDB service because MariaDB uses the same MySQL-driver path. Connect to a MariaDB host by setting `APP_DATABASE__BACKEND=mysql`, `APP_DATABASE__HOST`, `APP_DATABASE__PORT`, `APP_DATABASE__USERNAME`, `APP_DATABASE__PASSWORD`, and `APP_DATABASE__NAME`. For local/custom deployments, a `mysql://` `APP_DATABASE__URL` is still supported when no split database fields are set.
 

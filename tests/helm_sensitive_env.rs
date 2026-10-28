@@ -352,10 +352,15 @@ fn release_production_overlays_supply_the_management_audience() {
             .any(|(name, value)| name == "APP_MANAGEMENT_AUTH__AUDIENCES"
                 && value == "https://statuslist.eudi-adorsys.com/api/v1")
     );
-    let overrides = env
+    // APP_CACHE__HOST comes from the deploy.yml job env (--set-string); APP_CACHE__PASSWORD
+    // comes from secretEnv (secretKeyRef) -- neither appears in the plain rendered env block.
+    // Supply a placeholder matching what the pipeline injects so CacheConfig::validate passes.
+    let mut overrides: Vec<(&str, &str)> = env
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+        .collect();
+    overrides.push(("APP_CACHE__HOST", "cache.example.internal"));
+    overrides.push(("APP_CACHE__PASSWORD", "placeholder"));
     let config =
         Config::load_from_overrides(&overrides).expect("production release config must load");
     assert_eq!(

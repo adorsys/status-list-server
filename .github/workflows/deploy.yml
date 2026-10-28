@@ -695,10 +695,7 @@ jobs:
     env:
       # Pushed-ref values go through env, never ${{ }} in run:, since the pusher controls them.
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
-      # ElastiCache primary endpoint (hostname only, no scheme or port). Declared at job
-      # level, not workflow level, so a value scoped to the `production` environment
-      # resolves here. Required: production runs the Redis cache backend and the
-      # application rejects an empty host at startup.
+      # Job-level so the production environment's value resolves.
       APP_CACHE_HOST: ${{ vars.APP_CACHE_HOST }}
     steps:
       - name: Checkout source code
@@ -741,8 +738,7 @@ jobs:
             echo "APP_CACHE_HOST repository/environment variable is required" >&2
             exit 1
           fi
-          # Bare hostname only; the app assembles rediss:// itself. Not echoed verbatim in
-          # case a misconfigured value embeds credentials.
+          # Never echo the value; a misconfigured one may embed credentials.
           if [[ ! "${APP_CACHE_HOST}" =~ ^[A-Za-z0-9.-]+$ ]]; then
             echo "APP_CACHE_HOST must be a bare hostname (no scheme, port, path or credentials)" >&2
             exit 1
@@ -818,13 +814,6 @@ jobs:
           # `:?` on both -- helm reports an empty value as a YAML error pointing
           # nowhere near the cause, and an empty digest silently falls back to the
           # mutable tag, which is the failure this pipeline exists to prevent.
-          #
-          # Record each release ExternalSecret's pre-deploy refreshTime so the post-deploy
-          # verification can prove reconciliation happened for THIS deployment, not just a
-          # stale Ready=True left over from the previous store. On a fresh install the ES
-          # does not exist yet, so the baseline is empty and verification skips the change
-          # check for that resource. The Redis password ExternalSecret
-          # (statuslist-redis-credentials) is defined in values-production.yaml.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
           for es in statuslist-external-secret statuslist-external-secret-aws-credentials statuslist-redis-credentials; do
@@ -842,9 +831,6 @@ jobs:
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
           # A clean-looking rollback can still leave migration records the old release cannot start on.
-          #
-          # APP_CACHE__HOST comes from the APP_CACHE_HOST variable (see the job env and the
-          # validation step); values-production.yaml deliberately leaves it empty.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
@@ -872,47 +858,6 @@ jobs:
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment \
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
-
-      - name: Verify the Redis cache connected at startup
-        # Redis is not in the readiness probe and warm_up() failure is non-fatal, so a
-        # misconfigured Redis (host/password/TLS/egress) would deploy green while firing
-        # RedisCacheErrors. Gate on the app's startup log: fail on the "unavailable"
-        # warning, confirm the "backend selected" info line, warn if neither is present.
-        # Inspect EVERY pod, not just one: `kubectl logs deployment/...` reads a single
-        # replica, so under the HPA a broken sibling pod would otherwise go undetected.
-        # A failure here does not roll back (a broken cache degrades gracefully); the
-        # rollback-protected path is the ESO step.
-        run: |
-          set -euo pipefail
-          NS="${{ env.HELM_NAMESPACE }}"
-          PODS=$(kubectl get pods -n "$NS" \
-            -l "app=status-list-server,app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }}" \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-          checked=0
-          failed=""
-          confirmed=""
-          for pod in $PODS; do
-            checked=$((checked + 1))
-            logs=$(kubectl logs "pod/$pod" -n "$NS" --tail=500 2>/dev/null || true)
-            if printf '%s\n' "$logs" | grep -q "Redis status-list cache unavailable at startup"; then
-              echo "::error::Pod $pod: Redis status-list cache did not connect at startup; it will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
-              failed=1
-            elif printf '%s\n' "$logs" | grep -q "status-list cache backend selected"; then
-              confirmed=1
-            fi
-          done
-          if [ "$checked" -eq 0 ]; then
-            echo "::warning::No status-list-server pods found to inspect; skipping Redis startup verification"
-            exit 0
-          fi
-          if [ -n "$failed" ]; then
-            exit 1
-          fi
-          if [ -n "$confirmed" ]; then
-            echo "OK: Redis cache connected at startup on all $checked inspected pod(s)"
-          else
-            echo "::warning::Could not confirm Redis cache connected at startup from pod logs (startup lines may have rotated out of the tail); not treating as failure"
-          fi
 
       - name: Verify ESO secret path reconciles
         # On an upgrade the app secrets can remain from the old namespaced store even if the
@@ -971,9 +916,8 @@ jobs:
           }
           trap cleanup_on_failure EXIT
 
-          # Force ESO to reconcile every release ExternalSecret immediately, regardless of
-          # the 30m refreshInterval, so an image-only release cannot leave a stale
-          # refreshTime for the whole wait window.
+          # Force-sync all release ExternalSecrets immediately so an image-only release
+          # cannot leave a stale refreshTime for the whole wait window.
           for es in "$PRIMARY_ES" "$CREDS_ES" "$REDIS_ES"; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
@@ -1007,8 +951,41 @@ jobs:
 
           await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
 
-          # The Redis password ExternalSecret (redis-credentials) must sync too, or pods
-          # hit CreateContainerConfigError on their next restart or scale-up.
           await_synced "$REDIS_ES" "ExternalSecret $REDIS_ES ($NAMESPACE)"
 
           rollback_done=1
+
+      - name: Verify the Redis cache connected at startup
+        # Redis isn't in readiness and warm-up failure is non-fatal, so a broken cache
+        # would otherwise deploy green. Startup only; RedisCacheErrors covers runtime.
+        run: |
+          set -euo pipefail
+          NS="${{ env.HELM_NAMESPACE }}"
+          PODS=$(kubectl get pods -n "$NS" \
+            -l "app=status-list-server,app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+          checked=0
+          failed=""
+          confirmed=""
+          for pod in $PODS; do
+            checked=$((checked + 1))
+            logs=$(kubectl logs "pod/$pod" -n "$NS" --tail=500 2>/dev/null || true)
+            if printf '%s\n' "$logs" | grep -q "Redis status-list cache unavailable at startup"; then
+              echo "::error::Pod $pod: Redis status-list cache did not connect at startup; it will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
+              failed=1
+            elif printf '%s\n' "$logs" | grep -qE "cache\.backend=redis.*status-list cache backend selected|status-list cache backend selected.*cache\.backend=redis"; then
+              confirmed=1
+            fi
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::warning::No status-list-server pods found to inspect; skipping Redis startup verification"
+            exit 0
+          fi
+          if [ -n "$failed" ]; then
+            exit 1
+          fi
+          if [ -n "$confirmed" ] && [ -z "$failed" ]; then
+            echo "OK: Redis cache connected at startup on all $checked inspected pod(s)"
+          else
+            echo "::warning::Could not confirm Redis cache connected at startup from pod logs (startup lines may have rotated out of the tail); not treating as failure"
+          fi

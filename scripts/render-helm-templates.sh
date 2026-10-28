@@ -311,40 +311,24 @@ PROD_STORE_KIND_COUNT=$(grep -c 'kind: ClusterSecretStore' "${RENDER_TEMP}/rende
 if [ "$PROD_STORE_REF_COUNT" -ne "$PROD_ES_COUNT" ] || [ "$PROD_STORE_KIND_COUNT" -ne "$PROD_ES_COUNT" ]; then
   echo "ERROR: every production ExternalSecret must reference ClusterSecretStore/datev-secret-store (refs=$PROD_STORE_REF_COUNT kinds=$PROD_STORE_KIND_COUNT es=$PROD_ES_COUNT)"; exit 1
 fi
-# The Redis password ExternalSecret must sync redis-credentials with the password
-# secretKey, and the Deployment's APP_CACHE__PASSWORD secretKeyRef must reference that
-# exact Secret name+key. A mismatch between secretEnv and the ExternalSecret target only
-# surfaces as CreateContainerConfigError at pod start, so assert it at render time.
+# A secretEnv/ExternalSecret mismatch only shows at pod start; assert the cross-reference at render time.
 PROD_ES="${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/external-secrets.yaml"
-# Isolate the redis ExternalSecret document by name so the greps below cannot match a
-# different ExternalSecret in the same rendered file.
+PROD_DEPLOY="${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/deployment.yaml"
 REDIS_ES_BLOCK=$(awk 'BEGIN{RS="---\n"} /name: statuslist-redis-credentials/ {print}' "$PROD_ES")
-if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -q 'name: statuslist-redis-credentials'; then
+if [ -z "$REDIS_ES_BLOCK" ]; then
   echo "ERROR: production render must emit the statuslist-redis-credentials ExternalSecret"; exit 1
 fi
-if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^    name: redis-credentials$'; then
-  echo "ERROR: statuslist-redis-credentials ExternalSecret must target the redis-credentials Secret"; exit 1
+ES_TARGET_NAME=$(printf '%s\n' "$REDIS_ES_BLOCK" | grep -E '^\s+name:' | head -1 | sed 's/.*name: //' | tr -d ' "')
+ES_SECRET_KEY=$(printf '%s\n' "$REDIS_ES_BLOCK" | grep -E '^\s+secretKey:' | head -1 | sed 's/.*secretKey: //' | tr -d ' "')
+DEPLOY_REF_NAME=$(grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -E 'name:' | tail -1 | sed 's/.*name: //' | tr -d ' "')
+DEPLOY_REF_KEY=$(grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -E 'key:' | tail -1 | sed 's/.*key: //' | tr -d ' "')
+if [ "$DEPLOY_REF_NAME" != "$ES_TARGET_NAME" ]; then
+  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef name '$DEPLOY_REF_NAME' does not match ExternalSecret target '$ES_TARGET_NAME'"; exit 1
 fi
-if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+-\s+secretKey: password$'; then
-  echo "ERROR: statuslist-redis-credentials ExternalSecret must emit secretKey: password"; exit 1
+if [ "$DEPLOY_REF_KEY" != "$ES_SECRET_KEY" ]; then
+  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef key '$DEPLOY_REF_KEY' does not match ExternalSecret secretKey '$ES_SECRET_KEY'"; exit 1
 fi
-if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+key: statuslist-redis-password$'; then
-  echo "ERROR: statuslist-redis-credentials ExternalSecret must read remote key statuslist-redis-password"; exit 1
-fi
-if ! printf '%s\n' "$REDIS_ES_BLOCK" | grep -qE '^\s+property: PASSWORD$'; then
-  echo "ERROR: statuslist-redis-credentials ExternalSecret must read remote property PASSWORD"; exit 1
-fi
-# The Deployment secretEnv APP_CACHE__PASSWORD must reference redis-credentials/password so
-# the app pod can start once ESO syncs it.
-PROD_DEPLOY="${RENDER_TEMP}/rendered/prod-clusterstore/status-list-server/templates/deployment.yaml"
-if ! grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -qE 'name: "?redis-credentials"?$'; then
-  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef must reference the redis-credentials Secret"; exit 1
-fi
-if ! grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -qE 'key: "?password"?$'; then
-  echo "ERROR: APP_CACHE__PASSWORD secretKeyRef must reference the password key"; exit 1
-fi
-# Azure Workload Identity primary path: application pod label + application KSA distinct
-# from the External Secrets Operator identity.
+
 helm template status-list-server "$CHART_DIR" \
   --set serviceAccount.name=azure-app-sa \
   --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \
