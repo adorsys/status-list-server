@@ -961,31 +961,37 @@ jobs:
         run: |
           set -euo pipefail
           NS="${{ env.HELM_NAMESPACE }}"
-          PODS=$(kubectl get pods -n "$NS" \
+          if ! PODS=$(kubectl get pods -n "$NS" \
             -l "app=status-list-server,app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }}" \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); then
+            echo "::warning::Could not list status-list-server pods; Redis startup verification is incomplete"
+            exit 0
+          fi
           checked=0
           failed=""
-          confirmed=""
+          unverified=""
           for pod in $PODS; do
             checked=$((checked + 1))
-            logs=$(kubectl logs "pod/$pod" -n "$NS" --tail=500 2>/dev/null || true)
+            if ! logs=$(kubectl logs "pod/$pod" -n "$NS" --tail=500); then
+              unverified="$unverified $pod"
+              continue
+            fi
             if printf '%s\n' "$logs" | grep -q "Redis status-list cache unavailable at startup"; then
               echo "::error::Pod $pod: Redis status-list cache did not connect at startup; it will fire RedisCacheErrors. Check APP_CACHE_HOST, the redis-credentials secret, TLS/CA, and egress/security groups." >&2
               failed=1
-            elif printf '%s\n' "$logs" | grep -qE "cache\.backend=redis.*status-list cache backend selected|status-list cache backend selected.*cache\.backend=redis"; then
-              confirmed=1
+            elif ! printf '%s\n' "$logs" | grep -qE "cache\.backend=redis.*status-list cache backend selected|status-list cache backend selected.*cache\.backend=redis"; then
+              unverified="$unverified $pod"
             fi
           done
           if [ "$checked" -eq 0 ]; then
-            echo "::warning::No status-list-server pods found to inspect; skipping Redis startup verification"
+            echo "::warning::No status-list-server pods found to inspect; Redis startup verification is incomplete"
             exit 0
           fi
           if [ -n "$failed" ]; then
             exit 1
           fi
-          if [ -n "$confirmed" ] && [ -z "$failed" ]; then
-            echo "OK: Redis cache connected at startup on all $checked inspected pod(s)"
+          if [ -n "$unverified" ]; then
+            echo "::warning::Could not confirm Redis cache connected at startup on:$unverified (logs unreadable, or startup lines rotated out of the tail); verification is incomplete, not treating as failure"
           else
-            echo "::warning::Could not confirm Redis cache connected at startup from pod logs (startup lines may have rotated out of the tail); not treating as failure"
+            echo "OK: Redis cache connected at startup on all $checked inspected pod(s)"
           fi

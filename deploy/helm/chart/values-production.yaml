@@ -33,6 +33,7 @@ statuslist:
     APP_CACHE__TLS: "true"
     APP_CACHE__DATABASE: "0"
     APP_CACHE__KEY_PREFIX: "status-list-server:status-list:"
+    APP_CACHE__USERNAME: "status-list-server"
   # Must match the ExternalSecret target below.
   secretEnv:
     APP_CACHE__PASSWORD:
@@ -97,8 +98,7 @@ grafanaDashboard:
 #   existingSecret: statuslist-alerting-credentials   # pre-existing Secret; chart does not render its own
 #   # dmsWebhookUrl: ""  # set via existingSecret key "dms-webhook-url" instead
 
-# The remote secret must exist before the first deploy; see the runbook. The key name
-# and property are in the YAML below, and the store name is inherited.
+# The remote secret must exist before the first deploy; see the runbook.
 externalSecret:
   spec:
     extraExternalSecrets:

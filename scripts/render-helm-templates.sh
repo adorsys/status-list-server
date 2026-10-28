@@ -318,8 +318,8 @@ REDIS_ES_BLOCK=$(awk 'BEGIN{RS="---\n"} /name: statuslist-redis-credentials/ {pr
 if [ -z "$REDIS_ES_BLOCK" ]; then
   echo "ERROR: production render must emit the statuslist-redis-credentials ExternalSecret"; exit 1
 fi
-ES_TARGET_NAME=$(printf '%s\n' "$REDIS_ES_BLOCK" | grep -E '^\s+name:' | head -1 | sed 's/.*name: //' | tr -d ' "')
-ES_SECRET_KEY=$(printf '%s\n' "$REDIS_ES_BLOCK" | grep -E '^\s+secretKey:' | head -1 | sed 's/.*secretKey: //' | tr -d ' "')
+ES_TARGET_NAME=$(printf '%s\n' "$REDIS_ES_BLOCK" | awk '/^  target:/ {t=1; next} t && /^    name:/ {sub(/.*name: */, ""); gsub(/[" ]/, ""); print; exit} t && !/^    / {t=0}')
+ES_SECRET_KEY=$(printf '%s\n' "$REDIS_ES_BLOCK" | grep -E '^\s+-?\s*secretKey:' | head -1 | sed 's/.*secretKey: //' | tr -d ' "')
 DEPLOY_REF_NAME=$(grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -E 'name:' | tail -1 | sed 's/.*name: //' | tr -d ' "')
 DEPLOY_REF_KEY=$(grep -A4 'name: APP_CACHE__PASSWORD' "$PROD_DEPLOY" | grep -E 'key:' | tail -1 | sed 's/.*key: //' | tr -d ' "')
 if [ "$DEPLOY_REF_NAME" != "$ES_TARGET_NAME" ]; then

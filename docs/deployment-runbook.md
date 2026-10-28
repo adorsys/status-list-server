@@ -149,14 +149,52 @@ without it, so watch the `RedisCacheErrors` alert.
 
 Our EKS pipeline needs the `APP_CACHE_HOST` environment variable and a
 `statuslist-redis-password` Secrets Manager entry with a `PASSWORD` field
-before the first deploy.
+before the first deploy. It authenticates as the `status-list-server` user
+(`APP_CACHE__USERNAME` in `values-production.yaml`).
 
-Use a dedicated Redis ACL user scoped to `APP_CACHE__KEY_PREFIX`; do not share a broad
-write-capable Redis user with other applications. For the default prefix, create one with:
+Use a dedicated Redis user scoped to `APP_CACHE__KEY_PREFIX`; do not share a
+broad write-capable Redis user with other applications. On a self-managed Redis,
+create one for the default prefix with:
 
 ```text
 ACL SETUSER status-list-server reset on >REPLACE_WITH_A_STRONG_PASSWORD ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load
 ```
+
+ElastiCache rejects `ACL SETUSER`, so manage the user through the ElastiCache
+user APIs instead. The cache needs in-transit encryption and an engine that
+accepts subcommand rules (Redis OSS 7.0 or Valkey). Use the same password as
+the Secrets Manager `PASSWORD` field:
+
+```bash
+aws elasticache create-user \
+  --user-id status-list-server \
+  --user-name status-list-server \
+  --engine redis \
+  --passwords "REPLACE_WITH_A_STRONG_PASSWORD" \
+  --access-string "on ~status-list-server:status-list:* +get +del +hget +hset +expire +set +select +evalsha +script|load"
+
+aws elasticache create-user \
+  --user-id status-list-server-default \
+  --user-name default \
+  --engine redis \
+  --passwords "REPLACE_WITH_ANOTHER_STRONG_PASSWORD" \
+  --access-string "off -@all"
+
+aws elasticache create-user-group \
+  --user-group-id status-list-server \
+  --engine redis \
+  --user-ids status-list-server-default status-list-server
+
+aws elasticache modify-replication-group \
+  --replication-group-id <replication-group-id> \
+  --user-group-ids-to-add status-list-server
+```
+
+A `redis` user group must contain a user named `default`; the disabled
+`status-list-server-default` fills that slot in place of the built-in
+full-access `default`. For a password rotation, add the new password with
+`aws elasticache modify-user --passwords` (a user holds up to two), update the
+Secrets Manager entry, restart the rollout, then drop the old password.
 
 `SET` maintains durable invalidation fences, `SELECT` is needed when
 `APP_CACHE__DATABASE` is non-zero, and `SCRIPT|LOAD` lets `redis::Script` recover
