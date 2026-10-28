@@ -64,6 +64,34 @@ PostgreSQL, MySQL, and Redis integration tests need a running Docker daemon; SQL
 The [feature profile matrix](README.md#development-and-quality-checks) lists all profiles and their features. The `build`, `test`, and `compose` commands default to `postgres`, so select `minimal` explicitly when you want the in-memory workflow.
 Provider-specific setup is described in the [database](docs/database-backends.md), [secrets](docs/secrets-backends.md), and [DNS](docs/dns-providers.md) guides.
 
+## Release and versioning
+
+`release-plz` is the single source of release versions and changelog entries. It
+uses the Conventional Commit history and the configuration in `release-plz.toml`
+and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
+
+The normal promotion path is:
+
+1. Merge changes into `develop`.
+2. Manually dispatch **Release-plz PR** with `develop` selected. The resulting
+   release PR prepares the next version and changelog; it does not publish a
+   release.
+3. Merge `develop` into `stage` and validate the release candidate there. An RC
+   tag may use the release version with an `-rc` suffix, but RC tags are ignored
+   when release-plz calculates the next version.
+4. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
+   GitHub Release when that version is not tagged. If `v<version>` already
+   exists, release-plz makes no duplicate release.
+
+RC and final releases therefore use the same semantic version and changelog.
+The final `v<version>` tag is created only from `main`.
+
+For a hotfix, branch from the released `main` state and update the package to
+the next patch version with its changelog. After the hotfix is validated and
+merged into `main`, merge `main` back into `develop` so the fix, version, and
+changelog remain in the development line. Do not prepare a second independent
+version bump on `develop` for the same hotfix.
+
 ## Coding style and architecture
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.
