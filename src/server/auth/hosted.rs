@@ -257,10 +257,9 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 /// (which assigns identifiers) rather than accepting whole entities; hosted
 /// tests use this to exercise the same path production would.
 ///
-/// The registry write lock serializes this with a reload in the same process.
-/// Nothing serializes it across pods: no production code writes hosted keys.
-/// If the race happens, `static_conflict` fails the hosted key closed rather
-/// than trusting it twice.
+/// The registry write lock serializes this with a reload in the same process
+/// only. If a reload on another pod races it, `static_conflict` fails the
+/// hosted key closed rather than trusting it twice.
 pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
