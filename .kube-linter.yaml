@@ -1,9 +1,7 @@
 # latest-tag stays enforced: every image in the chart has a pinned tag.
 checks:
   exclude:
-    # Subchart containers (postgres) use template-level defaults
-    # that don't set cpu/memory resources or read-only root fs.
-    # These are third-party packaged charts we cannot modify.
+    # The postgres subchart sets none of these, and we can't change it.
     - "unset-cpu-requirements"
     - "unset-memory-requirements"
     - "no-read-only-root-fs"

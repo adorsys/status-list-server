@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 
-# Local CI runner.
-#
-# Command inventory mirrored from:
-# - .github/workflows/CI.yml
-# - .github/workflows/cargo_deny.yml
-# - .github/workflows/crate_type.yml
-#
-# Default mode keeps the day-to-day loop approachable: Rust format/build/lint/test
-# gates plus fast local wiring checks. Use --full for the practical local equivalent
-# of the required GitHub CI jobs. GitHub-only behavior that is not replicated locally:
-# checkout permissions, workflow concurrency/caching, Actions annotations, SARIF and
-# artifact uploads, and ci-success' JSON aggregation of already-finished jobs.
+# Local CI runner mirroring CI.yml, cargo_deny.yml and crate_type.yml.
+# --full runs the practical local equivalent of every required GitHub job.
 
 set -euo pipefail
 
@@ -31,7 +21,7 @@ AUDIT_VERSION="0.22.2"
 LLVM_COV_VERSION="0.6.16"
 # Defaults embedded in the pinned GitHub actions (see docs/local-ci.md).
 DENY_VERSION="0.20.2"
-TOMBI_VERSION="1.8.4"
+TOMBI_VERSION="1.8.9"
 MARKDOWNLINT_VERSION="0.23.2"
 TRIVY_VERSION="0.70.0"
 TRIVY_IMAGE="aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e"
