@@ -2,10 +2,6 @@ rule_files:
   - ../rules/recording.rules.yml
 evaluation_interval: 1m
 tests:
-  # Verifies the deterministic ratio recording rules produce expected values on
-  # synthetic series (single status_class / format buckets, so sum() collapses to
-  # one series and the ratio is exact). A 70-minute run gives the 5m and 1h
-  # window variants enough data to resolve.
   - interval: 1m
     input_series:
       - series: >-
@@ -33,7 +29,6 @@ tests:
           status_list_cache_misses_total{otel_scope_name="status-list-server",cache="status_list"}
         values: '0+1x70'
     promql_expr_test:
-      # 5xx rate = 5/20ths of total 5xx, total = 5xx+2xx = 100/20ths -> ratio 0.05
       - expr: 'sli:error_rate:5m'
         eval_time: 70m
         exp_samples:
@@ -64,15 +59,12 @@ tests:
         exp_samples:
           - labels: '{__name__="sli:cert_renewal_failure_rate:5m"}'
             value: 0.02
-      # hits/(hits+misses) = 3/(3+1) = 0.75 (exactly representable)
       - expr: 'sli:cache_hit_ratio:5m'
         eval_time: 70m
         exp_samples:
           - labels: '{__name__="sli:cache_hit_ratio:5m"}'
             value: 0.75
 
-  # The 30d failure-rate recording rules need a full 30d window to resolve, so
-  # they get a dedicated block at a 6h interval (120 samples = 30d).
   - interval: 6h
     input_series:
       - series: >-

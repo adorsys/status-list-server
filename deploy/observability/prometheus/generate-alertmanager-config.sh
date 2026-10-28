@@ -1,44 +1,13 @@
 #!/bin/sh
-# Generate the Alertmanager notification receiver config from environment
-# variables, so the same stack can notify ANY platform the customer chooses
-# (Slack, Discord, Teams, Mattermost, email, or a generic webhook) without any
-# repo changes or platform-specific code in version control.
-#
-# Routing (severity -> human / dead-man's-switch / noop, repeat intervals) is
-# static and platform-independent; only the human-channel `receivers:` block is
-# generated per platform. Alerts are channelled into a SINGLE human receiver:
-# All human alerts route to a single receiver carrying the severity label in the payload,
-# matching the platform credential model where one destination endpoint is configured.
-#
-# Required env:
-#   ALERTMANAGER_PLATFORM   slack|discord|teams|mattermost|email|webhook
-#
-# Per-platform credentials (set the one for your chosen platform):
-#   slack:      SLACK_WEBHOOK_URL  (a Slack incoming-webhook URL),
-#               SLACK_CHANNEL      (optional channel override, e.g. #alerts)
-#   discord:    DISCORD_WEBHOOK_URL
-#   teams:      MS_TEAMS_WEBHOOK_URL
-#   mattermost: MATTERMOST_WEBHOOK_URL
-#   email:      ALERTMANAGER_SMTP_HOST, ALERTMANAGER_SMTP_PORT,
-#               ALERTMANAGER_EMAIL_TO, ALERTMANAGER_SMTP_FROM
-#   webhook:    ALERTMANAGER_WEBHOOK_URL  (generic endpoint accepting
-#               Alertmanager's standard JSON — NOT Slack/Discord/Teams, which
-#               require native receivers)
-#
-# Optional:
-#   ALERTMANAGER_DMS_WEBHOOK_URL  dead-man's-switch webhook (e.g. a hosted
-#               Dead Man's Snitch / Healthchecks.io ping URL). The always-firing
-#               Watchdog (severity=none) routes here so a total collapse of
-#               Prometheus/Alertmanager is detected by its ABSENCE. When this is
-#               not set the watchdog is absorbed by an empty receiver so it never
-#               spams the human channel and never re-notifies on every interval.
+# Builds alertmanager.yml from env, so any platform works without code changes.
+# ALERTMANAGER_PLATFORM: slack|discord|teams|mattermost|email|webhook, plus that platform's URL or SMTP vars.
+# ALERTMANAGER_DMS_WEBHOOK_URL (optional) receives the always-firing Watchdog.
 
 set -eu
 
 PLATFORM="${ALERTMANAGER_PLATFORM:-}"
 OUT="${ALERTMANAGER_OUT:-/etc/alertmanager/alertmanager.yml}"
-# Grouping / dispatch intervals. Production defaults batch notifications to
-# avoid channel spam; the delivery test overrides them to run in seconds.
+# The delivery test shortens these.
 GROUP_WAIT="${ALERTMANAGER_GROUP_WAIT:-30s}"
 GROUP_INTERVAL="${ALERTMANAGER_GROUP_INTERVAL:-5m}"
 
@@ -47,8 +16,6 @@ if [ -z "$PLATFORM" ]; then
   exit 1
 fi
 
-# Emit a single receiver entry for the given platform. Receives: name, then
-# platform-specific vars already expanded by callers where needed.
 emit_receiver() {
   _name="$1"
   case "$PLATFORM" in
@@ -83,11 +50,7 @@ EOF
 EOF
       ;;
     teams)
-      # MS Teams exposes a classic inbound webhook that accepts a JSON POST.
-      # There is no native Alertmanager receiver for Teams in the pinned image,
-      # so deliver via a generic webhook_configs (the standard Alertmanager JSON
-      # payload). Most connectors that require the Adaptive Card schema can be
-      # bridged by an intermediary; the JSON still carries full alert context.
+      # No native Teams receiver in the pinned image, so send the generic JSON.
       _url="${MS_TEAMS_WEBHOOK_URL:?ALERTMANAGER: MS_TEAMS_WEBHOOK_URL required for platform=teams}"
       cat <<EOF
   - name: '$_name'
@@ -97,9 +60,7 @@ EOF
 EOF
       ;;
     mattermost)
-      # Mattermost exposes an incoming webhook that accepts a JSON POST; there
-      # is no native mattermost receiver in Alertmanager, so use a generic
-      # webhook_configs pointed at the Mattermost inbound webhook.
+      # No native Mattermost receiver; use the generic webhook.
       _url="${MATTERMOST_WEBHOOK_URL:?ALERTMANAGER: MATTERMOST_WEBHOOK_URL required for platform=mattermost}"
       cat <<EOF
   - name: '$_name'
@@ -134,7 +95,6 @@ EOF
   esac
 }
 
-# Static, platform-independent routing (plus global SMTP block for email).
 {
   if [ "$PLATFORM" = "email" ]; then
     _host="${ALERTMANAGER_SMTP_HOST:?ALERTMANAGER: ALERTMANAGER_SMTP_HOST required for platform=email}"
@@ -149,29 +109,22 @@ global:
 EOF
   fi
   cat <<'EOF'
-# Generated from ALERTMANAGER_PLATFORM + credentials at container start.
-# Routing is platform-independent; receivers are platform-specific.
+# Generated at container start from ALERTMANAGER_PLATFORM; don't edit by hand.
 
 route:
   group_by: ['alertname', 'sli', 'service']
 EOF
   printf "  group_wait: %s\n  group_interval: %s\n" "$GROUP_WAIT" "$GROUP_INTERVAL"
   cat <<'EOF'
-  # Anything not explicitly routed (no severity, or an unknown one) is absorbed
-  # by the noop sink so it never spams a human channel. The always-firing
-  # Watchdog (severity=none) is routed to the dead-man's-switch below, so its
-  # ABSENCE is what pages a human, not its firing.
+  # Unrouted alerts go to noop, never to a human.
   receiver: 'noop'
   routes:
-    # Watchdog (severity=none) -> dead-man's-switch (detects collapsed pipeline
-    # by ABSENCE). If ALERTMANAGER_DMS_WEBHOOK_URL is unset, `deadmansswitch`
-    # is an empty receiver and the watchdog is silently absorbed here.
+    # Watchdog goes to the dead man's switch, or nowhere if none is set.
     - matchers:
         - severity="none"
       receiver: 'deadmansswitch'
 
-    # Page (act now) and warn (act this week) share ONE human channel; the
-    # severity label is still in the payload so it can be filtered in-channel.
+    # page and warn share one channel; filter on the severity label.
     - matchers:
         - severity="page"
       receiver: 'human'
@@ -182,9 +135,7 @@ EOF
       repeat_interval: 24h
 
 inhibit_rules:
-  # Don't let a warn for an SLI+service reach the channel while the correlated
-  # page for the same SLI+service is already firing (fast-burn page + slow-burn
-  # warn pairs are deliberately emitted together by the alert rules).
+  # A firing page mutes the matching warn.
   - source_match:
       severity: page
     target_match:
@@ -192,11 +143,8 @@ inhibit_rules:
     equal: ['sli', 'service']
 
 receivers:
-  # Absorbs anything not explicitly routed.
   - name: 'noop'
 
-  # Dead-man's-switch for the always-firing Watchdog (pages on absence, not on
-  # firing). Empty (acts as a noop) when ALERTMANAGER_DMS_WEBHOOK_URL is unset.
   - name: 'deadmansswitch'
 EOF
 

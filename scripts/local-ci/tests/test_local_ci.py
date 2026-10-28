@@ -1,5 +1,3 @@
-"""Regression tests for local bootstrap and fail-closed command execution."""
-
 import os
 from pathlib import Path
 import shlex
@@ -381,8 +379,6 @@ done
                 for step in job.get('steps', []):
                     if step.get('uses', '').startswith('azure/setup-helm@'):
                         self.assertEqual(step['with']['version'], pins['HELM_VERSION'])
-        # The Helm/observability image pins live in the path-gated helm-checks.yml,
-        # not CI.yml, since the extraction moved those jobs out of the Rust lifecycle.
         self.assertIn(pins['ZIZMOR_IMAGE'], workflow)
         self.assertIn(pins['OTEL_COLLECTOR_IMAGE'], helm_checks)
         self.assertIn(pins['PROMETHEUS_IMAGE'], helm_checks)
@@ -395,8 +391,6 @@ done
         package = json.loads((ROOT / 'scripts/local-ci/node/package.json').read_text())
         self.assertEqual(package['dependencies']['tombi'], pins['TOMBI_VERSION'])
         self.assertEqual(package['dependencies']['markdownlint-cli2'], pins['MARKDOWNLINT_VERSION'])
-        # These versions are embedded by Actions, not explicit workflow inputs.
-        # An action upgrade must review these local defaults as well.
         for reference in [
             'EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25',
             'DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff',

@@ -27,12 +27,7 @@ jobs:
           cache: false
 
       - name: Searching for lib
-        # All targets, not `targets[0]`: cargo does not promise an ordering, so keying
-        # on the first one let `is_lib` flip and silently skip cargo-test-doc.
-        #
-        # Every library kind counts, not just "lib". A crate declaring `crate-type =
-        # ["cdylib"]` still has doc tests, and `is_lib: false` skips them silently --
-        # ci-success treats a skipped job as a pass.
+        # Every target and every library kind: a wrong is_lib silently skips cargo-test-doc.
         id: searching
         run: |
           set -euo pipefail
@@ -40,9 +35,7 @@ jobs:
             | jq -c '[.packages[].targets[].kind[]] | unique')
           echo "kinds of targets: ${kinds}"
 
-          # Assigned before being written: a command substitution inside `echo`'s
-          # arguments keeps `echo`'s exit status, so `set -e` would not see jq fail
-          # and the empty value would silently skip cargo-test-doc.
+          # Assigned first: inside echo's arguments a failing jq would slip past set -e.
           is_lib=$(printf '%s' "$kinds" | jq -r \
             '["lib","rlib","dylib","cdylib","staticlib","proc-macro"] as $lib
              | any(IN($lib[])) | tostring')

@@ -3,9 +3,7 @@ name: Auto Merge Dependabot
 on:
   pull_request:
 
-# `pull-requests: write` to arm auto-merge; `contents: write` because `--auto` merges
-# immediately when the pull request is already mergeable rather than arming anything.
-# Everything unlisted is `none`.
+# contents: write because --auto merges at once when the PR is already mergeable.
 permissions:
   contents: write
   pull-requests: write
@@ -13,8 +11,7 @@ permissions:
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # `user.login`, not `github.actor`: the actor is whoever last touched the pull
-    # request, so it is both spoofable and wrong after a maintainer reopens one.
+    # user.login, not github.actor, which is whoever last touched the PR.
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
@@ -24,8 +21,7 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      # Patch and minor only, never github-actions. Unknown or empty update-type is
-      # ineligible, so this fails closed. Decided once so the steps cannot disagree.
+      # Patch and minor only, never github-actions; unknown types are refused.
       - name: Decide whether this PR may auto-merge
         id: gate
         env:
@@ -65,20 +61,8 @@ jobs:
         run: |
           set -uo pipefail
 
-          # `Allow auto-merge` being off is a repository setting, not a fault in this
-          # pull request, and it withholds every eligible one until it is turned on. A
-          # job that is red on every dependency bump teaches people to ignore red, so
-          # that case warns. It is off by choice today (CONTRIBUTING.md, "Dependabot
-          # auto-merge"), which makes this the path every eligible bump takes rather
-          # than a rare fallback.
-          #
-          # Read from the repository object rather than matched against gh's error
-          # text: that wording is not an API and can change across gh versions or
-          # locales, which would silently reclassify this case as a hard failure --
-          # or, worse, reclassify an unrelated failure as this case.
-          #
-          # `allow_auto_merge` is the REST spelling; GraphQL calls it
-          # `autoMergeAllowed`.
+          # Auto-merge is off in repo settings by choice, so that case warns, not fails.
+          # Read the setting from the API rather than parsing gh's error text, which isn't stable.
           allowed=$(gh api "repos/${REPO}" --jq '.allow_auto_merge' 2>/dev/null) || allowed=""
 
           if [ "$allowed" = "false" ]; then
@@ -89,9 +73,7 @@ jobs:
           fi
 
           if [ "$allowed" != "true" ]; then
-            # Neither true nor false: the token could not read the setting. Genuinely
-            # anomalous for a token with push access, so surface it and still try --
-            # a failure below is then reported as a failure rather than swallowed.
+            # Couldn't read the setting: warn and try anyway, so a real failure still surfaces.
             echo "::warning::could not read allow_auto_merge for ${REPO} (got '${allowed}'); arming anyway."
           fi
 

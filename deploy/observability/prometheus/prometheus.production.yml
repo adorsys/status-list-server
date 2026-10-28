@@ -1,10 +1,4 @@
-# PRODUCTION PROMETHEUS CONFIGURATION
-#
-# MANDATORY OPERATOR STARTUP FLAG:
-# Prometheus MUST be started with `--storage.tsdb.retention.time=31d` (or equivalent).
-# The default 15-day retention silently halves the 30-day window evaluated by
-# `sli:error_budget:success:30d`, `sli:error_rate:30d`, and `sli:token_gen_failure_rate:30d`,
-# causing error-budget gauges to read artificially optimistic without raising an error.
+# Start Prometheus with --storage.tsdb.retention.time=31d or the 30d SLO gauges read optimistic.
 
 global:
   scrape_interval: 15s
@@ -14,11 +8,7 @@ rule_files:
   - /etc/prometheus/rules/recording.rules.yml
   - /etc/prometheus/rules/alerting.rules.yml
 
-# Forward fired/resolved alerts to Alertmanager for webhook-based
-# notifications. Under kube-prometheus-stack / managed
-# Prometheus this block is provided by the operator; for standalone
-# production Prometheus, point this at your Alertmanager service and
-# keep the default timeout (10s, 5 retries).
+# Standalone only; kube-prometheus-stack provides this block.
 alerting:
   alertmanagers:
     - static_configs:

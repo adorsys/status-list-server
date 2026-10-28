@@ -35,7 +35,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [prometheus, debug]
-    # Note: Logs pipeline currently uses debug exporter (stdout); dedicated backend (e.g. Loki) can be added as needed.
+    # Logs only go to stdout for now.
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

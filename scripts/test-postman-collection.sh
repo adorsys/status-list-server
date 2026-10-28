@@ -5,9 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 API_ENDPOINT="${API_ENDPOINT:-http://localhost:8000}"
-# When the management and admin listeners are on separate hostnames (or separate
-# ingress paths) override these directly; otherwise they default to the sibling
-# port on the same host as API_ENDPOINT.
+# Unset means API_ENDPOINT's host on 8001 (management) and 8002 (admin).
 MANAGEMENT_URL="${MANAGEMENT_URL:-}"
 ADMIN_URL="${ADMIN_URL:-}"
 POSTMAN_COLLECTION="${POSTMAN_COLLECTION:-postman/status-list-server.postman_collection.json}"
@@ -209,13 +207,8 @@ environment_mount="/etc/newman/status-list-server.postman_environment.json"
 newman_202_report="$tmp_dir/newman-202-report.json"
 newman_409_report="$tmp_dir/newman-409-report.json"
 
-# Resolve management/admin URLs: use the override when set, otherwise fall back
-# to the sibling-port URLs derived from API_ENDPOINT. The fallback keeps
-# existing single-host setups working out of the box.
 _sibling_url() {
-  # Replace the port in the URL (or append it if no port is present).
   local url="$1" port="$2"
-  # Strip trailing slash, then replace :PORT or append :PORT.
   url="${url%/}"
   if [[ "$url" =~ :[0-9]+$ ]]; then
     printf '%s\n' "${url%:*}:${port}"
