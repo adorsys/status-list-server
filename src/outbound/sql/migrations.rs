@@ -2194,8 +2194,9 @@ pub(crate) mod issuer_audit_events {
 }
 
 /// Carries every usable `credentials` key into `issuer_keys` unchanged, so
-/// issuers keep the kid they chose. The material hash is computed in Rust because it needs base64url decoding and zero stripping, which
-/// portable SQL cannot do.
+/// issuers keep the kid they chose. The material hash is computed in Rust
+/// because it needs base64url decoding and zero stripping, which portable SQL
+/// cannot do.
 ///
 /// Carried issuers get `source = 'credential'`, which the hosted key lookup
 /// accepts and `find_issuer` does not: they resolve by key, but are not portal

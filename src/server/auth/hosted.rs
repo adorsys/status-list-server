@@ -229,7 +229,7 @@ pub async fn validate_static_candidate_against_dynamic(
         // even when the kid was already admitted with different material.
         // A Reserved row of the same principal is a carry-over awaiting adoption
         // and must not block the registry from adopting its own material under a
-        // new kid (e.g. the RFC 7638 thumbprint written by the issuer-export).
+        // new kid (e.g. the RFC 7638 thumbprint written by the issuer export).
         if let Some(blocker) = store
             .find_key_by_material(material)
             .await
@@ -259,7 +259,8 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 ///
 /// The registry write lock serializes this with a reload in the same process.
 /// Nothing serializes it across pods: no production code writes hosted keys.
-/// If the race happens, `static_conflict` fails the hosted key closed rather than trusting it twice.
+/// If the race happens, `static_conflict` fails the hosted key closed rather
+/// than trusting it twice.
 pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
