@@ -273,17 +273,17 @@ fn jose_alg_name(algorithm: jsonwebtoken::Algorithm) -> &'static str {
     }
 }
 
-/// The issuer that already owns a key with the given material hash, if any.
-async fn find_material_owner(
+/// The hosted key row that already holds the given material hash, if any.
+async fn find_key_by_material_hash(
     hash: &str,
     db: &sea_orm::DatabaseConnection,
-) -> Result<Option<String>, RepositoryError> {
+) -> Result<Option<HostedIssuerKey>, RepositoryError> {
     let row = hosted_issuer_keys::Entity::find()
         .filter(hosted_issuer_keys::Column::KeyMaterial.eq(hash))
         .one(db)
         .await
         .map_err(find_err)?;
-    Ok(row.map(|row| row.issuer_id))
+    row.map(parse_key).transpose()
 }
 
 impl SeaOrmStore<HostedIssuerRow> {
@@ -415,14 +415,14 @@ impl SeaOrmStore<HostedIssuerRow> {
                         if load_entry(&key.kid, &db).await?.is_some() {
                             return Err(RepositoryError::DuplicateEntry);
                         }
-                        if let Some(owner) =
-                            find_material_owner(&material_hash(&material), &db).await?
+                        if let Some(blocker) =
+                            find_key_by_material_hash(&material_hash(&material), &db).await?
                         {
                             // Log the owner server-side; never return it, so one
                             // tenant cannot learn another tenant's id.
                             tracing::warn!(
                                 kid = %key.kid,
-                                owner = %owner,
+                                owner = %blocker.issuer_id,
                                 "rejecting a hosted key whose material is already registered"
                             );
                             return Err(RepositoryError::KeyMaterialReused);
@@ -473,12 +473,13 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
-    async fn key_material_in_use(&self, material: &str) -> Result<bool, RepositoryError> {
+    async fn find_key_by_material(
+        &self,
+        material: &str,
+    ) -> Result<Option<HostedIssuerKey>, RepositoryError> {
         time_query("find_material", "issuer_key", async {
             let hash = material_hash(material);
-            Ok(find_material_owner(&hash, self.current().as_ref())
-                .await?
-                .is_some())
+            find_key_by_material_hash(&hash, self.current().as_ref()).await
         })
         .await
     }
@@ -557,9 +558,12 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         self.store.all_keys().await.map_err(Into::into)
     }
 
-    async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
+    async fn find_key_by_material(
+        &self,
+        material: &str,
+    ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
         self.store
-            .key_material_in_use(material)
+            .find_key_by_material(material)
             .await
             .map_err(Into::into)
     }

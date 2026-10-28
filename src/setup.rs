@@ -2764,8 +2764,11 @@ mod general_tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())
         }
-        async fn key_material_in_use(&self, _material: &str) -> Result<bool, HostedIssuerError> {
-            Ok(false)
+        async fn find_key_by_material(
+            &self,
+            _material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(None)
         }
     }
 

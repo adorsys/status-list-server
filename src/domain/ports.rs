@@ -49,9 +49,15 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
 
-    /// Whether the given normalized key material (RFC 7638 §7 parameters) is
-    /// already registered to any hosted key, matched by its stored hash in SQL.
-    async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError>;
+    /// The hosted key that already holds the given normalized key material
+    /// (RFC 7638 §7 parameters), if any. Returns `None` when the material is
+    /// free. The `issuer_id` and `state` of the returned key let callers
+    /// distinguish a genuine cross-issuer collision from a `Reserved`
+    /// carry-over row of the same principal (adoption).
+    async fn find_key_by_material(
+        &self,
+        material: &str,
+    ) -> Result<Option<HostedIssuerKey>, HostedIssuerError>;
 
     /// Which of the given ids name a portal issuer, in one batched query.
     /// Used by the startup/reload warning path so it does not run one

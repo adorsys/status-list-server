@@ -15,7 +15,7 @@ use crate::domain::models::credential::{
     KeyResolveError, PublicJwk, ResolvedKey, canonical_jwk_material,
 };
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
 };
 use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
 use crate::server::auth::issuer_registry::{RegistryError, RegistryHandle, ValidatedRegistry};
@@ -80,15 +80,15 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                             // static_conflict avoids a spurious error-level
                             // collision log for adopted legacy issuers whose old
                             // reserved row is still present.
-                            if entry.key.state == crate::domain::models::hosted_issuer::HostedIssuerKeyState::Reserved {
-                            tracing::debug!(
-                                kid = %entry.key.kid,
-                                issuer = %entry.issuer.id,
-                                "hosted key is reserved and does not authenticate; \
-                                 adopt it into the registry to enable it"
-                            );
-                            return Err(KeyResolveError::Reserved);
-                        }
+                            if entry.key.state == HostedIssuerKeyState::Reserved {
+                                tracing::debug!(
+                                    kid = %entry.key.kid,
+                                    issuer = %entry.issuer.id,
+                                    "hosted key is reserved and does not authenticate; \
+                                     adopt it into the registry to enable it"
+                                );
+                                return Err(KeyResolveError::Reserved);
+                            }
                             if let Some(reason) = self.static_conflict(&entry) {
                                 tracing::error!(
                                     kid = %kid,
@@ -227,14 +227,21 @@ pub async fn validate_static_candidate_against_dynamic(
         }
         // New or changed material: always re-check it against the hosted store,
         // even when the kid was already admitted with different material.
-        if store
-            .key_material_in_use(material)
+        // A Reserved row of the same principal is a carry-over awaiting adoption
+        // and must not block the registry from adopting its own material under a
+        // new kid (e.g. the RFC 7638 thumbprint written by the issuer-export).
+        if let Some(blocker) = store
+            .find_key_by_material(material)
             .await
             .map_err(dynamic_check_failed)?
         {
-            return Err(RegistryError::Semantic(
-                "a candidate registry key reuses hosted issuer key material".into(),
-            ));
+            let is_own_reserved = blocker.issuer_id == *principal_id
+                && blocker.state == HostedIssuerKeyState::Reserved;
+            if !is_own_reserved {
+                return Err(RegistryError::Semantic(
+                    "a candidate registry key reuses hosted issuer key material".into(),
+                ));
+            }
         }
     }
     Ok(())
@@ -365,11 +372,15 @@ mod tests {
             Ok(self.keys.lock().await.values().cloned().collect())
         }
 
-        async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
+        async fn find_key_by_material(
+            &self,
+            material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
             let keys = self.keys.lock().await;
             Ok(keys
                 .values()
-                .any(|key| material_of(&key.jwk).as_deref() == Some(material)))
+                .find(|key| material_of(&key.jwk).as_deref() == Some(material))
+                .cloned())
         }
 
         async fn find_issuer_ids(
@@ -637,6 +648,60 @@ mod tests {
         );
     }
 
+    /// A carry-over Reserved row uses the legacy kid from the credential row.
+    /// The issuer-export (#725) writes the RFC 7638 thumbprint as the kid, so
+    /// the kid-level adoption check cannot match.  The material check must
+    /// recognise that the blocker is a Reserved row of the same principal and
+    /// allow the adoption rather than failing with "reuses hosted issuer key
+    /// material".
+    #[tokio::test]
+    async fn reserved_row_of_same_principal_does_not_block_adoption_under_thumbprint_kid() {
+        let registry = static_registry(); // principal "static-issuer", kid "static-key"
+
+        // Simulate the carry-over: the reserved row keeps the *legacy* kid
+        // but holds the same key material as the candidate.
+        let mut reserved = key_with_material("legacy-1", EC_JWK);
+        reserved.issuer_id = "static-issuer".into();
+        reserved.state = HostedIssuerKeyState::Reserved;
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[reserved]);
+
+        // The candidate uses "static-key" as the kid; find_key_by_kid won't
+        // find it in the hosted store, so the material check fires.  The
+        // Reserved row belongs to the same principal, so it must be allowed.
+        assert!(
+            validate_static_candidate_against_dynamic(
+                &store,
+                &RegistryHandle::empty().snapshot(),
+                &registry.snapshot()
+            )
+            .await
+            .is_ok(),
+            "a Reserved carry-over row of the same principal must not block adoption under a different kid"
+        );
+    }
+
+    /// An Active row of the *same* principal under a different kid must still
+    /// block: the issuer has an active hosted key that wasn't exported into the
+    /// registry.
+    #[tokio::test]
+    async fn active_material_of_same_principal_under_different_kid_is_still_rejected() {
+        let registry = static_registry();
+        let mut active = key_with_material("other-kid", EC_JWK);
+        active.issuer_id = "static-issuer".into();
+        active.state = HostedIssuerKeyState::Active;
+        let store: Arc<dyn HostedIssuerStore> = InMemoryHostedStore::with_keys(&[active]);
+        assert!(
+            validate_static_candidate_against_dynamic(
+                &store,
+                &RegistryHandle::empty().snapshot(),
+                &registry.snapshot()
+            )
+            .await
+            .is_err(),
+            "an Active hosted row with the same material but a different kid must still block the candidate"
+        );
+    }
+
     /// An operator who removed a key from the registry must not see it come
     /// back through a carried-over hosted row for the same issuer.
     #[tokio::test]
@@ -685,8 +750,11 @@ mod tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
         }
-        async fn key_material_in_use(&self, material: &str) -> Result<bool, HostedIssuerError> {
-            self.inner.key_material_in_use(material).await
+        async fn find_key_by_material(
+            &self,
+            material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            self.inner.find_key_by_material(material).await
         }
         async fn find_issuer_ids(
             &self,
@@ -930,7 +998,10 @@ mod tests {
                 "backend down",
             ))))
         }
-        async fn key_material_in_use(&self, _material: &str) -> Result<bool, HostedIssuerError> {
+        async fn find_key_by_material(
+            &self,
+            _material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
@@ -986,8 +1057,11 @@ mod tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())
         }
-        async fn key_material_in_use(&self, _material: &str) -> Result<bool, HostedIssuerError> {
-            Ok(false)
+        async fn find_key_by_material(
+            &self,
+            _material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(None)
         }
         async fn find_issuer_ids(
             &self,
