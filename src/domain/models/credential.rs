@@ -63,8 +63,9 @@ pub enum KeyResolveError {
     Expired,
     #[error("key has been revoked")]
     Revoked,
-    /// A carried-over key held so its identifier is preserved but not yet
-    /// trusted: nothing authenticates until an operator adopts or activates it.
+    /// A carried-over key held so its identifier is preserved but not
+    /// trusted: nothing authenticates until an operator adopts it into the
+    /// registry.
     #[error("key is reserved and does not authenticate")]
     Reserved,
     /// A malformed stored key row that can never authenticate: non-retryable,

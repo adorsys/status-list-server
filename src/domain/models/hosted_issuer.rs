@@ -1,5 +1,5 @@
-//! Hosted-profile issuer model (ADR 0002): issuers registered through
-//! onboarding and persisted in durable storage. Their public keys resolve
+//! Hosted-profile issuer model (ADR 0002): issuers held in durable storage
+//! rather than the static registry. Their public keys resolve
 //! through the same port as the static registry's, so authentication never
 //! depends on where a key came from.
 
@@ -28,9 +28,9 @@ impl HostedIssuerState {
 }
 
 /// A hosted-profile issuer with the identity data authentication needs plus
-/// the operator-managed metadata the admin surface edits. `id` is assigned by
-/// the server (UUID v4) and never chosen by the issuer; `aggregation_id` is
-/// generated once at creation and is immutable (ADR 0002, Identifiers).
+/// the operator-managed metadata. `id` is assigned by the server (UUID v4) and
+/// never chosen by the issuer; `aggregation_id` is generated once at creation
+/// and is immutable (ADR 0002, Identifiers).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostedIssuer {
     pub id: String,
@@ -95,7 +95,7 @@ pub struct HostedIssuerKey {
 /// Lifecycle of a hosted issuer key row. Stored as a string in
 /// `issuer_keys.state`; a revoked key makes resolution fail closed. `Reserved`
 /// holds a carried-over legacy kid and material so the identifier is kept but
-/// nothing authenticates until an operator adopts or activates the key.
+/// nothing authenticates until an operator adopts the key into the registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HostedIssuerKeyState {

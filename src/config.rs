@@ -75,8 +75,7 @@ impl DatabaseBackend {
 
 /// Deployment profile (ADR 0002). In the `private` profile only issuers listed
 /// in the operator registry are trusted. In the `hosted` profile the server
-/// additionally trusts issuers registered through onboarding, which live in
-/// durable SQL storage.
+/// also trusts issuer keys held in the SQL hosted issuer store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerProfile {

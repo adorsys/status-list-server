@@ -99,7 +99,7 @@ impl From<Credentials> for credentials::ActiveModel {
 /// Durable issuer ownership, list quota, and registry aggregation identity.
 /// A portal issuer (hosted profile) is *this* row, keyed in `issuer` by its
 /// server-assigned UUID, with the hosted metadata columns added by the
-/// `hosted_issuers` migration — not a second ownership model.
+/// `hosted_issuers` migration, not a second ownership model.
 pub(crate) mod issuers {
     use super::*;
 

@@ -258,7 +258,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
     post:
       operationId: registerIssuer
@@ -557,7 +557,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
     patch:
       operationId: updateStatusList
@@ -609,7 +609,7 @@ paths:
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
   /api/v1/status-lists/{list_id}/allocations:
     parameters:
@@ -666,7 +666,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -933,8 +933,8 @@ components:
         Bearer`; invalid credentials return identical `401 invalid_token`
         responses with `WWW-Authenticate: Bearer error="invalid_token"`.
 
-        In the `hosted` profile a management key may resolve from the durable
-        `issuer_keys` store. If that store is unreachable, authentication
+        In the `hosted` profile a management key may resolve from the hosted
+        issuer store. If that store is unreachable, authentication
         returns a retryable `503 service_unavailable` (with `Retry-After`)
         rather than a `401`, so a transient backend fault is never mistaken for
         a bad key.
@@ -1763,6 +1763,16 @@ components:
             error_description: "The server encountered an unexpected error."
 
     ServiceUnavailable:
+      description: Service temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "service_unavailable"
+            error_description: "the service is currently unavailable. Please try again later"
+
+    ManagementServiceUnavailable:
       description: |
         Service temporarily unavailable. On authenticated management operations
         in the `hosted` profile this also occurs when the durable trust backend
@@ -1773,8 +1783,8 @@ components:
       headers:
         Retry-After:
           description: |
-            Seconds to wait before retrying — a minimum, not a schedule; clients
-            should add their own jitter so retries do not re-synchronise.
+            Seconds to wait before retrying. This is a minimum, not a schedule;
+            clients should add their own jitter so retries do not re-synchronise.
           required: false
           schema:
             type: integer

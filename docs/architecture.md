@@ -136,9 +136,8 @@ never relaxes a rule:
 - **private** (default): only issuers an operator has listed in the operator
   trust registry are trusted. The hosted issuer store is not built, so a
   registry-only deployment is unaffected by the hosted key resolution path.
-- **hosted**: the server additionally trusts issuers registered through
-  self-service onboarding, held in durable SQL storage (see
-  [database-backends.md](database-backends.md)). The composite key resolver
+- **hosted**: the server also trusts issuer keys held in the SQL hosted issuer
+  store (see [database-backends.md](database-backends.md)). The composite key resolver
   serves static keys first, then the hosted store, and fails closed on any
   cross-source collision.
 

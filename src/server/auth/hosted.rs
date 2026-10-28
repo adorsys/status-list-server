@@ -140,9 +140,9 @@ async fn validate_dynamic_write(
     key: Option<&HostedIssuerKey>,
 ) -> Result<(), HostedIssuerError> {
     let snapshot = registry.snapshot();
-    // A hosted issuer may not reuse any static principal's id — issuer or
-    // admin — nor a static kid, nor static key material. Conflicts are typed
-    // so the admin surface maps them to 4xx instead of retrying a 5xx forever.
+    // A hosted issuer may not reuse a static principal's id (issuer or admin),
+    // a static kid, or static key material. Conflicts are typed so callers can
+    // map them to 4xx rather than retrying a 5xx.
     if snapshot.has_principal_id(issuer_id) {
         return Err(HostedIssuerError::AlreadyExists);
     }
@@ -258,9 +258,8 @@ fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
 /// tests use this to exercise the same path production would.
 ///
 /// The registry write lock serializes this with a reload in the same process.
-/// Nothing serializes it across pods yet: no production code writes hosted keys,
-/// and #626 adds a database-backed guard. If the race happens, `static_conflict`
-/// fails the hosted key closed rather than trusting it twice.
+/// Nothing serializes it across pods: no production code writes hosted keys.
+/// If the race happens, `static_conflict` fails the hosted key closed rather than trusting it twice.
 pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
@@ -524,8 +523,8 @@ mod tests {
     async fn write_colliding_with_static_kid_fails_closed() {
         let registry = static_registry();
         let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
-        // Distinct material so the kid branch — not the material branch — is
-        // what rejects the write.
+        // Distinct material so the kid branch, not the material branch, rejects
+        // the write.
         let mut hosted = key_with_material("static-key", DISTINCT_EC_JWK);
         hosted.issuer_id = "00000000-0000-4000-8000-000000000003".into();
         assert!(
@@ -649,8 +648,8 @@ mod tests {
     }
 
     /// A carry-over Reserved row uses the legacy kid from the credential row.
-    /// The issuer-export (#725) writes the RFC 7638 thumbprint as the kid, so
-    /// the kid-level adoption check cannot match.  The material check must
+    /// The issuer export writes the RFC 7638 thumbprint as the kid, so the
+    /// kid-level adoption check cannot match. The material check must
     /// recognise that the blocker is a Reserved row of the same principal and
     /// allow the adoption rather than failing with "reuses hosted issuer key
     /// material".
@@ -1100,12 +1099,10 @@ mod tests {
         );
     }
 
-    /// Acceptance criteria: a portal issuer's key authenticates a management
-    /// write exactly like a static issuer's key — same middleware path, same
-    /// `AuthenticatedIssuer` context, aggregation ID resolved from the
-    /// hosted issuer's `issuers` row — and a portal issuer publishes its
-    /// first list without a credentials row: that row is the quota record
-    /// the publish path reserves slots against.
+    /// A hosted issuer's key authenticates a management write like a static key:
+    /// same middleware path and `AuthenticatedIssuer` context, with the aggregation
+    /// ID taken from its `issuers` row. Its first publish needs no credentials row,
+    /// because the `issuers` row is the quota record.
     #[cfg(all(feature = "memory", feature = "sqlite"))]
     #[tokio::test]
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer() {

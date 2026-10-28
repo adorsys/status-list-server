@@ -2194,8 +2194,7 @@ pub(crate) mod issuer_audit_events {
 }
 
 /// Carries every usable `credentials` key into `issuer_keys` unchanged, so
-/// issuers keep the kid they chose (#688 → #369). The material hash is computed
-/// in Rust because it needs base64url decoding and zero stripping, which
+/// issuers keep the kid they chose. The material hash is computed in Rust because it needs base64url decoding and zero stripping, which
 /// portable SQL cannot do.
 ///
 /// Carried issuers get `source = 'credential'`, which the hosted key lookup
@@ -2208,8 +2207,8 @@ pub(crate) mod issuer_audit_events {
 ///
 /// Idempotent: a row already carried identically is skipped, so a re-run after
 /// a partial MySQL failure resumes. Carried keys land `reserved`, so they hold
-/// the kid and material but authenticate nothing until an operator adopts or
-/// activates the key. Data conflicts never fail the migration: rows whose
+/// the kid and material but authenticate nothing until an operator adopts the
+/// key into the registry. Data conflicts never fail the migration: rows whose
 /// material is shared by several credentials, and rows that would collide with
 /// an existing `issuer_keys` row, are skipped with a warning. Only real
 /// database errors return `Err`.
