@@ -2,10 +2,11 @@
 
 `POST /api/v1/credentials` has been removed. Issuers must be trusted through the operator-managed registry before they can publish lists.
 
-1. Set `DATABASE_URL` through your secret manager or secure shell input, then export the draft with either `cargo xtask issuer export --output ./issuers.yaml` from a source checkout or `status-list-server issuer-export --output /out/issuers.yaml` from the server image. For example, a one-off container can receive the already-set variable and write to a mounted directory:
+1. Set `DATABASE_URL` through your secret manager or secure shell input, then export the draft with either `cargo xtask issuer export --output ./issuers.yaml` from a source checkout or `status-list-server issuer-export --output /out/issuers.yaml` from the server image. Published images include PostgreSQL support; use the source-checkout command for MySQL or SQLite deployments. For example, a one-off PostgreSQL container can receive the already-set variable and write to a mounted directory as the host user:
 
    ```bash
-   docker run --rm --env DATABASE_URL --volume "$PWD:/out" \
+   docker run --rm --env DATABASE_URL --user "$(id -u):$(id -g)" \
+     --volume "$PWD:/out" \
      ghcr.io/adorsys/status-list-server:TAG issuer-export --output /out/issuers.yaml
    ```
 
