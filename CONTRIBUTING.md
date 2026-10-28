@@ -72,25 +72,36 @@ and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
 
 The normal promotion path is:
 
-1. Merge changes into `develop`.
-2. Manually dispatch **Release-plz PR** with `develop` selected. The resulting
+1. Before preparing a release, ensure the latest final release from `main` has
+   been back-merged into `develop`. The workflow refuses to calculate a version
+   when the latest final tag is not in the selected branch's history.
+2. Merge changes into `develop`.
+3. Manually dispatch **Release-plz PR** with `develop` selected. The resulting
    release PR prepares the next version and changelog; it does not publish a
    release.
-3. Merge `develop` into `stage` and validate the release candidate there. An RC
-   tag may use the release version with an `-rc` suffix, but RC tags are ignored
-   when release-plz calculates the next version.
-4. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
+4. Review and merge the release PR into `develop`.
+5. Merge `develop` into `stage`. The RC automation creates
+   `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
+   Release-plz ignores RC tags because its `git_only` final-tag match is
+   `^v(\d+\.\d+\.\d+)$`.
+6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.
 
-For a hotfix, branch from the released `main` state and update the package to
-the next patch version with its changelog. After the hotfix is validated and
-merged into `main`, merge `main` back into `develop` so the fix, version, and
-changelog remain in the development line. Do not prepare a second independent
-version bump on `develop` for the same hotfix.
+For a hotfix, branch `hotfix/*` from the released `main` state, then manually
+dispatch **Release-plz PR** with that branch selected. Review and merge the
+resulting patch-version and changelog PR into the hotfix branch before
+validation and the `hotfix/*` to `main` promotion.
+
+After the hotfix release, merge `main` back into `develop` with a merge commit
+before the next `develop` to `stage` promotion. If `develop` already contains a
+newer prepared version, resolve `Cargo.toml` and `CHANGELOG.md` by keeping the
+development version and adding the hotfix changelog section. The merge commit
+keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
+run to calculate from the latest release.
 
 ## Coding style and architecture
 
