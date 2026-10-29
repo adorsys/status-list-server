@@ -434,6 +434,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // The dynamic trust source behind the composite resolver: `Some` only in
     // the hosted profile, where registrations live in durable SQL storage.
     let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
+    let hosted_lifecycle_service: Option<
+        Arc<crate::server::auth::hosted_service::HostedIssuerLifecycleService>,
+    >;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -449,6 +452,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
             dynamic_issuer_store = None;
+            hosted_lifecycle_service = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -543,6 +547,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             dynamic_issuer_store = config.server.profile.is_hosted().then(|| {
                 let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone());
                 Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
+            });
+            hosted_lifecycle_service = config.server.profile.is_hosted().then(|| {
+                let store = Arc::new(SqlHostedIssuerStore::from_handle(db_handle.clone()));
+                Arc::new(
+                    crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(store),
+                )
             });
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
@@ -910,6 +920,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             dynamic_issuer_store.clone(),
         ),
         issuer_registry: issuer_registry.clone(),
+        hosted_lifecycle_service,
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
             portal: config.server.links.portal.clone(),
@@ -2751,10 +2762,15 @@ mod general_tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {

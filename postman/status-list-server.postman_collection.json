@@ -203,6 +203,68 @@
               }
             }
           ]
+        },
+        {
+          "name": "Suspend hosted issuer (admin listener)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"suspended\"}"
+            },
+            "url": {
+              "raw": "{{adminUrl}}/api/v1/issuers/{{issuer_id}}/state",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "state"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke hosted key (admin listener)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/api/v1/issuers/{{issuer_id}}/keys/{{kid}}/revoke",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys",
+                "{{kid}}",
+                "revoke"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     },
@@ -797,6 +859,14 @@
     {
       "key": "historical_time",
       "value": "1686925000"
+    },
+    {
+      "key": "adminToken",
+      "value": ""
+    },
+    {
+      "key": "kid",
+      "value": ""
     }
   ]
 }

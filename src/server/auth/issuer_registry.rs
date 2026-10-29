@@ -305,6 +305,7 @@ impl IssuerRegistry {
                     Arc::new(ResolvedKey {
                         principal: Principal::Admin {
                             id: admin.id.clone(),
+                            scopes: admin.scopes.clone(),
                         },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !admin.disabled,

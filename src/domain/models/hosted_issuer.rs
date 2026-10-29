@@ -15,14 +15,14 @@ use crate::domain::models::credential::{
 #[non_exhaustive]
 pub enum HostedIssuerState {
     Active,
-    Disabled,
+    Suspended,
 }
 
 impl HostedIssuerState {
     pub fn as_str(&self) -> &'static str {
         match self {
             HostedIssuerState::Active => "active",
-            HostedIssuerState::Disabled => "disabled",
+            HostedIssuerState::Suspended => "suspended",
         }
     }
 }
@@ -44,11 +44,29 @@ pub struct HostedIssuer {
     pub aggregation_id: AggregationId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedIssuerLifecycleState {
+    Active,
+    Suspended,
+    Expired,
+}
+
 impl HostedIssuer {
+    /// Expiry is derived at verification time, without a cleanup job.
+    pub fn lifecycle_state(&self, now: OffsetDateTime) -> HostedIssuerLifecycleState {
+        if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            HostedIssuerLifecycleState::Expired
+        } else if self.state == HostedIssuerState::Suspended {
+            HostedIssuerLifecycleState::Suspended
+        } else {
+            HostedIssuerLifecycleState::Active
+        }
+    }
+
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.state == HostedIssuerState::Active && self.expires_at.is_none_or(|expiry| now < expiry)
+        self.lifecycle_state(now) == HostedIssuerLifecycleState::Active
     }
 }
 
@@ -242,9 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn disabled_issuer_fails_closed() {
+    fn suspended_issuer_fails_closed() {
         let entry = entry_with(
-            HostedIssuerState::Disabled,
+            HostedIssuerState::Suspended,
             None,
             HostedIssuerKeyState::Active,
             (None, None),
@@ -263,6 +281,10 @@ mod tests {
             Some(expired),
             HostedIssuerKeyState::Active,
             (None, None),
+        );
+        assert_eq!(
+            entry.issuer.lifecycle_state(now()),
+            HostedIssuerLifecycleState::Expired
         );
         assert!(matches!(
             entry.resolved_key(now()),

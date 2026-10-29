@@ -132,6 +132,7 @@ fn fixture_state(config: &Config) -> AppState {
         management_auth: (&config.management_auth).into(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,

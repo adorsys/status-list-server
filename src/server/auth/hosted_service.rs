@@ -11,7 +11,7 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyState, HostedIssuerState,
     NewHostedIssuer, NewHostedIssuerKey,
 };
-use crate::domain::ports::HostedIssuerStore;
+use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
 use crate::server::auth::hosted::{register_hosted_issuer, register_hosted_issuer_key};
 use crate::server::auth::issuer_registry::RegistryHandle;
 
@@ -53,6 +53,7 @@ impl HostedIssuerService {
         &self,
         registry: &RegistryHandle,
         input: NewHostedIssuer,
+        actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
         let now = (self.clock)();
         if input.expires_at <= now {
@@ -71,7 +72,7 @@ impl HostedIssuerService {
             version: 1,
             aggregation_id: AggregationId((self.new_id)()),
         };
-        register_hosted_issuer(registry, &self.store, issuer).await
+        register_hosted_issuer(registry, &self.store, issuer, actor).await
     }
 
     /// Register a signing key, assigning its kid and `created_at`. The returned
@@ -80,6 +81,7 @@ impl HostedIssuerService {
         &self,
         registry: &RegistryHandle,
         input: NewHostedIssuerKey,
+        actor: &str,
     ) -> Result<HostedIssuerKey, HostedIssuerError> {
         let kid = (self.new_id)().to_string();
         let mut map = input.jwk;
@@ -97,8 +99,45 @@ impl HostedIssuerService {
             not_after: input.not_after,
             state: HostedIssuerKeyState::Active,
         };
-        register_hosted_issuer_key(registry, &self.store, key.clone()).await?;
+        register_hosted_issuer_key(registry, &self.store, key.clone(), actor).await?;
         Ok(key)
+    }
+}
+
+/// Applies operator lifecycle commands to durable state. The store commits
+/// each transition together with its audit event.
+pub struct HostedIssuerLifecycleService {
+    store: Arc<dyn HostedIssuerLifecycleStore>,
+}
+
+impl std::fmt::Debug for HostedIssuerLifecycleService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedIssuerLifecycleService")
+            .finish_non_exhaustive()
+    }
+}
+
+impl HostedIssuerLifecycleService {
+    pub fn new(store: Arc<dyn HostedIssuerLifecycleStore>) -> Self {
+        Self { store }
+    }
+
+    pub async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: HostedIssuerState,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        self.store.set_issuer_state(issuer_id, state, actor).await
+    }
+
+    pub async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError> {
+        self.store.revoke_key(issuer_id, kid, actor).await
     }
 }
 
@@ -138,11 +177,16 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             *self.issuer.lock().unwrap() = Some(issuer.clone());
             Ok(issuer)
         }
-        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             *self.key.lock().unwrap() = Some(key);
             Ok(())
         }
@@ -197,6 +241,7 @@ mod tests {
                     owner: Some("ops".into()),
                     expires_at: expires,
                 },
+                "portal-operator",
             )
             .await
             .unwrap();
@@ -232,6 +277,7 @@ mod tests {
                     owner: None,
                     expires_at: OffsetDateTime::UNIX_EPOCH + time::Duration::days(1),
                 },
+                "portal-operator",
             )
             .await
             .unwrap();
@@ -252,6 +298,7 @@ mod tests {
                     not_before: None,
                     not_after: None,
                 },
+                "portal-operator",
             )
             .await
             .unwrap();
@@ -291,6 +338,7 @@ mod tests {
                                 owner: None,
                                 expires_at: expires,
                             },
+                            "portal-operator",
                         )
                         .await,
                     Err(HostedIssuerError::InvalidExpiry(_))

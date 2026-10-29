@@ -30,7 +30,8 @@ info:
     operator-configurable through the `APP_RATE_LIMIT__*` environment
     variables (see `RateLimitConfig`):
 
-      * **strict** (per source IP) — `POST /api/v1/credentials`.
+      * **strict** (per source IP) — `POST /api/v1/credentials` and hosted
+        issuer lifecycle routes on the admin listener.
         Tunables: `strict_burst_size`, `strict_period_secs`
         (defaults: 10 / 60s).
       * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
@@ -189,6 +190,108 @@ paths:
               schema:
                 type: string
               example: "NOT_READY"
+
+  /api/v1/issuers/{issuer_id}/state:
+    patch:
+      operationId: changeHostedIssuerState
+      summary: Suspend or reactivate a hosted issuer
+      description: |
+        ADMIN LISTENER (default :8002), hosted profile only. Requires a signed
+        admin JWT whose registry principal has the `issuers:write` scope.
+        Expiry is enforced at verification time; an expired issuer cannot be
+        reactivated. A state change and its actor audit event commit together.
+      servers:
+        - url: http://{admin_host}
+          variables:
+            admin_host:
+              default: localhost:8002
+      parameters:
+        - name: issuer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state:
+                  type: string
+                  enum: [active, suspended]
+      responses:
+        "200":
+          description: Current issuer state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuer_id, state, version]
+                properties:
+                  issuer_id: { type: string }
+                  state: { type: string, enum: [active, suspended] }
+                  version: { type: integer, minimum: 1 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Hosted issuer not found or hosted profile unavailable
+        "409":
+          description: Concurrent lifecycle write; retry the request
+        "422":
+          description: Expired issuer cannot be reactivated
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: Trust backend unavailable
+
+  /api/v1/issuers/{issuer_id}/keys/{kid}/revoke:
+    post:
+      operationId: revokeHostedIssuerKey
+      summary: Permanently revoke a hosted issuer key
+      description: |
+        ADMIN LISTENER (default :8002), hosted profile only. Requires a signed
+        admin JWT with `issuers:write`. The key row remains reserved by its kid;
+        revocation and the actor audit event commit together. Repeating the
+        request for an already revoked key is idempotent.
+      servers:
+        - url: http://{admin_host}
+          variables:
+            admin_host:
+              default: localhost:8002
+      parameters:
+        - name: issuer_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: kid
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Key is revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuer_id, kid, state]
+                properties:
+                  issuer_id: { type: string }
+                  kid: { type: string }
+                  state: { type: string, const: revoked }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Hosted issuer or key not found
+        "409":
+          description: Concurrent lifecycle write; retry the request
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: Trust backend unavailable
 
   /metrics:
     get:

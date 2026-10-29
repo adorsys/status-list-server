@@ -35,7 +35,11 @@ use crate::server::handlers::{
     allocate_indices_route, credential_handler, get_aggregation, get_credential,
     get_issuer_aggregation, get_status_list, publish_status_route, update_status_route,
 };
-use crate::server::{AppState, auth::auth, health, service_document};
+use crate::server::{
+    AppState,
+    auth::{admin_auth, auth},
+    health, service_document,
+};
 use crate::utils::metrics::metrics_handler;
 
 /// A typed request extension carrying the name of the TCP listener that
@@ -87,7 +91,7 @@ impl HttpServer {
 
         let management_router = with_listener_name(
             with_common_layers(
-                management_routes(state.clone(), issuer_governor, strict_governor),
+                management_routes(state.clone(), issuer_governor, strict_governor.clone()),
                 config,
             ),
             "management",
@@ -95,7 +99,11 @@ impl HttpServer {
         .with_state(state.clone());
 
         let admin_router = with_listener_name(
-            with_common_layers(admin_routes(config, prometheus_registry), config),
+            with_common_layers(
+                admin_routes(config, prometheus_registry)
+                    .merge(hosted_admin_routes(state.clone(), strict_governor)),
+                config,
+            ),
             "admin",
         )
         .with_state(state);
@@ -366,6 +374,26 @@ fn management_routes(
 fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
     let router = Router::new().route("/health/ready", get(health::ready));
     attach_metrics(router, config, registry)
+}
+
+fn hosted_admin_routes(
+    state: AppState,
+    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+) -> Router<AppState> {
+    if state.hosted_lifecycle_service.is_none() {
+        return Router::new();
+    }
+    Router::new()
+        .route(
+            "/api/v1/issuers/{issuer_id}/state",
+            patch(crate::server::handlers::hosted_lifecycle::change_issuer_state),
+        )
+        .route(
+            "/api/v1/issuers/{issuer_id}/keys/{kid}/revoke",
+            post(crate::server::handlers::hosted_lifecycle::revoke_hosted_key),
+        )
+        .route_layer(from_fn_with_state(state, admin_auth))
+        .layer(GovernorLayer::new(strict_governor))
 }
 
 /// Axum middleware recording HTTP latency + request-count SLIs.

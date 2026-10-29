@@ -40,10 +40,14 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// mapping in one unit; both rows commit or neither does. Returns the
     /// stored issuer: an aggregation ID that collided with one already in use
     /// was regenerated server-side, because identifiers are server-assigned.
-    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError>;
+    async fn create_issuer(
+        &self,
+        issuer: HostedIssuer,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
 
     /// Register a signing key for an existing hosted issuer.
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
 
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
@@ -63,6 +67,25 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Used by the startup/reload warning path so it does not run one
     /// `find_issuer` per owner.
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;
+}
+
+/// Durable lifecycle changes for hosted issuers. Each method commits the state
+/// transition and its audit record in one transaction.
+#[async_trait]
+pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
+    async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.

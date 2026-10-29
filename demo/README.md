@@ -175,3 +175,11 @@ the pip fallback, then commit both:
 uv lock
 uv export --format requirements-txt -o requirements.txt
 ```
+
+## Hosted issuer emergency actions
+
+In the hosted profile, an operator uses the admin listener with a registry admin
+JWT carrying `issuers:write`. `PATCH /api/v1/issuers/{issuer_id}/state` with
+`{"state":"suspended"}` blocks the issuer's next management request.
+`POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes one
+key. The public status-list endpoint remains readable after either action.

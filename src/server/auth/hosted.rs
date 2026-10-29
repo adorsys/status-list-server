@@ -264,20 +264,22 @@ pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     issuer: HostedIssuer,
+    actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &issuer.id, None).await?;
-    store.create_issuer(issuer).await
+    store.create_issuer(issuer, actor).await
 }
 
 pub(crate) async fn register_hosted_issuer_key(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     key: HostedIssuerKey,
+    actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
-    store.add_key(key).await
+    store.add_key(key, actor).await
 }
 
 #[cfg(test)]
@@ -358,11 +360,16 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Ok(issuer)
         }
 
-        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             self.keys.lock().await.insert(key.kid.clone(), key);
             Ok(())
         }
@@ -512,7 +519,7 @@ mod tests {
         hosted.id = "static-issuer".into();
         assert!(
             matches!(
-                register_hosted_issuer(&registry, &store, hosted).await,
+                register_hosted_issuer(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an id collision with the static registry must be a typed AlreadyExists, not Backend"
@@ -529,7 +536,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000003".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "a kid collision with the static registry must be a typed AlreadyExists, not Backend"
@@ -559,7 +566,7 @@ mod tests {
         hosted.jwk = PublicJwk::try_new(serde_json::to_vec(&candidate).unwrap()).unwrap();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::KeyMaterialReused)
             ),
             "material reuse against the static registry must be typed KeyMaterialReused, not Backend"
@@ -575,7 +582,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an admin kid collision must be a typed AlreadyExists, not Backend"
@@ -591,7 +598,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::KeyMaterialReused)
             ),
             "admin material reuse must be typed KeyMaterialReused, not Backend"
@@ -606,7 +613,7 @@ mod tests {
         hosted.id = "admin-1".into();
         assert!(
             matches!(
-                register_hosted_issuer(&registry, &store, hosted).await,
+                register_hosted_issuer(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an admin id collision must be a typed AlreadyExists, not Backend"
@@ -738,13 +745,18 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
-            self.inner.create_issuer(issuer).await
+            self.inner.create_issuer(issuer, actor).await
         }
-        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            key: HostedIssuerKey,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             self.reached.notify_one();
             self.release.notified().await;
-            self.inner.add_key(key).await
+            self.inner.add_key(key, actor).await
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
@@ -783,6 +795,7 @@ mod tests {
                     &registry,
                     &store,
                     key_with_material("hosted-kid", EC_JWK),
+                    "portal-operator",
                 )
                 .await
             }
@@ -982,12 +995,17 @@ mod tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
@@ -1047,10 +1065,15 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Ok(issuer)
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             Ok(())
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
@@ -1130,26 +1153,35 @@ mod tests {
             Router,
             body::Body,
             http::{Request, StatusCode},
-            routing::put,
+            routing::{get, put},
         };
         use tower::ServiceExt;
 
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer())
+        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal issuer on {backend}: {e}"));
-        register_hosted_issuer_key(&registry, &store, key("portal-key"))
+        register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal key on {backend}: {e}"));
 
         // SQL-backed app state: the publish path's quota slot reservation and
         // the resolver's read both hit this database.
-        let mut state = crate::test_utils::test_app_state(Some(db)).await;
+        let mut state = crate::test_utils::test_app_state(Some(db.clone())).await;
         state.set_issuer_registry(registry.clone());
         state.issuer_key_resolver =
             Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
+        let mut other_state = crate::test_utils::test_app_state(Some(db.clone())).await;
+        let other_registry = Arc::new(RegistryHandle::empty());
+        other_state.set_issuer_registry(other_registry.clone());
+        other_state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            other_registry,
+            Some(Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(
+                db.clone(),
+            ))),
+        ));
 
         // The private half of `test_fixtures::TEST_EC_PUBLIC_JWK` (which also
         // carries kid `test-key`); the hosted key embeds kid `portal-key`.
@@ -1173,20 +1205,29 @@ mod tests {
         .unwrap();
 
         let list_id = uuid::Uuid::new_v4().to_string();
-        let app = Router::new()
-            .nest(
-                "/api/v1",
-                Router::new().route(
-                    "/status-lists/{list_id}/statuses",
+        let router = |state: crate::server::AppState| {
+            let management = Router::new()
+                .route(
+                    "/api/v1/status-lists/{list_id}/statuses",
                     put(crate::server::handlers::status_list::publish_status_route),
-                ),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::server::auth::auth,
-            ))
-            .with_state(state);
+                )
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::server::auth::auth,
+                ));
+            let public = Router::new().route(
+                "/api/v1/status-lists/{list_id}",
+                get(crate::server::handlers::get_status_list),
+            );
+            Router::new()
+                .merge(management)
+                .merge(public)
+                .with_state(state)
+        };
+        let app = router(state);
+        let other = router(other_state);
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(axum::http::Method::PUT)
@@ -1203,6 +1244,63 @@ mod tests {
             StatusCode::CREATED,
             "the portal issuer's first list must publish on {backend}"
         );
+        async fn write(app: Router, token: &str) -> StatusCode {
+            use tower::ServiceExt;
+            app.oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!(
+                        "/api/v1/status-lists/{}/statuses",
+                        uuid::Uuid::new_v4()
+                    ))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"statuses":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+        use crate::domain::ports::HostedIssuerLifecycleStore;
+        let lifecycle = crate::outbound::sql::SqlHostedIssuerStore::new(db.clone());
+        lifecycle
+            .set_issuer_state(&hosted.id, HostedIssuerState::Suspended, "portal-operator")
+            .await
+            .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(write(replica, &token).await, StatusCode::UNAUTHORIZED);
+        }
+        for replica in [app.clone(), other.clone()] {
+            let public = replica
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/status-lists/{list_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(public.status(), StatusCode::OK);
+        }
+        lifecycle
+            .set_issuer_state(&hosted.id, HostedIssuerState::Active, "portal-operator")
+            .await
+            .unwrap();
+        use crate::outbound::sql::issuers;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
+        issuers::Entity::update_many()
+            .col_expr(
+                issuers::Column::ExpiresAt,
+                Expr::value(time::OffsetDateTime::now_utc().unix_timestamp() - 1),
+            )
+            .filter(issuers::Column::Issuer.eq(&hosted.id))
+            .exec(db.as_ref())
+            .await
+            .unwrap();
+        for replica in [app, other] {
+            assert_eq!(write(replica, &token).await, StatusCode::UNAUTHORIZED);
+        }
     }
 
     /// A hosted-signed management JWT for `issuer_id`, using the private half of
@@ -1244,10 +1342,10 @@ mod tests {
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer())
+        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
             .await
             .unwrap();
-        register_hosted_issuer_key(&registry, &store, key("portal-key"))
+        register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
             .await
             .unwrap();
 

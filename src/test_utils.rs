@@ -195,6 +195,7 @@ pub(crate) async fn test_app_state_with_cert_provider(
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -246,6 +247,7 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -287,6 +289,7 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -475,6 +478,7 @@ async fn build_test_app_state(
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: crate::server::ServiceLinks {
             documentation: crate::config::REPOSITORY_URL.to_string(),
             portal: None,

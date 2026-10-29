@@ -173,6 +173,24 @@ impl std::fmt::Display for AuthenticatedIssuer {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AuthenticatedAdmin {
+    pub id: String,
+}
+
+#[derive(Clone)]
+struct AdminAuthRequest;
+
+/// Only a registry admin with `issuers:write` may change hosted lifecycle state.
+pub async fn admin_auth(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AuthenticationError> {
+    request.extensions_mut().insert(AdminAuthRequest);
+    auth(State(state), request, next).await
+}
+
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
@@ -251,13 +269,28 @@ pub async fn auth(
         }
         result => result.map_err(|reason| invalid_auth(Some(&kid), None, reason))?,
     };
+    let admin_request = request.extensions().get::<AdminAuthRequest>().is_some();
     let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
-        Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
-        Principal::Admin { id } => {
+        Principal::Issuer { id, aggregation_id } if !admin_request => {
+            (id.as_str(), Some(*aggregation_id))
+        }
+        Principal::Admin { id, scopes }
+            if admin_request && scopes.iter().any(|scope| scope == "issuers:write") =>
+        {
+            (id.as_str(), None)
+        }
+        Principal::Admin { id, .. } => {
             return Err(invalid_auth(
                 Some(&kid),
                 Some(id),
-                "admin keys cannot authenticate issuer management requests",
+                "admin scope is insufficient",
+            ));
+        }
+        Principal::Issuer { id, .. } => {
+            return Err(invalid_auth(
+                Some(&kid),
+                Some(id),
+                "issuer keys cannot authenticate admin requests",
             ));
         }
     };
@@ -311,13 +344,18 @@ pub async fn auth(
         )
         .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
-    let authenticated_issuer = Issuer(registered_issuer.to_owned());
-    request
-        .extensions_mut()
-        .insert(AuthenticatedIssuer::with_aggregation_id(
-            authenticated_issuer,
-            registered_aggregation_id,
-        ));
+    if let Some(aggregation_id) = registered_aggregation_id {
+        request
+            .extensions_mut()
+            .insert(AuthenticatedIssuer::with_aggregation_id(
+                Issuer(registered_issuer.to_owned()),
+                aggregation_id,
+            ));
+    } else {
+        request.extensions_mut().insert(AuthenticatedAdmin {
+            id: registered_issuer.to_owned(),
+        });
+    }
     let metric_issuer = bounded_identifier(Some(registered_issuer));
     let metric_kid = bounded_identifier(Some(&kid));
     crate::utils::metrics::record_management_auth_request(
@@ -360,7 +398,7 @@ mod tests {
         body::{Body, to_bytes},
         extract::Request,
         http::{StatusCode, header},
-        routing::get,
+        routing::{get, put},
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -736,6 +774,46 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn admin_lifecycle_auth_requires_issuer_write_scope() {
+        async fn admin_handler(Extension(admin): Extension<AuthenticatedAdmin>) -> String {
+            admin.id
+        }
+        let key = test_public_jwk();
+        let token = create_test_token(
+            "portal-backend",
+            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+            Algorithm::ES256,
+        );
+        for (scopes, expected) in [
+            (vec!["issuers:write"], StatusCode::OK),
+            (vec!["issuers:read"], StatusCode::UNAUTHORIZED),
+        ] {
+            let registry = serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [],
+                "admins": [{
+                    "id": "portal-backend",
+                    "scopes": scopes,
+                    "keys": [{"kid": key.key_id(), "alg": "ES256", "jwk": key.jwk()}],
+                }],
+            }))
+            .unwrap();
+            let mut state = test_app_state(None).await;
+            state.set_issuer_registry(Arc::new(
+                issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+            ));
+            let app = Router::new()
+                .route("/test", get(admin_handler))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth,
+                ))
+                .with_state(state);
+            assert_eq!(call_with_token(app, token.clone()).await.status(), expected);
+        }
     }
 
     fn set_registry(state: &mut AppState, issuer: &str, keys: &[PublicJwk]) {
@@ -1128,6 +1206,113 @@ mod tests {
             call_with_token(app, new_token).await.status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn disabling_static_issuer_stops_writes_on_both_replicas_but_keeps_public_list() {
+        use crate::server::handlers::{get_status_list, publish_status_route};
+
+        async fn write(app: Router, list_id: &str, token: &str) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!("/api/v1/status-lists/{list_id}/statuses/"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"statuses":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        async fn read(app: Router, list_id: &str) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/status-lists/{list_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        let public_key = test_public_jwk();
+        let aggregation_id = uuid::Uuid::new_v4();
+        let registry_yaml = |disabled| {
+            serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "test-issuer",
+                    "aggregation_id": aggregation_id,
+                    "disabled": disabled,
+                    "keys": [{
+                        "kid": public_key.key_id(),
+                        "alg": "ES256",
+                        "jwk": public_key.jwk(),
+                    }],
+                }],
+                "admins": []
+            }))
+            .unwrap()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("issuers.yaml");
+        std::fs::write(&file, registry_yaml(false)).unwrap();
+        let first_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        let second_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+
+        let mut first_state = test_app_state(None).await;
+        let mut second_state = first_state.clone();
+        first_state.set_issuer_registry(first_registry.clone());
+        second_state.set_issuer_registry(second_registry.clone());
+        let router = |state: AppState| {
+            let management = Router::new()
+                .route(
+                    "/api/v1/status-lists/{list_id}/statuses/",
+                    put(publish_status_route),
+                )
+                .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
+            let public =
+                Router::new().route("/api/v1/status-lists/{list_id}", get(get_status_list));
+            Router::new()
+                .merge(management)
+                .merge(public)
+                .with_state(state)
+        };
+        let first_app = router(first_state);
+        let second_app = router(second_state);
+        let token = create_test_token(
+            "test-issuer",
+            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+            Algorithm::ES256,
+        );
+        let published_list = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            write(first_app.clone(), &published_list, &token).await,
+            StatusCode::CREATED
+        );
+
+        std::fs::write(&file, registry_yaml(true)).unwrap();
+        first_registry.reload().unwrap();
+        second_registry.reload().unwrap();
+        assert_eq!(
+            write(first_app.clone(), &uuid::Uuid::new_v4().to_string(), &token).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            write(
+                second_app.clone(),
+                &uuid::Uuid::new_v4().to_string(),
+                &token
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(read(first_app, &published_list).await, StatusCode::OK);
+        assert_eq!(read(second_app, &published_list).await, StatusCode::OK);
     }
 
     #[tokio::test]

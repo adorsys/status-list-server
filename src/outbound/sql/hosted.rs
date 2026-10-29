@@ -6,20 +6,20 @@
 //! with no cache, so revocation takes effect on the next request.
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set, sea_query::Expr};
 use std::collections::HashSet;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
 use super::error::{RepositoryError, contention_err};
-use super::models::{PublicKey, hosted_issuer_keys, issuers};
+use super::models::{PublicKey, hosted_issuer_keys, issuer_audit_events, issuers};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
-use crate::domain::ports::HostedIssuerStore;
+use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
 use crate::utils::metrics_db::time_query;
 
 /// How often a creation regenerates a colliding random aggregation ID. 122
@@ -114,7 +114,9 @@ fn parse_issuer(row: issuers::Model) -> Result<HostedIssuer, RepositoryError> {
     };
     let state = match row.state.as_str() {
         value if value == HostedIssuerState::Active.as_str() => HostedIssuerState::Active,
-        value if value == HostedIssuerState::Disabled.as_str() => HostedIssuerState::Disabled,
+        value if value == HostedIssuerState::Suspended.as_str() || value == "disabled" => {
+            HostedIssuerState::Suspended
+        }
         other => {
             return Err(RepositoryError::DataError(format!(
                 "hosted issuer `{}` has unknown state `{other}`",
@@ -291,6 +293,7 @@ impl SeaOrmStore<HostedIssuerRow> {
     async fn create_issuer_unit(
         &self,
         issuer: HostedIssuer,
+        actor: &str,
     ) -> Result<HostedIssuer, RepositoryError> {
         time_query("insert", "hosted_issuer", async {
             let db = self.current();
@@ -302,6 +305,20 @@ impl SeaOrmStore<HostedIssuerRow> {
                 let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
                 match insert_issuer_row(&txn, &stored).await {
                     Ok(()) => {
+                        append_lifecycle_audit(
+                            &txn,
+                            &stored.id,
+                            actor,
+                            "issuer.created",
+                            None,
+                            Some(serde_json::json!({
+                                "state": stored.state.as_str(),
+                                "version": stored.version,
+                                "aggregation_id": stored.aggregation_id.0,
+                            })),
+                        )
+                        .await
+                        .map_err(err_txn)?;
                         txn.commit().await.map_err(map_insert_err)?;
                         // The row stores whole-second timestamps; return what was
                         // persisted so the returned issuer matches a re-read.
@@ -344,7 +361,7 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), RepositoryError> {
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), RepositoryError> {
         // The `kid` column is authoritative (the registry keeps the same
         // rule): a key whose embedded `kid` disagrees with its row never
         // enters storage.
@@ -401,6 +418,16 @@ impl SeaOrmStore<HostedIssuerRow> {
             .await;
             match insert {
                 Ok(_) => {
+                    append_lifecycle_audit(
+                        &txn,
+                        &key.issuer_id,
+                        actor,
+                        "key.registered",
+                        None,
+                        Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str()})),
+                    )
+                    .await
+                    .map_err(err_txn)?;
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
                 }
@@ -543,15 +570,19 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .map_err(Into::into)
     }
 
-    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError> {
+    async fn create_issuer(
+        &self,
+        issuer: HostedIssuer,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
         self.store
-            .create_issuer_unit(issuer)
+            .create_issuer_unit(issuer, actor)
             .await
             .map_err(Into::into)
     }
 
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
-        self.store.add_key(key).await.map_err(hosted_error)
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {
+        self.store.add_key(key, actor).await.map_err(hosted_error)
     }
 
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
@@ -570,6 +601,149 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
 
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError> {
         self.store.find_issuer_ids(ids).await.map_err(Into::into)
+    }
+}
+
+async fn append_lifecycle_audit(
+    txn: &sea_orm::DatabaseTransaction,
+    issuer_id: &str,
+    actor: &str,
+    action: &str,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+) -> Result<(), DbErr> {
+    issuer_audit_events::Entity::insert(issuer_audit_events::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        issuer_id: Set(Some(issuer_id.to_owned())),
+        actor: Set(Some(actor.to_owned())),
+        action: Set(action.to_owned()),
+        before: Set(before),
+        after: Set(after),
+        created_at: Set(OffsetDateTime::now_utc().unix_timestamp()),
+    })
+    .exec_without_returning(txn)
+    .await
+    .map(|_| ())
+}
+
+#[async_trait]
+impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
+    async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: HostedIssuerState,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        let row = issuers::Entity::find_by_id(issuer_id)
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .one(&txn)
+            .await
+            .map_err(err_txn)?
+            .ok_or(HostedIssuerError::NotFound)?;
+        let previous = parse_issuer(row.clone())?;
+        if state == HostedIssuerState::Active
+            && previous
+                .expires_at
+                .is_some_and(|expiry| expiry <= OffsetDateTime::now_utc())
+        {
+            return Err(HostedIssuerError::InvalidExpiry(
+                "an expired issuer cannot be reactivated".into(),
+            ));
+        }
+        if previous.state == state {
+            txn.commit().await.map_err(err_txn)?;
+            return Ok(previous);
+        }
+        let next_version = row.version.checked_add(1).ok_or_else(|| {
+            HostedIssuerError::Backend(Box::new(std::io::Error::other("issuer version overflow")))
+        })?;
+        let changed = issuers::Entity::update_many()
+            .col_expr(issuers::Column::State, Expr::value(state.as_str()))
+            .col_expr(issuers::Column::Version, Expr::value(next_version))
+            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .filter(issuers::Column::Version.eq(row.version))
+            .exec(&txn)
+            .await
+            .map_err(err_txn)?;
+        if changed.rows_affected != 1 {
+            return Err(HostedIssuerError::Contention {
+                code: "issuer_version",
+            });
+        }
+        append_lifecycle_audit(
+            &txn,
+            issuer_id,
+            actor,
+            "issuer.state_changed",
+            Some(serde_json::json!({"state": row.state, "version": row.version})),
+            Some(serde_json::json!({"state": state.as_str(), "version": next_version})),
+        )
+        .await
+        .map_err(err_txn)?;
+        txn.commit().await.map_err(err_txn)?;
+        Ok(HostedIssuer {
+            state,
+            version: next_version as u64,
+            ..previous
+        })
+    }
+
+    async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError> {
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        let row = hosted_issuer_keys::Entity::find_by_id(kid)
+            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .one(&txn)
+            .await
+            .map_err(err_txn)?
+            .ok_or(HostedIssuerError::NotFound)?;
+        let owner = issuers::Entity::find_by_id(issuer_id)
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .one(&txn)
+            .await
+            .map_err(err_txn)?;
+        if owner.is_none() {
+            return Err(HostedIssuerError::NotFound);
+        }
+        let previous = parse_key(row.clone())?;
+        if previous.state == HostedIssuerKeyState::Revoked {
+            txn.commit().await.map_err(err_txn)?;
+            return Ok(previous);
+        }
+        let changed = hosted_issuer_keys::Entity::update_many()
+            .col_expr(hosted_issuer_keys::Column::State, Expr::value("revoked"))
+            .filter(hosted_issuer_keys::Column::Kid.eq(kid))
+            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .filter(hosted_issuer_keys::Column::State.eq(row.state.as_str()))
+            .exec(&txn)
+            .await
+            .map_err(err_txn)?;
+        if changed.rows_affected != 1 {
+            return Err(HostedIssuerError::Contention { code: "key_state" });
+        }
+        append_lifecycle_audit(
+            &txn,
+            issuer_id,
+            actor,
+            "key.revoked",
+            Some(serde_json::json!({"kid": kid, "state": row.state})),
+            Some(serde_json::json!({"kid": kid, "state": "revoked"})),
+        )
+        .await
+        .map_err(err_txn)?;
+        txn.commit().await.map_err(err_txn)?;
+        Ok(HostedIssuerKey {
+            state: HostedIssuerKeyState::Revoked,
+            ..previous
+        })
     }
 }
 

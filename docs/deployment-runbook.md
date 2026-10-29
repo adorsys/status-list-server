@@ -128,7 +128,19 @@ For a zero-downtime rotation:
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
 5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+For emergency revocation, remove the compromised key from `keys`; to suspend the whole issuer, set its `disabled` field to `true`. Commit the change when the operator-managed registry is version-controlled, validate the file, then publish it to the mounted source. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer needs to authenticate, and do not delete the durable mapping while published tokens may still reference its URL. Public status-list reads continue while the issuer is disabled.
+
+Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
+
+For a hosted issuer, use the admin listener with a registry admin JWT carrying
+`issuers:write`: `PATCH /api/v1/issuers/{issuer_id}/state` with
+`{"state":"suspended"}` suspends it, and
+`POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes a key.
+The committed state and actor audit event are written in one database
+transaction. Send the old issuer token to each pod's management listener and
+confirm `401`; public status-list reads remain available. A revoked `kid`
+remains stored and cannot be reused. An expired hosted issuer is rejected at
+verification time, even if no cleanup job has run.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
