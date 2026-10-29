@@ -133,8 +133,12 @@ For emergency revocation, remove the compromised key from `keys`; to suspend the
 Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
 
 For a hosted issuer, use the admin listener with a registry admin JWT carrying
-`issuers:write`: `PATCH /api/v1/issuers/{issuer_id}/state` with
-`{"state":"suspended"}` suspends it, and
+`issuers:write`. Read the current version with
+`GET /api/v1/issuers/{issuer_id}/state`, then send
+`PATCH /api/v1/issuers/{issuer_id}/state` with
+`{"state":"suspended","expected_version":1}` suspends it when the
+current version is 1; a stale version returns `409 issuer_version_mismatch` and
+requires reading the current version before retrying. The revoke endpoint
 `POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes a key.
 The committed state and actor audit event are written in one database
 transaction. Send the old issuer token to each pod's management listener and

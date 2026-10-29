@@ -7,7 +7,7 @@ info:
 
     This service implements the
     [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
-    and allows credential issuers to register, publish, and update status lists.
+    and allows trusted credential issuers to publish and update status lists.
     Relying parties can retrieve status list tokens in JWT or CWT format.
 
     Error responses are JSON objects of the form
@@ -30,8 +30,8 @@ info:
     operator-configurable through the `APP_RATE_LIMIT__*` environment
     variables (see `RateLimitConfig`):
 
-      * **strict** (per source IP) — `POST /api/v1/credentials` and hosted
-        issuer lifecycle routes on the admin listener.
+      * **strict** (per source IP) — hosted issuer lifecycle routes on the
+        admin listener.
         Tunables: `strict_burst_size`, `strict_period_secs`
         (defaults: 10 / 60s).
       * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
@@ -192,6 +192,39 @@ paths:
               example: "NOT_READY"
 
   /api/v1/issuers/{issuer_id}/state:
+    get:
+      operationId: getHostedIssuerState
+      summary: Read a hosted issuer's state and version
+      description: |
+        ADMIN LISTENER (default :8002), hosted profile only. Requires a signed
+        registry admin JWT with `issuers:write`. Use the returned version as
+        `expected_version` in a subsequent state change.
+      servers:
+        - url: http://{admin_host}
+          variables:
+            admin_host:
+              default: localhost:8002
+      parameters:
+        - name: issuer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current issuer state and version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedIssuerState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Hosted issuer not found or hosted profile unavailable
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          description: Trust backend unavailable
     patch:
       operationId: changeHostedIssuerState
       summary: Suspend or reactivate a hosted issuer
@@ -200,6 +233,8 @@ paths:
         admin JWT whose registry principal has the `issuers:write` scope.
         Expiry is enforced at verification time; an expired issuer cannot be
         reactivated. A state change and its actor audit event commit together.
+        Supply the version observed before preparing this change. A stale
+        version returns `409 issuer_version_mismatch`, including for a no-op.
       servers:
         - url: http://{admin_host}
           variables:
@@ -217,29 +252,27 @@ paths:
           application/json:
             schema:
               type: object
-              required: [state]
+              required: [state, expected_version]
               properties:
                 state:
                   type: string
                   enum: [active, suspended]
+                expected_version:
+                  type: integer
+                  minimum: 1
       responses:
         "200":
           description: Current issuer state
           content:
             application/json:
               schema:
-                type: object
-                required: [issuer_id, state, version]
-                properties:
-                  issuer_id: {type: string}
-                  state: {type: string, enum: [active, suspended]}
-                  version: {type: integer, minimum: 1}
+                $ref: "#/components/schemas/HostedIssuerState"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           description: Hosted issuer not found or hosted profile unavailable
         "409":
-          description: Concurrent lifecycle write; retry the request
+          description: Stale issuer version; read the current state before retrying
         "422":
           description: Expired issuer cannot be reactivated
         "500":
@@ -332,12 +365,12 @@ paths:
 
   /api/v1/credentials:
     get:
-      operationId: getIssuerRegistration
+      operationId: getIssuerAggregationInfo
       summary: Get the calling issuer's aggregation ID and URI
       description: |
         Returns the aggregation ID and URI of the issuer the Bearer token
-        belongs to. Issuers registered before aggregation IDs existed never got
-        theirs in the registration response, and get them here.
+        belongs to. Issuers provisioned before aggregation IDs existed can get
+        their assigned ID here.
 
         MANAGEMENT LISTENER: served on the management listener (default :8001).
       servers:
@@ -349,11 +382,11 @@ paths:
               description: Host name and port of the management listener.
       responses:
         "200":
-          description: The issuer's registration.
+          description: The issuer's aggregation information.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RegistrationResponse"
+                $ref: "#/components/schemas/IssuerAggregationInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -362,58 +395,6 @@ paths:
           $ref: "#/components/responses/InternalServerError"
         "503":
           $ref: "#/components/responses/ManagementServiceUnavailable"
-
-    post:
-      operationId: registerIssuer
-      summary: Register issuer credentials
-      deprecated: true
-      description: |
-        Creates a legacy issuer record used for status-list ownership and
-        aggregation lookup. Management JWT verification uses only the
-        operator-managed issuer registry; this endpoint cannot establish trust
-        for a signing key.
-
-        **Deprecated.** Issuers are provisioned by the server operator. Do not
-        build new integrations on self-registration.
-
-        MANAGEMENT LISTENER: served on the management listener (default :8001).
-      security: []
-      servers:
-        - url: https://{management_host}
-          description: Management listener (authenticated issuer writes, default :8001).
-          variables:
-            management_host:
-              default: localhost:8001
-              description: Host name and port of the management listener.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CredentialsRequest"
-      responses:
-        "202":
-          description: |
-            Credentials accepted and stored. The body tells the issuer its
-            aggregation ID, which it cannot derive itself, and the aggregation
-            URI to publish in its metadata (draft-21 §9.1).
-            `GET /api/v1/credentials` returns them again later.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CredentialsResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/CredentialConflict"
-        "413":
-          $ref: "#/components/responses/PayloadTooLarge"
-        "422":
-          $ref: "#/components/responses/UnprocessableEntity"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/aggregation/{aggregation_id}:
     get:
@@ -437,8 +418,8 @@ paths:
           in: path
           required: true
           description: |
-            The issuer's aggregation ID, as returned at registration and by
-            `GET /api/v1/credentials`.
+            The issuer's aggregation ID, available from the authenticated
+            `GET /api/v1/credentials` endpoint.
           schema:
             type: string
             format: uuid
@@ -1043,44 +1024,15 @@ components:
         a bad key.
 
   schemas:
-    CredentialsRequest:
+    HostedIssuerState:
       type: object
-      required:
-        - issuer
-        - public_key
+      required: [issuer_id, state, version]
       properties:
-        issuer:
-          type: string
-          description: Unique identifier of the issuer.
-          example: "my-issuer"
-        public_key:
-          $ref: "#/components/schemas/JWK"
+        issuer_id: {type: string}
+        state: {type: string, enum: [active, suspended]}
+        version: {type: integer, minimum: 1}
 
-    CredentialsResponse:
-      type: object
-      required:
-        - status
-        - aggregation_id
-      properties:
-        status:
-          type: string
-          example: "Credentials stored successfully"
-        aggregation_id:
-          type: string
-          format: uuid
-          description: |
-            Opaque ID that names this issuer in public aggregation URIs, in
-            place of the issuer identifier.
-          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
-        aggregation_uri:
-          type: string
-          format: uri
-          description: |
-            The issuer's Status List Aggregation URI. Absent when status list
-            tokens do not carry one (see `StatusList.aggregation_uri`).
-          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
-
-    RegistrationResponse:
+    IssuerAggregationInfo:
       type: object
       required:
         - issuer
@@ -1100,56 +1052,6 @@ components:
             Absent when status list tokens do not carry one (see
             `StatusList.aggregation_uri`).
           example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
-
-    JWK:
-      type: object
-      description: |
-        JSON Web Key representing the issuer's public key. The exact fields
-        depend on the key type (e.g., `kty`, `crv`, `x`, `y` for EC keys).
-        Only public signing keys are accepted; symmetric keys and private key
-        members are rejected. `alg` must match the key type and curve.
-        RSA moduli must have 2048 to 8192 bits. If `use` is present it must be `sig`.
-      required:
-        - kty
-        - kid
-        - alg
-      properties:
-        kid:
-          type: string
-          minLength: 1
-          maxLength: 255
-          description: |
-            Management key identifier, unique across every issuer and admin
-            entry in the operator-managed registry.
-          example: "issuer-key-1"
-        alg:
-          type: string
-          enum: [ES256, ES384, EdDSA, PS256]
-          description: Signing algorithm; EdDSA requires Ed25519.
-          example: "ES256"
-        kty:
-          type: string
-          description: Key type.
-          example: "EC"
-        crv:
-          type: string
-          description: Curve name for EC keys.
-          example: "P-256"
-        x:
-          type: string
-          description: X coordinate of the public key.
-          example: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
-        y:
-          type: string
-          description: Y coordinate of the public key.
-          example: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
-      example:
-        kty: "EC"
-        crv: "P-256"
-        kid: "issuer-key-1"
-        alg: "ES256"
-        x: "NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8"
-        y: "eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"
 
     StatusUpdateRequest:
       type: object
@@ -1693,42 +1595,6 @@ components:
                 error: "write_contention"
                 error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
 
-    CredentialConflict:
-      description: |
-        The credential registration was rejected. Read the `error` field.
-
-        `credentials_already_exist` — this issuer or key ID is already
-        registered. **Retrying the identical registration will never succeed.**
-
-        `write_contention` — the write lost a lock race inside the database
-        (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
-        so **retry the identical request** after the `Retry-After` interval plus
-        jitter.
-      headers:
-        Retry-After:
-          description: |
-            Present only for `write_contention`. Seconds to wait before
-            retrying — a minimum, not a schedule.
-          required: false
-          schema:
-            type: integer
-            example: 1
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
-          examples:
-            alreadyExists:
-              summary: This issuer or key ID is already registered (do not retry)
-              value:
-                error: "credentials_already_exist"
-                error_description: "Credentials already exist for this issuer or key ID"
-            writeContention:
-              summary: Rolled back by a storage lock race (retry unchanged)
-              value:
-                error: "write_contention"
-                error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
-
     PayloadTooLarge:
       description: |
         The request body exceeds the operator-configurable
@@ -1746,8 +1612,7 @@ components:
       description: |
         The request was well-formed but the resulting serialized status list
         exceeds the operator-configurable `limits.max_serialized_list_size`
-        (default 1 MiB), or (for `POST /api/v1/credentials`) the supplied
-        public key could not be parsed into a JWK.
+        (default 1 MiB).
       content:
         application/json:
           schema:

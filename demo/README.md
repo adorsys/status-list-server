@@ -194,7 +194,11 @@ must never be used outside local development.
 ## Hosted issuer emergency actions
 
 In the hosted profile, an operator uses the admin listener with a registry admin
-JWT carrying `issuers:write`. `PATCH /api/v1/issuers/{issuer_id}/state` with
-`{"state":"suspended"}` blocks the issuer's next management request.
+JWT carrying `issuers:write`. Read the current version with
+`GET /api/v1/issuers/{issuer_id}/state`, then send
+`PATCH /api/v1/issuers/{issuer_id}/state` with
+`{"state":"suspended","expected_version":1}` blocks the issuer's next
+management request when the issuer is still at version 1. A stale version
+returns `409 issuer_version_mismatch`; read the current version before retrying.
 `POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes one
 key. The public status-list endpoint remains readable after either action.

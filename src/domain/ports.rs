@@ -73,10 +73,13 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
 /// transition and its audit record in one transaction.
 #[async_trait]
 pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
+    async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError>;
+
     async fn set_issuer_state(
         &self,
         issuer_id: &str,
         state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;
 

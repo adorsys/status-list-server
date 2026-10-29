@@ -628,10 +628,18 @@ async fn append_lifecycle_audit(
 
 #[async_trait]
 impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
+    async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+        load_issuer(issuer_id, self.store.current().as_ref())
+            .await
+            .map_err(HostedIssuerError::from)?
+            .ok_or(HostedIssuerError::NotFound)
+    }
+
     async fn set_issuer_state(
         &self,
         issuer_id: &str,
         state: HostedIssuerState,
+        expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
         let db = self.store.current();
@@ -643,6 +651,9 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
             .map_err(err_txn)?
             .ok_or(HostedIssuerError::NotFound)?;
         let previous = parse_issuer(row.clone())?;
+        if previous.version != expected_version {
+            return Err(HostedIssuerError::VersionMismatch);
+        }
         if state == HostedIssuerState::Active
             && previous
                 .expires_at
@@ -664,14 +675,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
             .col_expr(issuers::Column::Version, Expr::value(next_version))
             .filter(issuers::Column::Issuer.eq(issuer_id))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-            .filter(issuers::Column::Version.eq(row.version))
+            .filter(issuers::Column::Version.eq(expected_version as i64))
             .exec(&txn)
             .await
             .map_err(err_txn)?;
         if changed.rows_affected != 1 {
-            return Err(HostedIssuerError::Contention {
-                code: "issuer_version",
-            });
+            return Err(HostedIssuerError::VersionMismatch);
         }
         append_lifecycle_audit(
             &txn,

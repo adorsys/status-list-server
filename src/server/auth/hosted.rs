@@ -1265,7 +1265,12 @@ mod tests {
         use crate::domain::ports::HostedIssuerLifecycleStore;
         let lifecycle = crate::outbound::sql::SqlHostedIssuerStore::new(db.clone());
         lifecycle
-            .set_issuer_state(&hosted.id, HostedIssuerState::Suspended, "portal-operator")
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Suspended,
+                hosted.version,
+                "portal-operator",
+            )
             .await
             .unwrap();
         for replica in [app.clone(), other.clone()] {
@@ -1284,7 +1289,12 @@ mod tests {
             assert_eq!(public.status(), StatusCode::OK);
         }
         lifecycle
-            .set_issuer_state(&hosted.id, HostedIssuerState::Active, "portal-operator")
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Active,
+                hosted.version + 1,
+                "portal-operator",
+            )
             .await
             .unwrap();
         use crate::outbound::sql::issuers;

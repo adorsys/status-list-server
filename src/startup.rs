@@ -374,7 +374,8 @@ fn hosted_admin_routes(
     Router::new()
         .route(
             "/api/v1/issuers/{issuer_id}/state",
-            patch(crate::server::handlers::hosted_lifecycle::change_issuer_state),
+            get(crate::server::handlers::hosted_lifecycle::get_issuer_state)
+                .patch(crate::server::handlers::hosted_lifecycle::change_issuer_state),
         )
         .route(
             "/api/v1/issuers/{issuer_id}/keys/{kid}/revoke",

@@ -161,7 +161,7 @@
               { "key": "Content-Type", "value": "application/json" },
               { "key": "Authorization", "value": "Bearer {{adminToken}}" }
             ],
-            "body": { "mode": "raw", "raw": "{\"state\":\"suspended\"}" },
+            "body": { "mode": "raw", "raw": "{\"state\":\"suspended\",\"expected_version\":1}" },
             "url": {
               "raw": "{{adminUrl}}/api/v1/issuers/{{issuer_id}}/state",
               "host": ["{{adminUrl}}"],

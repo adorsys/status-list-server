@@ -164,6 +164,8 @@ pub enum HostedIssuerError {
     InvalidPublicJwk(String),
     #[error("invalid expiry: {0}")]
     InvalidExpiry(String),
+    #[error("issuer version has changed; read the current state before retrying")]
+    VersionMismatch,
     /// A persisted hosted row is malformed and can never parse: a permanent
     /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]

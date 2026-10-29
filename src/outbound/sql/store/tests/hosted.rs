@@ -491,10 +491,40 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
     assert!(first_resolver.resolve("lifecycle-key").await.is_ok());
     assert!(second_resolver.resolve("lifecycle-key").await.is_ok());
 
-    first
-        .set_issuer_state(&issuer.id, HostedIssuerState::Suspended, "portal-admin")
+    let suspended = first
+        .set_issuer_state(
+            &issuer.id,
+            HostedIssuerState::Suspended,
+            issuer.version,
+            "portal-admin",
+        )
         .await
         .unwrap();
+    assert!(matches!(
+        second
+            .set_issuer_state(
+                &issuer.id,
+                HostedIssuerState::Active,
+                issuer.version,
+                "portal-admin",
+            )
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+    let still_suspended = second.get_issuer(&issuer.id).await.unwrap();
+    assert_eq!(still_suspended.state, HostedIssuerState::Suspended);
+    assert_eq!(still_suspended.version, suspended.version);
+    assert!(matches!(
+        second
+            .set_issuer_state(
+                &issuer.id,
+                HostedIssuerState::Suspended,
+                issuer.version,
+                "portal-admin",
+            )
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
     for resolver in [&first_resolver, &second_resolver] {
         assert!(matches!(
             resolver.resolve("lifecycle-key").await,
@@ -502,7 +532,12 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
         ));
     }
     second
-        .set_issuer_state(&issuer.id, HostedIssuerState::Active, "portal-admin")
+        .set_issuer_state(
+            &issuer.id,
+            HostedIssuerState::Active,
+            suspended.version,
+            "portal-admin",
+        )
         .await
         .unwrap();
     second
@@ -596,7 +631,12 @@ async fn failed_audit_insert_rolls_back_lifecycle_change() {
     .unwrap();
     assert!(
         store
-            .set_issuer_state(&hosted.id, HostedIssuerState::Suspended, "portal-admin")
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Suspended,
+                hosted.version,
+                "portal-admin",
+            )
             .await
             .is_err()
     );

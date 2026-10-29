@@ -122,13 +122,20 @@ impl HostedIssuerLifecycleService {
         Self { store }
     }
 
+    pub async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+        self.store.get_issuer(issuer_id).await
+    }
+
     pub async fn set_issuer_state(
         &self,
         issuer_id: &str,
         state: HostedIssuerState,
+        expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
-        self.store.set_issuer_state(issuer_id, state, actor).await
+        self.store
+            .set_issuer_state(issuer_id, state, expected_version, actor)
+            .await
     }
 
     pub async fn revoke_key(
