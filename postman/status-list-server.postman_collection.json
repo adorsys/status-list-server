@@ -152,59 +152,7 @@
     },
     {
       "name": "Issuer Management",
-      "item": [
-        {
-          "name": "Register issuer credentials",
-          "request": {
-            "auth": {
-              "type": "noauth"
-            },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Accept",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"issuer\": \"{{issuer_id}}\",\n  \"public_key\": {\n    \"kty\": \"EC\",\n    \"crv\": \"P-256\",\n    \"x\": \"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\",\n    \"y\": \"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\",\n    \"kid\": \"{{issuer_id}}\",\n    \"alg\": \"ES256\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{managementUrl}}/api/v1/credentials",
-              "host": [
-                "{{managementUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "credentials"
-              ]
-            }
-          },
-          "response": [],
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('credentials are accepted', function () { pm.response.to.have.status(202); });",
-                  "pm.test('response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
-                  "pm.test('response body matches expected shape', function () {",
-                  "  var body = pm.response.json();",
-                  "  pm.expect(body).to.have.property('status');",
-                  "});"
-                ]
-              }
-            }
-          ]
-        }
-      ]
+      "item": []
     },
     {
       "name": "Status Lists",

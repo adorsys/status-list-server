@@ -17,6 +17,11 @@ MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
 POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
+if [[ -z "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
+  echo "POSTMAN_ISSUER_REGISTRY_FILE must point to the registry file loaded by the server (APP_MANAGEMENT_AUTH__ISSUERS_FILE)." >&2
+  exit 2
+fi
+
 tmp_dir=""
 cleanup() {
   if [[ -n "${tmp_dir:-}" ]]; then
@@ -134,22 +139,20 @@ const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' })
 publicKeyJwk.kid = header.kid;
 publicKeyJwk.alg = header.alg;
 
-if (registryFile) {
-  const registryContent = JSON.stringify({
-    version: 1,
-    issuers: [{
-      id: issuerId,
-      aggregation_id: listId,
-      display_name: 'Newman test issuer',
-      tier: 'standard',
-      keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
-    }],
-    admins: [],
-  }, null, 2);
-  const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
-  fs.writeFileSync(temporaryRegistry, registryContent);
-  fs.renameSync(temporaryRegistry, registryFile);
-}
+const registryContent = JSON.stringify({
+  version: 1,
+  issuers: [{
+    id: issuerId,
+    aggregation_id: listId,
+    display_name: 'Newman test issuer',
+    tier: 'standard',
+    keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
+  }],
+  admins: [],
+}, null, 2);
+const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
+fs.writeFileSync(temporaryRegistry, registryContent);
+fs.renameSync(temporaryRegistry, registryFile);
 
 function visitItems(items, visitor) {
   for (const item of items || []) {
@@ -157,15 +160,6 @@ function visitItems(items, visitor) {
     if (item.item) visitItems(item.item, visitor);
   }
 }
-
-visitItems(collection.item, (item) => {
-  if (item.name === 'Register issuer credentials' && item.request?.body?.raw) {
-    item.request.body.raw = JSON.stringify({
-      issuer: issuerId,
-      public_key: publicKeyJwk,
-    }, null, 2);
-  }
-});
 
 const values = new Map([
   ['baseUrl', baseUrl],
@@ -225,24 +219,22 @@ fi
 
 generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 wait_for_api
-if [[ -n "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
-  # Wait for the generated key to authenticate, rather than guessing how long
-  # the file watcher will take on this runner.
-  token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="token").value)' "$environment_artifact")"
-  if [[ -n "$MANAGEMENT_URL" ]]; then
-    probe_url="${MANAGEMENT_URL%/}"
-  else
-    probe_url="$(_sibling_url "$API_ENDPOINT" 8001)"
-  fi
-  deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
-  until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "$probe_url/api/v1/credentials" 2>/dev/null || true)" == "200" ]]; do
-    if (( SECONDS >= deadline )); then
-      echo "Timed out waiting for generated issuer key to authenticate" >&2
-      exit 14
-    fi
-    sleep 1
-  done
+# Wait for the generated key to authenticate instead of guessing how long
+# the server's registry file watcher will take to reload.
+token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="token").value)' "$environment_artifact")"
+if [[ -n "$MANAGEMENT_URL" ]]; then
+  probe_url="${MANAGEMENT_URL%/}"
+else
+  probe_url="$(_sibling_url "$API_ENDPOINT" 8001)"
 fi
+deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
+until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "$probe_url/api/v1/credentials" 2>/dev/null || true)" == "200" ]]; do
+  if (( SECONDS >= deadline )); then
+    echo "Timed out waiting for generated issuer key to authenticate" >&2
+    exit 14
+  fi
+  sleep 1
+done
 
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
