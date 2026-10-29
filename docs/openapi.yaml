@@ -3,6 +3,9 @@ info:
   title: Status List Server
   version: 0.1.0
   description: |
+    Protected issuer reads on the admin listener are documented separately in
+    [the Admin API contract](./openapi-admin.yaml).
+
     REST API for the Status List Server.
 
     This service implements the

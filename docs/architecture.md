@@ -125,7 +125,10 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and issuer identity lookup (`GET /api/v1/credentials`).
-- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`), metrics (`/metrics` when `server.enable_metrics`), and registry-protected issuer reads (`GET /admin/v1/issuers` and `GET /admin/v1/issuers/{issuer_id}`).
+
+See [Admin issuer reads](admin-api.md) for authentication, pagination, quota
+reporting, and ETag semantics.
 
 #### Deployment profiles
 

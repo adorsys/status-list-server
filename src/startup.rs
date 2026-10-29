@@ -91,7 +91,10 @@ impl HttpServer {
         .with_state(state.clone());
 
         let admin_router = with_listener_name(
-            with_common_layers(admin_routes(config, prometheus_registry), config),
+            with_common_layers(
+                admin_routes(state.clone(), config, prometheus_registry),
+                config,
+            ),
             "admin",
         )
         .with_state(state);
@@ -342,8 +345,22 @@ fn management_routes(
 /// Routes owned by the admin listener: readiness and (optionally) metrics.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
-fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
-    let router = Router::new().route("/health/ready", get(health::ready));
+fn admin_routes(state: AppState, config: &Config, registry: Registry) -> Router<AppState> {
+    let admin_api = Router::new()
+        .route(
+            "/issuers",
+            get(crate::server::handlers::admin::list_issuers),
+        )
+        .route(
+            "/issuers/{issuer_id}",
+            get(crate::server::handlers::admin::get_issuer),
+        );
+    let router = Router::new()
+        .route("/health/ready", get(health::ready))
+        .nest(
+            "/admin/v1",
+            admin_api.route_layer(from_fn_with_state(state, crate::server::auth::admin_auth)),
+        );
     attach_metrics(router, config, registry)
 }
 
@@ -532,7 +549,8 @@ mod tests {
 
         let public = public_routes(permissive).with_state(state.clone());
         let management = management_routes(state.clone(), issuer).with_state(state.clone());
-        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
+        let admin =
+            admin_routes(state.clone(), &config, prometheus::Registry::new()).with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
             let request = Request::builder()
@@ -599,6 +617,8 @@ mod tests {
             // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
+            (Method::GET, "/admin/v1/issuers", ADMIN),
+            (Method::GET, "/admin/v1/issuers/example", ADMIN),
         ];
 
         for (method, path, owner) in routes {

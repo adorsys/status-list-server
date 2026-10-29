@@ -23,6 +23,7 @@ statuslist:
     # Issuers targeting the AWS production deployment must use this exact aud.
     # Other deployments must override it with their own audience.
     APP_MANAGEMENT_AUTH__AUDIENCES: "https://statuslist.eudi-adorsys.com/api/v1"
+    APP_ADMIN_AUTH__AUDIENCES: "https://statuslist.eudi-adorsys.com/admin"
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"

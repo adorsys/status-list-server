@@ -413,6 +413,14 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             crate::server::auth::issuer_registry::RegistryHandle::empty()
         }
     });
+    if let Err(message) = validate_admin_auth_settings(
+        config.telemetry.environment,
+        &config.admin_auth.audiences,
+        &config.management_auth.audiences,
+        !issuer_registry.snapshot().admins().is_empty(),
+    ) {
+        color_eyre::eyre::bail!("{message}");
+    }
     // Hoisted DB handle captured from the backend branches below so the
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
@@ -905,6 +913,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
+        admin_auth: crate::server::AdminAuthConfig::from(&config.admin_auth),
+        admin_registry: issuer_registry.clone(),
+        hosted_issuer_store: dynamic_issuer_store.clone(),
         issuer_key_resolver: build_issuer_key_resolver(
             issuer_registry.clone(),
             dynamic_issuer_store.clone(),
@@ -943,6 +954,26 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     {
         Ok((state,))
     }
+}
+
+fn validate_admin_auth_settings(
+    environment: crate::config::TelemetryEnvironment,
+    admin_audiences: &[String],
+    management_audiences: &[String],
+    admins_configured: bool,
+) -> Result<(), &'static str> {
+    if admin_audiences
+        .iter()
+        .any(|aud| management_audiences.contains(aud))
+    {
+        return Err("admin_auth.audiences and management_auth.audiences must not overlap");
+    }
+    if admins_configured && environment.is_production() && admin_audiences.is_empty() {
+        return Err(
+            "admin_auth.audiences must not be empty in production when admins are configured",
+        );
+    }
+    Ok(())
 }
 
 /// A hosted deployment resolves through the composite: the static registry
@@ -1639,6 +1670,26 @@ mod general_tests {
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn admin_auth_settings_require_a_distinct_audience_and_production_configuration() {
+        let production = crate::config::TelemetryEnvironment::Production;
+        assert!(validate_admin_auth_settings(production, &[], &[], false).is_ok());
+        assert!(validate_admin_auth_settings(production, &[], &[], true).is_err());
+        assert!(
+            validate_admin_auth_settings(production, &["shared".into()], &["shared".into()], true,)
+                .is_err()
+        );
+        assert!(
+            validate_admin_auth_settings(
+                production,
+                &["admin".into()],
+                &["management".into()],
+                true,
+            )
+            .is_ok()
+        );
+    }
 
     #[derive(Debug)]
     struct UnavailableCredentials;
@@ -2727,6 +2778,22 @@ mod general_tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for ProbeStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_issuer_ids(
             &self,
             ids: &[String],
