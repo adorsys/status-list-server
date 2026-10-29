@@ -231,9 +231,9 @@ paths:
                 type: object
                 required: [issuer_id, state, version]
                 properties:
-                  issuer_id: { type: string }
-                  state: { type: string, enum: [active, suspended] }
-                  version: { type: integer, minimum: 1 }
+                  issuer_id: {type: string}
+                  state: {type: string, enum: [active, suspended]}
+                  version: {type: integer, minimum: 1}
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -265,11 +265,11 @@ paths:
         - name: issuer_id
           in: path
           required: true
-          schema: { type: string }
+          schema: {type: string}
         - name: kid
           in: path
           required: true
-          schema: { type: string }
+          schema: {type: string}
       responses:
         "200":
           description: Key is revoked
@@ -279,9 +279,9 @@ paths:
                 type: object
                 required: [issuer_id, kid, state]
                 properties:
-                  issuer_id: { type: string }
-                  kid: { type: string }
-                  state: { type: string, const: revoked }
+                  issuer_id: {type: string}
+                  kid: {type: string}
+                  state: {type: string, const: revoked}
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
