@@ -1,6 +1,8 @@
 //! Authentication middleware validating bearer JWTs against registered issuer credentials.
 
 pub mod errors;
+pub mod hosted;
+pub mod hosted_service;
 pub mod issuer_registry;
 
 use axum::{
@@ -17,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::models::credential::Principal;
 #[cfg(test)]
 use crate::domain::models::credential::PublicJwk;
 use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
+use crate::domain::models::credential::{KeyResolveError, Principal};
 use crate::server::{AppState, error::ApiError};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
@@ -232,10 +234,23 @@ pub async fn auth(
         return Err(invalid_auth(Some(&kid), None, "algorithm is not allowed"));
     }
 
-    let resolved = state
-        .issuer_key_resolver
-        .resolve(&kid)
-        .map_err(|reason| invalid_auth(Some(&kid), None, reason))?;
+    let resolved = match state.issuer_key_resolver.resolve(&kid).await {
+        Err(KeyResolveError::BackendUnavailable) => {
+            // The header `kid` is unauthenticated here, so it is not used as a
+            // label; only the retryable outcome is recorded.
+            crate::utils::metrics::record_management_auth_request(
+                None,
+                None,
+                "backend_unavailable",
+            );
+            tracing::warn!(
+                kid = %bounded_identifier(Some(&kid)),
+                "management JWT rejected: the trust backend is unavailable"
+            );
+            return Err(AuthenticationError::BackendUnavailable);
+        }
+        result => result.map_err(|reason| invalid_auth(Some(&kid), None, reason))?,
+    };
     let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
         Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
         Principal::Admin { id } => {
@@ -303,9 +318,11 @@ pub async fn auth(
             authenticated_issuer,
             registered_aggregation_id,
         ));
+    let metric_issuer = bounded_identifier(Some(registered_issuer));
+    let metric_kid = bounded_identifier(Some(&kid));
     crate::utils::metrics::record_management_auth_request(
-        Some(registered_issuer),
-        Some(&kid),
+        Some(&metric_issuer),
+        Some(&metric_kid),
         "success",
     );
     Ok(next.run(request).await)
@@ -574,6 +591,7 @@ mod tests {
         crate::setup::spawn_issuer_registry_watcher(
             handle.clone(),
             state.service,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -1324,6 +1342,7 @@ mod tests {
             crate::setup::spawn_issuer_registry_watcher(
                 registry.clone(),
                 state.service,
+                None,
                 file.clone(),
                 Duration::from_secs(1),
             );

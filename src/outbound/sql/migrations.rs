@@ -23,6 +23,10 @@ impl MigratorTrait for Migrator {
             Box::new(credentials_key_id::Migration),
             Box::new(issuer_aggregations::Migration),
             Box::new(issuer_ownership::Migration),
+            Box::new(hosted_issuers::Migration),
+            Box::new(issuer_keys::Migration),
+            Box::new(issuer_audit_events::Migration),
+            Box::new(issuer_keys_carry_over::Migration),
         ]
     }
 
@@ -131,6 +135,8 @@ fn forward_only(refused: &str) -> DbErr {
 /// Extend this list if new transactional tables are added.
 const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
+    "issuer_audit_events",
+    "issuer_keys",
     "issuers",
     "status_lists",
     "status_list_history",
@@ -1926,5 +1932,763 @@ pub(crate) mod issuer_ownership {
     enum Credentials {
         Table,
         Issuer,
+    }
+}
+
+/// Adds the hosted-profile metadata columns to the issuer ownership record
+/// (`issuers`, ADR 0002 hosted profile) rather than introducing a second
+/// ownership model: a hosted issuer *is* an `issuers` row, created before it
+/// can publish, keyed by its server-assigned UUID in the `issuer` column.
+/// Managed columns carry defaults so rows created by the registry path or by
+/// credential registration keep loading untouched.
+pub(crate) mod hosted_issuers {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261023_000001_hosted_issuers"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            for (column, kind) in [
+                ("display_name", "TEXT NULL"),
+                ("source", "VARCHAR(32) NOT NULL DEFAULT 'registry'"),
+                ("tier", "VARCHAR(32) NOT NULL DEFAULT 'standard'"),
+                ("state", "VARCHAR(32) NOT NULL DEFAULT 'active'"),
+                ("owner", "TEXT NULL"),
+                ("created_at", "BIGINT NOT NULL DEFAULT 0"),
+                ("expires_at", "BIGINT NULL"),
+                ("version", "BIGINT NOT NULL DEFAULT 0"),
+            ] {
+                if manager.has_column("issuers", column).await? {
+                    continue;
+                }
+                manager
+                    .get_connection()
+                    .execute_unprepared(&format!("ALTER TABLE issuers ADD COLUMN {column} {kind}"))
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+}
+
+/// Hosted-profile issuer public keys; `kid` is the PK used to resolve JWTs.
+/// `key_material` holds a SHA-256 of the canonical key parameters (RFC 7638
+/// §7) and is uniquely indexed so key-material reuse is rejected by a
+/// database constraint, not a race-prone application scan.
+pub(crate) mod issuer_keys {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261023_000002_issuer_keys"
+        }
+    }
+
+    const FK: &str = "fk_issuer_keys_issuer";
+    const KEY_MATERIAL_INDEX: &str = "idx_issuer_keys_key_material";
+    const ISSUER_ID_INDEX: &str = "idx_issuer_keys_issuer_id";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuer_keys").await? {
+                let mut table = Table::create();
+                table
+                    .table(IssuerKeys::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(IssuerKeys::Kid)
+                            .string_len(255)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerKeys::IssuerId)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerKeys::KeyMaterial)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(IssuerKeys::Alg).string().not_null())
+                    .col(ColumnDef::new(IssuerKeys::Jwk).json().not_null())
+                    .col(ColumnDef::new(IssuerKeys::State).string().not_null())
+                    .col(ColumnDef::new(IssuerKeys::NotBefore).big_integer().null())
+                    .col(ColumnDef::new(IssuerKeys::NotAfter).big_integer().null())
+                    .col(
+                        ColumnDef::new(IssuerKeys::CreatedAt)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name(FK)
+                            .from(IssuerKeys::Table, IssuerKeys::IssuerId)
+                            .to(IssuersFk::Table, IssuersFk::Issuer)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    );
+                pin_innodb_on_mysql(manager, &mut table);
+                manager.create_table(table).await?;
+            }
+            // The table is created empty, so the unique index is added in the
+            // same migration; folding it in avoids a later migration that adds
+            // a UNIQUE index over a defaulted column that may already have rows.
+            if !manager.has_index("issuer_keys", KEY_MATERIAL_INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(KEY_MATERIAL_INDEX)
+                            .table(IssuerKeys::Table)
+                            .col(IssuerKeys::KeyMaterial)
+                            .unique()
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            // Listing an issuer's keys and the `ON DELETE CASCADE` scan this
+            // column; Postgres does not index FK columns automatically.
+            if !manager.has_index("issuer_keys", ISSUER_ID_INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(ISSUER_ID_INDEX)
+                            .table(IssuerKeys::Table)
+                            .col(IssuerKeys::IssuerId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    // Local Iden view of the ownership table's PK for the FK target; the
+    // canonical `Issuers` enum is scoped to the ownership migration.
+    #[derive(Iden)]
+    enum IssuersFk {
+        #[iden = "issuers"]
+        Table,
+        Issuer,
+    }
+
+    #[derive(Iden)]
+    enum IssuerKeys {
+        Table,
+        Kid,
+        IssuerId,
+        KeyMaterial,
+        Alg,
+        Jwk,
+        State,
+        NotBefore,
+        NotAfter,
+        CreatedAt,
+    }
+}
+
+/// Append-only audit of hosted-profile issuer changes; no FK so it survives
+/// issuer removal. `id` is a UUID to avoid backend-specific auto-increment.
+pub(crate) mod issuer_audit_events {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261023_000003_issuer_audit_events"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if !manager.has_table("issuer_audit_events").await? {
+                let mut table = Table::create();
+                table
+                    .table(IssuerAuditEvents::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::Id)
+                            .string_len(36)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::IssuerId)
+                            .string_len(255)
+                            .null(),
+                    )
+                    .col(ColumnDef::new(IssuerAuditEvents::Actor).string().null())
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::Action)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(IssuerAuditEvents::Before).json().null())
+                    .col(ColumnDef::new(IssuerAuditEvents::After).json().null())
+                    .col(
+                        ColumnDef::new(IssuerAuditEvents::CreatedAt)
+                            .big_integer()
+                            .not_null(),
+                    );
+                pin_innodb_on_mysql(manager, &mut table);
+                manager.create_table(table).await?;
+            }
+            // Audit queries filter by issuer; the table is created empty in the
+            // same migration, so this index ships before any rows exist.
+            if !manager.has_index("issuer_audit_events", INDEX).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(INDEX)
+                            .table(IssuerAuditEvents::Table)
+                            .col(IssuerAuditEvents::IssuerId)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    const INDEX: &str = "idx_issuer_audit_events_issuer_id";
+
+    #[derive(Iden)]
+    enum IssuerAuditEvents {
+        Table,
+        Id,
+        IssuerId,
+        Actor,
+        Action,
+        Before,
+        After,
+        CreatedAt,
+    }
+}
+
+/// Carries every usable `credentials` key into `issuer_keys` unchanged, so
+/// issuers keep the kid they chose. The material hash is computed in Rust
+/// because it needs base64url decoding and zero stripping, which portable SQL
+/// cannot do.
+///
+/// Carried issuers get `source = 'credential'`, which the hosted key lookup
+/// accepts and `find_issuer` does not: they resolve by key, but are not hosted
+/// issuers. Issuers whose aggregation ID is still NULL are assigned one, so
+/// the carried key does not resolve to a corrupt row.
+///
+/// Only registry-backed credentials are carried (`source = 'registry'`): a
+/// credential someone attaches to a hosted issuer's id must not be picked up.
+///
+/// Idempotent: a row already carried identically is skipped, so a re-run after
+/// a partial MySQL failure resumes. Carried keys land `reserved`, so they hold
+/// the kid and material but authenticate nothing until an operator adopts the
+/// key into the registry. Data conflicts never fail the migration: rows whose
+/// material is shared by several credentials, and rows that would collide with
+/// an existing `issuer_keys` row, are skipped with a warning. Only real
+/// database errors return `Err`.
+pub(crate) mod issuer_keys_carry_over {
+    use super::*;
+    use crate::domain::models::credential::{PublicJwk, canonical_jwk_material};
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261024_000001_issuer_keys_carry_over"
+        }
+    }
+
+    /// The `issuers.source` of an issuer whose keys came from `credentials`.
+    pub(crate) const CARRIED_SOURCE: &str = "credential";
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            carry_over_credential_keys(manager.get_connection())
+                .await
+                .map(|_| ())
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    struct Planned {
+        issuer: String,
+        kid: String,
+        hash: String,
+        alg: &'static str,
+        jwk_json: String,
+        needs_aggregation_id: bool,
+    }
+
+    fn ph(backend: DatabaseBackend, n: usize) -> String {
+        if backend == DatabaseBackend::Postgres {
+            format!("${n}")
+        } else {
+            "?".to_string()
+        }
+    }
+
+    fn jose_alg(algorithm: jsonwebtoken::Algorithm) -> Option<&'static str> {
+        use jsonwebtoken::Algorithm::*;
+        match algorithm {
+            ES256 => Some("ES256"),
+            ES384 => Some("ES384"),
+            EdDSA => Some("EdDSA"),
+            PS256 => Some("PS256"),
+            _ => None,
+        }
+    }
+
+    /// The migration's private carry-over; not callable elsewhere. Runs once
+    /// at upgrade; re-running it would be unsafe while credentials can still
+    /// be created against an issuer's id.
+    async fn carry_over_credential_keys<C: ConnectionTrait>(conn: &C) -> Result<usize, DbErr> {
+        let backend = conn.get_database_backend();
+        let rows = conn
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT c.issuer AS issuer, c.public_key AS public_key, c.key_id AS key_id, \
+                     i.aggregation_id AS aggregation_id \
+                     FROM credentials c JOIN issuers i ON i.issuer = c.issuer \
+                     WHERE c.key_id IS NOT NULL AND i.source = 'registry' \
+                     ORDER BY c.issuer",
+            ))
+            .await?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let issuer: String = row.try_get("", "issuer")?;
+            let kid: String = row.try_get("", "key_id")?;
+            let public_key: serde_json::Value = row.try_get("", "public_key")?;
+            let aggregation_id: Option<String> = row.try_get("", "aggregation_id")?;
+
+            let bytes = serde_json::to_vec(&public_key)
+                .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
+            let jwk = match PublicJwk::try_new(bytes) {
+                Ok(jwk) if jwk.key_id() == kid => jwk,
+                Ok(_) => {
+                    tracing::warn!(%issuer, %kid, "skipping credential key: JWK kid differs from key_id");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%issuer, %kid, %error, "skipping credential key: not a valid management key");
+                    continue;
+                }
+            };
+            let Some(alg) = jose_alg(jwk.algorithm()) else {
+                continue;
+            };
+            let material = canonical_jwk_material(&public_key)
+                .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
+            let hash = hex::encode(Sha256::digest(material.as_bytes()));
+            candidates.push(Planned {
+                issuer,
+                kid,
+                hash,
+                alg,
+                jwk_json: jwk_to_string(&jwk)?,
+                needs_aggregation_id: aggregation_id.is_none(),
+            });
+        }
+
+        // Skip every credential whose material is shared by several
+        // credentials: their ownership is ambiguous, so none is carried.
+        let mut counts = BTreeMap::<String, usize>::new();
+        for candidate in &candidates {
+            *counts.entry(candidate.hash.clone()).or_default() += 1;
+        }
+        let (shared, plan): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|candidate| counts[&candidate.hash] > 1);
+        for candidate in &shared {
+            tracing::warn!(
+                issuer = %candidate.issuer,
+                kid = %candidate.kid,
+                "not carrying credential key: its key material is shared by several credentials"
+            );
+        }
+
+        // Skip any remaining row that would collide with an existing
+        // `issuer_keys` row it is not identical to. Data conflicts must not
+        // fail the upgrade; only real database errors do.
+        let lookup = format!(
+            "SELECT kid, issuer_id, key_material FROM issuer_keys WHERE kid = {} OR key_material = {}",
+            ph(backend, 1),
+            ph(backend, 2)
+        );
+        let mut already = Vec::new();
+        let mut carrying = Vec::new();
+        for planned in plan {
+            let existing = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    backend,
+                    &lookup,
+                    [planned.kid.clone().into(), planned.hash.clone().into()],
+                ))
+                .await?;
+            let mut identical = false;
+            let mut skip = false;
+            for row in existing {
+                let kid: String = row.try_get("", "kid")?;
+                let issuer_id: String = row.try_get("", "issuer_id")?;
+                let hash: String = row.try_get("", "key_material")?;
+                if kid == planned.kid && issuer_id == planned.issuer && hash == planned.hash {
+                    identical = true;
+                } else {
+                    tracing::warn!(
+                        issuer = %planned.issuer,
+                        kid = %planned.kid,
+                        existing_kid = %kid,
+                        existing_issuer = %issuer_id,
+                        "not carrying credential key: it collides with an existing issuer key"
+                    );
+                    skip = true;
+                }
+            }
+            if !skip {
+                already.push(identical);
+                carrying.push(planned);
+            }
+        }
+
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let jwk_value = if backend == DatabaseBackend::Postgres {
+            "CAST($5 AS JSON)".to_string()
+        } else {
+            "?".to_string() // CAST(? AS JSON) would give SQLite a numeric affinity.
+        };
+        let insert = format!(
+            "INSERT INTO issuer_keys \
+                 (kid, issuer_id, key_material, alg, jwk, state, not_before, not_after, created_at) \
+                 VALUES ({}, {}, {}, {}, {jwk_value}, 'reserved', NULL, NULL, {})",
+            ph(backend, 1),
+            ph(backend, 2),
+            ph(backend, 3),
+            ph(backend, 4),
+            ph(backend, 6)
+        );
+        let mut carried = 0;
+        for (planned, skip) in carrying.iter().zip(already) {
+            if planned.needs_aggregation_id {
+                conn.execute_raw(Statement::from_sql_and_values(
+                        backend,
+                        format!(
+                            "UPDATE issuers SET aggregation_id = {} WHERE issuer = {} AND aggregation_id IS NULL",
+                            ph(backend, 1),
+                            ph(backend, 2)
+                        ),
+                        [
+                            uuid::Uuid::new_v4().to_string().into(),
+                            planned.issuer.clone().into(),
+                        ],
+                    ))
+                    .await?;
+            }
+            if skip {
+                continue;
+            }
+            conn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                &insert,
+                [
+                    planned.kid.clone().into(),
+                    planned.issuer.clone().into(),
+                    planned.hash.clone().into(),
+                    planned.alg.into(),
+                    planned.jwk_json.clone().into(),
+                    now.into(),
+                ],
+            ))
+            .await?;
+            conn.execute_raw(Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "UPDATE issuers SET source = {} WHERE issuer = {} AND source = 'registry'",
+                    ph(backend, 1),
+                    ph(backend, 2)
+                ),
+                [CARRIED_SOURCE.into(), planned.issuer.clone().into()],
+            ))
+            .await?;
+            carried += 1;
+        }
+        Ok(carried)
+    }
+
+    fn jwk_to_string(jwk: &PublicJwk) -> Result<String, DbErr> {
+        serde_json::to_string(jwk.jwk()).map_err(|e| DbErr::Migration(e.to_string()))
+    }
+}
+
+#[cfg(all(
+    test,
+    any(feature = "sqlite", feature = "mysql", feature = "postgres-tests")
+))]
+mod carry_over_tests {
+    use super::*;
+    use crate::domain::models::credential::KeyResolveError;
+    use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
+    use crate::outbound::sql::SqlHostedIssuerStore;
+    use crate::outbound::sql::models::{Credentials, credentials, issuers};
+    use jsonwebtoken::jwk::Jwk;
+    use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, Set, Statement};
+    use std::sync::Arc;
+
+    /// The release before the carry-over migration.
+    struct Before;
+    #[async_trait::async_trait]
+    impl MigratorTrait for Before {
+        fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+            let mut all = Migrator::migrations();
+            all.pop();
+            all
+        }
+    }
+
+    const KEY_1: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-1","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
+    const KEY_2: &str = r#"{"kty":"EC","crv":"P-256","kid":"key-2","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
+    const OCT: &str = r#"{"kty":"oct","kid":"oct-1","alg":"HS256","k":"c2VjcmV0"}"#;
+    const RSA_PS256: &str = r#"{"kty":"RSA","kid":"rsa-1","alg":"PS256","n":"uNtunrvdLa-WuK-VpCwiEUXlOCmONEmo0ZYQ424NsGns0OVnu1T9hL4M_UODdKhz-_mXHvqsBxS-PZe0OMmdo9QrGWwnS4H8IX5c_fKZ01AX21_hJoQY6SMLUVGVbElqNW032v-LliC7-dTB0YeTg_wmbAN1uGkPr202k3c_18gVGvpa8B7Ri8Ytowl6WzpiVZ3VyP3HIQQuhrAXN0B1BatWpv4GwLXr-ihCmFgbS2RHm5TIkoap2yXw2p488RFgrnacRGj9QhN4p9HIMuYeLkoeClMS2ZQD2d9holRyRCUsARh8IvSf9DZVmDGwd5kqpHqT3GkZ8o8kdGAQTq53Nw","e":"AQAB"}"#;
+    /// A third distinct EC key, used only for the shared-material pair.
+    const KEY_DUP: &str = r#"{"kty":"EC","crv":"P-256","kid":"dup-x","alg":"ES256","x":"w0Nc9y5IMwcWV08tC3KtnukblytlN1HTOFngG8U6d60","y":"UklyBhY4aZvUS9aJDifOAiLMj1LVwNmhA8AXRvcs3f8"}"#;
+    /// A kid shaped like an RFC 7638 thumbprint, carried unchanged like any other.
+    const THUMBPRINT_KID: &str = "tlBOuPIle0dk1Dbs1lKHGJS5yMXswT8QXuVO4RWwxgg";
+
+    /// Seeds one legacy credential and its issuer row. `source` is the
+    /// `issuers.source` the carry-over migration filters on.
+    async fn seed(db: &DatabaseConnection, issuer: &str, kid: &str, jwk: &str, source: &str) {
+        let mut key: Jwk = serde_json::from_str(jwk).unwrap();
+        key.common.key_id = Some(kid.to_string());
+        let issuer_row = issuers::ActiveModel {
+            issuer: Set(issuer.to_string()),
+            aggregation_id: Set(None),
+            list_count: Set(0),
+            display_name: Set(None),
+            source: Set(source.to_string()),
+            tier: Set("standard".to_string()),
+            state: Set("active".to_string()),
+            owner: Set(None),
+            created_at: Set(0),
+            expires_at: Set(None),
+            version: Set(1),
+        };
+        issuers::Entity::insert(issuer_row)
+            .exec_without_returning(db)
+            .await
+            .unwrap();
+        let credential: credentials::ActiveModel = Credentials::new(issuer.to_string(), key).into();
+        credentials::Entity::insert(credential)
+            .exec_without_returning(db)
+            .await
+            .unwrap();
+    }
+
+    /// A static registry that has adopted the carried identity `legacy-1` /
+    /// `key-1`, so its key now authenticates through the static-first resolver.
+    fn registry_with_static_adoption() -> Arc<crate::server::auth::issuer_registry::RegistryHandle>
+    {
+        let jwk: serde_json::Value = serde_json::from_str(KEY_1).unwrap();
+        Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(
+                &serde_saphyr::to_string(&serde_json::json!({
+                    "version": 1,
+                    "issuers": [{
+                        "id": "legacy-1",
+                        "aggregation_id": uuid::Uuid::new_v4(),
+                        "keys": [{ "kid": "key-1", "alg": "ES256", "jwk": jwk }],
+                    }],
+                    "admins": [],
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The full upgrade scenario, run from an unmigrated database: an earlier
+    /// release's legacy credentials are seeded, then the current migrator runs.
+    /// Postgres exercises the `$n` numbering and `CAST($5 AS JSON)`; on MySQL a
+    /// partial failure leaves partial inserts, so the idempotency check matters
+    /// there too.
+    async fn upgrade_scenario(db: Arc<DatabaseConnection>) {
+        let backend = db.get_database_backend();
+        apply_migrations::<Before>(db.as_ref()).await.unwrap();
+
+        seed(&db, "legacy-1", "key-1", KEY_1, "registry").await; // human-chosen EC kid
+        seed(
+            &db,
+            "legacy-thumb",
+            THUMBPRINT_KID,
+            &KEY_2.replace("key-2", THUMBPRINT_KID),
+            "registry",
+        )
+        .await; // thumbprint kid
+        seed(&db, "legacy-rsa", "rsa-1", RSA_PS256, "registry").await; // RSA key
+        seed(&db, "legacy-oct", "oct-1", OCT, "registry").await; // oct: not a valid management key
+        seed(
+            &db,
+            "dup-a",
+            "dup-a",
+            &KEY_DUP.replace("dup-x", "dup-a"),
+            "registry",
+        )
+        .await; // shared material
+        seed(
+            &db,
+            "dup-b",
+            "dup-b",
+            &KEY_DUP.replace("dup-x", "dup-b"),
+            "registry",
+        )
+        .await; // shared material
+        // A credential attached to a hosted issuer's id must not be carried.
+        seed(&db, "portal-issuer", "portal-key", KEY_2, "portal").await;
+
+        run_migrations(&db).await.unwrap();
+
+        // Carried kids: key-1, the thumbprint kid, and rsa-1. The oct key, the
+        // shared-material duplicates, and the hosted-attached key are skipped.
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT kid, state FROM issuer_keys ORDER BY kid",
+            ))
+            .await
+            .unwrap();
+        let mut kids: Vec<String> = rows.iter().map(|r| r.try_get("", "kid").unwrap()).collect();
+        let mut expected = vec![
+            "key-1".to_string(),
+            THUMBPRINT_KID.to_string(),
+            "rsa-1".to_string(),
+        ];
+        expected.sort();
+        kids.sort();
+        assert_eq!(kids, expected, "carried kids on {backend:?}");
+        let states: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get("", "state").unwrap())
+            .collect();
+        assert!(
+            states.iter().all(|state| state == "reserved"),
+            "carried keys must land reserved on {backend:?}: {states:?}"
+        );
+
+        // A NULL-aggregation-id issuer was assigned one so its carried key does
+        // not resolve to a corrupt row.
+        let agg = db
+            .query_one_raw(Statement::from_string(
+                backend,
+                "SELECT aggregation_id FROM issuers WHERE issuer = 'legacy-1'",
+            ))
+            .await
+            .unwrap()
+            .expect("legacy-1 must exist")
+            .try_get::<Option<String>>("", "aggregation_id")
+            .unwrap();
+        assert!(
+            agg.is_some(),
+            "NULL aggregation id must be assigned on {backend:?}"
+        );
+
+        // A reserved carried key must never authenticate, until adopted.
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(SqlHostedIssuerStore::new(db.clone()));
+        let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
+            Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+            Some(store.clone()),
+        );
+        assert!(
+            matches!(
+                resolver.resolve("key-1").await,
+                Err(KeyResolveError::Reserved)
+            ),
+            "a reserved carried key must not authenticate on {backend:?}"
+        );
+        let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
+            registry_with_static_adoption(),
+            Some(store),
+        );
+        let resolved = resolver.resolve("key-1").await.unwrap();
+        assert_eq!(resolved.principal.id(), "legacy-1");
+
+        // Idempotency: re-running the carry-over migration is a no-op (this is
+        // what a partial MySQL failure resumes from).
+        issuer_keys_carry_over::Migration
+            .up(&SchemaManager::new(db.as_ref()))
+            .await
+            .unwrap();
+        let rows_after = db
+            .query_all_raw(Statement::from_string(
+                backend,
+                "SELECT kid FROM issuer_keys ORDER BY kid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows_after.len(),
+            kids.len(),
+            "a re-run must not change rows on {backend:?}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_carry_over_upgrade_scenario() {
+        use sea_orm::{ConnectOptions, Database};
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options
+            .max_connections(1)
+            .map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
+        let db = Database::connect(options).await.unwrap();
+        upgrade_scenario(Arc::new(db)).await;
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn mysql_carry_over_upgrade_scenario() {
+        use crate::outbound::sql::test_containers::mysql_helpers;
+        let test_db = mysql_helpers::MysqlTestDb::start_unmigrated().await;
+        upgrade_scenario(test_db.connection().await).await;
+    }
+
+    #[cfg(feature = "postgres-tests")]
+    #[tokio::test]
+    async fn postgres_carry_over_upgrade_scenario() {
+        use crate::outbound::sql::test_containers::postgres_helpers;
+        let test_db = postgres_helpers::postgres_connection_unmigrated().await;
+        upgrade_scenario(test_db.db.clone()).await;
     }
 }

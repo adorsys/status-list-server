@@ -54,7 +54,7 @@ impl ApiError {
         self
     }
 
-    fn retry_after(mut self, secs: u64) -> Self {
+    pub(crate) fn retry_after(mut self, secs: u64) -> Self {
         self.retry_after_secs = Some(secs);
         self
     }
