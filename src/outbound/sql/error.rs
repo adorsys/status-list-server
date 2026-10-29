@@ -6,6 +6,10 @@ pub enum RepositoryError {
     InsertError(String),
     #[error("Find error: {0}")]
     FindError(String),
+    /// A stored row is malformed and can never parse (bad state, timestamp, or
+    /// JWK). A permanent data fault, not a transient connectivity error.
+    #[error("Data error: {0}")]
+    DataError(String),
     #[error("Update error: {0}")]
     UpdateError(String),
     #[error("Delete error: {0}")]
@@ -16,6 +20,14 @@ pub enum RepositoryError {
     RepositoryNotSet,
     #[error("Duplicate entry")]
     DuplicateEntry,
+    /// A key's parameters are invalid for the management contract (conflicting
+    /// kid metadata, inverted window, or unusable JWK). Client error.
+    #[error("invalid management key: {0}")]
+    InvalidKey(String),
+    /// The key's normalized parameters (RFC 7638 §7) are already registered to
+    /// another hosted issuer; the owner is logged server-side, never returned.
+    #[error("key material was already registered")]
+    KeyMaterialReused,
     /// The statement lost a lock race and was rolled back. Distinct from
     /// [`DuplicateEntry`] and from the optimistic-guard miss: nothing was
     /// written, nobody won, and the request is safe to retry verbatim.

@@ -81,8 +81,8 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection,
+    SeaOrmStore, SqlCredentialRepo, SqlHostedIssuerStore, SqlStatusListRepo,
+    SqlStatusListSnapshotRepo, SwappableDatabaseConnection,
     list_quota::{self, StartupState},
     run_migrations, verify_binlog_format, verify_innodb_engines,
 };
@@ -431,6 +431,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         allow(unused_variables)
     )]
     let aggregation_withheld: Option<String>;
+    // The dynamic trust source behind the composite resolver: `Some` only in
+    // the hosted profile, where registrations live in durable SQL storage.
+    let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -445,6 +448,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             }
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
+            dynamic_issuer_store = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -536,6 +540,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
+            dynamic_issuer_store = config.server.profile.is_hosted().then(|| {
+                let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone());
+                Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
+            });
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
                     db_handle.clone(),
@@ -861,6 +869,20 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
 
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
     let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
+    // Cross-source checks are read-only and run before the immutable aggregation
+    // rows are written, so a rejected registry leaves no adoption side effects.
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        // In both directions of a collision the registry wins
+        // (composite resolution is static-first), so a candidate colliding
+        // with durable dynamic state must keep the last-known-good snapshot
+        // in force rather than silently absorb or shadow it.
+        crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+            dynamic_store,
+            &empty_registry,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
         .await?;
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
@@ -868,7 +890,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         fingerprint = %issuer_registry.snapshot().fingerprint(),
         "issuer registry loaded"
     );
-    warn_missing_registry_issuers(&service, &issuer_registry.snapshot()).await;
+    warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
+        .await;
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -882,7 +905,10 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         max_lists_per_issuer: config.limits.max_lists_per_issuer,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
-        issuer_key_resolver: issuer_registry.clone(),
+        issuer_key_resolver: build_issuer_key_resolver(
+            issuer_registry.clone(),
+            dynamic_issuer_store.clone(),
+        ),
         issuer_registry: issuer_registry.clone(),
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
@@ -903,6 +929,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         spawn_issuer_registry_watcher(
             issuer_registry.clone(),
             state.service.clone(),
+            dynamic_issuer_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
         );
@@ -918,9 +945,25 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
+/// A hosted deployment resolves through the composite: the static registry
+/// first, then the dynamic store behind the same port. Private deployments
+/// resolve against the registry only, exactly as before.
+pub(crate) fn build_issuer_key_resolver(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    dynamic: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Arc<dyn crate::domain::ports::IssuerKeyResolver> {
+    if dynamic.is_some() {
+        return Arc::new(
+            crate::server::auth::hosted::CompositeIssuerKeyResolver::new(registry, dynamic),
+        );
+    }
+    registry
+}
+
 pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
+    dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
 ) {
@@ -928,6 +971,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
         .spawn_with_initial_reconcile("issuer_registry", move || {
             let registry_handle = registry_handle.clone();
             let service = service.clone();
+            let dynamic_issuer_store = dynamic_issuer_store.clone();
             let retry_interval = poll_interval;
             async move {
                 loop {
@@ -937,7 +981,20 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 registry_handle.path(),
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
+                        // Serializes with hosted writes in this process; see
+                        // register_hosted_issuer for the cross-pod case.
+                        let _guard = registry_handle.write_lock().await;
                         let active = registry_handle.snapshot();
+                        // Read-only cross-source checks run before the immutable
+                        // aggregation rows are written, so rejection leaves none.
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+                                dynamic_store,
+                                &active,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         validate_registry_aggregation_ids(&service, &active, &candidate).await?;
                         registry_handle.replace(candidate)
                     }
@@ -948,8 +1005,12 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             crate::utils::metrics::set_issuer_registry_keys(
                                 registry_handle.snapshot().key_count(),
                             );
-                            warn_missing_registry_issuers(&service, &registry_handle.snapshot())
-                                .await;
+                            warn_missing_registry_issuers(
+                                &service,
+                                &registry_handle.snapshot(),
+                                &dynamic_issuer_store,
+                            )
+                            .await;
                             tracing::info!(
                                 event = "issuer_registry_reloaded",
                                 fingerprint = %registry_handle.snapshot().fingerprint(),
@@ -1088,19 +1149,56 @@ async fn validate_registry_aggregation_ids(
 async fn warn_missing_registry_issuers(
     service: &crate::domain::service::Service,
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
 ) {
-    match service.issuers_with_status_lists().await {
-        Ok(owners) => {
-            for issuer in owners {
-                if registry.issuer(&issuer).is_none() {
-                    tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not check status-list owners against issuer registry")
-        }
+    let Ok(owners) = service.issuers_with_status_lists().await else {
+        tracing::warn!("could not check status-list owners against issuer registry");
+        return;
+    };
+    let missing: Vec<String> = owners
+        .into_iter()
+        .filter(|issuer| registry.issuer(issuer).is_none())
+        .collect();
+    if missing.is_empty() {
+        return;
     }
+    // A hosted issuer owns its lists legitimately and is not expected
+    // to appear in the static registry; skip it so the warning keeps meaning
+    // "an operator-backed issuer is missing". One batched query for the hosted
+    // ids instead of one find_issuer per owner; a database error must not fall
+    // through to the false "missing from the registry" warning.
+    let to_warn = match missing_registry_issuers(&missing, dynamic_issuer_store).await {
+        Ok(to_warn) => to_warn,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not check hosted issuers; skipping the missing-issuer warnings"
+            );
+            return;
+        }
+    };
+    for issuer in to_warn {
+        tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry");
+    }
+}
+
+/// Which of the owners missing from the static registry are not hosted issuers
+/// and should be warned about. A single batched `find_issuer_ids` call handles
+/// all of them; a store error is returned so the caller skips the warnings
+/// rather than emitting a false "missing from the registry" per owner.
+async fn missing_registry_issuers(
+    missing: &[String],
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Result<Vec<String>, crate::domain::models::hosted_issuer::HostedIssuerError> {
+    let Some(store) = dynamic_issuer_store else {
+        return Ok(missing.to_vec());
+    };
+    let hosted = store.find_issuer_ids(missing).await?;
+    Ok(missing
+        .iter()
+        .filter(|issuer| !hosted.contains(*issuer))
+        .cloned()
+        .collect())
 }
 
 /// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
@@ -1530,10 +1628,17 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    use crate::domain::models::hosted_issuer::{
+        HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    };
+    use crate::domain::ports::HostedIssuerStore;
     use crate::{
         domain::models::credential::{AggregationId, Credential, CredentialError},
         test_utils::test_app_state,
     };
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Debug)]
     struct UnavailableCredentials;
@@ -1693,6 +1798,7 @@ mod general_tests {
         spawn_issuer_registry_watcher(
             registry.clone(),
             state.service,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -2608,5 +2714,110 @@ mod general_tests {
                 "APP_ENV={raw:?} must be treated as production for the base-URL guard"
             );
         }
+    }
+
+    /// A `HostedIssuerStore` double for the missing-issuer warning path: records
+    /// every `find_issuer_ids` call and can be made to fail.
+    #[derive(Default)]
+    struct ProbeStore {
+        portal: Mutex<HashSet<String>>,
+        calls: Mutex<Vec<Vec<String>>>,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl HostedIssuerStore for ProbeStore {
+        async fn find_issuer_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            self.calls.lock().unwrap().push(ids.to_vec());
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                    "backend down",
+                ))));
+            }
+            Ok(self.portal.lock().unwrap().clone())
+        }
+        async fn find_key_by_kid(
+            &self,
+            _kid: &str,
+        ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn find_issuer(&self, _id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn create_issuer(
+            &self,
+            _issuer: HostedIssuer,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
+        async fn find_key_by_material(
+            &self,
+            _material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_batches_one_call_for_many_owners() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.portal.lock().unwrap().insert("portal-1".into());
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "portal-1".into(), "b".into(), "c".into()];
+
+        let to_warn = missing_registry_issuers(&missing, &Some(store))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            to_warn,
+            vec!["a", "b", "c"],
+            "portal owners must be excluded from the missing-issuer warnings"
+        );
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one batched call, not one per owner");
+        assert_eq!(
+            calls[0].len(),
+            missing.len(),
+            "the batched call carries every owner"
+        );
+        for id in &missing {
+            assert!(calls[0].contains(id), "missing {id:?} in the batched call");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_skips_warnings_on_store_error() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.fail.store(true, Ordering::SeqCst);
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "b".into()];
+
+        let result = missing_registry_issuers(&missing, &Some(store)).await;
+
+        assert!(
+            result.is_err(),
+            "a store error must skip the warnings, never fall through to a false per-owner warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_without_dynamic_store_warns_all() {
+        let missing = vec!["a".into(), "b".into()];
+        let to_warn = missing_registry_issuers(&missing, &None).await.unwrap();
+        assert_eq!(
+            to_warn, missing,
+            "no dynamic store means every missing owner is warned"
+        );
     }
 }

@@ -258,6 +258,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
     post:
       operationId: registerIssuer
@@ -555,6 +557,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
     patch:
       operationId: updateStatusList
@@ -605,6 +609,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
+        "503":
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
   /api/v1/status-lists/{list_id}/allocations:
     parameters:
@@ -660,6 +666,8 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ManagementServiceUnavailable"
 
   /api/v1/status-lists/{list_id}:
     get:
@@ -953,6 +961,12 @@ components:
         Missing credentials return `401 missing_token` with `WWW-Authenticate:
         Bearer`; invalid credentials return identical `401 invalid_token`
         responses with `WWW-Authenticate: Bearer error="invalid_token"`.
+
+        In the `hosted` profile a management key may resolve from the hosted
+        issuer store. If that store is unreachable, authentication
+        returns a retryable `503 service_unavailable` (with `Retry-After`)
+        rather than a `401`, so a transient backend fault is never mistaken for
+        a bad key.
 
   schemas:
     CredentialsRequest:
@@ -1779,6 +1793,32 @@ components:
 
     ServiceUnavailable:
       description: Service temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "service_unavailable"
+            error_description: "the service is currently unavailable. Please try again later"
+
+    ManagementServiceUnavailable:
+      description: |
+        Service temporarily unavailable. On authenticated management operations
+        in the `hosted` profile this also occurs when the durable trust backend
+        that resolves management keys is unreachable: the request is rejected
+        with a retryable `503` rather than a `401`, so a transient backend fault
+        is never mistaken for a bad key. A `Retry-After` header (jittered 1–5 s)
+        tells the client when to try again.
+      headers:
+        Retry-After:
+          description: |
+            Seconds to wait before retrying. This is a minimum, not a schedule;
+            clients should add their own jitter so retries do not re-synchronise.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
       content:
         application/json:
           schema:
