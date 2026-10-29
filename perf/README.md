@@ -14,9 +14,9 @@ This suite contains four tests exercising the StatusList Server:
 4. Authentication test
 
 Each test targets `http://localhost:8000` by default. Public reads (health,
-welcome, status-list retrieval) hit that target. Management writes (credential
-registration and status-list publishes/updates) go to the management listener at
-`http://localhost:8001` by default. Override the write destination with
+welcome, status-list retrieval) hit that target. Authenticated status-list
+publishes and updates go to the management listener at `http://localhost:8001`
+by default. Override the write destination with
 `MANAGEMENT_TARGET` (e.g. `MANAGEMENT_TARGET=https://mgmt.example.com npm run
 test:load`) for a deployment with a separate management hostname.
 
@@ -49,16 +49,28 @@ and is written with owner-only permissions. Regenerate it for each run.
 `generate-tokens` writes a single, git-ignored `scripts/test-tokens.json`
 containing the issuer ID, the public JWK and a set of signed JWTs. The run and
 setup scripts read everything they need from this file, so the key always
-matches the signed JWTs it was generated with.
+matches the signed JWTs it was generated with. It also writes the matching
+operator-managed issuer registry to `scripts/issuer-registry.json`.
 
-### One-time setup against the running server
+### Start the server with the generated registry
 
-Before each test, `scripts/setup.js` runs automatically (via the `npm run
-test:*` scripts). It registers the test issuer from `test-tokens.json` and
-publishes a set of seed status lists, writing their IDs to
-`scripts/seed-lists.json` (git-ignored). Registration lets the server resolve the
-token's `kid` to its public key; without it, authenticated requests return
-`401 invalid_token`. The seed lists give the read scenarios real list IDs to query.
+Generate the token and registry files before starting the server. From the
+repository root, configure the server to load that registry and accept the same
+audience used to sign the management tokens:
+
+```bash
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$PWD/perf/scripts/issuer-registry.json" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+cargo run
+```
+
+Set `MANAGEMENT_AUDIENCE` to the same value before `npm run generate-tokens` if
+you use a different audience. Before each test, `scripts/setup.js` runs
+automatically and publishes seed status lists with the registry-provisioned
+issuer. It writes their IDs to `scripts/seed-lists.json` (git-ignored); the
+seed lists give the read scenarios real list IDs to query. The issuer identity
+lookup scenario also uses this issuer and its token. Regenerate the tokens and
+registry, then restart the server, before running a test with a new key.
 
 Setup runs as a separate Node script rather than an Artillery `before:` hook,
 which does not execute processor `function:` steps.

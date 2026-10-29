@@ -10,7 +10,7 @@ statuslist:
   ingress:
     management:
       # Enable the management listener Ingress in production so issuer writes
-      # (PUT/PATCH .../statuses, POST .../allocations, POST /credentials) reach
+      # (PUT/PATCH .../statuses, POST .../allocations) reach
       # the management port (8001) instead of the public listener, which returns
       # 404 for every write. Shared hostname: the edge routes by path regex.
       enabled: true
