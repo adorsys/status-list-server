@@ -18,17 +18,18 @@ The environment exposes these variables:
 | `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
 | `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
 | `issuer_id`       | `my-issuer`                            | Issuer identifier generated for the temporary Newman test key.         |
+| `adminToken` | empty | Signed admin JWT with registry-granted `issuers:read`. |
 | `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
-The collection is organized into Health & Metrics, Issuer Management, Status
-Lists, and Aggregation folders. Requests include Postman test scripts that check
+The collection is organized into Health & Metrics, Status Lists, Aggregation,
+and Admin API folders. Requests include Postman test scripts that check
 status codes, content types, token response headers, and JSON response shapes.
 
 Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK provisioned in the operator-managed issuer
-registry. The Newman script generates a temporary issuer key and token, writes
-the public key to the registry file named by `POSTMAN_ISSUER_REGISTRY_FILE`,
+registry. The Newman script generates separate temporary issuer and admin keys and
+tokens, writes their public keys to the registry file named by `POSTMAN_ISSUER_REGISTRY_FILE`,
 and waits until the running server reloads that file.
 
 ## Local Prerequisites
@@ -44,8 +45,8 @@ The Postman/Newman runner expects these host tools:
 ## Newman Collection Check
 
 Create an empty valid registry file, then start the API with that same path and
-the audience used by the Newman script. The script replaces the empty registry
-with its temporary issuer entry; the server's registry watcher reloads it.
+the distinct management and admin audiences used by the Newman script. The
+script replaces the empty registry with its temporary issuer and admin entries; the server's registry watcher reloads it.
 
 ```bash
 registry_file="$PWD/target/postman-test-issuers.json"
@@ -53,11 +54,14 @@ mkdir -p "$(dirname "$registry_file")"
 printf '{"version":1,"issuers":[],"admins":[]}\n' > "$registry_file"
 
 APP_SERVER__HOST=0.0.0.0 \
+APP_SERVER__MANAGEMENT__HOST=0.0.0.0 \
+APP_SERVER__ADMIN__HOST=0.0.0.0 \
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
 APP_MANAGEMENT_AUTH__ISSUERS_FILE="$registry_file" \
 APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+APP_ADMIN_AUTH__AUDIENCES=status-list-server-admin \
 cargo run
 ```
 
@@ -67,12 +71,14 @@ the same registry file:
 ```bash
 POSTMAN_ISSUER_REGISTRY_FILE="$PWD/target/postman-test-issuers.json" \
 MANAGEMENT_AUDIENCE=status-list-server-management \
+ADMIN_AUDIENCE=status-list-server-admin \
 ./scripts/test-postman-collection.sh
 ```
 
-The script writes the issuer's public JWK to the registry file, then runs Newman
+The script writes the issuer's and admin's public JWKs to the registry file, then runs Newman
 with a temporary collection and environment containing `baseUrl`, `list_id`,
-`issuer_id`, `token`, and `historical_time`. It fails early if
+`issuer_id`, `token`, `adminToken`, and `historical_time`. It waits until both
+identities can authenticate before running the assertions. It fails early if
 `POSTMAN_ISSUER_REGISTRY_FILE` is unset. No generated collection or environment
 is written into the repository. Set `NEWMAN_RUNNER=docker` to use the pinned
 Newman container instead of a locally installed Newman binary.
@@ -81,13 +87,15 @@ Useful environment overrides:
 
 | Variable                   | Default                             | Purpose                                                           |
 | -------------------------- | ----------------------------------- | ----------------------------------------------------------------- |
+| `MANAGEMENT_AUDIENCE` | `status-list-server-management` | Must match the server management audience. |
+| `ADMIN_AUDIENCE` | `status-list-server-admin` | Must match the server admin audience and differ from management. |
 | `API_ENDPOINT`             | `http://localhost:8000`             | Live API endpoint under test.                                     |
 | `NEWMAN_API_READY_TIMEOUT` | `180`                               | Maximum seconds to wait for the live API before running Newman.   |
 | `NEWMAN_RUNNER`            | `auto`                              | Newman runner selection: `auto`, `local`, or `docker`.            |
 | `NEWMAN_DOCKER_IMAGE`      | `postman/newman@sha256:02dc...e04f` | Pinned Newman container used by CI and `NEWMAN_RUNNER=docker`.    |
 | `POSTMAN_ISSUER_REGISTRY_FILE` | required                          | Dedicated registry file loaded by the server through `APP_MANAGEMENT_AUTH__ISSUERS_FILE`. |
 
-The script replaces the registry file with its temporary test issuer. Run it
+The script replaces the registry file with its temporary test issuer and admin. Run it
 only against a local or isolated test server with a dedicated registry file;
 never point it at a production registry or a registry shared with other
 issuers. For a remote test server, the Newman runner and server must both have
