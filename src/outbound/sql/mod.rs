@@ -2,6 +2,7 @@
 
 mod error;
 pub mod hosted;
+pub mod issuer_export;
 pub mod list_quota;
 mod migrations;
 mod models;
