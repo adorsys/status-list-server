@@ -3,6 +3,96 @@
 All notable changes to this project will be documented in this file.
 <!-- markdownlint-disable line-length no-bare-urls ul-style emphasis-style -->
 
+## [2.0.0] - 2026-10-30
+
+### Features
+
+- *(aggregation)* Scope status list aggregation to one issuer [**breaking**]
+
+- *(cache)* Implement Redis cache support and update configuration options
+
+- *(compose)* Split optional services into profiles
+
+- *(crypto)* Support multi-curve keys with PEM-only provisioning [**breaking**]
+
+- *(compose)* Fix docker compose configuration conflict when both env and envtemplate exist
+
+- *(tests)* Add postman assets and Microcks contract testing support
+
+- *(xtask)* Adopt cargo xtask workflow
+
+- *(compose)* Replace LocalStack with Floci for AWS emulation and update related configurations
+
+- *(cache)* Cache signed status-list tokens per validity window and use weak identity-derived ETags
+
+- *(ci)* Rewrite local CI script for improved functionality and clarity
+
+- *(auth)* Make the status list sub URI one authoritative value that issuers can read
+
+- *(statuslist)* Add allocation and recording of indices for status lists
+
+- *(docs)* Consolidate license badges and restore dependencies and release tag badges in readme
+
+- *(statuslist)* Status list aggregation endpoint
+
+- *(statuslist)* Enforce 8-bit capacity for application-specific status values and update related validations
+
+- *(openapi)* Align openapi status contract dual stringinteger deserialization
+
+- *(db)* Update database password handling and support MySQL
+
+- *(ci)* Image provenance self asserted
+
+### Bug Fixes
+
+- *(ci)* Give each Trivy SARIF run a distinct category and move codeql-action to v4
+
+- *(demo)* Replace Jupyter notebooks with plain workflow scripts
+
+- *(demo)* Move demo environment to uv and align notebooks
+
+- *(deploy)* Point release at datev-wallet ClusterSecretStore
+
+- *(deps)* Update quinn-proto
+
+- *(docker)* Pin builder base images to immutable sha256 digests
+
+- *(helm)* Align chart monitoring with shared kube-prometheus-stack
+
+- *(migrations)* Make rollbacks across migrations recoverable
+
+- *(tests)* Clean up scoped database fixture containers
+
+- *(http)* Negotiate Accept per RFC 9110 for status list retrieval
+
+- *(auth)* Reject token lifetime values the spec forbids
+
+- *(db)* Reject empty PATCH and validate duplicate indices
+
+- *(auth)* Prevent 304 Not Modified when client JWT has expired
+
+### Refactor
+
+- *(deploy)* Consolidate helm and observability assets under deploy/
+
+- *(acme)* Consolidate Azure modules under outbound::azure
+
+- *(database)* Split store.rs tests into concern-based modules
+
+### Documentation
+
+- *(adr)* Add an ADR template and record the issuer trust decision
+
+- *(helm)* Expand chart value and template documentation
+
+### Performance
+
+- *(perf)* Make the performance-test workspace discoverable and harness-agnostic
+
+- *(perf)* Cache pre-parsed CWT x5chain and eliminate token clone allocations
+
+
+
 ## [1.2.0] - 2026-09-14
 
 ### Features
