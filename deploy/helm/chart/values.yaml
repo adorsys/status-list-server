@@ -97,9 +97,7 @@ statuslist:
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
-    # Deployment profile: private (default, operator registry only) or hosted
-    # (also trusts issuer keys in the SQL hosted issuer store). See
-    # docs/architecture.md.
+    # private (default): operator registry only. hosted: also the SQL issuer store (docs/architecture.md).
     # APP_SERVER__PROFILE: "private"
     # Service document links (GET /). Defaults to the repository URL.
     # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
@@ -312,7 +310,7 @@ alerting:
   dmsWebhookUrl: ""
   # For existingSecret setups; the chart can't check that dms-webhook-url exists.
   dmsEnabled: false
-  # Go duration; empty keeps Alertmanager's 10s.
+  # Go duration; empty leaves the timeout to Alertmanager's default.
   webhookTimeout: ""
   # to, smtpHost and smtpFrom are plain values; only smtpPassword comes from the Secret.
   email:
@@ -416,7 +414,7 @@ secretStore:
   provider: ""
   aws:
     service: SecretsManager # SecretsManager | ParameterStore
-    # Set it: ESO otherwise falls back to eu-central-1 and fails elsewhere with SecretSyncedError.
+    # Empty falls back to statuslist.aws.region, then eu-central-1; set it outside that region.
     region: ""
   vault:
     server: ""

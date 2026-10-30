@@ -150,7 +150,7 @@ statuslist:
 
   replicaCount: 3
 
-# Disabled: changing the Secret doesn't change an existing Postgres user's password.
+# The bundled subchart can't rotate an existing user's password; use a managed database.
 postgres:
   enabled: false
 
