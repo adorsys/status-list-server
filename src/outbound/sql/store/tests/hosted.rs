@@ -6,12 +6,12 @@
 #[cfg(feature = "sqlite")]
 use super::fixtures;
 use crate::domain::models::credential::{AggregationId, PublicJwk};
-#[cfg(feature = "sqlite")]
-use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
