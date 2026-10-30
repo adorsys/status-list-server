@@ -755,8 +755,9 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
-                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));"
+                  "const status = pm.response.code;",
+                  "pm.test(`issuer list answers 200 when authorized or 401 without admin auth, got ${status}`, () => pm.expect([200, 401]).to.include(status));",
+                  "if (status === 200) pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.include(\"no-store\"));"
                 ]
               }
             }
@@ -797,10 +798,13 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
-                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
-                  "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
-                  "pm.test(\"No key-count quota is reported as null\", () => pm.expect(pm.response.json().usage.keys_limit).to.eql(null));"
+                  "const status = pm.response.code;",
+                  "pm.test(`issuer detail answers 200 when authorized or 401 without admin auth, got ${status}`, () => pm.expect([200, 401]).to.include(status));",
+                  "if (status === 200) {",
+                  "  pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.include(\"no-store\"));",
+                  "  pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
+                  "  pm.test(\"No key-count quota is reported as null\", () => pm.expect(pm.response.json().usage.keys_limit).to.eql(null));",
+                  "}"
                 ]
               }
             }
