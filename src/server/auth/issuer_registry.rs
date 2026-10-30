@@ -269,17 +269,6 @@ impl IssuerDirectory for RegistryHandle {
     }
 }
 
-impl RegistryKey {
-    /// The key's validity window. Registry validation already parsed both
-    /// bounds, so a present value is always well-formed.
-    pub fn validity(&self) -> (Option<time::OffsetDateTime>, Option<time::OffsetDateTime>) {
-        (
-            parsed_window(self.not_before.as_deref()),
-            parsed_window(self.not_after.as_deref()),
-        )
-    }
-}
-
 impl IssuerEntry {
     /// Keys that still count against the tier's `max_keys`: every key whose
     /// validity window has not ended, including keys staged for rotation.

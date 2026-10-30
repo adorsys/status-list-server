@@ -1,9 +1,9 @@
 //! Rate limiting on the management listener.
 //!
-//! [`AuthFailureGate`] runs before `auth`, keyed on the client address, and
-//! only rejected authentications spend it. [`IssuerRateLimiter`] runs after
-//! `auth`, keyed on the verified issuer, so a forged `iss` cannot reach a
-//! bucket. State is per replica.
+//! [`AuthFailureGate`] wraps `auth`, keyed on the client address, and counts
+//! rejected authentications only. [`IssuerRateLimiter`] runs after `auth`,
+//! keyed on the verified issuer, so a forged `iss` cannot reach a bucket.
+//! State is per replica.
 //!
 //! The client address is the peer, unless the peer is a trusted proxy: then it
 //! is the rightmost `X-Forwarded-For` entry that is not a trusted proxy, which
@@ -13,10 +13,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
@@ -25,11 +25,11 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use dashmap::DashMap;
 use governor::{
     DefaultKeyedRateLimiter, Quota, RateLimiter,
     clock::{Clock, DefaultClock},
 };
+use ipnet::IpNet;
 use tower_governor::GovernorError;
 
 use crate::domain::models::credential::Issuer;
@@ -39,35 +39,46 @@ use crate::server::{
     auth::{AuthenticatedIssuer, errors::AuthenticationRejected},
     error::ApiError,
 };
-use crate::utils::ip_network::IpNetwork;
 
-/// Gate keys come from client addresses, so they are unbounded and pruned.
-const GATE_RETAIN_INTERVAL: Duration = Duration::from_secs(60);
+/// How often idle buckets are dropped. Gate keys come from client addresses
+/// and issuer keys include hosted issuers, so neither key set is bounded.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Once an address has spent its budget, every request from it is refused
-/// before its token is verified, which keeps bad-token floods away from
-/// signature verification.
+/// Drops idle buckets every [`PRUNE_INTERVAL`] until `limiter` is dropped.
+fn spawn_pruner<T: Send + Sync + 'static>(limiter: &Arc<T>, prune: fn(&T)) {
+    let limiter = Arc::downgrade(limiter);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            prune(&limiter);
+        }
+    });
+}
+
+/// Budget of rejected authentications per client address. A request that
+/// authenticates spends nothing and is never refused here, so a client sending
+/// bad tokens cannot lock out a verified issuer behind the same address. A
+/// rejection past the budget is answered with `429` instead of `401`.
 #[derive(Debug)]
 pub struct AuthFailureGate {
     limiter: DefaultKeyedRateLimiter<IpAddr>,
-    blocked_until: DashMap<IpAddr, Instant>,
     clock: DefaultClock,
-    trusted_proxies: Vec<IpNetwork>,
+    trusted_proxies: Vec<IpNet>,
     /// Warn once, not per request.
     warned_untrusted_forwarding: AtomicBool,
 }
 
 impl AuthFailureGate {
     /// `None` when `burst` or `period` is zero.
-    pub(crate) fn new(
-        burst: u32,
-        period: Duration,
-        trusted_proxies: Vec<IpNetwork>,
-    ) -> Option<Self> {
+    pub(crate) fn new(burst: u32, period: Duration, trusted_proxies: Vec<IpNet>) -> Option<Self> {
         let quota = Quota::with_period(period)?.allow_burst(NonZeroU32::new(burst)?);
         Some(Self {
             limiter: RateLimiter::keyed(quota),
-            blocked_until: DashMap::new(),
             clock: DefaultClock::default(),
             trusted_proxies,
             warned_untrusted_forwarding: AtomicBool::new(false),
@@ -75,7 +86,7 @@ impl AuthFailureGate {
     }
 
     fn is_trusted(&self, ip: IpAddr) -> bool {
-        self.trusted_proxies.iter().any(|net| net.contains(ip))
+        self.trusted_proxies.iter().any(|net| net.contains(&ip))
     }
 
     fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
@@ -90,7 +101,7 @@ impl AuthFailureGate {
                 tracing::warn!(
                     peer = %peer,
                     "ignoring X-Forwarded-For from a peer outside rate_limit.trusted_proxies; \
-                     the management write gate keys on the peer address"
+                     the management authentication gate keys on the peer address"
                 );
             }
             return peer;
@@ -114,42 +125,17 @@ impl AuthFailureGate {
         client
     }
 
-    fn blocked_for(&self, ip: IpAddr) -> Option<Duration> {
-        let now = Instant::now();
-        let until = *self.blocked_until.get(&ip)?;
-        if until > now {
-            return Some(until - now);
-        }
-        self.blocked_until.remove_if(&ip, |_, until| *until <= now);
-        None
-    }
-
-    fn record_failure(&self, ip: IpAddr) -> Option<Duration> {
-        let not_until = self.limiter.check_key(&ip).err()?;
-        let wait = not_until.wait_time_from(self.clock.now());
-        self.blocked_until.insert(ip, Instant::now() + wait);
-        Some(wait)
-    }
-
-    fn retain_recent(&self) {
-        let now = Instant::now();
-        self.blocked_until.retain(|_, until| *until > now);
-        self.limiter.retain_recent();
-        self.limiter.shrink_to_fit();
+    /// Spends one token of `ip`'s budget; `Err` carries the wait once spent.
+    fn record_failure(&self, ip: IpAddr) -> Result<(), Duration> {
+        self.limiter
+            .check_key(&ip)
+            .map_err(|not_until| not_until.wait_time_from(self.clock.now()))
     }
 
     pub fn spawn_pruner(gate: &Arc<Self>) {
-        let gate: Weak<Self> = Arc::downgrade(gate);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(GATE_RETAIN_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let Some(gate) = gate.upgrade() else {
-                    break;
-                };
-                gate.retain_recent();
-            }
+        spawn_pruner(gate, |gate| {
+            gate.limiter.retain_recent();
+            gate.limiter.shrink_to_fit();
         });
     }
 }
@@ -168,22 +154,23 @@ pub async fn auth_failure_gate(
         return governor_error_response(GovernorError::UnableToExtractKey);
     };
     let ip = gate.client_ip(peer, request.headers());
-    if let Some(wait) = gate.blocked_for(ip) {
-        return ApiError::too_many_requests(wait).into_response();
-    }
     let response = next.run(request).await;
     if response
         .extensions()
         .get::<AuthenticationRejected>()
         .is_some()
-        && let Some(wait) = gate.record_failure(ip)
+        && let Err(wait) = gate.record_failure(ip)
     {
-        return ApiError::too_many_requests(wait).into_response();
+        return ApiError::too_many_requests(
+            wait,
+            "Too many failed authentications from this address",
+        )
+        .into_response();
     }
     response
 }
 
-/// Keys are verified registry issuers, so buckets are bounded and not pruned.
+/// One bucket per issuer and tier, pruned once idle.
 #[derive(Debug)]
 pub struct IssuerRateLimiter {
     standard: DefaultKeyedRateLimiter<Issuer>,
@@ -194,8 +181,8 @@ pub struct IssuerRateLimiter {
 impl IssuerRateLimiter {
     pub fn new(tiers: &Tiers) -> Self {
         Self {
-            standard: RateLimiter::keyed(write_quota(&tiers.standard)),
-            sandbox: RateLimiter::keyed(write_quota(&tiers.sandbox)),
+            standard: RateLimiter::keyed(request_quota(&tiers.standard)),
+            sandbox: RateLimiter::keyed(request_quota(&tiers.sandbox)),
             clock: DefaultClock::default(),
         }
     }
@@ -212,9 +199,18 @@ impl IssuerRateLimiter {
             .check_key(issuer)
             .map_err(|not_until| not_until.wait_time_from(self.clock.now()))
     }
+
+    pub fn spawn_pruner(limiter: &Arc<Self>) {
+        spawn_pruner(limiter, |limiter| {
+            for tier in [&limiter.standard, &limiter.sandbox] {
+                tier.retain_recent();
+                tier.shrink_to_fit();
+            }
+        });
+    }
 }
 
-fn write_quota(limits: &TierLimits) -> Quota {
+fn request_quota(limits: &TierLimits) -> Quota {
     Quota::with_period(limits.write_period)
         .expect("tier write period is validated as non-zero")
         .allow_burst(limits.write_burst_size)
@@ -235,7 +231,8 @@ pub async fn issuer_rate_limit(
         .check(principal.issuer(), principal.tier())
     {
         crate::utils::metrics::record_issuer_rate_limited(principal.as_ref(), principal.tier());
-        return ApiError::too_many_requests(wait).into_response();
+        return ApiError::too_many_requests(wait, "The issuer's request budget is spent")
+            .into_response();
     }
     next.run(request).await
 }
@@ -243,10 +240,11 @@ pub async fn issuer_rate_limit(
 pub fn governor_error_response(error: GovernorError) -> Response {
     match error {
         // `tower_governor` truncates the wait; round up so `Retry-After` suffices.
-        GovernorError::TooManyRequests { wait_time, .. } => {
-            ApiError::too_many_requests(Duration::from_secs(wait_time.saturating_add(1)))
-                .into_response()
-        }
+        GovernorError::TooManyRequests { wait_time, .. } => ApiError::too_many_requests(
+            Duration::from_secs(wait_time.saturating_add(1)),
+            "Too many requests from this address",
+        )
+        .into_response(),
         GovernorError::UnableToExtractKey => {
             ApiError::internal("rate limiter could not determine the client address")
                 .into_response()
@@ -362,7 +360,6 @@ mod tests {
             max_keys: 2,
             write_burst_size: NonZeroU32::new(burst).unwrap(),
             write_period: Duration::from_secs(60),
-            max_lifetime: None,
         };
         Tiers {
             standard: limits(standard_burst),

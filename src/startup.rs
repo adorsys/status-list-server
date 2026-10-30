@@ -31,10 +31,6 @@ use tower_http::{
 
 use crate::config::{API_V1_PREFIX, Config};
 
-/// Path prefix of the admin API on the admin listener.
-const ADMIN_API_PREFIX: &str = "/admin/v1";
-
-use crate::server::handlers::admin;
 use crate::server::handlers::{
     allocate_indices_route, get_aggregation, get_credential, get_issuer_aggregation,
     get_status_list, publish_status_route, update_status_route,
@@ -42,11 +38,7 @@ use crate::server::handlers::{
 use crate::server::rate_limit::{
     AuthFailureGate, auth_failure_gate, governor_error_response, issuer_rate_limit,
 };
-use crate::server::{
-    AppState,
-    auth::{admin_auth, auth},
-    health, service_document,
-};
+use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
 
 /// A typed request extension carrying the name of the TCP listener that
@@ -75,8 +67,8 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let (write_gate, permissive_governor) = build_governor_configs(&config.rate_limit)?;
-        AuthFailureGate::spawn_pruner(&write_gate);
+        let (auth_gate, permissive_governor) = build_governor_configs(&config.rate_limit)?;
+        AuthFailureGate::spawn_pruner(&auth_gate);
 
         let public_router = with_listener_name(
             with_common_layers(
@@ -97,16 +89,13 @@ impl HttpServer {
         .with_state(state.clone());
 
         let management_router = with_listener_name(
-            with_common_layers(management_routes(state.clone(), write_gate), config),
+            with_common_layers(management_routes(state.clone(), auth_gate), config),
             "management",
         )
         .with_state(state.clone());
 
         let admin_router = with_listener_name(
-            with_common_layers(
-                admin_routes(config, prometheus_registry, state.clone()),
-                config,
-            ),
+            with_common_layers(admin_routes(config, prometheus_registry), config),
             "admin",
         )
         .with_state(state);
@@ -294,13 +283,15 @@ type GovernorPolicies = (
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let write_gate = Arc::new(
+    let auth_gate = Arc::new(
         AuthFailureGate::new(
             config.strict_burst_size,
             Duration::from_secs(config.strict_period_secs),
             config.trusted_proxy_networks()?,
         )
-        .ok_or_else(|| eyre!("management write gate requires non-zero burst_size and period"))?,
+        .ok_or_else(|| {
+            eyre!("management authentication gate requires non-zero burst_size and period")
+        })?,
     );
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
@@ -309,7 +300,7 @@ fn build_governor_configs(
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((write_gate, permissive))
+    Ok((auth_gate, permissive))
 }
 
 /// Routes owned by the public listener: status-list reads, aggregation reads,
@@ -332,11 +323,12 @@ fn public_routes(
 }
 
 /// Routes owned by the management listener: authenticated issuer operations.
-fn management_routes(state: AppState, write_gate: Arc<AuthFailureGate>) -> Router<AppState> {
-    // Order: write gate -> auth -> issuer limiter -> handler. Only a verified
-    // identity reaches an issuer bucket, and only rejected authentications
-    // spend the per-address gate. Every authenticated route spends the
-    // issuer's bucket, so no route lets one issuer load the server unbounded.
+fn management_routes(state: AppState, auth_gate: Arc<AuthFailureGate>) -> Router<AppState> {
+    // Order: authentication gate -> auth -> issuer limiter -> handler. Only a
+    // verified identity reaches an issuer bucket, and only rejected
+    // authentications spend the per-address gate. Every authenticated route
+    // spends the issuer's bucket, so no route lets one issuer load the server
+    // unbounded.
     let protected = Router::new()
         .nest(
             "/status-lists/{list_id}/statuses",
@@ -351,7 +343,7 @@ fn management_routes(state: AppState, write_gate: Arc<AuthFailureGate>) -> Route
         .route("/credentials", get(get_credential))
         .route_layer(from_fn_with_state(state.clone(), issuer_rate_limit))
         .route_layer(from_fn_with_state(state.clone(), auth))
-        .route_layer(from_fn_with_state(write_gate, auth_failure_gate));
+        .route_layer(from_fn_with_state(auth_gate, auth_failure_gate));
 
     Router::new().nest(API_V1_PREFIX, protected)
 }
@@ -359,19 +351,8 @@ fn management_routes(state: AppState, write_gate: Arc<AuthFailureGate>) -> Route
 /// Routes owned by the admin listener: readiness and (optionally) metrics.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
-pub(crate) fn admin_routes(
-    config: &Config,
-    registry: Registry,
-    state: AppState,
-) -> Router<AppState> {
-    let admin_api = Router::new()
-        .route("/issuers", get(admin::list_issuers))
-        .route("/issuers/{issuer_id}", get(admin::get_issuer))
-        .route_layer(from_fn_with_state(state, admin_auth))
-        .layer(middleware::from_fn(admin::no_store));
-    let router = Router::new()
-        .route("/health/ready", get(health::ready))
-        .nest(ADMIN_API_PREFIX, admin_api);
+fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
+    let router = Router::new().route("/health/ready", get(health::ready));
     attach_metrics(router, config, registry)
 }
 
@@ -560,8 +541,7 @@ mod tests {
 
         let public = public_routes(permissive).with_state(state.clone());
         let management = management_routes(state.clone(), issuer).with_state(state.clone());
-        let admin =
-            admin_routes(&config, prometheus::Registry::new(), state.clone()).with_state(state);
+        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
             let request = Request::builder()
@@ -1007,11 +987,20 @@ mod tests {
     }
 
     async fn two_issuer_management_with(overrides: &[(&str, &str)], burst: u32) -> Router {
-        use crate::domain::models::tier::IssuerTier;
+        two_issuer_management_tiered(overrides, burst, "standard").await
+    }
+
+    /// Management routes over `issuer-a` (standard) and `issuer-b` in
+    /// `issuer_b_tier`. The standard write burst is `burst` and the sandbox
+    /// burst is 1, each with one token per 600 seconds.
+    async fn two_issuer_management_tiered(
+        overrides: &[(&str, &str)],
+        burst: u32,
+        issuer_b_tier: &str,
+    ) -> Router {
         use crate::server::auth::tests::{rotation_public_jwk, test_public_jwk};
 
         let config = Config::load_from_overrides(overrides).unwrap();
-        let (write_gate, _) = build_governor_configs(&config.rate_limit).unwrap();
         let mut state = crate::test_utils::test_app_state(None).await;
         let key = |key: crate::domain::models::credential::PublicJwk| {
             serde_json::json!({
@@ -1024,7 +1013,7 @@ mod tests {
             "version": 1,
             "issuers": [
                 { "id": "issuer-a", "aggregation_id": uuid::Uuid::new_v4(), "keys": [key(test_public_jwk())] },
-                { "id": "issuer-b", "aggregation_id": uuid::Uuid::new_v4(), "keys": [key(rotation_public_jwk())] },
+                { "id": "issuer-b", "aggregation_id": uuid::Uuid::new_v4(), "tier": issuer_b_tier, "keys": [key(rotation_public_jwk())] },
             ],
             "admins": []
         }))
@@ -1032,13 +1021,24 @@ mod tests {
         state.set_issuer_registry(Arc::new(
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
         ));
-        state.tier_limits_mut(IssuerTier::Standard).write_burst_size =
-            std::num::NonZeroU32::new(burst).unwrap();
-        state.tier_limits_mut(IssuerTier::Standard).write_period = Duration::from_secs(600);
+        management_with_budgets(&config, state, burst)
+    }
+
+    /// Management routes over `state` with the standard write burst set to
+    /// `burst` and the sandbox burst to 1, each with one token per 600 seconds.
+    fn management_with_budgets(config: &Config, mut state: AppState, burst: u32) -> Router {
+        use crate::domain::models::tier::IssuerTier;
+
+        let (auth_gate, _) = build_governor_configs(&config.rate_limit).unwrap();
+        for (tier, burst) in [(IssuerTier::Standard, burst), (IssuerTier::Sandbox, 1)] {
+            let limits = state.tier_limits_mut(tier);
+            limits.write_burst_size = std::num::NonZeroU32::new(burst).unwrap();
+            limits.write_period = Duration::from_secs(600);
+        }
         state.issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(
             &state.tiers,
         ));
-        management_routes(state.clone(), write_gate).with_state(state)
+        management_routes(state.clone(), auth_gate).with_state(state)
     }
 
     /// One client IP for every request, as behind a shared NAT or proxy.
@@ -1114,6 +1114,85 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "issuer-b must not share issuer-a's bucket"
         );
+    }
+
+    #[tokio::test]
+    async fn test_a_sandbox_issuer_spends_its_tiers_request_budget() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let management = two_issuer_management_tiered(&[], 3, "sandbox").await;
+        let standard = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        let sandbox = issuer_token("issuer-b", "rotation-key", &rotation_private_pem());
+
+        assert_ne!(
+            patch_statuses(&management, &sandbox).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(patch_statuses(&management, &sandbox).await).await;
+        for _ in 0..3 {
+            assert_ne!(
+                patch_statuses(&management, &standard).await.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "the standard tier keeps its own, larger budget"
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_a_hosted_issuer_spends_the_budget_of_its_stored_tier() {
+        use crate::domain::models::credential::AggregationId;
+        use crate::domain::models::hosted_issuer::{
+            HostedIssuer, HostedIssuerKey, HostedIssuerKeyState, HostedIssuerState,
+        };
+        use crate::domain::ports::HostedIssuerStore;
+        use crate::server::auth::tests::{test_ec_private_pem, test_public_jwk};
+
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        let store = Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
+        let issuer_id = uuid::Uuid::new_v4().to_string();
+        let now = time::OffsetDateTime::now_utc();
+        store
+            .create_issuer(HostedIssuer {
+                id: issuer_id.clone(),
+                display_name: None,
+                tier: "sandbox".into(),
+                state: HostedIssuerState::Active,
+                owner: None,
+                created_at: now,
+                expires_at: Some(now + time::Duration::days(1)),
+                version: 1,
+                aggregation_id: AggregationId::generate(),
+            })
+            .await
+            .unwrap();
+        let jwk = test_public_jwk();
+        store
+            .add_key(HostedIssuerKey {
+                kid: jwk.key_id().to_owned(),
+                issuer_id: issuer_id.clone(),
+                jwk,
+                created_at: now,
+                not_before: None,
+                not_after: None,
+                state: HostedIssuerKeyState::Active,
+            })
+            .await
+            .unwrap();
+        let mut state = crate::test_utils::test_app_state(Some(db)).await;
+        state.issuer_key_resolver = crate::setup::build_issuer_key_resolver(
+            Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+            Some(store),
+        );
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let management = management_with_budgets(&config, state, 100);
+        let token = issuer_token(&issuer_id, "test-key", &test_ec_private_pem());
+
+        assert_ne!(
+            patch_statuses(&management, &token).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(patch_statuses(&management, &token).await).await;
     }
 
     async fn get_credentials(router: &Router, token: &str) -> axum::response::Response {
@@ -1203,7 +1282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verified_writes_from_one_ip_do_not_spend_the_default_write_gate() {
+    async fn test_verified_writes_from_one_ip_do_not_spend_the_default_auth_gate() {
         use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
 
         let config = Config::load_from_overrides(&[]).unwrap();
@@ -1226,7 +1305,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spoofed_forwarding_headers_do_not_evade_the_write_gate() {
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_auth_gate() {
         let management = two_issuer_management_with(
             &[
                 ("rate_limit.strict_burst_size", "1"),
@@ -1252,9 +1331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clients_behind_a_trusted_proxy_have_their_own_write_gate() {
-        use crate::server::auth::tests::test_ec_private_pem;
-
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_auth_gate() {
         let management = two_issuer_management_with(
             &[
                 ("rate_limit.strict_burst_size", "1"),
@@ -1265,7 +1342,6 @@ mod tests {
         )
         .await;
         let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        let genuine = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
 
         assert_eq!(
             patch_statuses_via(&management, "not-a-token", proxy, Some("203.0.113.1"))
@@ -1284,17 +1360,17 @@ mod tests {
             .await,
         )
         .await;
-        // Another client behind the same proxy is unaffected.
-        assert_ne!(
-            patch_statuses_via(&management, &genuine, proxy, Some("203.0.113.2"))
+        // Another client behind the same proxy has its own budget.
+        assert_eq!(
+            patch_statuses_via(&management, "not-a-token", proxy, Some("203.0.113.2"))
                 .await
                 .status(),
-            StatusCode::TOO_MANY_REQUESTS
+            StatusCode::UNAUTHORIZED
         );
     }
 
     #[tokio::test]
-    async fn test_write_gate_refuses_an_address_once_its_auth_failures_are_spent() {
+    async fn test_spent_auth_failures_never_block_a_verified_issuer_on_the_same_address() {
         use crate::server::auth::tests::test_ec_private_pem;
 
         let management = two_issuer_management_with(
@@ -1312,16 +1388,13 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
-        // The address is refused before its token is verified, so a valid
-        // token from it waits too, while other addresses are unaffected.
-        assert_contract_429(patch_statuses(&management, &genuine).await).await;
-        let elsewhere = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        // Clients behind one NAT or proxy share the address: a verified issuer
+        // among them is never refused for the others' bad tokens.
         assert_ne!(
-            patch_statuses_from(&management, &genuine, elsewhere)
-                .await
-                .status(),
+            patch_statuses(&management, &genuine).await.status(),
             StatusCode::TOO_MANY_REQUESTS
         );
+        assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
     }
 
     #[tokio::test]
@@ -1331,9 +1404,9 @@ mod tests {
             ("rate_limit.strict_period_secs", "600"),
         ])
         .unwrap();
-        let (write_gate, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let (auth_gate, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
-        let management = management_routes(state.clone(), write_gate).with_state(state);
+        let management = management_routes(state.clone(), auth_gate).with_state(state);
 
         let first = patch_statuses(&management, "not-a-token").await;
         assert_eq!(first.status(), StatusCode::UNAUTHORIZED);

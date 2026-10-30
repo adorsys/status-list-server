@@ -162,8 +162,6 @@ pub struct Config {
     pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
-    #[serde(default)]
-    pub admin_auth: AdminAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     #[serde(default)]
@@ -178,8 +176,9 @@ pub struct WatcherConfig {
     pub poll_interval_secs: u64,
 }
 
-/// Per-client-IP rate limits. `strict_*` is the management write gate, which
-/// counts rejected authentications only; `permissive_*` covers public reads.
+/// Per-client-IP rate limits. `strict_*` is the management authentication
+/// gate, which counts rejected authentications only; `permissive_*` covers
+/// public reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
@@ -187,23 +186,32 @@ pub struct RateLimitConfig {
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
     /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
-    /// management write gate believes. Empty keys every request on its peer
-    /// address.
+    /// management authentication gate believes. Empty keys every request on
+    /// its peer address.
     #[serde(default, deserialize_with = "deserialize_trimmed_list")]
     pub trusted_proxies: Vec<String>,
 }
 
 impl RateLimitConfig {
     /// `trusted_proxies`, parsed. Loading fails when any entry is malformed.
-    pub(crate) fn trusted_proxy_networks(
-        &self,
-    ) -> Result<Vec<crate::utils::ip_network::IpNetwork>, ConfigError> {
+    pub(crate) fn trusted_proxy_networks(&self) -> Result<Vec<ipnet::IpNet>, ConfigError> {
         self.trusted_proxies
             .iter()
             .map(|value| {
-                value.parse().map_err(|error| {
-                    ConfigError::Message(format!("rate_limit.trusted_proxies: {error}"))
-                })
+                value
+                    .parse::<ipnet::IpNet>()
+                    .or_else(|_| {
+                        // A bare address is a single host. An IPv4-mapped one
+                        // is stored as IPv4, as peers are compared.
+                        value
+                            .parse::<std::net::IpAddr>()
+                            .map(|ip| ipnet::IpNet::from(ip.to_canonical()))
+                    })
+                    .map_err(|_| {
+                        ConfigError::Message(format!(
+                            "rate_limit.trusted_proxies: `{value}` is not an IP address or CIDR network"
+                        ))
+                    })
             })
             .collect()
     }
@@ -269,9 +277,6 @@ pub struct TierConfig {
     pub write_burst_size: Option<u32>,
     #[serde(default)]
     pub write_period_secs: Option<u64>,
-    /// Unset on the standard tier sets no bound.
-    #[serde(default)]
-    pub max_lifetime_days: Option<u64>,
 }
 
 const STANDARD_MAX_KEYS: usize = 5;
@@ -283,8 +288,6 @@ const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
 const SANDBOX_MAX_KEYS: usize = 2;
 const SANDBOX_WRITE_BURST_SIZE: u32 = 10;
 const SANDBOX_WRITE_PERIOD_SECS: u64 = 6;
-const SANDBOX_MAX_LIFETIME_DAYS: u64 = 30;
-const SECS_PER_DAY: u64 = 86_400;
 
 impl TiersConfig {
     /// Fill defaults and check that every tier stays within the global
@@ -317,7 +320,6 @@ impl TiersConfig {
                 .standard
                 .write_period_secs
                 .unwrap_or(STANDARD_WRITE_PERIOD_SECS),
-            max_lifetime_days: self.standard.max_lifetime_days,
         };
         let sandbox = RawTier {
             max_lists: self
@@ -344,15 +346,6 @@ impl TiersConfig {
                 .sandbox
                 .write_period_secs
                 .unwrap_or(SANDBOX_WRITE_PERIOD_SECS.max(standard.write_period_secs)),
-            max_lifetime_days: Some(
-                self.sandbox.max_lifetime_days.unwrap_or(
-                    standard
-                        .max_lifetime_days
-                        .map_or(SANDBOX_MAX_LIFETIME_DAYS, |days| {
-                            SANDBOX_MAX_LIFETIME_DAYS.min(days)
-                        }),
-                ),
-            ),
         };
 
         standard.validate_caps("standard", limits)?;
@@ -373,7 +366,6 @@ struct RawTier {
     max_keys: usize,
     write_burst_size: u32,
     write_period_secs: u64,
-    max_lifetime_days: Option<u64>,
 }
 
 impl RawTier {
@@ -388,20 +380,12 @@ impl RawTier {
             ("max_keys", self.max_keys > 0),
             ("write_burst_size", self.write_burst_size > 0),
             ("write_period_secs", self.write_period_secs > 0),
-            (
-                "max_lifetime_days",
-                self.max_lifetime_days.is_none_or(|days| days > 0),
-            ),
         ];
         if let Some((key, _)) = positive.iter().find(|(_, ok)| !ok) {
             return Err(ConfigError::Message(format!(
                 "tiers.{tier}.{key} must be greater than 0"
             )));
         }
-        self.max_lifetime().map_err(|_| {
-            ConfigError::Message(format!("tiers.{tier}.max_lifetime_days is too large"))
-        })?;
-
         let caps = [
             (
                 "max_lists",
@@ -428,13 +412,6 @@ impl RawTier {
                     "tiers.{tier}.{key} ({value}) must not exceed {cap_key} ({cap})"
                 )));
             }
-        }
-        if self.max_lists > AGGREGATION_DEFAULT_LIMIT as u64 {
-            return Err(ConfigError::Message(format!(
-                "tiers.{tier}.max_lists ({}) must not exceed AGGREGATION_DEFAULT_LIMIT \
-                 ({AGGREGATION_DEFAULT_LIMIT}), the aggregation page size",
-                self.max_lists
-            )));
         }
         Ok(())
     }
@@ -475,29 +452,7 @@ impl RawTier {
                 self.write_period_secs, standard.write_period_secs
             )));
         }
-        if let Some(standard_days) = standard.max_lifetime_days {
-            match self.max_lifetime_days {
-                Some(days) if days <= standard_days => {}
-                days => {
-                    return Err(ConfigError::Message(format!(
-                        "tiers.sandbox.max_lifetime_days ({}) must not exceed \
-                         tiers.standard.max_lifetime_days ({standard_days})",
-                        days.map_or_else(|| "unset".to_string(), |days| days.to_string())
-                    )));
-                }
-            }
-        }
         Ok(())
-    }
-
-    fn max_lifetime(&self) -> Result<Option<Duration>, ()> {
-        self.max_lifetime_days
-            .map(|days| {
-                days.checked_mul(SECS_PER_DAY)
-                    .map(Duration::from_secs)
-                    .ok_or(())
-            })
-            .transpose()
     }
 
     fn into_limits(self) -> TierLimits {
@@ -509,7 +464,6 @@ impl RawTier {
             write_burst_size: NonZeroU32::new(self.write_burst_size)
                 .expect("validated as non-zero"),
             write_period: Duration::from_secs(self.write_period_secs),
-            max_lifetime: self.max_lifetime().expect("validated as representable"),
         }
     }
 }
@@ -552,51 +506,6 @@ impl ManagementAuthConfig {
             );
         }
 
-        Ok(())
-    }
-}
-
-/// JWT validation policy for the admin API. Clock leeway is shared with
-/// `management_auth.leeway_secs`, since it describes the server's clock.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AdminAuthConfig {
-    /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
-    pub max_token_lifetime_secs: u64,
-    /// Accepted admin-token audiences. Empty skips the `aud` check in
-    /// development and rejects every admin token in production.
-    #[serde(deserialize_with = "deserialize_trimmed_list")]
-    pub audiences: Vec<String>,
-}
-
-impl Default for AdminAuthConfig {
-    fn default() -> Self {
-        Self {
-            max_token_lifetime_secs: 300,
-            audiences: Vec::new(),
-        }
-    }
-}
-
-impl AdminAuthConfig {
-    fn validate(&self, environment: TelemetryEnvironment) -> Result<(), ConfigError> {
-        if self.max_token_lifetime_secs == 0 {
-            return Err(ConfigError::Message(
-                "admin_auth.max_token_lifetime_secs must be greater than 0".to_string(),
-            ));
-        }
-        // Not a startup failure: the admin API is optional, and existing
-        // production deployments must keep starting without it.
-        if self.audiences.is_empty() {
-            if environment.is_production() {
-                tracing::warn!(
-                    "admin_auth.audiences is empty; the admin API rejects every token in production"
-                );
-            } else {
-                tracing::warn!(
-                    "admin_auth.audiences is empty; admin audience validation is disabled in development"
-                );
-            }
-        }
         Ok(())
     }
 }
@@ -2110,7 +2019,6 @@ impl Config {
         config
             .management_auth
             .validate(config.telemetry.environment)?;
-        config.admin_auth.validate(config.telemetry.environment)?;
         config.status_list.validate()?;
         config.limits.validate()?;
         config.rate_limit.trusted_proxy_networks()?;
@@ -2232,8 +2140,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("management_auth.issuers_file", Option::<String>::None)?
-        .set_default("admin_auth.max_token_lifetime_secs", 300)?
-        .set_default("admin_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
@@ -3235,26 +3141,6 @@ mod tests {
     }
 
     #[test]
-    fn test_admin_auth_defaults_and_overrides() {
-        let config = Config::load_from_overrides(&[]).unwrap();
-        assert_eq!(config.admin_auth.max_token_lifetime_secs, 300);
-        assert!(config.admin_auth.audiences.is_empty());
-
-        let config = Config::load_from_overrides(&[
-            ("APP_ADMIN_AUTH__AUDIENCES", "admin-api, ops "),
-            ("APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS", "60"),
-        ])
-        .unwrap();
-        assert_eq!(config.admin_auth.audiences, ["admin-api", "ops"]);
-        assert_eq!(config.admin_auth.max_token_lifetime_secs, 60);
-
-        let err = Config::load_from_overrides(&[("admin_auth.max_token_lifetime_secs", "0")])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("admin_auth.max_token_lifetime_secs"), "{err}");
-    }
-
-    #[test]
     fn test_trusted_proxies_parse_from_a_comma_separated_list() {
         let config = Config::load_from_overrides(&[]).unwrap();
         assert!(
@@ -3267,7 +3153,7 @@ mod tests {
 
         let config = Config::load_from_overrides(&[(
             "APP_RATE_LIMIT__TRUSTED_PROXIES",
-            "10.0.0.0/8, fd00::/8,192.0.2.7",
+            "10.0.0.0/8, fd00::/8,192.0.2.7,::ffff:192.0.2.8",
         )])
         .unwrap();
         let networks: Vec<String> = config
@@ -3277,15 +3163,20 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert_eq!(networks, ["10.0.0.0/8", "fd00::/8", "192.0.2.7/32"]);
+        assert_eq!(
+            networks,
+            ["10.0.0.0/8", "fd00::/8", "192.0.2.7/32", "192.0.2.8/32"]
+        );
     }
 
     #[test]
     fn test_malformed_trusted_proxy_fails_loading() {
-        let err = Config::load_from_overrides(&[("rate_limit.trusted_proxies", "10.0.0.0/40")])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("rate_limit.trusted_proxies"), "{err}");
+        for value in ["10.0.0.0/40", "fd00::/129", "10.0.0.0/x", "example.com/8"] {
+            let err = Config::load_from_overrides(&[("rate_limit.trusted_proxies", value)])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("rate_limit.trusted_proxies"), "{value}: {err}");
+        }
     }
 
     fn resolved_tiers(overrides: &[(&str, &str)]) -> Result<Tiers, ConfigError> {
@@ -3310,7 +3201,6 @@ mod tests {
                 max_keys: 5,
                 write_burst_size: NonZeroU32::new(100).unwrap(),
                 write_period: Duration::from_secs(1),
-                max_lifetime: None,
             }
         );
         assert_eq!(
@@ -3322,7 +3212,6 @@ mod tests {
                 max_keys: 2,
                 write_burst_size: NonZeroU32::new(10).unwrap(),
                 write_period: Duration::from_secs(6),
-                max_lifetime: Some(Duration::from_secs(30 * 86_400)),
             }
         );
     }
@@ -3360,17 +3249,12 @@ mod tests {
             ("tiers.standard.max_keys", "1"),
             ("tiers.standard.write_burst_size", "3"),
             ("tiers.standard.write_period_secs", "30"),
-            ("tiers.standard.max_lifetime_days", "7"),
         ])
         .unwrap();
         assert_eq!(tiers.sandbox.max_lists, 4);
         assert_eq!(tiers.sandbox.max_keys, 1);
         assert_eq!(tiers.sandbox.write_burst_size.get(), 3);
         assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
-        assert_eq!(
-            tiers.sandbox.max_lifetime,
-            Some(Duration::from_secs(7 * 86_400))
-        );
     }
 
     #[test]
@@ -3386,20 +3270,12 @@ mod tests {
         let tiers = resolved_tiers(&[
             ("APP_TIERS__SANDBOX__MAX_LISTS", "3"),
             ("APP_TIERS__SANDBOX__WRITE_PERIOD_SECS", "30"),
-            ("APP_TIERS__STANDARD__MAX_LIFETIME_DAYS", "365"),
-            ("APP_TIERS__SANDBOX__MAX_LIFETIME_DAYS", "7"),
+            ("APP_TIERS__STANDARD__MAX_KEYS", "4"),
         ])
         .unwrap();
         assert_eq!(tiers.sandbox.max_lists, 3);
         assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
-        assert_eq!(
-            tiers.standard.max_lifetime,
-            Some(Duration::from_secs(365 * 86_400))
-        );
-        assert_eq!(
-            tiers.sandbox.max_lifetime,
-            Some(Duration::from_secs(7 * 86_400))
-        );
+        assert_eq!(tiers.standard.max_keys, 4);
     }
 
     #[test]
@@ -3422,9 +3298,15 @@ mod tests {
     #[test]
     fn test_tier_max_lists_is_bounded_by_the_aggregation_page() {
         let over = (AGGREGATION_DEFAULT_LIMIT + 1).to_string();
-        // The global cap rejects first; the tier check holds the same line.
+        // `limits.max_lists_per_issuer` is itself at most the page size, so
+        // bounding each tier by it bounds the tier by the page.
         let err = tier_error(&[("tiers.standard.max_lists", &over)]);
-        assert!(err.contains("tiers.standard.max_lists"), "{err}");
+        assert!(
+            err.contains(
+                "tiers.standard.max_lists (1001) must not exceed limits.max_lists_per_issuer"
+            ),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3461,23 +3343,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_lifetime_must_fit_within_standard() {
-        let err = tier_error(&[
-            ("tiers.standard.max_lifetime_days", "10"),
-            ("tiers.sandbox.max_lifetime_days", "11"),
-        ]);
-        assert!(
-            err.contains("tiers.sandbox.max_lifetime_days (11) must not exceed"),
-            "{err}"
-        );
-        let tiers = resolved_tiers(&[("tiers.standard.max_lifetime_days", "10")]).unwrap();
-        assert_eq!(
-            tiers.sandbox.max_lifetime,
-            Some(Duration::from_secs(10 * 86_400))
-        );
-    }
-
-    #[test]
     fn test_zero_tier_values_are_rejected() {
         for key in [
             "max_lists",
@@ -3486,7 +3351,6 @@ mod tests {
             "max_keys",
             "write_burst_size",
             "write_period_secs",
-            "max_lifetime_days",
         ] {
             let sandbox_key = format!("tiers.sandbox.{key}");
             let err = tier_error(&[(&sandbox_key, "0")]);

@@ -132,8 +132,6 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         ),
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
-        admin_auth: status_list_server::server::AdminAuthConfig::from_config(config),
-        registry_handle: registry.clone(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: status_list_server::server::ServiceLinks {

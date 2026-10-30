@@ -47,11 +47,12 @@ pub struct TierLimits {
     pub max_statuses_per_request: usize,
     /// Non-revoked signing keys an issuer may hold.
     pub max_keys: usize,
+    /// Bucket of the issuer's request budget. Despite the `write_` name it is
+    /// spent by every authenticated management request, reads included, so
+    /// no route lets one issuer load the server unbounded.
     pub write_burst_size: NonZeroU32,
-    /// One write token is replenished per period, per replica.
+    /// One token is replenished per period, per replica.
     pub write_period: Duration,
-    /// Upper bound on an issuer's lifetime; `None` sets no bound.
-    pub max_lifetime: Option<Duration>,
 }
 
 /// Limits for every tier.
@@ -71,7 +72,7 @@ impl Tiers {
 }
 
 /// An issuer's consumption of its tier's quotas.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IssuerUsage {
     pub lists: u64,
     pub lists_limit: u64,

@@ -243,7 +243,8 @@ impl StatusList {
     }
 
     /// Entries the list already holds: its fixed size, or for a grow-on-write
-    /// list every entry its encoded bytes cover.
+    /// list every entry its encoded bytes cover. The last byte may be padding,
+    /// so a list can hold up to `8 / bits - 1` entries past its highest write.
     pub(crate) fn entry_count(&self) -> Result<u64, StatusListError> {
         if let Some(size) = self.size {
             return Ok(u64::from(size));

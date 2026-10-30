@@ -899,8 +899,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     );
     warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
         .await;
-    refresh_issuer_usage(&service, &issuer_registry.snapshot(), &tiers).await;
     let issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(&tiers));
+    crate::server::rate_limit::IssuerRateLimiter::spawn_pruner(&issuer_rate_limiter);
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -913,8 +913,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         issuer_rate_limiter,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
-        admin_auth: crate::server::AdminAuthConfig::from_config(config),
-        registry_handle: issuer_registry.clone(),
         issuer_key_resolver: build_issuer_key_resolver(
             issuer_registry.clone(),
             dynamic_issuer_store.clone(),
@@ -929,11 +927,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ),
         readiness,
     };
-    spawn_issuer_usage_refresh(
-        issuer_registry.clone(),
-        state.service.clone(),
-        tiers.clone(),
-    );
+    spawn_issuer_usage_refresh(issuer_registry.clone(), &state.service, tiers);
 
     if let Some(path) = config
         .management_auth
@@ -945,7 +939,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             issuer_registry.clone(),
             state.service.clone(),
             dynamic_issuer_store.clone(),
-            tiers,
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
         );
@@ -980,7 +973,6 @@ pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
     dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
-    tiers: Arc<Tiers>,
     path: std::path::PathBuf,
     poll_interval: Duration,
 ) {
@@ -989,7 +981,6 @@ pub(crate) fn spawn_issuer_registry_watcher(
             let registry_handle = registry_handle.clone();
             let service = service.clone();
             let dynamic_issuer_store = dynamic_issuer_store.clone();
-            let tiers = tiers.clone();
             let retry_interval = poll_interval;
             async move {
                 loop {
@@ -1029,8 +1020,6 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 &dynamic_issuer_store,
                             )
                             .await;
-                            refresh_issuer_usage(&service, &registry_handle.snapshot(), &tiers)
-                                .await;
                             tracing::info!(
                                 event = "issuer_registry_reloaded",
                                 fingerprint = %registry_handle.snapshot().fingerprint(),
@@ -1166,30 +1155,33 @@ async fn validate_registry_aggregation_ids(
     Ok(())
 }
 
-/// How often each pod recounts issuer usage. Registry reloads only happen when
-/// the file changes, so without this the gauges would miss lists other pods
-/// create and keys whose `not_after` passes.
+/// How often each pod refreshes the issuer usage gauges. A reload, a list
+/// another pod creates and a key whose `not_after` passes all show within one
+/// interval.
 const ISSUER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Refreshes the usage gauges at once, then on every interval, until the
+/// service is dropped.
 fn spawn_issuer_usage_refresh(
     registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
-    service: Arc<Service>,
+    service: &Arc<Service>,
     tiers: Arc<Tiers>,
 ) {
+    let service = Arc::downgrade(service);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(ISSUER_USAGE_REFRESH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // The first tick completes at once; startup has just refreshed.
-        interval.tick().await;
         loop {
             interval.tick().await;
+            let Some(service) = service.upgrade() else {
+                break;
+            };
             refresh_issuer_usage(&service, &registry.snapshot(), &tiers).await;
         }
     });
 }
 
 /// Publishes every registered issuer's list and key usage against its tier.
-/// List counts come from one grouped query rather than one query per issuer.
 async fn refresh_issuer_usage(
     service: &Service,
     registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
@@ -1866,7 +1858,6 @@ mod general_tests {
             registry.clone(),
             state.service,
             None,
-            state.tiers,
             file.clone(),
             Duration::from_secs(1),
         );

@@ -43,39 +43,6 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
     }
 }
 
-/// Admin-token validation policy, resolved from `admin_auth.*`.
-#[derive(Debug, Clone)]
-pub struct AdminAuthConfig {
-    pub leeway_secs: u64,
-    pub max_token_lifetime_secs: u64,
-    pub audiences: Vec<String>,
-    /// Reject every token while `audiences` is empty instead of skipping
-    /// the `aud` check, so production never accepts audience-less tokens.
-    pub audience_required: bool,
-}
-
-impl Default for AdminAuthConfig {
-    fn default() -> Self {
-        Self {
-            leeway_secs: 60,
-            max_token_lifetime_secs: 300,
-            audiences: Vec::new(),
-            audience_required: false,
-        }
-    }
-}
-
-impl AdminAuthConfig {
-    pub fn from_config(config: &crate::config::Config) -> Self {
-        Self {
-            leeway_secs: config.management_auth.leeway_secs,
-            max_token_lifetime_secs: config.admin_auth.max_token_lifetime_secs,
-            audiences: config.admin_auth.audiences.clone(),
-            audience_required: config.telemetry.environment.is_production(),
-        }
-    }
-}
-
 /// Links exposed in the `GET /` service document.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceLinks {
@@ -114,10 +81,6 @@ pub struct AppState {
     pub issuer_rate_limiter: Arc<rate_limit::IssuerRateLimiter>,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
-    pub admin_auth: AdminAuthConfig,
-    /// The registry itself, for the admin API, which reports registry
-    /// entries and checks admin scopes. Same handle as the two ports below.
-    pub registry_handle: Arc<auth::issuer_registry::RegistryHandle>,
     /// Last-known-good operator-managed issuer trust registry snapshot.
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
@@ -133,8 +96,7 @@ pub struct AppState {
 impl AppState {
     pub fn set_issuer_registry(&mut self, registry: Arc<auth::issuer_registry::RegistryHandle>) {
         self.issuer_key_resolver = registry.clone();
-        self.issuer_registry = registry.clone();
-        self.registry_handle = registry;
+        self.issuer_registry = registry;
     }
     /// The issuer's aggregation URI, or `None` when aggregation is not
     /// configured or is withheld from the issuer.

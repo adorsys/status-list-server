@@ -1,4 +1,3 @@
-pub mod admin;
 pub mod issue_credential;
 pub mod status_list;
 

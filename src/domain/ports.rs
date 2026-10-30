@@ -153,7 +153,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Issuer identifiers that currently own at least one status list.
     async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
 
-    /// Number of status lists each issuer owns, counted from the stored lists.
+    /// Number of status lists each issuer holds against its list quota.
     /// Issuers without a list are absent.
     async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
 

@@ -125,7 +125,7 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and issuer identity lookup (`GET /api/v1/credentials`).
-- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`), metrics (`/metrics` when `server.enable_metrics`) and the admin API's issuer reads (`GET /admin/v1/issuers`, `GET /admin/v1/issuers/{issuer_id}`, see [`openapi-admin.yaml`](openapi-admin.yaml)).
+- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
 
 #### Deployment profiles
 
@@ -189,14 +189,15 @@ and tuned independently:
 | **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
 |                | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` |                                                             |                                                               |
 
-The writes tier is a gate in front of the `auth` middleware that counts
+The writes tier is a gate around the `auth` middleware that counts
 **rejected authentications** only. Each request `auth` answers with `401`
-spends one token of the client address's bucket; requests that authenticate
-spend nothing, so verified issuers behind one address never share it. Once an
-address has spent its bucket, every request from it, including one with a
-valid token, gets `429` before its token is verified, until the next token is
-replenished. This keeps floods of bad tokens from one address away from
-signature verification. Per-issuer budgets come from the issuer's tier (see
+spends one token of the client address's bucket. Once an address has spent its
+bucket, each further rejected authentication from it is answered with `429`
+instead of `401`, until the next token is replenished. A request that
+authenticates spends nothing and is never refused by the gate, so a client
+sending bad tokens cannot lock out a verified issuer behind the same address.
+Every request still has its token verified; floods of bad tokens belong at the
+edge. Per-issuer budgets come from the issuer's tier (see
 [Issuer tiers](#issuer-tiers-app_tiers__)), applied after `auth`.
 
 The writes gate keys on the TCP peer address. Only when the peer is listed
@@ -210,9 +211,9 @@ unparsable entry ends the walk at the nearest trusted address.
 
 Behind an ingress or load balancer, list its addresses (for example the pod
 CIDR of the ingress controller). Otherwise every client shares the ingress
-address and one client sending bad tokens blocks all of them until a token is
-replenished. The first `X-Forwarded-For` received from an untrusted peer is
-logged as a warning. Clients behind one NAT address still share the gate.
+address, and so one budget of rejected authentications. The first
+`X-Forwarded-For` received from an untrusted peer is logged as a warning.
+Clients behind one NAT address still share the gate.
 
 The order on management routes is: writes gate, `auth`, issuer limit,
 handler. When any bucket is exhausted the server returns
@@ -240,7 +241,6 @@ request bounds. Each value is set as `tiers.<tier>.<key>`, for example
 | `max_keys`                 | 5                                 | 2                 |
 | `write_burst_size`         | 100                               | 10                |
 | `write_period_secs`        | 1                                 | 6                 |
-| `max_lifetime_days`        | unset (no bound)                  | 30                |
 
 An unset `sandbox` value is lowered to the resolved `standard` value when the
 default would exceed it, so lowering a `limits.*` cap never breaks startup.
@@ -253,8 +253,7 @@ unless:
   page size (1000);
 - every `sandbox` value is at most the `standard` value. `write_period_secs`
   is the exception: a longer period is stricter, so `sandbox` must be at
-  least the `standard` period. When `standard` sets `max_lifetime_days`,
-  `sandbox` must not exceed it.
+  least the `standard` period.
 
 The issuer rate limit covers every authenticated management route:
 `PUT`/`PATCH .../statuses`, `POST .../allocations` and `GET /credentials`,
@@ -275,8 +274,8 @@ revoke the statuses it issued.
 `max_keys` is enforced on the issuer registry: a registry in which an issuer
 holds more keys whose `not_after` has not passed than its tier allows stops a
 pod from starting, and a reload with such a registry is refused and keeps the
-previous one. `max_lifetime_days` is validated at startup but not applied,
-because the registry records no creation time for an issuer.
+previous one. `status-list-server issuer-registry` applies the same check
+before a deployment.
 
 Rate-limit state is per replica: the effective cluster-wide budget of an
 issuer is `write_burst_size × replica_count`, and the same holds for the IP

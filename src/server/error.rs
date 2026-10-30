@@ -119,12 +119,13 @@ impl ApiError {
 
     /// 429 for an exhausted rate-limit bucket. `Retry-After` is the wait until
     /// the next token, rounded up so a client that honours it is admitted.
-    pub fn too_many_requests(wait: std::time::Duration) -> Self {
+    /// The description tells the client which budget it spent.
+    pub fn too_many_requests(wait: std::time::Duration, description: impl Into<String>) -> Self {
         let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
             "too_many_requests",
-            Some("Too many requests".into()),
+            Some(description.into()),
         )
         .retry_after(secs.max(1))
     }
@@ -640,7 +641,7 @@ mod tests {
             (std::time::Duration::from_millis(1_200), "2"),
             (std::time::Duration::from_secs(6), "6"),
         ] {
-            let response = ApiError::too_many_requests(wait).into_response();
+            let response = ApiError::too_many_requests(wait, "Too many requests").into_response();
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
             assert_eq!(
                 response

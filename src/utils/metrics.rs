@@ -180,7 +180,8 @@ static ISSUER_RATE_LIMITED: InstrumentSlot<Counter<u64>> = OnceLock::new();
 static ISSUER_USAGE: Mutex<BTreeMap<String, (IssuerTier, IssuerUsage)>> =
     Mutex::new(BTreeMap::new());
 
-// Labelled per issuer: cardinality is bounded by the operator-managed registry.
+// Labelled per issuer. Ids come from the registry or the hosted issuer store,
+// never from the request, so a client cannot mint a series.
 fn issuer_tier_attrs(issuer: &str, tier: IssuerTier) -> [KeyValue; 2] {
     [
         KeyValue::new("issuer", issuer.to_owned()),

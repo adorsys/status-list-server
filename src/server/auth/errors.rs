@@ -86,7 +86,7 @@ fn retry_after_secs() -> u64 {
 }
 
 /// Response extension marking a request the client failed to authenticate,
-/// which the management write gate charges to the client address.
+/// which the management authentication gate charges to the client address.
 #[derive(Clone, Copy, Debug)]
 pub struct AuthenticationRejected;
 

@@ -37,10 +37,11 @@ info:
         (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,
         `POST /api/v1/status-lists/{list_id}/allocations` and
         `GET /api/v1/credentials`). Only requests rejected with `401` spend
-        this budget. Once an address has spent it, every request from that
-        address gets `429` before its token is checked, until a token is
-        replenished. `X-Forwarded-For` from any other peer is ignored, so a
-        client cannot choose its own key.
+        this budget. Once an address has spent it, its further rejected
+        requests get `429` instead of `401`, until a token is replenished. A
+        request that authenticates is never refused by this budget.
+        `X-Forwarded-For` from any other peer is ignored, so a client cannot
+        choose its own key.
         Tunables: `strict_burst_size`, `strict_period_secs` (defaults: 10 / 60s).
       * **permissive** (per source IP) — public read routes
         (`GET /api/v1/aggregation/{aggregation_id}`,
