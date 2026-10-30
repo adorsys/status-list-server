@@ -6,9 +6,11 @@
 #[cfg(feature = "sqlite")]
 use super::fixtures;
 use crate::domain::models::credential::{AggregationId, PublicJwk};
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
-    HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
+    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
+    HostedIssuerState,
 };
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
@@ -38,6 +40,7 @@ fn key(issuer_id: &str, kid: &str) -> HostedIssuerKey {
 /// A second, distinct EC key so tests that assert *material* reuse start from
 /// a namespace that earlier helpers have not touched.
 const ROTATED_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"rotated","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
+#[cfg(feature = "sqlite")]
 const THIRD_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"third","alg":"ES256","x":"w0Nc9y5IMwcWV08tC3KtnukblytlN1HTOFngG8U6d60","y":"UklyBhY4aZvUS9aJDifOAiLMj1LVwNmhA8AXRvcs3f8"}"#;
 
 fn key_with_material(issuer_id: &str, kid: &str, jwk_json: &str) -> HostedIssuerKey {
