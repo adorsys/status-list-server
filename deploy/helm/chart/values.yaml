@@ -374,7 +374,7 @@ postgres:
 
 mysql:
   # External MySQL only: this chart never deploys it, and mysql.enabled fails the render.
-  # No published image includes MySQL support yet; build one and set statuslist.image.tag.
+  # Published images are Postgres-only; for MySQL build one and set statuslist.image.tag.
   auth:
     username: mysql
     database: status-list
