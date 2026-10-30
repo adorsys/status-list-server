@@ -1,13 +1,16 @@
 //! Inbound HTTP web server module containing handlers, auth middleware, and shared application state.
 
 pub mod auth;
+pub mod cache;
 pub mod error;
 pub mod handlers;
 pub mod health;
 pub mod rate_limit;
 
-use crate::domain::service::Service;
+use crate::domain::models::credential::AggregationId;
+use crate::domain::service::{Service, StatusListPolicy};
 use std::sync::Arc;
+use url::Url;
 
 /// JWT policy for protected management endpoints.
 #[derive(Debug, Clone)]
@@ -42,15 +45,45 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
 pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
-    pub server_domain: String,
-    pub aggregation_uri: Option<String>,
+    /// Resolved public base URL (e.g. `https://statuslist.example.com/api/v1`).
+    /// Used to build the `sub` URI signed into issued tokens and returned to
+    /// issuers as the publish `Location`.
+    pub public_base_url: String,
+    /// The aggregation endpoint's URL. Tokens and registrations advertise it
+    /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
+    pub aggregation_uri: Option<Url>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
+    pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    /// Per-replica cache of signed status-list token bytes.
+    pub token_bytes_cache: crate::server::cache::TokenBytesCache,
     /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
+}
+
+impl AppState {
+    /// The issuer's aggregation URI, or `None` when aggregation is not
+    /// configured.
+    pub fn aggregation_uri_for(&self, aggregation_id: AggregationId) -> Option<String> {
+        let mut uri = self.aggregation_uri.clone()?;
+        uri.path_segments_mut()
+            .ok()?
+            .push(&aggregation_id.to_string());
+        Some(uri.into())
+    }
+
+    pub fn status_list_policy(&self) -> StatusListPolicy {
+        StatusListPolicy {
+            token_exp_secs: self.token_exp_secs,
+            max_status_index: self.max_status_index,
+            max_statuses_per_request: self.max_statuses_per_request,
+            max_serialized_list_size: self.max_serialized_list_size,
+            max_lists_per_issuer: self.max_lists_per_issuer,
+        }
+    }
 }

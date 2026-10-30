@@ -24,6 +24,6 @@ export default {
   },
   ignores: [
     // Ignore merge commits (e.g., "Merge branch 'develop' into ...")
-    (message) => message.startsWith("Merge "),
+    (message) => message.startsWith("Merge ") || message.startsWith("merge: "),
   ],
 };

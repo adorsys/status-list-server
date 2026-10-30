@@ -32,6 +32,17 @@ pub enum RepositoryError {
     /// [`DuplicateEntry`]: RepositoryError::DuplicateEntry
     #[error("Write contention ({code}): the transaction lost a lock race and may be retried")]
     Contention { code: &'static str },
+    /// The issuer's `credentials.list_count` already reached the quota.
+    #[error("Status list quota exceeded: issuer holds {count} of {max}")]
+    QuotaExceeded { count: u64, max: u64 },
+    #[error("Status list not found")]
+    NotFound,
+    #[error("Issuer mismatch")]
+    IssuerMismatch,
+    #[error("Status list is not fixed-size")]
+    ListNotFixedSize,
+    #[error("Status list does not have enough unallocated indices")]
+    AllocationExhausted,
 }
 
 // There is deliberately no `impl From<sea_orm::DbErr>` for this type, nor for
@@ -87,10 +98,13 @@ fn contention_code(err: &sea_orm::DbErr) -> Option<&'static str> {
     {
         use sea_orm::{DbErr, RuntimeErr, SqlxError};
 
-        let (DbErr::Exec(RuntimeErr::SqlxError(SqlxError::Database(db)))
-        | DbErr::Query(RuntimeErr::SqlxError(SqlxError::Database(db)))) = err
-        else {
-            return None;
+        let db = match err {
+            DbErr::Exec(RuntimeErr::SqlxError(inner))
+            | DbErr::Query(RuntimeErr::SqlxError(inner)) => match inner.as_ref() {
+                SqlxError::Database(db) => db,
+                _ => return None,
+            },
+            _ => return None,
         };
 
         #[cfg(feature = "mysql")]

@@ -1,8 +1,8 @@
 ARG APP_NAME=status-list-server
 
-# Use buildx's automatic platform detection
-FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl AS builder-amd64
-FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl AS builder-arm64
+# Use buildx's automatic platform detection.
+FROM --platform=$BUILDPLATFORM blackdex/rust-musl:x86_64-musl@sha256:875ccf23ed478f7edee9be54d3dd6556dbca067e9af8e33f22f6b316226a5d5e AS builder-amd64
+FROM --platform=$BUILDPLATFORM blackdex/rust-musl:aarch64-musl@sha256:9f1f5a00c2ef54ab851b8cbf4e5a843c74314679a2f7f4af5664b3a7ce21bce8 AS builder-arm64
 
 # Select the appropriate builder based on target platform
 FROM builder-${TARGETARCH} AS builder
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=registry-cache-${TARGETPL
     env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local cargo-auditable@${CARGO_AUDITABLE_VERSION}; \
     env -u CARGO_BUILD_TARGET cargo install --locked --root /usr/local rust-audit-info@${RUST_AUDIT_INFO_VERSION}
 
-ARG FEATURES="postgres,aws"
+ARG FEATURES="postgres,aws,redis"
 
 # The release profile sets strip, lto and codegen-units = 1, each of which can drop
 # .dep-v0. A missing section yields a passing scan and an empty SBOM, so this must
@@ -40,6 +40,7 @@ ARG FEATURES="postgres,aws"
 # counted so a rust-audit-info crash fails as itself rather than as a count of 0.
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=test_data,target=test_data \
+    --mount=type=bind,source=xtask,target=xtask \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=cache,target=/app/target,id=target-cache-${TARGETPLATFORM} \

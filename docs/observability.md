@@ -19,7 +19,7 @@ Telemetry behavior is determined primarily by the deployment environment (`APP_E
 
 ## 2. Helm Deployment Architecture & Wiring
 
-When deploying via Helm (`helm/chart`), OpenTelemetry Collector integration is provided by the official
+When deploying via Helm (`deploy/helm/chart`), OpenTelemetry Collector integration is provided by the official
 [`open-telemetry/opentelemetry-collector`](https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-collector)
 subchart. Configuration is under the `opentelemetry-collector` key in `values.yaml`.
 
@@ -90,10 +90,22 @@ When `statuslist.networkPolicy.enabled=true` is set:
 
 ### Running the Observability Stack
 
-In local development, Docker Compose provisions an OpenTelemetry Collector, Prometheus, and Jaeger instance alongside the server. The application runs in `development` mode (human-readable stdout logs) with `APP_TELEMETRY__ENABLED=true` exporting OTLP traces to Jaeger:
+In local development, the server starts by default. The `observability`
+profile adds the OpenTelemetry Collector, Prometheus, Jaeger, Alertmanager,
+Grafana, and Pushgateway. Set `GRAFANA_ADMIN_PASSWORD` in your local `.env` or shell first:
 
 ```bash
-docker compose up -d
+APP_TELEMETRY__ENABLED=true \
+  docker compose --profile observability up -d
+```
+
+To add PostgreSQL, ACME, and AWS services and enable their matching app features:
+
+```bash
+FEATURES=postgres,aws APP_TELEMETRY__ENABLED=true \
+  docker compose -f docker-compose.yml -f compose/postgres.yml \
+    --profile postgres --profile acme --profile aws \
+    --profile observability up -d --build
 ```
 
 Services provisioned for observability:

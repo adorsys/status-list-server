@@ -2,13 +2,34 @@
 
 use std::sync::Arc;
 
-use crate::domain::models::credential::{Credential, CredentialError, Issuer};
+use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
 use crate::domain::models::status_list::{
-    StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
+    Status, StatusEntry, StatusList, StatusListError, StatusListRecord, StatusListSnapshot,
+    StatusListUriPage, validate_unique_indices,
 };
 use crate::domain::ports::{
-    CertificateProvider, CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
+    AllocateStatusListIndices, CertificateProvider, CreateStatusList, CredentialRepo,
+    StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
+
+#[derive(Debug, Clone)]
+pub struct StatusListPolicy {
+    pub token_exp_secs: u64,
+    pub max_status_index: i32,
+    pub max_statuses_per_request: usize,
+    pub max_serialized_list_size: usize,
+    pub max_lists_per_issuer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishStatusListCommand {
+    pub list_id: String,
+    pub issuer: Issuer,
+    pub sub: String,
+    pub statuses: Vec<StatusEntry>,
+    pub size: Option<u32>,
+    pub default_status: Option<Status>,
+}
 
 /// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
@@ -84,83 +105,100 @@ impl Service {
         self.snapshot_repo.is_some()
     }
 
-    /// Create and publish a new status list record, enforcing uniqueness and size invariants.
-    #[allow(clippy::too_many_arguments)]
+    /// Create and publish a new status list record, enforcing uniqueness, size
+    /// invariants and the per-issuer list quota.
+    ///
+    /// The quota is checked by the repository inside creation, since a
+    /// count-then-insert here would race concurrent publishes.
     pub async fn publish_status_list(
         &self,
-        list_id: String,
-        issuer: Issuer,
-        sub: String,
-        statuses: Vec<StatusEntry>,
-        token_exp_secs: u64,
-        max_status_index: i32,
-        max_statuses_per_request: usize,
-        max_serialized_list_size: usize,
+        command: PublishStatusListCommand,
+        policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
+        validate_request_shape(
+            &command.statuses,
+            policy.max_status_index,
+            policy.max_statuses_per_request,
+        )?;
+        let default_status = command.default_status.unwrap_or(Status::Valid);
+        if let Some(size) = command.size {
+            StatusList::validate_size_limit(
+                &command.statuses,
+                size,
+                &default_status,
+                policy.max_status_index,
+            )?;
         }
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
-
-        let record = StatusListRecord {
-            list_id,
-            issuer,
-            status_list: StatusList::create(statuses)?,
-            sub,
-            updated_at: current_unix_timestamp(),
+        let initially_allocated = if command.size.is_some() {
+            command
+                .statuses
+                .iter()
+                .map(|entry| entry.index)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
         };
 
-        if record.status_list.lst.len() > max_serialized_list_size {
+        let record = StatusListRecord {
+            list_id: command.list_id,
+            issuer: command.issuer,
+            status_list: StatusList::create_with_options(
+                command.statuses,
+                command.size,
+                default_status,
+            )?,
+            sub: command.sub,
+            updated_at: current_unix_timestamp(),
+            version: 1,
+        };
+
+        if record.status_list.lst.len() > policy.max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
 
-        if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&record, token_exp_secs);
-            self.status_list_repo
-                .insert_with_snapshot(record.clone(), snapshot)
-                .await?;
+        let initial_snapshot = if self.snapshots_enabled() {
+            Some(build_snapshot(&record, policy.token_exp_secs)?)
         } else {
-            self.status_list_repo.insert(record.clone()).await?;
-        }
+            None
+        };
+
+        self.status_list_repo
+            .create(CreateStatusList {
+                record: record.clone(),
+                initial_snapshot,
+                initial_allocations: initially_allocated,
+                max_lists_per_issuer: policy.max_lists_per_issuer,
+            })
+            .await?;
+
         Ok(record)
     }
 
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Request-shape validation (count bound, index bound, duplicate indices)
+    /// runs before any storage access so a malformed request is rejected with
+    /// `400` consistently and without a wasted `find` or write. The
+    /// duplicate-index invariant is re-enforced in the domain model as defense
+    /// in depth in case this service boundary is bypassed.
+    ///
+    /// An update that leaves the list unchanged — including a literal empty
+    /// `statuses` payload and a non-empty payload that re-sets every affected
+    /// index to its current value — is a successful no-op: the list version and
+    /// history are untouched and no redundant snapshot is written.
     pub async fn update_statuses(
         &self,
         issuer: &Issuer,
         list_id: &str,
         statuses: Vec<StatusEntry>,
-        token_exp_secs: u64,
-        max_status_index: i32,
-        max_statuses_per_request: usize,
-        max_serialized_list_size: usize,
+        policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        if statuses.len() > max_statuses_per_request {
-            return Err(StatusListError::TooManyStatuses {
-                count: statuses.len(),
-                max: max_statuses_per_request,
-            });
-        }
-        for entry in &statuses {
-            if entry.index > max_status_index {
-                return Err(StatusListError::IndexTooLarge {
-                    index: entry.index,
-                    max: max_status_index,
-                });
-            }
-        }
+        validate_request_shape(
+            &statuses,
+            policy.max_status_index,
+            policy.max_statuses_per_request,
+        )?;
+        validate_unique_indices(&statuses)?;
 
         let mut existing = self
             .status_list_repo
@@ -172,22 +210,58 @@ impl Service {
             return Err(StatusListError::IssuerMismatch);
         }
 
+        existing
+            .status_list
+            .validate_updates_within_size(&statuses)?;
+        if existing.status_list.size.is_some() {
+            let update_indices = statuses.iter().map(|entry| entry.index).collect::<Vec<_>>();
+            if let Some(index) = self
+                .status_list_repo
+                .first_unallocated_index(list_id, &update_indices)
+                .await?
+            {
+                return Err(StatusListError::IndexNotAllocated { index });
+            }
+        }
+
+        let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
-        if existing.status_list.lst.len() > max_serialized_list_size {
+
+        // A request that does not change the list is a successful no-op. It must
+        // not bump the version or `updated_at`, or insert a redundant history
+        // snapshot, which would bloat history with a duplicate entry for an
+        // unchanged state.
+        if existing.status_list == current_status_list {
+            return Ok(existing);
+        }
+
+        if existing.status_list.lst.len() > policy.max_serialized_list_size {
             return Err(StatusListError::TooLarge);
         }
 
-        let previous_updated_at = existing.updated_at;
-        existing.updated_at = next_updated_at(previous_updated_at, current_unix_timestamp());
+        // Optimistic-concurrency version: strictly monotonic, bumped on every
+        // committed change and used for conflict detection and cache fencing. It
+        // is deliberately separate from `updated_at`, which stays a real
+        // wall-clock timestamp so a burst of writes to one list can never push a
+        // token's `iat` into the future (RPs reject a future `iat`).
+        let previous_version = existing.version;
+        existing.version = next_version(previous_version);
+        // `updated_at` stays a real wall-clock timestamp and never moves
+        // backwards, even on a replica with a slightly slow clock: two writes in
+        // the same second can therefore share an `updated_at`, which is fine
+        // because the monotonic `version` is the concurrency guard and the
+        // snapshot/history tie-breaker. Advancing it with `max(now, previous)`
+        // (rather than `previous + 1`) keeps it from drifting ahead of the clock.
+        existing.updated_at = existing.updated_at.max(current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
-            let snapshot = build_snapshot(&existing, token_exp_secs);
+            let snapshot = build_snapshot(&existing, policy.token_exp_secs)?;
             self.status_list_repo
-                .update_with_snapshot(existing.clone(), previous_updated_at, snapshot)
+                .update_with_snapshot(existing.clone(), previous_version, snapshot)
                 .await?
         } else {
             self.status_list_repo
-                .update(existing.clone(), previous_updated_at)
+                .update(existing.clone(), previous_version)
                 .await?
         };
 
@@ -195,8 +269,31 @@ impl Service {
             return Err(StatusListError::Conflict);
         }
 
-        invalidate_after_commit(self.status_list_cache.as_ref(), &existing.list_id).await;
+        invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
         Ok(existing)
+    }
+
+    pub async fn allocate_indices(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+        count: u32,
+        policy: &StatusListPolicy,
+    ) -> Result<Vec<i32>, StatusListError> {
+        if count == 0 || count as usize > policy.max_statuses_per_request {
+            return Err(StatusListError::InvalidAllocationCount {
+                count,
+                max: policy.max_statuses_per_request,
+            });
+        }
+
+        self.status_list_repo
+            .allocate_indices(AllocateStatusListIndices {
+                list_id: list_id.to_string(),
+                issuer: issuer.clone(),
+                count,
+            })
+            .await
     }
 
     /// Retrieve a status list record from cache or fallback to persistent storage.
@@ -220,9 +317,35 @@ impl Service {
         Ok(record)
     }
 
-    /// List all published status list URIs.
-    pub async fn list_uris(&self) -> Result<Vec<String>, StatusListError> {
-        self.status_list_repo.list_uris().await
+    /// List one page of published status list URIs, starting after `after`.
+    pub async fn list_uris(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<StatusListUriPage, StatusListError> {
+        self.status_list_repo.list_uris(None, after, limit).await
+    }
+
+    /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
+    /// `None` when no issuer has it.
+    pub async fn list_issuer_uris(
+        &self,
+        aggregation_id: AggregationId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<StatusListUriPage>, StatusListError> {
+        let Some(issuer) = self
+            .credential_repo
+            .find_issuer_by_aggregation_id(aggregation_id)
+            .await
+            .map_err(|e| StatusListError::Backend(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        self.status_list_repo
+            .list_uris(Some(&issuer.0), after, limit)
+            .await
+            .map(Some)
     }
 
     /// Retrieve the snapshot that was active at the given Unix timestamp
@@ -259,8 +382,25 @@ impl Service {
     /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
     /// `impl From<RepositoryError> for CredentialError` maps it to
     /// `AlreadyExists`, so the 409 is unchanged.
-    pub async fn publish_credential(&self, credential: Credential) -> Result<(), CredentialError> {
-        self.credential_repo.insert(credential).await
+    ///
+    /// Returns the aggregation ID the issuer was registered under.
+    pub async fn publish_credential(
+        &self,
+        credential: Credential,
+    ) -> Result<AggregationId, CredentialError> {
+        let aggregation_id = AggregationId::generate();
+        self.credential_repo
+            .insert(credential, aggregation_id)
+            .await?;
+        Ok(aggregation_id)
+    }
+
+    /// The issuer's aggregation ID, or `None` for an unknown issuer.
+    pub async fn find_aggregation_id(
+        &self,
+        issuer: &Issuer,
+    ) -> Result<Option<AggregationId>, CredentialError> {
+        self.credential_repo.find_aggregation_id(&issuer.0).await
     }
 
     /// Retrieve credentials by issuer identifier.
@@ -303,35 +443,192 @@ pub fn current_unix_timestamp() -> i64 {
     time::UtcDateTime::now().unix_timestamp()
 }
 
-pub fn next_updated_at(previous: i64, now: i64) -> i64 {
-    now.max(previous + 1)
+/// The next monotonic optimistic-concurrency version for a record currently at
+/// `previous`.
+///
+/// The version is the concurrency guard and distributed cache-fencing stamp; it
+/// is deliberately decoupled from `updated_at` (which stays a real wall-clock
+/// timestamp) so a burst of writes to one list can never push the token's `iat`
+/// into the future. `saturating_add` keeps a saturated version monotonic rather
+/// than wrapping.
+pub fn next_version(previous: u64) -> u64 {
+    previous.saturating_add(1)
 }
 
-fn build_snapshot(record: &StatusListRecord, token_exp_secs: u64) -> StatusListSnapshot {
+/// Enforce the request-level count and index bounds shared by publish and update.
+fn validate_request_shape(
+    statuses: &[StatusEntry],
+    max_status_index: i32,
+    max_statuses_per_request: usize,
+) -> Result<(), StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+    for entry in statuses {
+        if entry.index > max_status_index {
+            return Err(StatusListError::IndexTooLarge {
+                index: entry.index,
+                max: max_status_index,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
+///
+/// Used by every expiry-construction site (`build_snapshot` and the default token
+/// validity window) so the two stay in sync. Configuration validation normally
+/// keeps `token_exp_secs` within `MAX_TOKEN_LIFETIME_SECS`, but a directly
+/// constructed `AppState`/`Service` can bypass it, so this converts through
+/// `i64::try_from` before `checked_add` (a raw `as i64` would turn `u64::MAX`
+/// into `-1` and let the addition "succeed" with a bogus exp).
+pub(crate) fn token_expiry(iat: i64, token_exp_secs: u64) -> Result<i64, StatusListError> {
+    let token_exp =
+        i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
+            iat,
+            token_exp_secs,
+        })?;
+    iat.checked_add(token_exp)
+        .ok_or_else(|| StatusListError::TokenExpiryOverflow {
+            iat,
+            token_exp_secs,
+        })
+}
+
+fn build_snapshot(
+    record: &StatusListRecord,
+    token_exp_secs: u64,
+) -> Result<StatusListSnapshot, StatusListError> {
     let iat = record.updated_at;
-    StatusListSnapshot {
+    let exp = token_expiry(iat, token_exp_secs)?;
+    Ok(StatusListSnapshot {
         snapshot_id: uuid::Uuid::new_v4().to_string(),
         list_id: record.list_id.clone(),
         issuer: record.issuer.clone(),
         status_list: record.status_list.clone(),
         sub: record.sub.clone(),
         iat,
-        exp: iat + token_exp_secs as i64,
-    }
+        exp,
+        version: record.version,
+    })
 }
 
-async fn invalidate_after_commit(cache: &dyn StatusListCache, list_id: &str) {
-    match cache.invalidate(list_id).await {
+async fn invalidate_after_commit(cache: &dyn StatusListCache, record: &StatusListRecord) {
+    match cache
+        .invalidate_after_update(&record.list_id, record.version)
+        .await
+    {
         Ok(()) => {
-            tracing::debug!(list_id = %list_id, "invalidated cache entry after commit");
+            tracing::debug!(list_id = %record.list_id, "invalidated cache entry after commit");
         }
         Err(error) => {
             tracing::warn!(
-                list_id = %list_id,
+                list_id = %record.list_id,
                 error = ?error,
                 "status list write committed, but cache invalidation failed; \
                  reads may be stale until the cache entry expires"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::status_list::StatusList;
+    use crate::test_utils::{publish_list, register_issuer, test_app_state};
+
+    fn record_with_updated_at(updated_at: i64) -> StatusListRecord {
+        StatusListRecord {
+            list_id: "list-1".into(),
+            issuer: Issuer("test-issuer".into()),
+            sub: "https://example.com/status-list/1".into(),
+            status_list: StatusList {
+                bits: 1,
+                lst: "AAECAw==".into(),
+                size: None,
+                default_status: None,
+            },
+            updated_at,
+            version: 1,
+        }
+    }
+
+    #[test]
+    fn snapshot_exp_guards_against_iat_plus_exp_overflow() {
+        // Synthetic issuance-time boundary: an `updated_at` (the iat used for the
+        // exp claim) near i64::MAX with a representable token_exp_secs still overflows
+        // `iat + token_exp_secs`. `checked_add` must fail closed rather than wrap exp
+        // negative (which previously panicked in debug and wrapped in release).
+        let record = record_with_updated_at(i64::MAX - 5);
+        let err = build_snapshot(&record, 10)
+            .expect_err("iat near i64::MAX with token_exp_secs=10 must overflow and be rejected");
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { iat, token_exp_secs }
+                if iat == i64::MAX - 5 && token_exp_secs == 10),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+
+        // A representable value that does not overflow still builds the snapshot.
+        let ok = build_snapshot(&record_with_updated_at(1_000), 900)
+            .expect("non-overflowing iat + token_exp_secs should build a snapshot");
+        assert_eq!(ok.exp, 1_900);
+    }
+
+    #[test]
+    fn snapshot_exp_rejects_u64_max_token_exp_secs_via_try_from() {
+        // Direct-construction bypass: an AppState/Service caller could pass
+        // `token_exp_secs = u64::MAX` without going through config validation.
+        // The guard must convert via `i64::try_from` before `checked_add`, so
+        // `u64::MAX` does NOT silently become `-1` and produce a bogus (lower)
+        // exp. It must fail closed instead.
+        let record = record_with_updated_at(1_000);
+        let err = build_snapshot(&record, u64::MAX)
+            .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
+        assert!(
+            matches!(err, StatusListError::TokenExpiryOverflow { iat, token_exp_secs }
+                if iat == 1_000 && token_exp_secs == u64::MAX),
+            "expected TokenExpiryOverflow, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_lists_only_that_issuers_lists() {
+        let state = test_app_state(None).await;
+        let service = &state.service;
+        let one = register_issuer(service, "one").await;
+        register_issuer(service, "two").await;
+        let a = publish_list(service, "one", "a").await;
+        publish_list(service, "two", "b").await;
+
+        let page = service.list_issuer_uris(one, None, 10).await.unwrap();
+        assert_eq!(page.unwrap().status_lists, [a]);
+        assert_eq!(
+            service
+                .list_uris(None, 10)
+                .await
+                .unwrap()
+                .status_lists
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn list_issuer_uris_is_none_for_an_unknown_aggregation_id() {
+        let state = test_app_state(None).await;
+        register_issuer(&state.service, "one").await;
+        publish_list(&state.service, "one", "a").await;
+
+        let page = state
+            .service
+            .list_issuer_uris(AggregationId::generate(), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page, None);
     }
 }

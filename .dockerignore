@@ -18,7 +18,7 @@ LICENSE
 README.md
 
 /demo
-/helm
+/deploy
 .env.*
 arc.*
 architecture.md

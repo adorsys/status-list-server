@@ -1,0 +1,8 @@
+{
+  "name": "status-list-local-ci-tools",
+  "private": true,
+  "dependencies": {
+    "markdownlint-cli2": "0.23.2",
+    "tombi": "1.8.4"
+  }
+}

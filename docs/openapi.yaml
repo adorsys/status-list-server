@@ -36,10 +36,12 @@ info:
       * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
         `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
         the peer IP) — `PUT`/`PATCH`
-        `/api/v1/status-lists/{list_id}/statuses`.
+        `/api/v1/status-lists/{list_id}/statuses` and the authenticated
+        `GET /api/v1/credentials`.
         Tunables: `strict_burst_size`, `strict_period_secs`.
       * **permissive** (per source IP) — public read routes
-        (`GET /api/v1/aggregation`,
+        (`GET /api/v1/aggregation/{aggregation_id}`,
+        `GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
         Tunables: `permissive_burst_size`, `permissive_period_secs`
         (defaults: 100 / 60s).
@@ -58,6 +60,7 @@ info:
     | `max_status_index` | 100000 | `400 Bad Request` (`index` too large) |
     | `max_statuses_per_request` | 5000 | `400 Bad Request` (too many entries) |
     | `max_serialized_list_size` | 1 MiB | `422 Unprocessable Entity` |
+    | `max_lists_per_issuer` | 1000 | `400 Bad Request` (`list_quota_exceeded`) |
 
     These bounds are reflected on the request schemas (`StatusEntry.index`
     `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
@@ -185,6 +188,38 @@ paths:
           $ref: "#/components/responses/InternalServerError"
 
   /api/v1/credentials:
+    get:
+      operationId: getIssuerRegistration
+      summary: Get the calling issuer's aggregation ID and URI
+      description: |
+        Returns the aggregation ID and URI of the issuer the Bearer token
+        belongs to. Issuers registered before aggregation IDs existed never got
+        theirs in the registration response, and get them here.
+      responses:
+        "200":
+          description: The issuer's registration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            The issuer's credential was removed after the token was checked
+            (`issuer_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "issuer_not_found"
+                error_description: "Issuer is not registered"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
     post:
       operationId: registerIssuer
       summary: Register issuer credentials
@@ -201,12 +236,15 @@ paths:
               $ref: "#/components/schemas/CredentialsRequest"
       responses:
         "202":
-          description: Credentials accepted and stored successfully
+          description: |
+            Credentials accepted and stored. The body tells the issuer its
+            aggregation ID, which it cannot derive itself, and the aggregation
+            URI to publish in its metadata (draft-21 §9.1).
+            `GET /api/v1/credentials` returns them again later.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-              example: "Credentials stored successfully"
+                $ref: "#/components/schemas/CredentialsResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
@@ -220,30 +258,127 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /api/v1/aggregation:
+  /api/v1/aggregation/{aggregation_id}:
     get:
-      operationId: getAggregation
-      summary: Aggregate all status list URIs
+      operationId: getIssuerAggregation
+      summary: List one issuer's status list URIs
       description: |
-        Returns the `sub` URIs of every status list hosted by this server,
-        issuer-agnostic. Intended for relying parties that need to enumerate
-        the set of status lists to poll. The response is a JSON object with a
-        single `status_lists` array of URI strings.
+        Returns the `sub` URIs of one issuer's status lists as a draft-21 §9.3
+        Status List Aggregation, plus a `next_cursor` for paging. Status list
+        tokens advertise this URI in `aggregation_uri`.
 
-        When `server.aggregation_uri` is configured, that URI is advertised
-        inside issued status list tokens (draft-21 §4.2/§4.3).
+        The response is complete in one page and `next_cursor` is `null`: the
+        server refuses to start when `limits.max_lists_per_issuer` exceeds the
+        default page size, and the list quota holds each issuer to it. When an
+        issuer has more lists anyway, for example while the quota is off, a
+        request without `limit` gets `409 paging_required` rather than part of
+        the aggregation. Send `limit` to page as described under
+        `getAggregation`.
       security: []
+      parameters:
+        - name: aggregation_id
+          in: path
+          required: true
+          description: |
+            The issuer's aggregation ID, as returned at registration and by
+            `GET /api/v1/credentials`.
+          schema:
+            type: string
+            format: uuid
+            example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        - $ref: "#/components/parameters/AggregationLimit"
+        - $ref: "#/components/parameters/AggregationCursor"
+        - $ref: "#/components/parameters/AggregationIfNoneMatch"
       responses:
         "200":
-          description: Aggregation of all hosted status list URIs.
+          $ref: "#/components/responses/AggregationPage"
+        "304":
+          $ref: "#/components/responses/AggregationNotModified"
+        "400":
+          description: |
+            `aggregation_id` is not a UUID (`invalid_aggregation_id`), or
+            `limit`, `cursor` or the query string is invalid (`invalid_query`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AggregationResponse"
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                status_lists:
-                  - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
-                  - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+                error: "invalid_aggregation_id"
+                error_description: "aggregation_id must be a UUID"
+        "404":
+          description: No issuer has this aggregation ID (`aggregation_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "aggregation_not_found"
+                error_description: "No issuer has this aggregation ID"
+        "409":
+          description: |
+            The issuer has more status lists than one page and the request
+            sent neither `limit` nor `cursor` (`paging_required`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "paging_required"
+                error_description: "this aggregation has more than 1000 status lists; send limit to page through it"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/aggregation:
+    get:
+      operationId: getAggregation
+      summary: List every issuer's status list URIs, one page at a time
+      deprecated: true
+      description: |
+        Returns the `sub` URIs of every hosted status list, across issuers,
+        one bounded page per request. Kept for status list tokens issued
+        before `aggregation_uri` named one issuer; use
+        `GET /api/v1/aggregation/{aggregation_id}` instead. A client that
+        reads only `status_lists` sees the first page and nothing else.
+
+        **Paging.** Pages are ordered by `list_id` and hold at most `limit`
+        URIs (default and maximum 1000). While `next_cursor` is non-null, pass
+        it back as `cursor` to fetch the next page; the same next page is also
+        advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
+        returns exactly once every list that existed when the walk started
+        and still exists when its page is read; lists are never deleted
+        through the API, but an operator may delete them directly in the
+        database. A list published during a walk may be missed, and not only
+        because it was published late: `list_id` is chosen by the publisher
+        and can be any UUID, so a new list can sort before the current cursor.
+        The same applies to the paged exceptions of `getIssuerAggregation`.
+
+        There is no total count: counting every list is itself an unbounded
+        read on a public endpoint.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/AggregationLimit"
+        - $ref: "#/components/parameters/AggregationCursor"
+        - $ref: "#/components/parameters/AggregationIfNoneMatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/AggregationPage"
+        "304":
+          $ref: "#/components/responses/AggregationNotModified"
+        "400":
+          description: |
+            `limit` is outside 1–1000, `cursor` is not a value this endpoint
+            returned, or the query string could not be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_query"
+                error_description: "limit must be between 1 and 1000, got 5000"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -256,7 +391,15 @@ paths:
       - name: list_id
         in: path
         required: true
-        description: UUID of the status list.
+        description: |
+          UUID of the status list. For publish (`PUT`), only the lowercase,
+          hyphenated form is accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`);
+          the braced, `urn:uuid:`, no-hyphen and uppercase forms are rejected
+          with `400`. For update (`PATCH`), any well-formed UUID is accepted
+          for the lookup, but a list is only found by the exact spelling it was
+          published with: an uppercase (or otherwise differently-spelled) ID
+          for a list stored in the canonical lowercase form is not matched and
+          yields `404`.
         schema:
           type: string
           format: uuid
@@ -265,19 +408,79 @@ paths:
     put:
       operationId: publishStatusList
       summary: Publish a new status list
+      parameters:
+        - name: list_id
+          in: path
+          required: true
+          description: |
+            UUID of the status list. Only the lowercase, hyphenated UUID form is
+            accepted (e.g. `477121aa-b598-419e-916f-1e74654ff38b`); braced,
+            `urn:uuid:`, no-hyphen and uppercase forms are rejected with `400`.
+          schema:
+            type: string
+            format: uuid
+            example: "477121aa-b598-419e-916f-1e74654ff38b"
       description: |
         Creates a new status list for the given `list_id`. The issuer is
         derived from the validated JWT Bearer token. The request body defines
         the initial status entries for the list.
+
+        On success the response `Location` header and the `uri` member of the
+        body carry the absolute URI of the created status list. For full spec
+        compliance (§5.1/§5.2/§8.3) the issuer MUST embed that exact URI in the
+        Referenced Token's `status.status_list.uri`; the status list token's own
+        `sub` carries the same URI so relying parties can resolve it.
+
+        The URI is fixed when the list is published and stored as its subject.
+        Changing `server.public_base_url` (or `server.domain`) affects only
+        subsequently published lists. Existing lists keep their original URI;
+        the old endpoint must continue serving them because already-issued
+        credentials still reference it.
+
+        Each issuer may hold at most `limits.max_lists_per_issuer` status lists
+        (default 1000). A publish past that is refused with `400`
+        `list_quota_exceeded`; status lists cannot be deleted through the API,
+        so retrying never succeeds until an operator raises the quota. A
+        `list_id` that already exists is still refused with `409`, even when
+        the quota is full, so retrying a publish that did land is recognisable.
+        During the upgrade of an existing SQL deployment to a release with the
+        quota, an operator may run it unenforced until it is enabled.
+
+        `size` may be supplied to create a fixed-size list. The server rounds it
+        up so `bits * entries` is byte-aligned and initialises every entry to
+        `default_status` (default `0`). `size` must be at least 1 and, after
+        rounding, no larger than `limits.max_status_index + 1` (default
+        100001). Later writes past that fixed size are refused with
+        `400 index_out_of_range`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/StatusUpdateRequest"
+              $ref: "#/components/schemas/StatusPublishRequest"
       responses:
         "201":
           description: Status list created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: |
+                Absolute URI of the newly created status list, e.g.
+                `https://statuslist.example.com/api/v1/status-lists/{list_id}`.
+                This is the value the issuer MUST embed in the Referenced
+                Token's `status.status_list.uri`; the status list token's own
+                `sub` carries the same URI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusPublishResponse"
+              example:
+                uri: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+                list_id: "477121aa-b598-419e-916f-1e74654ff38b"
+                size: 100000
+                bits: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -299,6 +502,15 @@ paths:
       description: |
         Updates the status entries of an existing status list. The JWT Bearer
         token must belong to the issuer that originally published the list.
+
+        An update that leaves the list unchanged is a successful no-op: it
+        neither advances the list version nor records a history snapshot.
+        A payload that is empty (`{"statuses": []}`) or that re-sets every
+        affected `index` to its current value both qualify.
+
+        On fixed-size lists, PATCH may update only indices previously returned
+        by the allocation endpoint or supplied as initial publish statuses.
+        Updating an unallocated index is refused with `409 index_not_allocated`.
       requestBody:
         required: true
         content:
@@ -327,6 +539,54 @@ paths:
         "500":
           $ref: "#/components/responses/UpdateInternalServerError"
 
+  /api/v1/status-lists/{list_id}/allocations:
+    parameters:
+      - name: list_id
+        in: path
+        required: true
+        description: UUID of the status list.
+        schema:
+          type: string
+          format: uuid
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
+
+    post:
+      operationId: allocateStatusListIndices
+      summary: Allocate unused status-list indices
+      description: |
+        Reserves unused indices for the authenticated issuer's fixed-size
+        status list and returns them in ascending order. Each reserved
+        `(list_id, index)` pair is recorded so it is not returned by a later
+        allocation request. Lists published without `size` are caller-managed
+        and return `409 list_not_fixed_size` from this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AllocationRequest"
+      responses:
+        "201":
+          description: Indices allocated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AllocationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/UpdateConflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/status-lists/{list_id}:
     get:
       operationId: getStatusList
@@ -335,11 +595,34 @@ paths:
         Returns the status list token for the requested `list_id`, encoded as a
         JWT or CWT depending on the `Accept` header.
 
+        **Content negotiation.** The token format is negotiated per RFC 9110
+        §12.5.1. The `Accept` header (absent or empty means "accept anything")
+        is a comma-separated list of media ranges, each optionally carrying a
+        `q`-value (`q=0` excludes a range); type/subtype matching is
+        case-insensitive. Wildcard precedence for each supported type is
+        three-tiered: an exact type beats `application/*`, which beats `*/*`,
+        so an explicit `q=0` exclusion is never overridden by a wildcard. The
+        supported types are `application/statuslist+jwt` and
+        `application/statuslist+cwt`; the type with the highest acceptable `q`
+        is served, and JWT wins ties (including a wildcard match). A `406 Not
+        Acceptable` is returned only when no supported type is acceptable (for
+        example `q=0` on both types, only unsupported types, or a malformed or
+        out-of-range `q` such as `q=2` on the only matching range).
+
+        Media parameters other than `q` (for example `profile=v2`) are ignored
+        for matching — a deliberately parameter-agnostic policy. The server
+        serves exactly two un-parameterized representations, so treating every
+        parameterized range as a match is less surprising than RFC 9110's
+        parameter-equality matching, which would ignore every parameterized
+        range and produce spurious `406`s. Revisit this if a parameterized
+        status-list variant is introduced.
+
         JWT-format responses are gzip-compressed (`Content-Encoding: gzip`)
         only when the client has advertised support via `Accept-Encoding: gzip`
         (see draft-ietf-oauth-status-list-21 §8.2). CWT-format responses are
-        never gzip-compressed. Because the representation varies by
-        `Accept-Encoding`, every response carries `Vary: Accept-Encoding`.
+        never gzip-compressed. Because the representation varies by both `Accept`
+        and `Accept-Encoding`, the `200`, `304` and `406` responses carry
+        `Vary: Accept, Accept-Encoding`.
 
         The decoded token conforms to the
         [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
@@ -364,14 +647,22 @@ paths:
           in: header
           required: false
           description: |
-            Desired token format. Defaults to `application/statuslist+jwt` if
-            omitted.
+            Desired token format, negotiated per RFC 9110 §12.5.1. Defaults to
+            `application/statuslist+jwt` when omitted (or when the header is
+            `*/*` / `application/*`). Accepts a comma-separated list of media
+            ranges with optional `q`-values; type/subtype matching is
+            case-insensitive and non-`q` parameters are ignored (a documented
+            parameter-agnostic policy). For each type an exact range beats
+            `application/*`, which beats `*/*`, so an explicit `q=0` exclusion
+            is never overridden by a wildcard. The supported types are
+            `application/statuslist+jwt` and `application/statuslist+cwt`; the
+            type with the highest acceptable `q` is served (JWT wins ties). A
+            `406 Not Acceptable` is returned only when no supported type is
+            acceptable (e.g. `q=0` on both, an unsupported type, or a malformed
+            or out-of-range `q`).
           schema:
             type: string
-            enum:
-              - application/statuslist+jwt
-              - application/statuslist+cwt
-            default: application/statuslist+jwt
+            example: application/statuslist+jwt
         - name: time
           in: query
           required: false
@@ -383,6 +674,44 @@ paths:
             type: integer
             format: int64
             example: 1686925000
+        - name: If-None-Match
+          in: header
+          required: false
+          description: |
+            Conditional validator: the strong `"..."` `ETag` previously returned by
+            this endpoint. The ETag is opaque to clients — it is a SHA-256 digest
+            of the exact served representation bytes (RFC 9110 §8.8.3.1). Because
+            ES256 signatures are randomized, the bytes differ across replicas,
+            restarts, cold caches and window roll-overs; the strong ETag therefore
+            differs across replicas — this is a documented, accepted deviation from
+            cross-replica ETag equality (ticket 564 acceptance criterion: "two
+            replicas return matching ETags *or the issue documents why they don't*").
+            Within a single replica the ETag is stable for the whole token window,
+            so a client revalidating against the same replica gets a `304` with no
+            signing. The token window is exactly the token's full lifetime
+            (`exp_secs`); the ETag changes on content update, key/certificate
+            rotation, window roll-over, token-format/encoding change, aggregation
+            URI or token lifetime change, or mid-window content revert. A matching
+            `If-None-Match` proves the client holds the current window's token; the
+            server certifies `304` only while that token remains valid beyond the
+            advertised `max-age = min(ttl, exp - now)`, so the `304` never extends
+            a cached token past its `exp`. Otherwise a freshly signed `200 OK`
+            token is returned.
+          schema:
+            type: string
+            example: '"a1b2c3d4..."'
+        - name: If-Modified-Since
+          in: header
+          required: false
+          description: |
+            Date-time validator matching the `Last-Modified` header of a previous
+            response. Unlike `If-None-Match`, an `If-Modified-Since`-only request
+            never returns `304 Not Modified`; the server always returns a freshly
+            signed `200 OK` token. `304` is returned only for a matching
+            `If-None-Match`.
+          schema:
+            type: string
+            example: "Wed, 21 Oct 2015 07:28:00 GMT"
         - name: Accept-Encoding
           in: header
           required: false
@@ -429,11 +758,69 @@ paths:
               schema:
                 type: string
               description: |
-                Always `Accept-Encoding`. Because the response body varies by
-                the request's `Accept-Encoding` header, this is required so
-                that shared caches/CDNs do not serve a gzipped variant to a
-                client that did not request one (RFC 9111 §4.2).
-              example: Accept-Encoding
+                Always `Accept, Accept-Encoding`. The response body varies by both
+                the requested token format (`Accept`) and the negotiated content
+                coding (`Accept-Encoding`), which is required so shared caches/CDNs
+                do not serve a gzipped variant to a client that did not request one
+                (RFC 9111 §4.1).
+              example: Accept, Accept-Encoding
+        "304":
+          description: |
+            Not Modified. Returned only for a matching `If-None-Match`
+            conditional revalidation when the list has not changed and the
+            client's previously cached Status List Token is still more than `ttl`
+            seconds from `exp`. The client can continue to use its cached token,
+            so no body is sent.
+
+            A matching `If-None-Match` proves the client holds the current-window
+            token; the server certifies the `304` only while that token is still
+            valid beyond the advertised `max-age = min(ttl, exp - now)`, so the
+            `304` never strands the relying party with a token that is about to
+            expire or already expired (RFC 9110 §8.8.1).
+
+            An `If-Modified-Since`-only request never gets a `304`; it always
+            receives a freshly signed `200 OK` token.
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: |
+                The current strong validator for the live representation. It is a
+                SHA-256 digest of the served representation bytes, stable for the
+                whole token window on a single replica. It differs across replicas
+                (due to randomized ES256 signatures) and changes whenever the live
+                representation or its validity window changes (content,
+                key/certificate, window roll-over, format or encoding, aggregation
+                URI, token lifetime settings).
+            Last-Modified:
+              schema:
+                type: string
+              description: |
+                The HTTP-date of the last modification of the status list.
+            Cache-Control:
+              schema:
+                type: string
+              description: |
+                Caching directive for intermediaries (e.g. `max-age=<min(ttl, exp - now)>`).
+                The live token is not marked `immutable`: it expires and its validator
+                rotates, so freshness-honouring caches/browsers must revalidate to
+                obtain an unexpired token.
+            Vary:
+              schema:
+                type: string
+              description: Always `Accept, Accept-Encoding`.
+        "400":
+          description: |
+            `list_id` contains a NUL character (`invalid_list_id`), `time` is
+            not a positive timestamp in the past (`invalid_historical_time`),
+            or the query string could not be parsed (`invalid_query`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_list_id"
+                error_description: "list_id must not contain NUL"
         "404":
           $ref: "#/components/responses/NotFound"
         "406":
@@ -487,6 +874,51 @@ components:
         public_key:
           $ref: "#/components/schemas/JWK"
 
+    CredentialsResponse:
+      type: object
+      required:
+        - status
+        - aggregation_id
+      properties:
+        status:
+          type: string
+          example: "Credentials stored successfully"
+        aggregation_id:
+          type: string
+          format: uuid
+          description: |
+            Opaque ID that names this issuer in public aggregation URIs, in
+            place of the issuer identifier.
+          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            The issuer's Status List Aggregation URI. Absent when status list
+            tokens do not carry one (see `StatusList.aggregation_uri`).
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+
+    RegistrationResponse:
+      type: object
+      required:
+        - issuer
+        - aggregation_id
+      properties:
+        issuer:
+          type: string
+          example: "my-issuer"
+        aggregation_id:
+          type: string
+          format: uuid
+          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            Absent when status list tokens do not carry one (see
+            `StatusList.aggregation_uri`).
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+
     JWK:
       type: object
       description: |
@@ -524,6 +956,8 @@ components:
         entries in a status list. The number of entries is bounded by the
         operator-configurable `limits.max_statuses_per_request` (default 5000);
         a request exceeding that bound is rejected with `400 Bad Request`.
+        A `statuses` array containing duplicate `index` values is rejected with
+        `400 Bad Request` on both `PUT` and `PATCH`.
       required:
         - statuses
       properties:
@@ -533,6 +967,93 @@ components:
           maxItems: 5000
           items:
             $ref: "#/components/schemas/StatusEntry"
+
+    StatusPublishRequest:
+      allOf:
+        - $ref: "#/components/schemas/StatusUpdateRequest"
+        - type: object
+          properties:
+            size:
+              type: integer
+              format: int32
+              minimum: 1
+              maximum: 100001
+              description: |
+                Optional fixed number of entries to create. The server rounds
+                this value up so `bits * entries` is a multiple of 8. The
+                rounded value must not exceed `limits.max_status_index + 1`
+                (default 100001).
+              example: 100000
+            default_status:
+              $ref: "#/components/schemas/StatusValue"
+
+    StatusPublishResponse:
+      type: object
+      description: |
+        Response body of a successful `PUT /api/v1/status-lists/{list_id}/statuses`.
+        `uri` is the absolute URI of the newly created status list — the value
+        the issuer MUST embed in the Referenced Token's `status.status_list.uri`
+        (spec §5.1/§5.2/§8.3). It is identical to the `Location` header.
+      required:
+        - uri
+        - list_id
+        - size
+        - bits
+      properties:
+        uri:
+          type: string
+          format: uri
+          description: Absolute URI of the created status list.
+          example: "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+        list_id:
+          type: string
+          format: uuid
+          description: The `list_id` the status list was published under.
+          example: "477121aa-b598-419e-916f-1e74654ff38b"
+        size:
+          type:
+            - integer
+            - "null"
+          format: int32
+          minimum: 1
+          maximum: 100001
+          description: |
+            Fixed list size actually stored by the server after byte-alignment
+            rounding, or `null` when the list is caller-managed.
+          example: 100000
+        bits:
+          type: integer
+          format: int32
+          enum: [1, 2, 4, 8]
+          description: Number of bits stored for each status entry.
+          example: 1
+
+    AllocationRequest:
+      type: object
+      required:
+        - count
+      properties:
+        count:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 5000
+          description: |
+            Number of unused indices to reserve. The maximum is bounded by
+            `limits.max_statuses_per_request` (default 5000).
+          example: 10
+
+    AllocationResponse:
+      type: object
+      required:
+        - indices
+      properties:
+        indices:
+          type: array
+          items:
+            type: integer
+            format: int32
+          example: [0, 1, 2]
 
     StatusEntry:
       type: object
@@ -555,13 +1076,28 @@ components:
           $ref: "#/components/schemas/StatusValue"
 
     StatusValue:
-      type: string
-      description: "Status value."
-      enum:
-        - VALID
-        - INVALID
-        - SUSPENDED
-      example: "INVALID"
+      description: |
+        Draft-21 status type value. Accepted as either a numeric integer, a
+        case-insensitive string name, or a stringified supported integer.
+
+        | Value                | Integer | String        |
+        |----------------------|---------|---------------|
+        | Valid                | `0`     | `"VALID"`     |
+        | Invalid              | `1`     | `"INVALID"`   |
+        | Suspended            | `2`     | `"SUSPENDED"` |
+        | Application-specific | `3`     | `"3"`         |
+        | Application-specific | `12-15` | `"12"-"15"`  |
+
+        Values `4` through `11`, `16` through `255`, and values above `255`
+        are rejected by this API.
+      anyOf:
+        - type: integer
+          description: Draft-21 status code.
+          enum: [0, 1, 2, 3, 12, 13, 14, 15]
+          example: 1
+        - type: string
+          description: Named status value (case-insensitive) or a stringified supported integer.
+          example: "VALID"
 
     StatusList:
       type: object
@@ -588,6 +1124,18 @@ components:
           description: |
             Base64url-encoded zlib-compressed status byte array.
           example: "eJxLTAQAASUAw3s"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: |
+            The issuing issuer's Status List Aggregation URI (draft-21 §4.2,
+            §4.3). Present when the server has `server.aggregation_uri`
+            configured, the list quota is enforced and no issuer has more
+            status lists than one aggregation page, unless looking up the
+            issuer's aggregation ID failed.
+            Tokens served before issuer scoping carried the unscoped URI, which
+            still resolves.
+          example: "https://statuslist.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
 
     StatusListToken:
       type: object
@@ -613,11 +1161,19 @@ components:
           example: "https://statuslist.example.com/statuslists/477121aa-b598-419e-916f-1e74654ff38b"
         iat:
           type: integer
-          description: Issued-at timestamp (seconds since Unix epoch).
+          description: |
+            Issued-at timestamp (seconds since Unix epoch). For live tokens it is
+            `max(window_start, updated_at)`: the start of the current token window
+            (matching the window by which the ETag and signed-bytes cache rotate),
+            or the last content change if that is later — so it never predates the
+            list's most recent modification, and is part of the cache key and ETag
+            so a mid-window content revert to an earlier state is a distinct
+            identity. Lifetime is governed by `exp` and `ttl`, not by `iat` skew.
           example: 1752515200
         exp:
           type: integer
-          description: Expiration timestamp (seconds since Unix epoch).
+          description: |
+            Expiration timestamp (seconds since Unix epoch); always `iat + exp_secs`.
           example: 1752516100
         ttl:
           type: integer
@@ -629,20 +1185,33 @@ components:
     AggregationResponse:
       type: object
       description: |
-        Response body of `GET /api/v1/aggregation`. Contains the `sub` URIs of
-        every status list hosted by the server, issuer-agnostic.
+        Response body of `GET /api/v1/aggregation/{aggregation_id}` and
+        `GET /api/v1/aggregation`: one page of the `sub` URIs of one issuer's
+        status lists, or of every issuer's. The `status_lists` member is the
+        draft-21 §9.3 Status List Aggregation structure; `next_cursor` is an
+        extension for paging.
       required:
         - status_lists
+        - next_cursor
       properties:
         status_lists:
           type: array
-          description: URIs of all hosted status lists.
+          description: URIs of the hosted status lists on this page.
+          maxItems: 1000
           items:
             type: string
             format: uri
           example:
             - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
             - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: |
+            Opaque cursor for the next page, to pass back as `cursor`. Always
+            present; `null` on the last page.
+          example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
     ErrorResponse:
       type: object
@@ -670,6 +1239,12 @@ components:
             - invalid_public_jwk
             - too_many_statuses
             - index_too_large
+            - index_out_of_range
+            - invalid_size
+            - invalid_count
+            - duplicate_index
+            - list_quota_exceeded
+            - invalid_aggregation_id
             # 401 — emitted by the authentication middleware
             - invalid_auth_header
             - invalid_token
@@ -681,13 +1256,18 @@ components:
             # 404
             - status_list_not_found
             - historical_status_list_not_found
+            - aggregation_not_found
             # 406
             - invalid_accept_header
             # 409
             - status_list_already_exists
             - credentials_already_exist
             - update_conflict
+            - index_not_allocated
+            - list_not_fixed_size
+            - allocation_exhausted
             - write_contention
+            - paging_required
             # 413
             - payload_too_large
             # 422
@@ -705,7 +1285,74 @@ components:
             part of the contract and may change without notice.
           example: "Status list already exists"
 
+  parameters:
+    AggregationLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of URIs on this page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 1000
+    AggregationCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque `next_cursor` value from the previous page. Omit for the first
+        page. Clients must not construct or modify cursors, and a cursor only
+        works on the aggregation that returned it.
+      schema:
+        type: string
+    AggregationIfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: |
+        `ETag` of a page fetched earlier. The server answers `304 Not Modified`
+        while that page is unchanged.
+      schema:
+        type: string
+        example: 'W/"3b1f..."'
+
   responses:
+    AggregationPage:
+      description: One page of status list URIs.
+      headers:
+        ETag:
+          schema:
+            type: string
+          description: Weak validator of this page.
+        Link:
+          schema:
+            type: string
+          description: |
+            Present only when another page follows, as
+            `<?limit=<limit>&cursor=<next_cursor>>; rel="next"` (RFC 8288).
+            The target is a relative reference resolved against this
+            request's URI, so it keeps the request's path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AggregationResponse"
+          example:
+            status_lists:
+              - "https://statuslist.example.com/api/v1/status-lists/477121aa-b598-419e-916f-1e74654ff38b"
+              - "https://statuslist.example.com/api/v1/status-lists/8e4ebb4a-dd79-498f-ac97-966f22884037"
+            next_cursor: null
+
+    AggregationNotModified:
+      description: |
+        Not Modified. The page matching `If-None-Match` is unchanged, so no
+        body is sent.
+      headers:
+        ETag:
+          schema:
+            type: string
+          description: The same weak validator the page was served with.
+
     BadRequest:
       description: |
         Invalid request data. In addition to schema/validation failures
@@ -717,7 +1364,20 @@ components:
             `Too many statuses in request: <count> > <max>`; or
           * a status `index` exceeds `limits.max_status_index`
             (default 100000) — `Status index <n> exceeds the configured
-            maximum`.
+            maximum`; or
+          * a payload repeats the same `index` in more than one entry — on
+            either `PATCH` or `PUT` — `duplicate status index <n> in statuses
+            array`; or
+          * `size` is `0` or rounds above `limits.max_status_index + 1` —
+            `invalid_size`; or
+          * allocation `count` is `0` or exceeds
+            `limits.max_statuses_per_request` — `invalid_count`.
+
+        `list_quota_exceeded` (publish only) is different in kind: the request
+        was well-formed, and is refused because the issuer already holds
+        `limits.max_lists_per_issuer` status lists (default 1000). No change
+        to the request and no retry will succeed; the quota must be raised by
+        an operator. It carries no `Retry-After`.
       content:
         application/json:
           schema:
@@ -757,14 +1417,27 @@ components:
             error_description: "Status list was not found"
 
     NotAcceptable:
-      description: Requested response format not supported
+      description: |
+        Requested response format not supported. No acceptable media type was
+        advertised in the `Accept` header. Supported types are
+        `application/statuslist+jwt` and `application/statuslist+cwt`; the 406
+        body lists both.
+      headers:
+        Vary:
+          schema:
+            type: string
+          description: |
+            Always `Accept, Accept-Encoding`, advertising that the outcome
+            depends on `Accept` (RFC 9110 §12.5.5). The 406 itself is sent with
+            `Cache-Control: no-store`, so caches never store it.
+          example: Accept, Accept-Encoding
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "invalid_accept_header"
-            error_description: "Invalid accept header"
+            error_description: "No acceptable media type. Supported: application/statuslist+jwt, application/statuslist+cwt"
 
     PublishConflict:
       description: |
@@ -773,7 +1446,9 @@ components:
 
         `status_list_already_exists` — a list with this `list_id` is already
         published. **Retrying will never succeed**; choose a different `list_id`
-        or update the existing list instead.
+        or update the existing list instead. When the stored list can be read, a
+        `Location` header carries its canonical URI (the same `sub` the list
+        already uses), so a racing publisher can adopt it instead of guessing.
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -781,6 +1456,15 @@ components:
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
       headers:
+        Location:
+          description: |
+            Present only for `status_list_already_exists`, when the stored list
+            is readable: the canonical URI of the existing list — the `sub` the
+            list already uses.
+          required: false
+          schema:
+            type: string
+            format: uri
         Retry-After:
           description: |
             Present only for `write_contention`. Seconds to wait before
@@ -883,9 +1567,10 @@ components:
 
     UpdateConflict:
       description: |
-        The write was rejected because it raced another writer. Two distinct
-        cases share this status and they require **opposite** client behaviour,
-        so branch on the `error` field rather than on the status code.
+        The request was rejected because of the current status-list state.
+        Branch on the `error` field rather than on the status code: some cases
+        are transient write races, while others are durable request/state
+        mismatches where retrying the same request will not help.
 
         `update_conflict` — optimistic-concurrency conflict. Another writer's
         update landed first between the client's read and this write, so this
@@ -899,6 +1584,18 @@ components:
         request**; no re-read is required. A `Retry-After` header gives a floor —
         add jitter on top, since the writers that just collided would otherwise
         resynchronise.
+
+        `index_not_allocated` — PATCH on a fixed-size list targeted an index
+        that has not been allocated. Retrying the same request will not help;
+        allocate an index first or use one already assigned to the token.
+
+        `list_not_fixed_size` — allocation was requested for a list published
+        without `size`. Retrying the same request will not help; use
+        caller-managed indices for that list or publish a fixed-size list.
+
+        `allocation_exhausted` — the list has fewer unallocated entries
+        remaining than requested. Retrying the same request will not help unless
+        the list is explicitly grown first.
 
         > Note for integrators: 409 is not a status most generic HTTP clients,
         > SDKs or service meshes retry automatically. `write_contention` is
@@ -928,6 +1625,21 @@ components:
               value:
                 error: "write_contention"
                 error_description: "The write lost a lock race in storage and was rolled back. Nothing was modified; retry the same request."
+            indexNotAllocated:
+              summary: Fixed-size PATCH used an unallocated index (retry will not help)
+              value:
+                error: "index_not_allocated"
+                error_description: "index 5 has not been allocated for this status list"
+            listNotFixedSize:
+              summary: Allocation requested on a caller-managed list (retry will not help)
+              value:
+                error: "list_not_fixed_size"
+                error_description: "status list must be fixed-size to allocate indices"
+            allocationExhausted:
+              summary: Not enough unallocated entries remain (retry will not help)
+              value:
+                error: "allocation_exhausted"
+                error_description: "not enough unallocated entries remain in this status list"
 
     UpdateInternalServerError:
       description: |

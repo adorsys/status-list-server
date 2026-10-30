@@ -1,8 +1,8 @@
-# Container-backed tests must not run concurrently with each other.
+# Bound concurrent container-backed tests across nextest processes.
 #
 # Two suites start real Docker containers: the SQL backend proofs, one database
 # per test (`src/outbound/sql/test_containers.rs`), and the ACME provisioning
-# tests, which start three apiece — pebble, challtestsrv and localstack
+# tests, which start three apiece — pebble, challtestsrv and floci
 # (`tests/cert_provisioning.rs`). nextest runs tests in parallel by default, so
 # unconstrained these try to boot a dozen servers at once and starve each other
 # of CPU during init. The failures land *before* any test code runs and look
@@ -10,8 +10,9 @@
 # `WaitContainer(StartupTimeout)`, and the ACME tests time out waiting on
 # pebble. Both are pure scheduling artefacts.
 #
-# Serialising the group trades wall-clock time for determinism, which is the
-# right trade for tests whose entire purpose is proving real-backend behaviour.
+# Limiting the group to four trades wall-clock time for predictable resource use.
+# SQL fixtures also hold a process-wide four-slot semaphore for plain cargo test;
+# nextest needs this group because it runs tests in separate processes.
 [test-groups.containers]
 max-threads = 4
 

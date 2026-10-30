@@ -1,0 +1,12 @@
+services:
+  app:
+    build:
+      args:
+        FEATURES: ${FEATURES:-mysql}
+    environment:
+      APP_DATABASE__BACKEND: mysql
+      APP_DATABASE__HOST: mysql
+      APP_DATABASE__PORT: "3306"
+      APP_DATABASE__USERNAME: ${MYSQL_USER:-mysql}
+      APP_DATABASE__PASSWORD: ${MYSQL_PASSWORD:-mysql}
+      APP_DATABASE__NAME: ${MYSQL_DATABASE:-status-list}
