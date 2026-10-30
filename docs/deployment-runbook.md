@@ -132,6 +132,57 @@ To revoke one key, remove its entry from `keys`; to disable the whole issuer, se
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
+### Issuer tiers
+
+Each registry issuer has a `tier`, `standard` (the default) or `sandbox`, which
+selects its rate limit, list quota and request bounds from
+`APP_TIERS__*` (see [architecture](architecture.md#issuer-tiers-app_tiers__)).
+A registry with any other tier value is rejected, and a failed reload keeps the
+previous registry. A registry is also rejected when an issuer holds more keys
+whose `not_after` has not passed than its tier's `max_keys`: a pod refuses to
+start with it, and a reload with it keeps the previous registry. Retire a key
+by setting its `not_after` before adding a new one beyond the limit.
+
+Moving an issuer to another tier takes effect on the next reload. Lists it
+already holds are kept even when they exceed the new quota, and statuses at
+indices those lists already hold stay updatable even above the new tier's
+`max_status_index`. The issuer starts with a full bucket of the new tier.
+
+Per-issuer usage is exported with `issuer` and `tier` labels:
+
+| Metric                      | Meaning                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `issuer_lists`              | Status lists the issuer holds                                         |
+| `issuer_lists_limit`        | The tier's `max_lists`                                                |
+| `issuer_keys`               | Registry keys whose `not_after` has not passed                        |
+| `issuer_keys_limit`         | The tier's `max_keys`                                                 |
+| `issuer_rate_limited_total` | Management requests refused with `429` by the issuer's tier rate limit |
+
+The gauges list exactly the issuers of the current registry, under their
+current tier. Each pod recounts them from the database at startup, on each
+registry reload and every 60 seconds, so every pod reports the cluster-wide
+count, at most a minute old: aggregate `issuer_lists` across pods with `max`,
+not `sum`. `issuer_rate_limited_total` is per pod, so `sum` it. Rate limits
+are held per replica, so an issuer's
+cluster-wide budget is the tier budget times the replica count; set a global
+cap at the ingress or API gateway.
+
+The same usage is served live by the admin API on the admin listener
+(`GET /admin/v1/issuers` and `GET /admin/v1/issuers/{issuer_id}`, see
+[`openapi-admin.yaml`](openapi-admin.yaml)), counted from the database on each
+request. Callers authenticate with a `statuslist-admin+jwt` token signed with a
+key listed under `admins` in the registry, whose entry grants `issuers:read`.
+Set `APP_ADMIN_AUTH__AUDIENCES` to the `aud` values those tokens carry: in
+production the admin API rejects every token while it is empty.
+
+The management write gate keys on the TCP peer address. Behind an ingress, set
+`APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress controller's addresses or
+CIDRs, so the gate keys on the client address the ingress appends to
+`X-Forwarded-For`; without it, every client behind the ingress shares one
+budget for rejected authentications. Make sure the ingress appends the peer
+address it saw rather than passing a client's `X-Forwarded-For` through
+unchanged.
+
 ## Redis Status-List Cache
 
 Redis is an optional runtime cache backend. Set `APP_CACHE__BACKEND=redis`, provide

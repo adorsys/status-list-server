@@ -242,6 +242,16 @@ impl StatusList {
         })
     }
 
+    /// Entries the list already holds: its fixed size, or for a grow-on-write
+    /// list every entry its encoded bytes cover.
+    pub(crate) fn entry_count(&self) -> Result<u64, StatusListError> {
+        if let Some(size) = self.size {
+            return Ok(u64::from(size));
+        }
+        let bytes = decode_compressed(&self.lst)?.len() as u64;
+        Ok(bytes * 8 / u64::from(self.bits.max(1)))
+    }
+
     pub(crate) fn validate_updates_within_size(
         &self,
         status_updates: &[StatusEntry],
@@ -804,6 +814,25 @@ mod tests {
             matches!(bits, 1 | 2 | 4 | 8),
             "bits must be one of 1, 2, 4, or 8, got {bits}"
         );
+    }
+
+    #[test]
+    fn entry_count_covers_every_entry_of_the_encoded_bytes() {
+        // Suspended needs two bits per entry: index 5 needs 12 bits, so two
+        // bytes, which hold eight entries.
+        let grown = StatusList::create(vec![StatusEntry {
+            index: 5,
+            status: Status::Suspended,
+        }])
+        .unwrap();
+        assert_eq!(grown.bits, 2);
+        assert_eq!(grown.entry_count().unwrap(), 8);
+
+        let empty = StatusList::create(vec![]).unwrap();
+        assert_eq!(empty.entry_count().unwrap(), 0);
+
+        let fixed = StatusList::create_with_options(vec![], Some(16), Status::Valid).unwrap();
+        assert_eq!(fixed.entry_count().unwrap(), 16);
     }
 
     #[test]

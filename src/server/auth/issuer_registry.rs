@@ -21,6 +21,7 @@ use thiserror::Error;
 use crate::domain::models::credential::{
     AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
 };
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::ports::{IssuerDirectory, IssuerKeyResolver};
 
 const REGISTRY_SCHEMA: &str = include_str!("../../../docs/schemas/issuers.v1.schema.json");
@@ -62,8 +63,8 @@ pub struct IssuerEntry {
     pub aggregation_id: uuid::Uuid,
     #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default = "default_tier")]
-    pub tier: String,
+    #[serde(default)]
+    pub tier: IssuerTier,
     #[serde(default)]
     pub disabled: bool,
     pub keys: Vec<Arc<RegistryKey>>,
@@ -107,6 +108,8 @@ pub struct RegistryHandle {
     aggregation_history: Mutex<AggregationHistory>,
     reload_failures: AtomicU64,
     write_lock: tokio::sync::Mutex<()>,
+    /// Tier key limits every candidate must respect before it is activated.
+    key_limits: Option<Arc<Tiers>>,
 }
 
 #[derive(Debug, Default)]
@@ -150,11 +153,19 @@ impl RegistryHandle {
             reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
             write_lock: tokio::sync::Mutex::new(()),
+            key_limits: None,
         }
     }
 
     pub async fn write_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.write_lock.lock().await
+    }
+
+    /// Enforce each tier's `max_keys` on every candidate, the loaded registry
+    /// included, through [`Self::validate_candidate`].
+    pub fn with_key_limits(mut self, tiers: Arc<Tiers>) -> Self {
+        self.key_limits = Some(tiers);
+        self
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
@@ -227,6 +238,10 @@ impl RegistryHandle {
                 )));
             }
         }
+        drop(history);
+        if let Some(tiers) = &self.key_limits {
+            registry.validate_key_limits(tiers, time::OffsetDateTime::now_utc())?;
+        }
         Ok(())
     }
 
@@ -251,6 +266,28 @@ impl IssuerDirectory for RegistryHandle {
         self.snapshot()
             .issuer_by_aggregation_id(aggregation_id)
             .map(str::to_owned)
+    }
+}
+
+impl RegistryKey {
+    /// The key's validity window. Registry validation already parsed both
+    /// bounds, so a present value is always well-formed.
+    pub fn validity(&self) -> (Option<time::OffsetDateTime>, Option<time::OffsetDateTime>) {
+        (
+            parsed_window(self.not_before.as_deref()),
+            parsed_window(self.not_after.as_deref()),
+        )
+    }
+}
+
+impl IssuerEntry {
+    /// Keys that still count against the tier's `max_keys`: every key whose
+    /// validity window has not ended, including keys staged for rotation.
+    pub fn active_key_count(&self, now: time::OffsetDateTime) -> usize {
+        self.keys
+            .iter()
+            .filter(|key| parsed_window(key.not_after.as_deref()).is_none_or(|end| now < end))
+            .count()
     }
 }
 
@@ -358,6 +395,7 @@ impl IssuerRegistry {
                         principal: Principal::Issuer {
                             id: issuer.id.clone(),
                             aggregation_id,
+                            tier: issuer.tier,
                         },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !issuer.disabled,
@@ -503,6 +541,28 @@ impl ValidatedRegistry {
     /// `from_yaml`, so the resolver's per-request recheck is O(1).
     pub fn has_key_material(&self, material: &str) -> bool {
         self.materials.contains(material)
+    }
+
+    /// Rejects a registry in which an issuer holds more keys than its tier's
+    /// `max_keys`. Keys only stop counting when `not_after` passes, so a
+    /// registry accepted at `now` stays within the limit afterwards.
+    pub fn validate_key_limits(
+        &self,
+        tiers: &Tiers,
+        now: time::OffsetDateTime,
+    ) -> Result<(), RegistryError> {
+        for issuer in &self.registry.issuers {
+            let keys = issuer.active_key_count(now);
+            let max_keys = tiers.get(issuer.tier).max_keys;
+            if keys > max_keys {
+                return Err(RegistryError::Semantic(format!(
+                    "issuer `{}` holds {keys} keys whose `not_after` has not passed, more than \
+                     tiers.{}.max_keys ({max_keys})",
+                    issuer.id, issuer.tier
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -707,10 +767,6 @@ fn canonical_public_material(jwk: &Value) -> Result<String, RegistryError> {
     crate::domain::models::credential::canonical_jwk_material(jwk).map_err(RegistryError::Semantic)
 }
 
-fn default_tier() -> String {
-    "standard".to_string()
-}
-
 fn key_is_active(key: &RegistryKey, now: time::OffsetDateTime) -> bool {
     let parse = |value: Option<&str>| {
         value.map(|value| {
@@ -741,6 +797,80 @@ mod tests {
                 .id(),
             "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
         );
+    }
+
+    #[test]
+    fn resolved_issuer_keys_carry_the_registry_tier() {
+        let kid = "QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M";
+        let tier_of = |yaml: &str| match IssuerRegistry::from_yaml(yaml)
+            .unwrap()
+            .resolve(kid)
+            .unwrap()
+            .principal
+        {
+            Principal::Issuer { tier, .. } => tier,
+            Principal::Admin { .. } => panic!("expected an issuer key"),
+        };
+        assert_eq!(tier_of(VALID), IssuerTier::Standard);
+        assert_eq!(
+            tier_of(&VALID.replace("tier: standard", "tier: sandbox")),
+            IssuerTier::Sandbox
+        );
+        assert_eq!(
+            tier_of(&VALID.replace("    tier: standard\n", "")),
+            IssuerTier::Standard
+        );
+    }
+
+    #[test]
+    fn rejects_an_issuer_holding_more_keys_than_its_tier_allows() {
+        let at = |rfc3339: &str| {
+            time::OffsetDateTime::parse(rfc3339, &time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        // The first example issuer holds two keys until 2026-11-15.
+        let registry = IssuerRegistry::from_yaml(VALID).unwrap();
+        let mut tiers = crate::test_utils::test_tiers();
+        tiers.standard.max_keys = 2;
+        assert!(
+            registry
+                .validate_key_limits(&tiers, at("2026-10-20T00:00:00Z"))
+                .is_ok()
+        );
+
+        tiers.standard.max_keys = 1;
+        let err = registry
+            .validate_key_limits(&tiers, at("2026-10-20T00:00:00Z"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tiers.standard.max_keys (1)"), "{err}");
+        // Once the retiring key's `not_after` passes it no longer counts.
+        assert!(
+            registry
+                .validate_key_limits(&tiers, at("2026-11-15T00:00:00Z"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_tier() {
+        let yaml = VALID.replace("tier: standard", "tier: premium");
+        assert!(IssuerRegistry::from_yaml(&yaml).is_err());
+    }
+
+    #[test]
+    fn active_key_count_excludes_ended_keys() {
+        let registry = IssuerRegistry::from_yaml(VALID).unwrap();
+        let issuer = registry
+            .issuer("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00")
+            .unwrap();
+        let at = |rfc3339: &str| {
+            time::OffsetDateTime::parse(rfc3339, &time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        // A key staged for rotation already counts; one past `not_after` does not.
+        assert_eq!(issuer.active_key_count(at("2026-10-01T00:00:00Z")), 2);
+        assert_eq!(issuer.active_key_count(at("2026-11-15T00:00:00Z")), 1);
     }
 
     #[test]
@@ -843,6 +973,36 @@ mod tests {
         std::fs::write(file.path(), "version: invalid").unwrap();
         assert!(handle.reload().is_err());
         assert_eq!(handle.snapshot().key_count(), 3);
+    }
+
+    #[test]
+    fn handle_with_key_limits_refuses_a_registry_over_its_tier_key_limit() {
+        let issuer = "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00";
+        // Without `not_after` both of the issuer's keys count at any time.
+        let two_keys = VALID.replace("        not_after: \"2026-11-15T00:00:00Z\"\n", "");
+        let mut tiers = crate::test_utils::test_tiers();
+        tiers.standard.max_keys = 2;
+        tiers.sandbox.max_keys = 1;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &two_keys).unwrap();
+        let handle = RegistryHandle::load(file.path())
+            .unwrap()
+            .with_key_limits(Arc::new(tiers));
+        handle.validate_candidate(&handle.snapshot()).unwrap();
+
+        std::fs::write(
+            file.path(),
+            two_keys.replace("tier: standard", "tier: sandbox"),
+        )
+        .unwrap();
+        let err = handle.reload().unwrap_err().to_string();
+        assert!(err.contains("tiers.sandbox.max_keys (1)"), "{err}");
+        assert_eq!(
+            handle.snapshot().issuer(issuer).unwrap().tier,
+            IssuerTier::Standard,
+            "a refused reload keeps the previous registry"
+        );
     }
 
     #[test]

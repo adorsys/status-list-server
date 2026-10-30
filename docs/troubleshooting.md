@@ -788,6 +788,13 @@ served, pods refuse to start until it is enabled, unless the operator opts into 
 [Upgrading to the list quota](#upgrading-to-the-list-quota)). The memory backend enforces it from
 startup. Each pod exports `list_quota_enforced` (`1` or `0`) as a metric.
 
+The quota applied to an issuer is its tier's `max_lists` (`APP_TIERS__STANDARD__MAX_LISTS`, which
+defaults to `limits.max_lists_per_issuer`, or `APP_TIERS__SANDBOX__MAX_LISTS`, default `10`); the
+global setting is the cap for both. While the quota is not enforced, no tier's `max_lists` is
+enforced either, including `sandbox`. `list-quota enable` checks every issuer against the global cap
+only. The `issuer_lists` and `issuer_lists_limit` metrics show each issuer's count and its tier's
+quota.
+
 Operators manage it with the server binary, run with the same configuration as the pods (for
 example `kubectl exec deploy/<release> -- /app/status-list-server list-quota status`):
 
@@ -942,8 +949,8 @@ conflict before retrying; do not change an ID that appears in an issued token. R
 The request was well-formed; the issuer's quota is full. Retrying never succeeds, which is why the
 response carries no `Retry-After`.
 
-**Root cause:** The issuer has published `max_lists_per_issuer` lists. Because nothing deletes
-lists, an issuer that reaches the quota stays there until an operator acts.
+**Root cause:** The issuer has published its tier's `max_lists` lists (`M` in the message). Because
+nothing deletes lists, an issuer that reaches the quota stays there until an operator acts.
 
 **Diagnostics:** Compare the stored counter with the lists that actually exist:
 
@@ -960,8 +967,10 @@ If `list_count` and `actual` differ, the counter has drifted; recompute it as de
 
 **Fix:** Either:
 
-- **Raise the quota**, if it is below `1000`. Set `APP_LIMITS__MAX_LISTS_PER_ISSUER` and roll the
-  Deployment. The limit is global: it raises the ceiling for every issuer, not only this one.
+- **Raise the quota**, if it is below `1000`. Set the tier's `APP_TIERS__<TIER>__MAX_LISTS` (and
+  `APP_LIMITS__MAX_LISTS_PER_ISSUER` if the cap is in the way) and roll the Deployment. The limit
+  applies to every issuer of that tier, not only this one. A `sandbox` issuer can also be moved to
+  `standard` in the issuer registry.
 - **Delete lists the issuer no longer needs**, directly in the database, then
   [recompute the counter](#recomputing-issuer-list-counts). Only delete a list that no
   unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`

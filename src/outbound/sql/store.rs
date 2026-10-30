@@ -739,6 +739,35 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Counted from `status_lists` rather than read from `issuers.list_count`,
+    /// which pods of a release without the list quota leave stale until
+    /// `list-quota recount`.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
+    pub async fn count_status_lists_by_issuer(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, RepositoryError> {
+        time_query("count_by_issuer", "status_list", async {
+            let db = self.db.current();
+            let rows = status_lists::Entity::find()
+                .select_only()
+                .column(status_lists::Column::Issuer)
+                .column_as(
+                    Expr::col(status_lists::Column::ListId).count(),
+                    "list_count",
+                )
+                .group_by(status_lists::Column::Issuer)
+                .into_tuple::<(String, i64)>()
+                .all(&*db)
+                .await
+                .map_err(find_err)?;
+            Ok(rows
+                .into_iter()
+                .map(|(issuer, count)| (issuer, u64::try_from(count).unwrap_or(0)))
+                .collect())
+        })
+        .await
+    }
+
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn allocate_indices(
         &self,

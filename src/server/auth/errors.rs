@@ -85,9 +85,23 @@ fn retry_after_secs() -> u64 {
     1 + u64::from(nanos % 5)
 }
 
+/// Response extension marking a request the client failed to authenticate,
+/// which the management write gate charges to the client address.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthenticationRejected;
+
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
-        self.into_api_error().into_response()
+        // Server-side faults are not the client's failure to authenticate.
+        let rejected = !matches!(
+            self,
+            AuthenticationError::InternalServer | AuthenticationError::BackendUnavailable
+        );
+        let mut response = self.into_api_error().into_response();
+        if rejected {
+            response.extensions_mut().insert(AuthenticationRejected);
+        }
+        response
     }
 }
 

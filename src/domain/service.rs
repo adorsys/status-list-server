@@ -177,10 +177,16 @@ impl Service {
     /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
     ///
     /// Request-shape validation (count bound, index bound, duplicate indices)
-    /// runs before any storage access so a malformed request is rejected with
-    /// `400` consistently and without a wasted `find` or write. The
+    /// runs before the update is applied, in that order, so a malformed
+    /// request is rejected with `400` consistently and without a write. The
     /// duplicate-index invariant is re-enforced in the domain model as defense
     /// in depth in case this service boundary is bypassed.
+    ///
+    /// `policy.max_status_index` bounds growth only: an index the list already
+    /// covers can always be updated, so an issuer moved to a tier with a lower
+    /// bound can still revoke the statuses it issued. Telling the two apart
+    /// needs the stored list, so a request with an index above the bound
+    /// reports a missing or foreign list before the index bound.
     ///
     /// An update that leaves the list unchanged — including a literal empty
     /// `statuses` payload and a non-empty payload that re-sets every affected
@@ -193,22 +199,25 @@ impl Service {
         statuses: Vec<StatusEntry>,
         policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        validate_request_shape(
-            &statuses,
-            policy.max_status_index,
-            policy.max_statuses_per_request,
-        )?;
+        validate_status_count(&statuses, policy.max_statuses_per_request)?;
+        // The index bound is checked before duplicates. An index above the
+        // bound needs the stored list to tell growth from an existing entry.
+        let beyond_bound = statuses
+            .iter()
+            .any(|entry| entry.index > policy.max_status_index);
+        let checked = if beyond_bound {
+            let existing = self.find_owned_list(issuer, list_id).await?;
+            validate_update_indices(&existing.status_list, &statuses, policy.max_status_index)?;
+            Some(existing)
+        } else {
+            None
+        };
         validate_unique_indices(&statuses)?;
 
-        let mut existing = self
-            .status_list_repo
-            .find(list_id)
-            .await?
-            .ok_or(StatusListError::NotFound)?;
-
-        if &existing.issuer != issuer {
-            return Err(StatusListError::IssuerMismatch);
-        }
+        let mut existing = match checked {
+            Some(existing) => existing,
+            None => self.find_owned_list(issuer, list_id).await?,
+        };
 
         existing
             .status_list
@@ -270,6 +279,22 @@ impl Service {
         }
 
         invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
+        Ok(existing)
+    }
+
+    async fn find_owned_list(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+    ) -> Result<StatusListRecord, StatusListError> {
+        let existing = self
+            .status_list_repo
+            .find(list_id)
+            .await?
+            .ok_or(StatusListError::NotFound)?;
+        if &existing.issuer != issuer {
+            return Err(StatusListError::IssuerMismatch);
+        }
         Ok(existing)
     }
 
@@ -487,18 +512,13 @@ pub fn next_version(previous: u64) -> u64 {
     previous.saturating_add(1)
 }
 
-/// Enforce the request-level count and index bounds shared by publish and update.
+/// Enforce the request-level count and index bounds of a publish.
 fn validate_request_shape(
     statuses: &[StatusEntry],
     max_status_index: i32,
     max_statuses_per_request: usize,
 ) -> Result<(), StatusListError> {
-    if statuses.len() > max_statuses_per_request {
-        return Err(StatusListError::TooManyStatuses {
-            count: statuses.len(),
-            max: max_statuses_per_request,
-        });
-    }
+    validate_status_count(statuses, max_statuses_per_request)?;
     for entry in statuses {
         if entry.index > max_status_index {
             return Err(StatusListError::IndexTooLarge {
@@ -508,6 +528,43 @@ fn validate_request_shape(
         }
     }
     Ok(())
+}
+
+fn validate_status_count(
+    statuses: &[StatusEntry],
+    max_statuses_per_request: usize,
+) -> Result<(), StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+    Ok(())
+}
+
+/// Rejects an update index above `max_status_index` unless the list already
+/// covers it, so the bound limits growth without blocking existing entries.
+fn validate_update_indices(
+    list: &StatusList,
+    statuses: &[StatusEntry],
+    max_status_index: i32,
+) -> Result<(), StatusListError> {
+    let mut beyond_bound = statuses
+        .iter()
+        .filter(|entry| entry.index > max_status_index)
+        .peekable();
+    if beyond_bound.peek().is_none() {
+        return Ok(());
+    }
+    let entries = list.entry_count()?;
+    match beyond_bound.find(|entry| !u64::try_from(entry.index).is_ok_and(|i| i < entries)) {
+        Some(entry) => Err(StatusListError::IndexTooLarge {
+            index: entry.index,
+            max: max_status_index,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
@@ -666,5 +723,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page, None);
+    }
+
+    async fn assert_list_counts_cover_only_issuers_with_lists(service: &Service, backend: &str) {
+        register_issuer(service, "busy").await;
+        register_issuer(service, "idle").await;
+        for list_id in ["usage-1", "usage-2"] {
+            publish_list(service, "busy", list_id).await;
+        }
+
+        let counts = service
+            .status_list_repo()
+            .list_counts_by_issuer()
+            .await
+            .unwrap();
+        assert_eq!(counts.get("busy"), Some(&2), "{backend}");
+        assert_eq!(counts.get("idle"), None, "{backend}");
+    }
+
+    #[tokio::test]
+    async fn list_counts_cover_only_issuers_with_lists() {
+        let state = test_app_state(None).await;
+        assert_list_counts_cover_only_issuers_with_lists(&state.service, "memory").await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn list_counts_cover_only_issuers_with_lists_on_sqlite() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        let state = test_app_state(Some(db)).await;
+        assert_list_counts_cover_only_issuers_with_lists(&state.service, "sqlite").await;
     }
 }

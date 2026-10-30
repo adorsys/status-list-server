@@ -26,15 +26,21 @@ info:
 
     ## Rate limiting
 
-    The server applies two independent token-bucket governor tiers, each
-    operator-configurable through the `APP_RATE_LIMIT__*` environment
+    The server applies independent token-bucket limits. Two are keyed by
+    client IP and configured through the `APP_RATE_LIMIT__*` environment
     variables (see `RateLimitConfig`):
 
-      * **writes** (per smart IP via `SmartIpKeyExtractor`, reading
-        `X-Forwarded-For`, `X-Real-Ip`, and `Forwarded` headers, falling back to
-        the peer IP) — `PUT`/`PATCH`
-        `/api/v1/status-lists/{list_id}/statuses` and the authenticated
-        `GET /api/v1/credentials`.
+      * **writes** (per peer IP; behind a proxy listed in
+        `APP_RATE_LIMIT__TRUSTED_PROXIES`, per the rightmost
+        `X-Forwarded-For` entry that is not a trusted proxy): every
+        authenticated management route
+        (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,
+        `POST /api/v1/status-lists/{list_id}/allocations` and
+        `GET /api/v1/credentials`). Only requests rejected with `401` spend
+        this budget. Once an address has spent it, every request from that
+        address gets `429` before its token is checked, until a token is
+        replenished. `X-Forwarded-For` from any other peer is ignored, so a
+        client cannot choose its own key.
         Tunables: `strict_burst_size`, `strict_period_secs` (defaults: 10 / 60s).
       * **permissive** (per source IP) — public read routes
         (`GET /api/v1/aggregation/{aggregation_id}`,
@@ -43,7 +49,15 @@ info:
         Tunables: `permissive_burst_size`, `permissive_period_secs`
         (defaults: 100 / 60s).
 
-    When a quota is exhausted the server returns `429 Too Many Requests`.
+    Behind authentication, each issuer also has a request budget set by its
+    tier (`APP_TIERS__<TIER>__WRITE_BURST_SIZE` and `..._WRITE_PERIOD_SECS`,
+    defaults 100 / 1s for `standard` and 10 / 6s for `sandbox`). It covers
+    every authenticated management route, which share one bucket, and is
+    keyed on the verified issuer, so issuers sharing an IP do not share a
+    budget.
+
+    Limits are held per server replica. When a quota is exhausted the server
+    returns `429 Too Many Requests` with a `Retry-After` header.
 
     ## Request bounds
 
@@ -58,6 +72,12 @@ info:
     | `max_statuses_per_request` | 5000 | `400 Bad Request` (too many entries) |
     | `max_serialized_list_size` | 1 MiB | `422 Unprocessable Entity` |
     | `max_lists_per_issuer` | 1000 | `400 Bad Request` (`list_quota_exceeded`) |
+
+    `max_status_index`, `max_statuses_per_request` and `max_lists_per_issuer`
+    are caps: the bound applied to a request is the issuer's tier value
+    (`APP_TIERS__<TIER>__MAX_STATUS_INDEX`, `..._MAX_STATUSES_PER_REQUEST`,
+    `..._MAX_LISTS`), at most the cap. The `sandbox` tier defaults to 10000,
+    1000 and 10.
 
     These bounds are reflected on the request schemas (`StatusEntry.index`
     `maximum`, `StatusUpdateRequest.statuses` `maxItems`) for the default
@@ -443,8 +463,9 @@ paths:
         the old endpoint must continue serving them because already-issued
         credentials still reference it.
 
-        Each issuer may hold at most `limits.max_lists_per_issuer` status lists
-        (default 1000). A publish past that is refused with `400`
+        Each issuer may hold at most its tier's `max_lists` status lists
+        (default 1000 for `standard`, 10 for `sandbox`, never more than
+        `limits.max_lists_per_issuer`). A publish past that is refused with `400`
         `list_quota_exceeded`; status lists cannot be deleted through the API,
         so retrying never succeeds until an operator raises the quota. A
         `list_id` that already exists is still refused with `409`, even when
@@ -526,6 +547,13 @@ paths:
         On fixed-size lists, PATCH may update only indices previously returned
         by the allocation endpoint or supplied as initial publish statuses.
         Updating an unallocated index is refused with `409 index_not_allocated`.
+
+        The issuer's tier `max_status_index` bounds growth only: an `index`
+        the list already holds can always be updated, even above the bound, so
+        an issuer moved to a tier with a lower bound can still revoke what it
+        issued. Telling the two apart needs the stored list, so when an `index`
+        is above the bound, a missing list (`404`) or a list owned by another
+        issuer (`403`) is reported before `400 index_too_large`.
       requestBody:
         required: true
         content:
@@ -1311,7 +1339,8 @@ components:
       description: |
         Invalid request data. In addition to schema/validation failures
         (e.g. a non-UUID `list_id`), this status is returned when an enforced
-        request bound is exceeded:
+        request bound is exceeded. Each bound below is the issuer's tier value,
+        at most the named `limits.*` cap:
 
           * number of status entries exceeds
             `limits.max_statuses_per_request` (default 5000) —
@@ -1328,8 +1357,9 @@ components:
             `limits.max_statuses_per_request` — `invalid_count`.
 
         `list_quota_exceeded` (publish only) is different in kind: the request
-        was well-formed, and is refused because the issuer already holds
-        `limits.max_lists_per_issuer` status lists (default 1000). No change
+        was well-formed, and is refused because the issuer already holds its
+        tier's `max_lists` status lists (default 1000 for `standard`, 10 for
+        `sandbox`). No change
         to the request and no retry will succeed; the quota must be raised by
         an operator. It carries no `Retry-After`.
       content:
@@ -1476,9 +1506,18 @@ components:
 
     TooManyRequests:
       description: |
-        The client has exceeded the configured rate-limit quota for the route
-        tier (strict, per-issuer, or permissive — see the Rate limiting section
-        in the API description).
+        The client has exceeded a configured rate limit: the IP-keyed writes
+        or permissive limit, or the issuer's tier request budget (see the Rate
+        limiting section in the API description).
+      headers:
+        Retry-After:
+          description: |
+            Seconds until the exhausted bucket admits another request.
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            example: 6
       content:
         application/json:
           schema:

@@ -8,6 +8,7 @@ pub mod health;
 pub mod rate_limit;
 
 use crate::domain::models::credential::{AggregationId, Issuer};
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::service::{Service, StatusListPolicy};
 use axum::{Json, extract::State};
 use std::collections::HashSet;
@@ -38,6 +39,39 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
             leeway_secs: config.leeway_secs,
             max_token_lifetime_secs: config.max_token_lifetime_secs,
             audiences: config.audiences.clone(),
+        }
+    }
+}
+
+/// Admin-token validation policy, resolved from `admin_auth.*`.
+#[derive(Debug, Clone)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    pub audiences: Vec<String>,
+    /// Reject every token while `audiences` is empty instead of skipping
+    /// the `aud` check, so production never accepts audience-less tokens.
+    pub audience_required: bool,
+}
+
+impl Default for AdminAuthConfig {
+    fn default() -> Self {
+        Self {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: Vec::new(),
+            audience_required: false,
+        }
+    }
+}
+
+impl AdminAuthConfig {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self {
+            leeway_secs: config.management_auth.leeway_secs,
+            max_token_lifetime_secs: config.admin_auth.max_token_lifetime_secs,
+            audiences: config.admin_auth.audiences.clone(),
+            audience_required: config.telemetry.environment.is_production(),
         }
     }
 }
@@ -73,12 +107,17 @@ pub struct AppState {
     pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    pub max_status_index: i32,
-    pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
-    pub max_lists_per_issuer: u64,
+    /// Per-tier quotas and request bounds, resolved from `tiers.*`.
+    pub tiers: Arc<Tiers>,
+    /// Per-replica write budgets keyed on the authenticated issuer.
+    pub issuer_rate_limiter: Arc<rate_limit::IssuerRateLimiter>,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
+    /// The registry itself, for the admin API, which reports registry
+    /// entries and checks admin scopes. Same handle as the two ports below.
+    pub registry_handle: Arc<auth::issuer_registry::RegistryHandle>,
     /// Last-known-good operator-managed issuer trust registry snapshot.
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
@@ -94,7 +133,8 @@ pub struct AppState {
 impl AppState {
     pub fn set_issuer_registry(&mut self, registry: Arc<auth::issuer_registry::RegistryHandle>) {
         self.issuer_key_resolver = registry.clone();
-        self.issuer_registry = registry;
+        self.issuer_registry = registry.clone();
+        self.registry_handle = registry;
     }
     /// The issuer's aggregation URI, or `None` when aggregation is not
     /// configured or is withheld from the issuer.
@@ -113,13 +153,26 @@ impl AppState {
         Some(uri.into())
     }
 
-    pub fn status_list_policy(&self) -> StatusListPolicy {
+    pub fn status_list_policy(&self, tier: IssuerTier) -> StatusListPolicy {
+        let limits = self.tiers.get(tier);
         StatusListPolicy {
             token_exp_secs: self.token_exp_secs,
-            max_status_index: self.max_status_index,
-            max_statuses_per_request: self.max_statuses_per_request,
+            max_status_index: limits.max_status_index,
+            max_statuses_per_request: limits.max_statuses_per_request,
             max_serialized_list_size: self.max_serialized_list_size,
-            max_lists_per_issuer: self.max_lists_per_issuer,
+            max_lists_per_issuer: limits.max_lists,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tier_limits_mut(
+        &mut self,
+        tier: IssuerTier,
+    ) -> &mut crate::domain::models::tier::TierLimits {
+        let tiers = Arc::make_mut(&mut self.tiers);
+        match tier {
+            IssuerTier::Standard => &mut tiers.standard,
+            IssuerTier::Sandbox => &mut tiers.sandbox,
         }
     }
 }

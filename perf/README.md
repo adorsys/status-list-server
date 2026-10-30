@@ -77,10 +77,14 @@ which does not execute processor `function:` steps.
 
 ## Rate limits
 
-The server rate-limits by source IP (strict 10 req/60s writes, permissive
-100 req/60s reads by default). A single IP running this suite will be throttled
-with `429 Too Many Requests`, which masks the behaviour the tests assert on.
-Raise the limits before running the suite.
+The server rate-limits by source IP (strict: 10 rejected management
+authentications per 60s, permissive: 100 req/60s reads by default) and
+management requests per issuer (burst 100, one token per second for the
+`standard` tier). The
+`auth` suite sends unauthenticated requests on purpose, which spend the strict
+limit, and every suite writes as one issuer. A single IP and issuer running
+this suite will be throttled with `429 Too Many Requests`, which masks the
+behaviour the tests assert on. Raise the limits before running the suite.
 
 ### Limits per suite
 
@@ -96,9 +100,11 @@ per virtual user):
 | `spike` | 600 users/sec     | mixed        | `STRICT_BURST_SIZE=60000` / `PERMISSIVE=60000` |
 | `stress`| 250 users/sec     | mixed        | `STRICT_BURST_SIZE=30000` / `PERMISSIVE=30000` |
 
-The values below (the highest of the four) are safe for every suite -- raising
-the write (strict) limit especially matters, since the authenticated update
-flows send two writes back to back. Use the per-suite values above when running
+The values below (the highest of the four) are safe for every suite. Raising
+the issuer request limit especially matters, since the authenticated update
+flows send two writes back to back and every suite writes as one issuer, so
+`APP_TIERS__STANDARD__WRITE_BURST_SIZE` needs the same headroom as
+`STRICT_BURST_SIZE`. Use the per-suite values above when running
 a single suite so the limits stay high enough to avoid `429`s yet still let the
 server shed truly excessive load. `APP_SERVER__AGGREGATION_URI` makes every
 served token carry `aggregation_uri`, so the read scenarios also measure the
@@ -113,6 +119,7 @@ APP_RATE_LIMIT__STRICT_BURST_SIZE=60000 \
 APP_RATE_LIMIT__STRICT_PERIOD_SECS=60 \
 APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE=60000 \
 APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS=60 \
+APP_TIERS__STANDARD__WRITE_BURST_SIZE=60000 \
 RUST_LOG=info \
 ./target/debug/status-list-server
 ```

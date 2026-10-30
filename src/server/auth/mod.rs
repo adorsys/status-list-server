@@ -17,17 +17,20 @@ use hyper::{StatusCode, header};
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crate::domain::models::credential::PublicJwk;
 use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
 use crate::domain::models::credential::{KeyResolveError, Principal};
+use crate::domain::models::tier::IssuerTier;
 use crate::server::{AppState, error::ApiError};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
 const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
 const MANAGEMENT_TOKEN_TYPE: &str = "statuslist-management+jwt";
+const ADMIN_TOKEN_TYPE: &str = "statuslist-admin+jwt";
 
 /// Required management claims are non-optional (`iss`, `iat`, `exp`).
 /// Optional claims are deserialized as `Option` and validated when present.
@@ -83,6 +86,7 @@ struct TestClaims {
 pub struct AuthenticatedIssuer {
     issuer: Issuer,
     aggregation_id: Option<crate::domain::models::credential::AggregationId>,
+    tier: IssuerTier,
 }
 
 impl AuthenticatedIssuer {
@@ -92,19 +96,33 @@ impl AuthenticatedIssuer {
         Self {
             issuer,
             aggregation_id: None,
+            tier: IssuerTier::Standard,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tier(mut self, tier: IssuerTier) -> Self {
+        self.tier = tier;
+        self
     }
 
     /// Build a principal together with the immutable registry data resolved
     /// while authenticating the request.
-    pub(crate) fn with_aggregation_id(
+    pub(crate) fn from_registry(
         issuer: Issuer,
         aggregation_id: crate::domain::models::credential::AggregationId,
+        tier: IssuerTier,
     ) -> Self {
         Self {
             issuer,
             aggregation_id: Some(aggregation_id),
+            tier,
         }
+    }
+
+    /// The limits tier the registry assigned to this issuer.
+    pub fn tier(&self) -> IssuerTier {
+        self.tier
     }
 
     pub(crate) fn aggregation_id(
@@ -173,71 +191,216 @@ impl std::fmt::Display for AuthenticatedIssuer {
     }
 }
 
+/// What one token kind requires. Management and admin tokens go through the
+/// same verification steps but never accept each other's `typ` or principal.
+struct TokenPolicy<'a> {
+    typ: &'static str,
+    principal: PrincipalKind,
+    audiences: &'a [String],
+    /// With no `audiences`, reject every token instead of skipping `aud`.
+    audience_required: bool,
+    leeway_secs: u64,
+    max_token_lifetime_secs: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrincipalKind {
+    Issuer,
+    Admin,
+}
+
+/// Why a bearer token was not accepted. `Invalid` carries what may be logged:
+/// never the token itself.
+enum TokenRejection {
+    Missing,
+    Invalid {
+        kid: Option<String>,
+        principal: Option<String>,
+        reason: String,
+    },
+    /// The trust backend could not be reached; retryable. The header `kid` is
+    /// unauthenticated, so it is logged but never used as a metric label.
+    Unavailable {
+        kid: String,
+    },
+    Internal,
+}
+
+fn rejected(
+    kid: Option<&str>,
+    principal: Option<&str>,
+    reason: impl std::fmt::Display,
+) -> TokenRejection {
+    TokenRejection::Invalid {
+        kid: kid.map(str::to_owned),
+        principal: principal.map(str::to_owned),
+        reason: reason.to_string(),
+    }
+}
+
+fn principal_id(principal: &Principal) -> &str {
+    match principal {
+        Principal::Issuer { id, .. } | Principal::Admin { id } => id,
+    }
+}
+
+/// Verifies the request's bearer token against the registry: `typ`, `kid`,
+/// algorithm, the principal kind, signature, issuer, audience and lifetime.
+async fn verify_bearer(
+    headers: &axum::http::HeaderMap,
+    resolver: &dyn crate::domain::ports::IssuerKeyResolver,
+    policy: &TokenPolicy<'_>,
+) -> Result<Arc<crate::domain::models::credential::ResolvedKey>, TokenRejection> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let Some(auth_header) = auth_header else {
+        return Err(TokenRejection::Missing);
+    };
+    let Some((scheme, token)) = auth_header.split_once(char::is_whitespace) else {
+        if auth_header.eq_ignore_ascii_case("Bearer") {
+            return Err(rejected(None, None, "empty Bearer token"));
+        }
+        return Err(TokenRejection::Missing);
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(TokenRejection::Missing);
+    }
+    if token.trim().is_empty() {
+        return Err(rejected(None, None, "empty Bearer token"));
+    }
+
+    let header = jsonwebtoken::decode_header(token)
+        .map_err(|e| rejected(None, None, format!("invalid JWT header: {e}")))?;
+    let typ_ok = header.typ.as_deref().is_some_and(|typ| {
+        typ.eq_ignore_ascii_case(policy.typ)
+            || typ.get(.."application/".len()).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("application/")
+                    && typ
+                        .get("application/".len()..)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(policy.typ))
+            })
+    });
+    let Some(kid) = header.kid.clone() else {
+        return Err(rejected(None, None, "missing kid"));
+    };
+    if kid.is_empty() || kid.chars().count() > 255 {
+        return Err(rejected(Some(&kid), None, "invalid kid length"));
+    }
+    if !typ_ok {
+        return Err(rejected(Some(&kid), None, "missing or invalid typ"));
+    }
+    if header.crit.is_some() {
+        return Err(rejected(Some(&kid), None, "crit header is not permitted"));
+    }
+    if !MANAGEMENT_SIGNING_ALGORITHMS.contains(&header.alg) {
+        return Err(rejected(Some(&kid), None, "algorithm is not allowed"));
+    }
+
+    let resolved = match resolver.resolve(&kid).await {
+        Err(KeyResolveError::BackendUnavailable) => {
+            return Err(TokenRejection::Unavailable { kid });
+        }
+        result => result.map_err(|reason| rejected(Some(&kid), None, reason))?,
+    };
+    let registered = principal_id(&resolved.principal);
+    let kind = match resolved.principal {
+        Principal::Issuer { .. } => PrincipalKind::Issuer,
+        Principal::Admin { .. } => PrincipalKind::Admin,
+    };
+    if kind != policy.principal {
+        let reason = match policy.principal {
+            PrincipalKind::Issuer => "admin keys cannot authenticate issuer management requests",
+            PrincipalKind::Admin => "issuer keys cannot authenticate admin requests",
+        };
+        return Err(rejected(Some(&kid), Some(registered), reason));
+    }
+    let registered_alg = resolved.public_key.algorithm();
+    if resolved.public_key.key_id() != kid || registered_alg != header.alg {
+        return Err(rejected(
+            Some(&kid),
+            Some(registered),
+            "algorithm or key id mismatch",
+        ));
+    }
+    if policy.audience_required && policy.audiences.is_empty() {
+        return Err(rejected(
+            Some(&kid),
+            Some(registered),
+            "no audience is configured for this token type",
+        ));
+    }
+
+    let decoding_key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|e| {
+        rejected(
+            Some(&kid),
+            Some(registered),
+            format!("invalid verification key: {e}"),
+        )
+    })?;
+
+    let mut validation = Validation::new(registered_alg);
+    validation.leeway = policy.leeway_secs;
+    validation.validate_nbf = true;
+    validation.set_issuer(&[registered]);
+    if !policy.audiences.is_empty() {
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
+        validation.set_audience(policy.audiences);
+    } else {
+        // jsonwebtoken can require registered claims like `iss` and `exp`;
+        // `iat` is required by deserializing into `ManagementClaims`.
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
+        validation.validate_aud = false;
+    }
+
+    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
+        .map_err(|e| {
+            rejected(
+                Some(&kid),
+                Some(registered),
+                format!("claim or signature validation failed: {e}"),
+            )
+        })?;
+    let now = current_unix_timestamp().map_err(|_| TokenRejection::Internal)?;
+    token_data
+        .claims
+        .validate_policy(now, policy.leeway_secs, policy.max_token_lifetime_secs)
+        .map_err(|reason| rejected(Some(&kid), Some(registered), reason))?;
+    Ok(resolved)
+}
+
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
-    let auth_header = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    let Some(auth_header) = auth_header else {
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
-        return Err(AuthenticationError::MissingToken);
+    let policy = TokenPolicy {
+        typ: MANAGEMENT_TOKEN_TYPE,
+        principal: PrincipalKind::Issuer,
+        audiences: &state.management_auth.audiences,
+        audience_required: false,
+        leeway_secs: state.management_auth.leeway_secs,
+        max_token_lifetime_secs: state.management_auth.max_token_lifetime_secs,
     };
-    let Some((scheme, token)) = auth_header.split_once(char::is_whitespace) else {
-        if auth_header.eq_ignore_ascii_case("Bearer") {
-            return Err(invalid_auth(None, None, "empty Bearer token"));
+    let resolved = match verify_bearer(
+        request.headers(),
+        state.issuer_key_resolver.as_ref(),
+        &policy,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(TokenRejection::Missing) => {
+            crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
+            return Err(AuthenticationError::MissingToken);
         }
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
-        return Err(AuthenticationError::MissingToken);
-    };
-    if !scheme.eq_ignore_ascii_case("Bearer") {
-        crate::utils::metrics::record_management_auth_request(None, None, "missing_token");
-        return Err(AuthenticationError::MissingToken);
-    }
-    if token.trim().is_empty() {
-        return Err(invalid_auth(None, None, "empty Bearer token"));
-    }
-
-    let header = jsonwebtoken::decode_header(token)
-        .map_err(|e| invalid_auth(None, None, format!("invalid JWT header: {e}")))?;
-    let typ_ok = header.typ.as_deref().is_some_and(|typ| {
-        typ.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE)
-            || typ.get(.."application/".len()).is_some_and(|prefix| {
-                prefix.eq_ignore_ascii_case("application/")
-                    && typ
-                        .get("application/".len()..)
-                        .is_some_and(|value| value.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE))
-            })
-    });
-    let Some(kid) = header.kid.clone() else {
-        return Err(invalid_auth(None, None, "missing kid"));
-    };
-    if kid.is_empty() || kid.chars().count() > 255 {
-        return Err(invalid_auth(Some(&kid), None, "invalid kid length"));
-    }
-    if !typ_ok {
-        return Err(invalid_auth(Some(&kid), None, "missing or invalid typ"));
-    }
-    if header.crit.is_some() {
-        return Err(invalid_auth(
-            Some(&kid),
-            None,
-            "crit header is not permitted",
-        ));
-    }
-    let allowed_algorithm = MANAGEMENT_SIGNING_ALGORITHMS.contains(&header.alg);
-    if !allowed_algorithm {
-        return Err(invalid_auth(Some(&kid), None, "algorithm is not allowed"));
-    }
-
-    let resolved = match state.issuer_key_resolver.resolve(&kid).await {
-        Err(KeyResolveError::BackendUnavailable) => {
-            // The header `kid` is unauthenticated here, so it is not used as a
-            // label; only the retryable outcome is recorded.
+        Err(TokenRejection::Invalid {
+            kid,
+            principal,
+            reason,
+        }) => return Err(invalid_auth(kid.as_deref(), principal.as_deref(), reason)),
+        Err(TokenRejection::Unavailable { kid }) => {
             crate::utils::metrics::record_management_auth_request(
                 None,
                 None,
@@ -249,82 +412,86 @@ pub async fn auth(
             );
             return Err(AuthenticationError::BackendUnavailable);
         }
-        result => result.map_err(|reason| invalid_auth(Some(&kid), None, reason))?,
+        Err(TokenRejection::Internal) => return Err(AuthenticationError::InternalServer),
     };
-    let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
-        Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
-        Principal::Admin { id } => {
-            return Err(invalid_auth(
-                Some(&kid),
-                Some(id),
-                "admin keys cannot authenticate issuer management requests",
-            ));
-        }
+    let Principal::Issuer {
+        id: registered_issuer,
+        aggregation_id,
+        tier,
+    } = &resolved.principal
+    else {
+        return Err(AuthenticationError::InternalServer);
     };
-    let registered_kid = resolved.public_key.key_id();
-    let registered_alg = resolved.public_key.algorithm();
-    if registered_kid != kid || registered_alg != header.alg {
-        return Err(invalid_auth(
-            Some(&kid),
-            Some(registered_issuer),
-            "algorithm or key id mismatch",
-        ));
-    }
 
-    let decoding_key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|e| {
-        invalid_auth(
-            Some(&kid),
-            Some(registered_issuer),
-            format!("invalid verification key: {e}"),
-        )
-    })?;
-
-    let mut validation = Validation::new(registered_alg);
-    validation.leeway = state.management_auth.leeway_secs;
-    validation.validate_nbf = true;
-    validation.set_issuer(&[registered_issuer]);
-    if !state.management_auth.audiences.is_empty() {
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
-        validation.set_audience(&state.management_auth.audiences);
-    } else {
-        // jsonwebtoken can require registered claims like `iss` and `exp`;
-        // `iat` is required by deserializing into `ManagementClaims`.
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
-        validation.validate_aud = false;
-    }
-
-    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
-        .map_err(|e| {
-            invalid_auth(
-                Some(&kid),
-                Some(registered_issuer),
-                format!("claim or signature validation failed: {e}"),
-            )
-        })?;
-    let now = current_unix_timestamp()?;
-    token_data
-        .claims
-        .validate_policy(
-            now,
-            state.management_auth.leeway_secs,
-            state.management_auth.max_token_lifetime_secs,
-        )
-        .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
-
-    let authenticated_issuer = Issuer(registered_issuer.to_owned());
     request
         .extensions_mut()
-        .insert(AuthenticatedIssuer::with_aggregation_id(
-            authenticated_issuer,
-            registered_aggregation_id,
+        .insert(AuthenticatedIssuer::from_registry(
+            Issuer(registered_issuer.clone()),
+            *aggregation_id,
+            *tier,
         ));
     let metric_issuer = bounded_identifier(Some(registered_issuer));
-    let metric_kid = bounded_identifier(Some(&kid));
+    let metric_kid = bounded_identifier(Some(resolved.public_key.key_id()));
     crate::utils::metrics::record_management_auth_request(
         Some(&metric_issuer),
         Some(&metric_kid),
         "success",
     );
+    Ok(next.run(request).await)
+}
+
+/// An admin principal verified by [`admin_auth`]. Its scopes are read from
+/// the registry on each check, never from the token.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedAdmin {
+    pub id: String,
+}
+
+/// Authenticates admin API requests: a `statuslist-admin+jwt` signed with a
+/// key listed under `admins` in the registry. A management token is never
+/// accepted here, nor an admin token on the management listener.
+pub async fn admin_auth(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AuthenticationError> {
+    let policy = TokenPolicy {
+        typ: ADMIN_TOKEN_TYPE,
+        principal: PrincipalKind::Admin,
+        audiences: &state.admin_auth.audiences,
+        audience_required: state.admin_auth.audience_required,
+        leeway_secs: state.admin_auth.leeway_secs,
+        max_token_lifetime_secs: state.admin_auth.max_token_lifetime_secs,
+    };
+    let resolved = match verify_bearer(
+        request.headers(),
+        state.issuer_key_resolver.as_ref(),
+        &policy,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(TokenRejection::Missing) => return Err(AuthenticationError::MissingToken),
+        Err(TokenRejection::Invalid {
+            kid,
+            principal,
+            reason,
+        }) => {
+            tracing::warn!(kid = %bounded_identifier(kid.as_deref()), iss = %bounded_identifier(principal.as_deref()), reason = %reason, "Admin JWT rejected");
+            return Err(AuthenticationError::InvalidToken);
+        }
+        Err(TokenRejection::Unavailable { kid }) => {
+            tracing::warn!(
+                kid = %bounded_identifier(Some(&kid)),
+                "admin JWT rejected: the trust backend is unavailable"
+            );
+            return Err(AuthenticationError::BackendUnavailable);
+        }
+        Err(TokenRejection::Internal) => return Err(AuthenticationError::InternalServer),
+    };
+    request.extensions_mut().insert(AuthenticatedAdmin {
+        id: principal_id(&resolved.principal).to_owned(),
+    });
     Ok(next.run(request).await)
 }
 
@@ -351,7 +518,7 @@ fn current_unix_timestamp() -> Result<u64, AuthenticationError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_utils::{metrics_after, test_app_state};
     use crate::utils::file_watcher::FileWatcher;
@@ -427,11 +594,11 @@ mod tests {
             .with_state(app_state)
     }
 
-    fn test_ec_private_pem() -> String {
+    pub(crate) fn test_ec_private_pem() -> String {
         "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsJyilHyjhzXDVU2A\n5ud6kfXPktY7wx5d8CQFe1nMzK2hRANCAAQ17IW//Yvrs4SmU1smlHTYgWKzj+UV\nb0diaF8Xk6vqb3gB9qnvD4NxkNvLsQPPqjQKncEP831drigLydrC6WPT\n-----END PRIVATE KEY-----".to_string()
     }
 
-    fn test_public_jwk() -> crate::domain::models::credential::PublicJwk {
+    pub(crate) fn test_public_jwk() -> crate::domain::models::credential::PublicJwk {
         crate::domain::models::credential::PublicJwk::try_new(
             r#"{
                 "kty": "EC",
@@ -447,11 +614,11 @@ mod tests {
         .unwrap()
     }
 
-    fn rotation_private_pem() -> String {
+    pub(crate) fn rotation_private_pem() -> String {
         "-----BEGIN PRIVATE KEY-----\nMIIBeQIBADCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0BAQIhAP////8AAAAB\nAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAABAAAAAAAAAAAAAAAA\n///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxTsPY7zjw+J9JgSwMV\nAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg\n9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9QIhAP////8A\nAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBBG0wawIBAQQgyO8dO/IXvyo2\nloV5QPB42Gv31v5U5pik40FfQ12VVzWhRANCAASozvoFuoPcmZaeJPgC5JgzkrDE\nLlYA1w9cGkJRB8B/UXP3TuiR9gairPTOlLAzTEO0bGDIMKjjeU4tfYCm/Jy5\n-----END PRIVATE KEY-----".to_string()
     }
 
-    fn rotation_public_jwk() -> PublicJwk {
+    pub(crate) fn rotation_public_jwk() -> PublicJwk {
         PublicJwk::try_new(
             br#"{
                 "kty":"EC", "crv":"P-256", "kid":"rotation-key", "alg":"ES256",
@@ -592,6 +759,7 @@ mod tests {
             handle.clone(),
             state.service,
             None,
+            state.tiers,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -1343,6 +1511,7 @@ mod tests {
                 registry.clone(),
                 state.service,
                 None,
+                state.tiers,
                 file.clone(),
                 Duration::from_secs(1),
             );
