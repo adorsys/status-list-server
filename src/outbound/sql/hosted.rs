@@ -359,6 +359,15 @@ impl SeaOrmStore<HostedIssuerRow> {
     }
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), RepositoryError> {
+        self.add_key_if_version(key, None, actor).await
+    }
+
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: Option<u64>,
+        actor: &str,
+    ) -> Result<(), RepositoryError> {
         // The `kid` column is authoritative (the registry keeps the same
         // rule): a key whose embedded `kid` disagrees with its row never
         // enters storage.
@@ -387,18 +396,18 @@ impl SeaOrmStore<HostedIssuerRow> {
             let hash = material_hash(&material);
             let db = self.current();
             let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
-            let issuer_exists = issuers::Entity::find_by_id(&key.issuer_id)
+            let issuer = issuers::Entity::find_by_id(&key.issuer_id)
                 .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-                .select_only()
-                .column(issuers::Column::Issuer)
-                .into_tuple::<String>()
                 .one(&txn)
                 .await
-                .map_err(err_txn)?
-                .is_some();
-            if !issuer_exists {
+                .map_err(err_txn)?;
+            let Some(issuer) = issuer else {
                 txn.rollback().await.ok();
                 return Err(RepositoryError::NotFound);
+            };
+            if expected_version.is_some_and(|expected| issuer.version != expected as i64) {
+                txn.rollback().await.ok();
+                return Err(RepositoryError::VersionMismatch);
             }
             let insert = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
                 kid: Set(key.kid.clone()),
@@ -425,6 +434,23 @@ impl SeaOrmStore<HostedIssuerRow> {
                     )
                     .await
                     .map_err(err_txn)?;
+                    if let Some(expected) = expected_version {
+                        let next_version = issuer.version.checked_add(1).ok_or_else(|| {
+                            RepositoryError::UpdateError("issuer version overflow".into())
+                        })?;
+                        let changed = issuers::Entity::update_many()
+                            .col_expr(issuers::Column::Version, Expr::value(next_version))
+                            .filter(issuers::Column::Issuer.eq(&key.issuer_id))
+                            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+                            .filter(issuers::Column::Version.eq(expected as i64))
+                            .exec(&txn)
+                            .await
+                            .map_err(err_txn)?;
+                        if changed.rows_affected != 1 {
+                            txn.rollback().await.ok();
+                            return Err(RepositoryError::VersionMismatch);
+                        }
+                    }
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
                 }
@@ -533,6 +559,7 @@ impl SeaOrmStore<HostedIssuerRow> {
 fn hosted_error(err: RepositoryError) -> HostedIssuerError {
     match &err {
         RepositoryError::KeyMaterialReused => HostedIssuerError::KeyMaterialReused,
+        RepositoryError::VersionMismatch => HostedIssuerError::VersionMismatch,
         RepositoryError::InvalidKey(message) => {
             HostedIssuerError::InvalidPublicJwk(message.clone())
         }
@@ -651,6 +678,18 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {
         self.store.add_key(key, actor).await.map_err(hosted_error)
+    }
+
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<(), HostedIssuerError> {
+        self.store
+            .add_key_if_version(key, Some(expected_version), actor)
+            .await
+            .map_err(hosted_error)
     }
 
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {

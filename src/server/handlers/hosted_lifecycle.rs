@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::domain::models::hosted_issuer::NewHostedIssuerKey;
 use crate::domain::models::hosted_issuer::{HostedIssuerError, HostedIssuerState};
 use crate::server::{
     AppState,
@@ -49,6 +50,15 @@ pub enum UpdateIssuerRequest {
 #[serde(deny_unknown_fields)]
 pub struct UpdateKeyRequest {
     state: String,
+}
+
+/// `POST /admin/v1/issuers/{issuer_id}/keys` body. `kid` is deliberately
+/// absent: the server assigns it from the public JWK.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddIssuerKeyRequest {
+    public_key: serde_json::Map<String, serde_json::Value>,
+    alg: String,
 }
 
 fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
@@ -174,6 +184,55 @@ fn lifecycle_error(error: HostedIssuerError) -> ApiError {
     }
 }
 
+fn add_key_error(hosted_error: HostedIssuerError) -> ApiError {
+    match hosted_error {
+        HostedIssuerError::AlreadyExists | HostedIssuerError::KeyMaterialReused => error(
+            StatusCode::CONFLICT,
+            "key_material_in_use",
+            "the key id or public-key material is already reserved",
+        ),
+        HostedIssuerError::InvalidPublicJwk(_) => {
+            ApiError::unprocessable("invalid_public_jwk", "the requested public JWK is invalid")
+        }
+        other => lifecycle_error(other),
+    }
+}
+
+fn new_key_input(
+    issuer_id: String,
+    mut input: AddIssuerKeyRequest,
+) -> Result<NewHostedIssuerKey, ApiError> {
+    if input.public_key.contains_key("kid") {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "the server assigns kid; do not include it in public_key",
+        ));
+    }
+    if input
+        .public_key
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|alg| alg != input.alg)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "alg must match public_key.alg when it is supplied",
+        ));
+    }
+    input.public_key.insert(
+        "alg".into(),
+        serde_json::Value::String(std::mem::take(&mut input.alg)),
+    );
+    Ok(NewHostedIssuerKey {
+        issuer_id,
+        jwk: input.public_key,
+        not_before: None,
+        not_after: None,
+    })
+}
+
 fn response_headers(etag: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -288,6 +347,68 @@ pub async fn revoke_issuer_key(
     ))
 }
 
+/// `POST /admin/v1/issuers/{issuer_id}/keys`: register an active portal key.
+/// The SQL store verifies the current issuer version while it commits the key,
+/// making the preceding `If-Match` check race-safe.
+pub async fn add_issuer_key(
+    State(state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedAdmin>,
+    Path(issuer_id): Path<String>,
+    headers: HeaderMap,
+    input: Result<Json<AddIssuerKeyRequest>, JsonRejection>,
+) -> Result<
+    (
+        StatusCode,
+        HeaderMap,
+        Json<crate::server::handlers::admin::KeyDto>,
+    ),
+    ApiError,
+> {
+    require_scope(&admin, "issuers:write")?;
+    let Json(input) = input.map_err(|rejection| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            format!("invalid add issuer key request: {rejection}"),
+        )
+    })?;
+    let if_match = if_match_value(&headers)?;
+    let (current, current_etag) = load_issuer_for_update(&state, &issuer_id).await?;
+    check_if_match(if_match, &current_etag)?;
+    let input = new_key_input(issuer_id.clone(), input)?;
+    let store = state
+        .hosted_issuer_store
+        .as_ref()
+        .expect("lifecycle routes are mounted only with the hosted issuer store")
+        .clone();
+    let service = crate::server::auth::hosted_service::HostedIssuerService::new(store);
+    let key = match service
+        .register_key_if_version(&state.admin_registry, input, current.version, &admin.id)
+        .await
+    {
+        Ok(key) => key,
+        Err(HostedIssuerError::VersionMismatch) => {
+            let issuer = load_current(&state, &issuer_id).await?;
+            let dto = hosted_dto(&state, issuer).await?;
+            return Err(precondition_failed(issuer_etag(&dto)));
+        }
+        Err(other) => return Err(add_key_error(other)),
+    };
+    let dto = hosted_dto(&state, load_current(&state, &issuer_id).await?).await?;
+    let etag = issuer_etag(&dto);
+    let mut response_headers = response_headers(&etag);
+    response_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!("/admin/v1/issuers/{issuer_id}/keys/{}", key.kid))
+            .expect("generated key id is a valid location segment"),
+    );
+    Ok((
+        StatusCode::CREATED,
+        response_headers,
+        Json(key_from_hosted(key)),
+    ))
+}
+
 async fn load_current(
     state: &AppState,
     issuer_id: &str,
@@ -323,7 +444,7 @@ mod tests {
     use axum::http::{Method, Request};
     use axum::middleware::from_fn_with_state;
     use axum::response::Response;
-    use axum::routing::patch;
+    use axum::routing::{patch, post};
     use jsonwebtoken::{Algorithm, EncodingKey, Header};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
@@ -459,9 +580,29 @@ mod tests {
 
         async fn add_key(
             &self,
-            _key: HostedIssuerKey,
+            key: HostedIssuerKey,
             _actor: &str,
         ) -> Result<(), HostedIssuerError> {
+            self.keys.lock().unwrap().push(key);
+            Ok(())
+        }
+
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            let mut issuers = self.issuers.lock().unwrap();
+            let issuer = issuers
+                .iter_mut()
+                .find(|issuer| issuer.id == key.issuer_id)
+                .ok_or(HostedIssuerError::NotFound)?;
+            if issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            self.keys.lock().unwrap().push(key);
+            issuer.version += 1;
             Ok(())
         }
 
@@ -621,6 +762,7 @@ mod tests {
             // listener.
             let app = axum::Router::new()
                 .route("/admin/v1/issuers/{issuer_id}", patch(update_issuer))
+                .route("/admin/v1/issuers/{issuer_id}/keys", post(add_issuer_key))
                 .route(
                     "/admin/v1/issuers/{issuer_id}/keys/{kid}",
                     patch(revoke_issuer_key),
@@ -652,6 +794,28 @@ mod tests {
         ) -> Response {
             let mut builder = Request::builder()
                 .method(Method::PATCH)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(if_match) = if_match {
+                builder = builder.header(header::IF_MATCH, if_match);
+            }
+            self.app
+                .clone()
+                .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn post(
+            &self,
+            uri: &str,
+            token: &str,
+            if_match: Option<&str>,
+            body: &str,
+        ) -> Response {
+            let mut builder = Request::builder()
+                .method(Method::POST)
                 .uri(uri)
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json");
@@ -748,6 +912,61 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_json(response).await["state"], "active");
+    }
+
+    #[tokio::test]
+    async fn add_key_requires_current_etag_and_returns_the_assigned_key() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer(
+            "portal-issuer",
+            Some(service_now() + time::Duration::days(30)),
+        ));
+        let token = write_token();
+        let etag = app.current_etag("portal-issuer").await;
+        let body = r#"{
+            "public_key": {
+                "kty": "EC", "crv": "P-256",
+                "x": "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY",
+                "y": "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+            },
+            "alg": "ES256"
+        }"#;
+
+        let response = app
+            .post(
+                "/admin/v1/issuers/portal-issuer/keys",
+                &token,
+                Some(&etag),
+                body,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(response.headers().contains_key(header::LOCATION));
+        let next_etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(next_etag, etag);
+        let response_body = body_json(response).await;
+        assert_eq!(response_body["state"], "active");
+        assert_eq!(
+            response_body["kid"],
+            "QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M"
+        );
+        assert_eq!(app.store.issuer("portal-issuer").unwrap().version, 2);
+
+        let response = app
+            .post(
+                "/admin/v1/issuers/portal-issuer/keys",
+                &token,
+                Some(&etag),
+                body,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
     }
 
     #[tokio::test]

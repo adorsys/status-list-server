@@ -391,6 +391,10 @@ fn hosted_admin_routes(
     }
     Router::new()
         .route(
+            "/admin/v1/issuers/{issuer_id}/keys",
+            post(crate::server::handlers::hosted_lifecycle::add_issuer_key),
+        )
+        .route(
             "/admin/v1/issuers/{issuer_id}",
             patch(crate::server::handlers::hosted_lifecycle::update_issuer),
         )

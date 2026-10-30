@@ -12,7 +12,9 @@ use crate::domain::models::hosted_issuer::{
     NewHostedIssuer, NewHostedIssuerKey,
 };
 use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
-use crate::server::auth::hosted::{register_hosted_issuer, register_hosted_issuer_key};
+use crate::server::auth::hosted::{
+    register_hosted_issuer, register_hosted_issuer_key, register_hosted_issuer_key_if_version,
+};
 use crate::server::auth::issuer_registry::RegistryHandle;
 
 /// Assigns server-side identifiers for a hosted write and commits it through
@@ -83,7 +85,7 @@ impl HostedIssuerService {
         input: NewHostedIssuerKey,
         actor: &str,
     ) -> Result<HostedIssuerKey, HostedIssuerError> {
-        let kid = (self.new_id)().to_string();
+        let kid = key_thumbprint(&input.jwk)?;
         let mut map = input.jwk;
         map.insert("kid".into(), serde_json::Value::String(kid.clone()));
         let bytes = serde_json::to_vec(&map)
@@ -102,6 +104,52 @@ impl HostedIssuerService {
         register_hosted_issuer_key(registry, &self.store, key.clone(), actor).await?;
         Ok(key)
     }
+
+    /// Register a key only if the issuer has not changed since the admin
+    /// client read its ETag.
+    pub async fn register_key_if_version(
+        &self,
+        registry: &RegistryHandle,
+        input: NewHostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError> {
+        let kid = key_thumbprint(&input.jwk)?;
+        let mut map = input.jwk;
+        map.insert("kid".into(), serde_json::Value::String(kid.clone()));
+        let bytes = serde_json::to_vec(&map)
+            .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
+        let jwk = PublicJwk::try_new(bytes)
+            .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
+        let key = HostedIssuerKey {
+            kid,
+            issuer_id: input.issuer_id,
+            jwk,
+            created_at: (self.clock)(),
+            not_before: input.not_before,
+            not_after: input.not_after,
+            state: HostedIssuerKeyState::Active,
+        };
+        register_hosted_issuer_key_if_version(
+            registry,
+            &self.store,
+            key.clone(),
+            expected_version,
+            actor,
+        )
+        .await?;
+        Ok(key)
+    }
+}
+
+fn key_thumbprint(
+    jwk: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, HostedIssuerError> {
+    let jwk: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(serde_json::Value::Object(jwk.clone()))
+            .map_err(|error| HostedIssuerError::InvalidPublicJwk(error.to_string()))?;
+    jwk.thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256)
+        .map_err(|error| HostedIssuerError::InvalidPublicJwk(error.to_string()))
 }
 
 /// Applies operator lifecycle commands to durable state. The decision rules

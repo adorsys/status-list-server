@@ -60,6 +60,20 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Register a signing key for an existing hosted issuer.
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
 
+    /// Register a signing key only while the issuer is still at
+    /// `expected_version`. The default preserves the store's existing API for
+    /// test-only adapters; durable stores override it to make an HTTP
+    /// `If-Match` precondition atomic with the insertion.
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<(), HostedIssuerError> {
+        let _ = expected_version;
+        self.add_key(key, actor).await
+    }
+
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;

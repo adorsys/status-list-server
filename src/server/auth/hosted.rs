@@ -282,6 +282,20 @@ pub(crate) async fn register_hosted_issuer_key(
     store.add_key(key, actor).await
 }
 
+/// Version-checked form of [`register_hosted_issuer_key`] for an admin API
+/// update guarded by `If-Match`.
+pub(crate) async fn register_hosted_issuer_key_if_version(
+    registry: &RegistryHandle,
+    store: &Arc<dyn HostedIssuerStore>,
+    key: HostedIssuerKey,
+    expected_version: u64,
+    actor: &str,
+) -> Result<(), HostedIssuerError> {
+    let _guard = registry.write_lock().await;
+    validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
+    store.add_key_if_version(key, expected_version, actor).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
