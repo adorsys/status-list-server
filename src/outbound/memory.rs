@@ -108,6 +108,16 @@ impl MemoryStatusLists {
 
 #[async_trait]
 impl StatusListRepo for MemoryStatusLists {
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError> {
+        Ok(self
+            .values
+            .read()
+            .await
+            .per_issuer
+            .get(issuer)
+            .map_or(0, |lists| lists.len() as u64))
+    }
+
     async fn find(&self, id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         crate::utils::metrics_db::time_query("find", "status_list", async {
             Ok(self.values.read().await.by_id.get(id).cloned())
@@ -1251,6 +1261,9 @@ mod tests {
                 .unwrap();
         }
 
+        assert_eq!(repo.count_by_issuer("one").await.unwrap(), 3);
+        assert_eq!(repo.count_by_issuer("two").await.unwrap(), 1);
+        assert_eq!(repo.count_by_issuer("nobody").await.unwrap(), 0);
         let first = repo.list_uris(Some("one"), None, 2).await.unwrap();
         assert_eq!(
             first.status_lists,

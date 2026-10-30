@@ -190,3 +190,17 @@ ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
 
 The fixture contains public keys only. Its private keys are demo material and
 must never be used outside local development.
+
+## Admin issuer reads
+
+Configure an admin principal, `issuers:read`, and a distinct admin audience as
+explained in the [operator guide](../docs/admin-api.md). Obtain a signed admin
+token from your operator tooling. From the `demo` directory, run:
+
+```bash
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --issuer example
+```
+
+The script prompts for the token without echoing it. The first command walks
+all pages; the second displays one issuer and its ETag. Tokens are never printed.

@@ -36,7 +36,8 @@ info:
     - Errors use the same envelope as the public API:
       `{"error": "<code>", "error_description": "<text>"}`. Branch on
       `error`; `error_description` wording is not part of the contract.
-    - Every response, success or error, carries `Cache-Control: no-store`.
+    - Every success response carries `Cache-Control: no-store`; errors carry
+      `Cache-Control: no-store, max-age=0`.
     - Instants are Unix timestamps in seconds (UTC).
     - Each issuer has an `ETag`. Every change to an existing issuer,
       including adding or revoking one of its keys, requires `If-Match`
@@ -85,9 +86,12 @@ paths:
         Static and portal issuers together, ordered by `id` ascending, one
         bounded page per request. Requires `issuers:read`.
 
-        Pass `next_cursor` back as `cursor` to read the next page. A full walk
-        returns every issuer that existed when the walk started and still
-        exists when its page is read, exactly once.
+        Pass `next_cursor` back as `cursor` to read the next page with the same
+        filters. A full walk returns every matching issuer present at the start
+        that remains present and matching when its page is read, exactly once.
+        A concurrently added issuer whose id
+        sorts before the current cursor may be absent from that walk; begin a
+        new walk to observe it.
       parameters:
         - name: source
           in: query
@@ -231,6 +235,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Issuer"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -488,12 +494,16 @@ components:
 
   headers:
     CacheControl:
-      description: Always `no-store`.
+      description: Success responses use `no-store`; errors use `no-store, max-age=0`.
       schema:
         type: string
-        const: no-store
+        enum: [no-store, "no-store, max-age=0"]
     ETag:
-      description: The issuer's version (RFC 9110 §8.8.3). Send it back in `If-Match`.
+      description: |
+        Opaque strong validator of the complete issuer JSON representation
+        (RFC 9110 §8.8.3), including keys, usage, and derived expiry state.
+        It is not the database version. Send it back in `If-Match` when
+        updating a portal issuer.
       schema:
         type: string
         example: '"7"'
@@ -622,7 +632,11 @@ components:
     IssuerUsage:
       type: object
       required: [lists, lists_limit, keys, keys_limit]
-      description: Current use against the issuer's tier limits.
+      description: |
+        Current use against enforced limits. `lists_limit` is the configured
+        server-wide per-issuer cap. `keys_limit` is null because this release
+        does not enforce a key-count quota; clients must not interpret it as zero.
+        This nullable field extends the earlier integer-only contract.
       properties:
         lists:
           type: integer
@@ -638,9 +652,10 @@ components:
           description: Non-revoked keys.
           example: 1
         keys_limit:
-          type: integer
+          type: [integer, "null"]
           minimum: 1
-          example: 2
+          description: Null while no key-count quota is enforced. A number denotes an enforced cap.
+          example: null
 
     IssuerPage:
       type: object
@@ -765,7 +780,8 @@ components:
     InvalidInput:
       description: |
         `invalid_input` — the body is not valid JSON, misses a required
-        member, or contains a member the caller may not set.
+        member, contains a member the caller may not set, or the issuer path
+        parameter is not valid UTF-8.
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"

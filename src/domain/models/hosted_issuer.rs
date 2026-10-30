@@ -52,6 +52,22 @@ impl HostedIssuer {
     }
 }
 
+/// Metadata filters applied before bounding an admin issuer page.
+#[derive(Clone, Debug, Default)]
+pub struct HostedIssuerFilter {
+    pub tier: Option<String>,
+    pub state: Option<HostedIssuerReadState>,
+    pub owner: Option<String>,
+}
+
+/// Admin-visible lifecycle derived from persisted state and expiry.
+#[derive(Clone, Copy, Debug)]
+pub enum HostedIssuerReadState {
+    Active,
+    Suspended,
+    Expired,
+}
+
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
 /// (`id`, `aggregation_id`, `created_at`, `version`) are assigned by the
 /// server, never by the caller (ADR 0002, Identifiers), so this carries only

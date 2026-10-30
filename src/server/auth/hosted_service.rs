@@ -118,6 +118,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for RecordingStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,

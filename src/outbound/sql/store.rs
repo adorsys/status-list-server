@@ -4,8 +4,8 @@ mod tests;
 use arc_swap::ArcSwap;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect,
-    Set, Statement, TransactionTrait, Value,
+    DatabaseTransaction, DbErr, EntityTrait, IsolationLevel, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, Statement, TransactionTrait, Value,
     sea_query::{Expr, ExprTrait, OnConflict},
 };
 use std::{collections::BTreeSet, sync::Arc};
@@ -722,6 +722,17 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    pub async fn count_status_lists_by_issuer(&self, issuer: &str) -> Result<u64, RepositoryError> {
+        time_query("count", "status_list", async {
+            status_lists::Entity::find()
+                .filter(status_lists::Column::Issuer.eq(issuer))
+                .count(self.db.current().as_ref())
+                .await
+                .map_err(find_err)
+        })
+        .await
+    }
+
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_status_list_issuers(&self) -> Result<Vec<String>, RepositoryError> {
         time_query("list_issuers", "status_list", async {
@@ -1379,7 +1390,25 @@ fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
 /// Not a classifier, unlike its `map_*_err` siblings: contention maps to 409,
 /// and a 409 on a read claims a conflict with state the request never proposed.
 fn find_err(e: sea_orm::DbErr) -> RepositoryError {
-    RepositoryError::FindError(e.to_string())
+    use sea_orm::{ConnAcquireErr, DbErr, RuntimeErr, SqlxError};
+
+    let unavailable = match &e {
+        DbErr::ConnectionAcquire(ConnAcquireErr::Timeout | ConnAcquireErr::ConnectionClosed) => {
+            true
+        }
+        DbErr::Conn(RuntimeErr::SqlxError(source))
+        | DbErr::Exec(RuntimeErr::SqlxError(source))
+        | DbErr::Query(RuntimeErr::SqlxError(source)) => matches!(
+            source.as_ref(),
+            SqlxError::Io(_) | SqlxError::PoolTimedOut | SqlxError::PoolClosed
+        ),
+        _ => false,
+    };
+    if unavailable {
+        RepositoryError::Unavailable
+    } else {
+        RepositoryError::FindError(e.to_string())
+    }
 }
 
 const ALLOCATION_INSERT_CHUNK_ROWS: usize = 400;

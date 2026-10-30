@@ -6,7 +6,9 @@
 //! with no cache, so revocation takes effect on the next request.
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{
+    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -16,8 +18,8 @@ use super::models::{PublicKey, hosted_issuer_keys, issuers};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
-    HostedIssuerState,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
 };
 use crate::domain::ports::HostedIssuerStore;
 use crate::utils::metrics_db::time_query;
@@ -530,6 +532,68 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 
 #[async_trait]
 impl HostedIssuerStore for SqlHostedIssuerStore {
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        let mut query = issuers::Entity::find()
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .order_by_asc(issuers::Column::Issuer)
+            .limit(limit as u64);
+        if let Some(after) = after {
+            query = query.filter(issuers::Column::Issuer.gt(after));
+        }
+        if let Some(tier) = &filters.tier {
+            query = query.filter(issuers::Column::Tier.eq(tier));
+        }
+        if let Some(owner) = &filters.owner {
+            query = query.filter(issuers::Column::Owner.eq(owner));
+        }
+        let unexpired = Condition::any()
+            .add(issuers::Column::ExpiresAt.is_null())
+            .add(issuers::Column::ExpiresAt.gt(now.unix_timestamp()));
+        query = match filters.state {
+            Some(HostedIssuerReadState::Suspended) => {
+                query.filter(issuers::Column::State.eq("disabled"))
+            }
+            Some(HostedIssuerReadState::Expired) => query
+                .filter(issuers::Column::State.eq("active"))
+                .filter(issuers::Column::ExpiresAt.lte(now.unix_timestamp())),
+            Some(HostedIssuerReadState::Active) => query
+                .filter(issuers::Column::State.eq("active"))
+                .filter(unexpired),
+            None => query,
+        };
+        query
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?
+            .into_iter()
+            .map(parse_issuer)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn issuer_keys(
+        &self,
+        issuer_id: &str,
+    ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+        hosted_issuer_keys::Entity::find()
+            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .order_by_desc(hosted_issuer_keys::Column::CreatedAt)
+            .order_by_asc(hosted_issuer_keys::Column::Kid)
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?
+            .into_iter()
+            .map(parse_key)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn find_key_by_kid(
         &self,
         kid: &str,

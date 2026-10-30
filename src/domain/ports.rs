@@ -8,7 +8,7 @@ use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
 };
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
 };
 
 /// Resolve a trusted signing key without exposing the backing trust source to
@@ -27,6 +27,17 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Return a bounded page ordered by issuer id, strictly after `after`.
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+    /// Return all signing-key metadata for one hosted issuer.
+    async fn issuer_keys(&self, issuer_id: &str)
+    -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
     /// The issuer owning a registered management-token key ID.
     async fn find_key_by_kid(
         &self,
@@ -115,6 +126,9 @@ pub struct AllocateStatusListIndices {
 
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
+    /// Count all lists owned by one issuer, including during quota transitions.
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError>;
+
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 

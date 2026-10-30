@@ -10,6 +10,8 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
@@ -38,6 +40,8 @@ fn key(issuer_id: &str, kid: &str) -> HostedIssuerKey {
 /// A second, distinct EC key so tests that assert *material* reuse start from
 /// a namespace that earlier helpers have not touched.
 const ROTATED_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"rotated","alg":"ES256","x":"qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E","y":"c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"}"#;
+#[cfg(feature = "sqlite")]
+const THIRD_EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"third","alg":"ES256","x":"w0Nc9y5IMwcWV08tC3KtnukblytlN1HTOFngG8U6d60","y":"UklyBhY4aZvUS9aJDifOAiLMj1LVwNmhA8AXRvcs3f8"}"#;
 
 fn key_with_material(issuer_id: &str, kid: &str, jwk_json: &str) -> HostedIssuerKey {
     let mut jwk: serde_json::Value = serde_json::from_str(jwk_json).unwrap();
@@ -174,6 +178,124 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
 #[tokio::test]
 async fn test_sqlite_hosted_round_trip() {
     round_trip(&sqlite_store().await, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
+    let store = sqlite_store().await;
+    let first = issuer("00000000-0000-4000-8000-000000000001");
+    let second = issuer("00000000-0000-4000-8000-000000000002");
+    store.create_issuer(first.clone()).await.unwrap();
+    store.create_issuer(second.clone()).await.unwrap();
+    let mut older = key(&first.id, "older-key");
+    older.created_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let mut newer = key_with_material(&first.id, "newer-key", ROTATED_EC_JWK);
+    newer.created_at = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+    let mut same_time = key_with_material(&first.id, "same-time-key", THIRD_EC_JWK);
+    same_time.created_at = older.created_at;
+    store.add_key(older).await.unwrap();
+    store.add_key(newer).await.unwrap();
+    store.add_key(same_time).await.unwrap();
+
+    let page = store
+        .list_issuers_after(
+            None,
+            1,
+            &HostedIssuerFilter::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [first.id.as_str()]
+    );
+    let next = store
+        .list_issuers_after(
+            Some(&first.id),
+            1,
+            &HostedIssuerFilter::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [second.id.as_str()]
+    );
+    let keys = store.issuer_keys(&first.id).await.unwrap();
+    assert_eq!(keys.len(), 3);
+    assert_eq!(
+        keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
+        ["newer-key", "older-key", "same-time-key"]
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_admin_issuer_filters_combine_tier_owner_and_state() {
+    let store = sqlite_store().await;
+    let now = OffsetDateTime::now_utc();
+    let mut active = issuer("00000000-0000-4000-8000-000000000011");
+    active.tier = "sandbox".into();
+    active.owner = Some("portal|alice".into());
+    active.expires_at = Some(now + time::Duration::days(1));
+    let mut different_owner = issuer("00000000-0000-4000-8000-000000000012");
+    different_owner.tier = "sandbox".into();
+    different_owner.owner = Some("portal|bob".into());
+    let mut suspended = issuer("00000000-0000-4000-8000-000000000013");
+    suspended.state = HostedIssuerState::Disabled;
+    let mut expired = issuer("00000000-0000-4000-8000-000000000014");
+    expired.expires_at = Some(now - time::Duration::seconds(1));
+    for value in [active.clone(), different_owner, suspended, expired] {
+        store.create_issuer(value).await.unwrap();
+    }
+
+    let active_filter = HostedIssuerFilter {
+        tier: Some("sandbox".into()),
+        state: Some(HostedIssuerReadState::Active),
+        owner: Some("portal|alice".into()),
+    };
+    let active_rows = store
+        .list_issuers_after(None, 10, &active_filter, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        active_rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        [active.id.as_str()]
+    );
+
+    for (state, expected) in [
+        (
+            HostedIssuerReadState::Suspended,
+            "00000000-0000-4000-8000-000000000013",
+        ),
+        (
+            HostedIssuerReadState::Expired,
+            "00000000-0000-4000-8000-000000000014",
+        ),
+    ] {
+        let rows = store
+            .list_issuers_after(
+                None,
+                10,
+                &HostedIssuerFilter {
+                    state: Some(state),
+                    ..HostedIssuerFilter::default()
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            [expected]
+        );
+    }
 }
 
 #[cfg(feature = "sqlite")]

@@ -14,6 +14,7 @@ NEWMAN_TIMEOUT_REQUEST="${NEWMAN_TIMEOUT_REQUEST:-10000}"
 NEWMAN_API_READY_TIMEOUT="${NEWMAN_API_READY_TIMEOUT:-180}"
 NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
 MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
+ADMIN_AUDIENCE="${ADMIN_AUDIENCE:-status-list-server-admin}"
 POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
@@ -95,11 +96,11 @@ generate_postman_artifacts() {
   local collection_out="$1"
   local environment_out="$2"
 
-  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" <<'NODE'
+  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" "$ADMIN_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 
-const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, registryFile] = process.argv.slice(2);
+const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, adminAudience, registryFile] = process.argv.slice(2);
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
 
@@ -113,31 +114,33 @@ const now = Math.floor(Date.now() / 1000);
 const issuerId = `newman-issuer-${Date.now()}`;
 const listId = crypto.randomUUID();
 
-const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-  namedCurve: 'P-256',
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-});
-
 function base64url(input) {
-  return Buffer.from(input)
-    .toString('base64')
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
+  return Buffer.from(input).toString('base64url');
 }
 
-const header = { alg: 'ES256', typ: 'statuslist-management+jwt', kid: issuerId };
-const payload = { iss: issuerId, aud: audience, iat: now, exp: now + 300 };
-const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
-const signature = crypto.sign('sha256', Buffer.from(signingInput), {
-  key: privateKey,
-  dsaEncoding: 'ieee-p1363'
-});
-const token = `${signingInput}.${base64url(signature)}`;
-const publicKeyJwk = crypto.createPublicKey(publicKey).export({ format: 'jwk' });
-publicKeyJwk.kid = header.kid;
-publicKeyJwk.alg = header.alg;
+function identity(id, typ, audience) {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+    namedCurve: 'P-256',
+  });
+  const header = { alg: 'ES256', typ, kid: id };
+  const payload = { iss: id, aud: audience, iat: now, exp: now + 300 };
+  const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
+  const signature = crypto.sign('sha256', Buffer.from(signingInput), {
+    key: privateKey,
+    dsaEncoding: 'ieee-p1363'
+  });
+  const jwk = publicKey.export({ format: 'jwk' });
+  jwk.kid = id;
+  jwk.alg = header.alg;
+  return {
+    token: `${signingInput}.${base64url(signature)}`,
+    key: { kid: id, alg: header.alg, jwk },
+  };
+}
+
+const issuer = identity(issuerId, 'statuslist-management+jwt', audience);
+const adminId = `newman-admin-${crypto.randomUUID()}`;
+const admin = identity(adminId, 'statuslist-admin+jwt', adminAudience);
 
 const registryContent = JSON.stringify({
   version: 1,
@@ -146,9 +149,9 @@ const registryContent = JSON.stringify({
     aggregation_id: listId,
     display_name: 'Newman test issuer',
     tier: 'standard',
-    keys: [{ kid: issuerId, alg: header.alg, jwk: publicKeyJwk }],
+    keys: [issuer.key],
   }],
-  admins: [],
+  admins: [{ id: adminId, scopes: ['issuers:read'], keys: [admin.key] }],
 }, null, 2);
 const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
 fs.writeFileSync(temporaryRegistry, registryContent);
@@ -167,7 +170,8 @@ const values = new Map([
   ['adminUrl', adminUrl],
   ['list_id', listId],
   ['issuer_id', issuerId],
-  ['token', token],
+  ['token', issuer.token],
+  ['adminToken', admin.token],
 ]);
 
 for (const variable of collection.variable || []) {
@@ -182,7 +186,7 @@ for (const variable of environment.values || []) {
 }
 
 environment.name = `${environment.name || 'status-list-server'} - Newman`;
-fs.writeFileSync(collectionOut, JSON.stringify(collection, null, 2));
+fs.writeFileSync(collectionOut, JSON.stringify(collection, null, 2), { mode: 0o600 });
 fs.writeFileSync(environmentOut, JSON.stringify(environment, null, 2), { mode: 0o600 });
 NODE
 }
@@ -236,6 +240,20 @@ until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $t
   sleep 1
 done
 
+admin_token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="adminToken").value)' "$environment_artifact")"
+if [[ -n "$ADMIN_URL" ]]; then
+  admin_probe_url="${ADMIN_URL%/}"
+else
+  admin_probe_url="$(_sibling_url "$API_ENDPOINT" 8002)"
+fi
+deadline=$((SECONDS + NEWMAN_API_READY_TIMEOUT))
+until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $admin_token" "$admin_probe_url/admin/v1/issuers?limit=1" 2>/dev/null || true)" == "200" ]]; do
+  if (( SECONDS >= deadline )); then
+    echo "Timed out waiting for generated admin key to authenticate; check APP_ADMIN_AUTH__AUDIENCES matches ADMIN_AUDIENCE" >&2
+    exit 14
+  fi
+  sleep 1
+done
 
 if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
   "$NEWMAN_COMMAND" run "$collection_artifact" \
