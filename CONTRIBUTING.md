@@ -64,6 +64,49 @@ PostgreSQL, MySQL, and Redis integration tests need a running Docker daemon; SQL
 The [feature profile matrix](README.md#development-and-quality-checks) lists all profiles and their features. The `build`, `test`, and `compose` commands default to `postgres`, so select `minimal` explicitly when you want the in-memory workflow.
 Provider-specific setup is described in the [database](docs/database-backends.md), [secrets](docs/secrets-backends.md), and [DNS](docs/dns-providers.md) guides.
 
+## Release and versioning
+
+`release-plz` is the single source of release versions and changelog entries. It
+uses the Conventional Commit history and the configuration in `release-plz.toml`
+and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
+Release-plz uses one release-branch prefix across target branches, so only one
+branch may have an open release-plz PR at a time. The workflow refuses to run
+when another target branch already has one; close that PR before dispatching
+for `develop` or a `hotfix/*` branch. A later dispatch recreates it if needed.
+
+The normal promotion path is:
+
+1. Before preparing a release, ensure the latest final release from `main` has
+   been back-merged into `develop`. The workflow refuses to calculate a version
+   when the latest final tag is not in the selected branch's history.
+2. Merge changes into `develop`.
+3. Manually dispatch **Release-plz PR** with `develop` selected. The resulting
+   release PR prepares the next version and changelog; it does not publish a
+   release.
+4. Review and merge the release PR into `develop`.
+5. Merge `develop` into `stage`. The RC automation creates
+   `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
+   Release-plz ignores RC tags because its `git_only` final-tag match is
+   `^v(\d+\.\d+\.\d+)$`.
+6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
+   GitHub Release when that version is not tagged. If `v<version>` already
+   exists, release-plz makes no duplicate release.
+
+RC and final releases therefore use the same semantic version and changelog.
+The final `v<version>` tag is created only from `main`.
+
+For a hotfix, branch `hotfix/*` from the released `main` state, then manually
+dispatch **Release-plz PR** with that branch selected. Review and merge the
+resulting patch-version and changelog PR into the hotfix branch before
+validation and the `hotfix/*` to `main` promotion.
+
+After the hotfix release, merge `main` back into `develop` with a merge commit
+before the next `develop` to `stage` promotion. If `develop` already contains a
+newer prepared version, resolve `Cargo.toml` and `CHANGELOG.md` by keeping the
+development version and adding the hotfix changelog section. The merge commit
+keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
+run to calculate from the latest release.
+
 ## Coding style and architecture
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.
