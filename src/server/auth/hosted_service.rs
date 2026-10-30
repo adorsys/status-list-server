@@ -400,9 +400,8 @@ mod tests {
             .await
             .unwrap();
 
-        // The kid is server-assigned (third id), not caller-chosen, and the JWK
-        // embeds the same kid so storage's kid/embedding invariant holds.
-        assert_eq!(key.kid, uuid::Uuid::from_u64_pair(0, 3).to_string());
+        // The kid is the RFC 7638 thumbprint of the server-validated JWK.
+        assert_eq!(key.kid, "tlBOuPIle0dk1Dbs1lKHGJS5yMXswT8QXuVO4RWwxgg");
         assert_eq!(key.jwk.key_id(), key.kid);
         assert_eq!(key.created_at, OffsetDateTime::UNIX_EPOCH);
         assert_eq!(key.issuer_id, issuer.id);
