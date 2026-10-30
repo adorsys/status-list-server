@@ -23,6 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::domain::models::credential::PublicJwk;
 use crate::domain::models::credential::{Issuer, MANAGEMENT_SIGNING_ALGORITHMS};
 use crate::domain::models::credential::{KeyResolveError, Principal};
+use crate::domain::models::tier::IssuerTier;
 use crate::server::{AppState, error::ApiError};
 
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
@@ -83,6 +84,7 @@ struct TestClaims {
 pub struct AuthenticatedIssuer {
     issuer: Issuer,
     aggregation_id: Option<crate::domain::models::credential::AggregationId>,
+    tier: IssuerTier,
 }
 
 impl AuthenticatedIssuer {
@@ -92,19 +94,33 @@ impl AuthenticatedIssuer {
         Self {
             issuer,
             aggregation_id: None,
+            tier: IssuerTier::Standard,
         }
     }
 
-    /// Build a principal together with the immutable registry data resolved
-    /// while authenticating the request.
-    pub(crate) fn with_aggregation_id(
+    #[cfg(test)]
+    pub(crate) fn with_tier(mut self, tier: IssuerTier) -> Self {
+        self.tier = tier;
+        self
+    }
+
+    /// Build a principal together with the immutable data its trust source
+    /// resolved while authenticating the request.
+    pub(crate) fn resolved(
         issuer: Issuer,
         aggregation_id: crate::domain::models::credential::AggregationId,
+        tier: IssuerTier,
     ) -> Self {
         Self {
             issuer,
             aggregation_id: Some(aggregation_id),
+            tier,
         }
+    }
+
+    /// The limits tier the trust source assigned to this issuer.
+    pub fn tier(&self) -> IssuerTier {
+        self.tier
     }
 
     pub(crate) fn aggregation_id(
@@ -251,8 +267,12 @@ pub async fn auth(
         }
         result => result.map_err(|reason| invalid_auth(Some(&kid), None, reason))?,
     };
-    let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
-        Principal::Issuer { id, aggregation_id } => (id.as_str(), *aggregation_id),
+    let (registered_issuer, registered_aggregation_id, tier) = match &resolved.principal {
+        Principal::Issuer {
+            id,
+            aggregation_id,
+            tier,
+        } => (id.as_str(), *aggregation_id, *tier),
         Principal::Admin { id } => {
             return Err(invalid_auth(
                 Some(&kid),
@@ -314,9 +334,10 @@ pub async fn auth(
     let authenticated_issuer = Issuer(registered_issuer.to_owned());
     request
         .extensions_mut()
-        .insert(AuthenticatedIssuer::with_aggregation_id(
+        .insert(AuthenticatedIssuer::resolved(
             authenticated_issuer,
             registered_aggregation_id,
+            tier,
         ));
     let metric_issuer = bounded_identifier(Some(registered_issuer));
     let metric_kid = bounded_identifier(Some(&kid));
@@ -351,7 +372,7 @@ fn current_unix_timestamp() -> Result<u64, AuthenticationError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_utils::{metrics_after, test_app_state};
     use crate::utils::file_watcher::FileWatcher;
@@ -427,11 +448,11 @@ mod tests {
             .with_state(app_state)
     }
 
-    fn test_ec_private_pem() -> String {
+    pub(crate) fn test_ec_private_pem() -> String {
         "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgsJyilHyjhzXDVU2A\n5ud6kfXPktY7wx5d8CQFe1nMzK2hRANCAAQ17IW//Yvrs4SmU1smlHTYgWKzj+UV\nb0diaF8Xk6vqb3gB9qnvD4NxkNvLsQPPqjQKncEP831drigLydrC6WPT\n-----END PRIVATE KEY-----".to_string()
     }
 
-    fn test_public_jwk() -> crate::domain::models::credential::PublicJwk {
+    pub(crate) fn test_public_jwk() -> crate::domain::models::credential::PublicJwk {
         crate::domain::models::credential::PublicJwk::try_new(
             r#"{
                 "kty": "EC",
@@ -447,11 +468,11 @@ mod tests {
         .unwrap()
     }
 
-    fn rotation_private_pem() -> String {
+    pub(crate) fn rotation_private_pem() -> String {
         "-----BEGIN PRIVATE KEY-----\nMIIBeQIBADCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0BAQIhAP////8AAAAB\nAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAABAAAAAAAAAAAAAAAA\n///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxTsPY7zjw+J9JgSwMV\nAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg\n9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9QIhAP////8A\nAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBBG0wawIBAQQgyO8dO/IXvyo2\nloV5QPB42Gv31v5U5pik40FfQ12VVzWhRANCAASozvoFuoPcmZaeJPgC5JgzkrDE\nLlYA1w9cGkJRB8B/UXP3TuiR9gairPTOlLAzTEO0bGDIMKjjeU4tfYCm/Jy5\n-----END PRIVATE KEY-----".to_string()
     }
 
-    fn rotation_public_jwk() -> PublicJwk {
+    pub(crate) fn rotation_public_jwk() -> PublicJwk {
         PublicJwk::try_new(
             br#"{
                 "kty":"EC", "crv":"P-256", "kid":"rotation-key", "alg":"ES256",

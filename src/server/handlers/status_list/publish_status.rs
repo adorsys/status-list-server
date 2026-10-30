@@ -138,7 +138,7 @@ async fn publish_status_with_options(
     // exactly what `record.sub` holds afterwards and the response echoes it.
     let uri = build_status_list_uri(&appstate.public_base_url, &list_id);
 
-    let policy = appstate.status_list_policy();
+    let policy = appstate.status_list_policy(principal.tier());
     let issuer: crate::domain::models::credential::Issuer = principal.clone().into();
     let record = match appstate
         .service
@@ -201,6 +201,7 @@ pub async fn publish_status_route(
 mod tests {
     use super::*;
     use crate::domain::models::credential::Issuer;
+    use crate::domain::models::tier::IssuerTier;
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
     };
@@ -758,7 +759,7 @@ mod tests {
                     index: 8,
                     status: crate::domain::models::status_list::Status::Valid,
                 }],
-                &app_state.status_list_policy(),
+                &app_state.status_list_policy(IssuerTier::Standard),
             )
             .await
             .unwrap_err();
@@ -799,7 +800,9 @@ mod tests {
     async fn publish_route_rejects_size_above_configured_index_limit() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let mut app_state = test_app_state(None).await;
-        app_state.max_status_index = 7;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 7;
         let router = Router::new()
             .route(
                 "/status-lists/{list_id}/statuses/",
@@ -829,7 +832,7 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        let policy = app_state.status_list_policy();
+        let policy = app_state.status_list_policy(IssuerTier::Standard);
         app_state
             .service
             .publish_status_list(
@@ -855,7 +858,7 @@ mod tests {
                     index: 0,
                     status: crate::domain::models::status_list::Status::Invalid,
                 }],
-                &app_state.status_list_policy(),
+                &app_state.status_list_policy(IssuerTier::Standard),
             )
             .await
             .unwrap_err();
@@ -869,7 +872,7 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        let policy = app_state.status_list_policy();
+        let policy = app_state.status_list_policy(IssuerTier::Standard);
         app_state
             .service
             .publish_status_list(
@@ -892,7 +895,7 @@ mod tests {
                 &Issuer("issuer".to_string()),
                 &token_id,
                 1,
-                &app_state.status_list_policy(),
+                &app_state.status_list_policy(IssuerTier::Standard),
             )
             .await
             .unwrap();
@@ -906,7 +909,7 @@ mod tests {
                     index: allocated[0],
                     status: crate::domain::models::status_list::Status::Invalid,
                 }],
-                &app_state.status_list_policy(),
+                &app_state.status_list_policy(IssuerTier::Standard),
             )
             .await
             .unwrap();
@@ -1224,7 +1227,9 @@ mod tests {
     async fn test_publish_status_rejects_too_many_statuses() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let mut app_state = test_app_state(None).await;
-        app_state.max_statuses_per_request = 1;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_statuses_per_request = 1;
 
         let status_entries = vec![
             RequestStatusEntry {
@@ -1258,7 +1263,9 @@ mod tests {
     async fn test_publish_status_rejects_index_too_large() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let mut app_state = test_app_state(None).await;
-        app_state.max_status_index = 10;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 10;
 
         let status_entries = vec![RequestStatusEntry {
             index: 999_999,
@@ -1358,7 +1365,7 @@ mod tests {
                 "without snapshots",
             ),
         ] {
-            app_state.max_lists_per_issuer = 2;
+            app_state.tier_limits_mut(IssuerTier::Standard).max_lists = 2;
             let publish = |issuer: &'static str| {
                 publish_status(
                     State(app_state.clone()),
@@ -1391,6 +1398,88 @@ mod tests {
                 publish("issuer-with-room").await.is_ok(),
                 "another issuer's quota is independent ({path})"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_quota_is_enforced_per_tier() {
+        assert_list_quota_is_enforced_per_tier(test_app_state(None).await).await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_list_quota_is_enforced_per_tier_on_sqlite() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        crate::outbound::sql::list_quota::enable(&db, 1_000)
+            .await
+            .unwrap();
+        let app_state = test_app_state(Some(db)).await;
+        for issuer in ["sandbox-issuer", "standard-issuer"] {
+            crate::test_utils::register_issuer(&app_state.service, issuer).await;
+        }
+        assert_list_quota_is_enforced_per_tier(app_state).await;
+    }
+
+    async fn assert_list_quota_is_enforced_per_tier(mut app_state: AppState) {
+        app_state.tier_limits_mut(IssuerTier::Sandbox).max_lists = 2;
+        let publish = |issuer: &'static str, tier: IssuerTier| {
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer(issuer).with_tier(tier),
+                Path(uuid::Uuid::new_v4().to_string()),
+                Json(StatusesRequest { statuses: vec![] }),
+            )
+        };
+
+        for _ in 0..2 {
+            assert!(publish("sandbox-issuer", IssuerTier::Sandbox).await.is_ok());
+        }
+        let err = match publish("sandbox-issuer", IssuerTier::Sandbox).await {
+            Ok(_) => panic!("the sandbox publish past its tier quota must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "list_quota_exceeded");
+
+        for _ in 0..3 {
+            assert!(
+                publish("standard-issuer", IssuerTier::Standard)
+                    .await
+                    .is_ok(),
+                "the standard tier keeps its own, larger quota"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_bounds_are_enforced_per_tier() {
+        let mut app_state = test_app_state(None).await;
+        app_state
+            .tier_limits_mut(IssuerTier::Sandbox)
+            .max_statuses_per_request = 1;
+        app_state
+            .tier_limits_mut(IssuerTier::Sandbox)
+            .max_status_index = 10;
+        let publish = |tier: IssuerTier, statuses: Vec<RequestStatusEntry>| {
+            publish_status(
+                State(app_state.clone()),
+                authenticated_issuer(format!("{tier}-issuer")).with_tier(tier),
+                Path(uuid::Uuid::new_v4().to_string()),
+                Json(StatusesRequest { statuses }),
+            )
+        };
+        let entry = |index| RequestStatusEntry {
+            index,
+            status: RequestStatus::VALID,
+        };
+
+        for statuses in [vec![entry(0), entry(1)], vec![entry(11)]] {
+            let err = match publish(IssuerTier::Sandbox, statuses.clone()).await {
+                Ok(_) => panic!("the sandbox tier's request bounds must apply"),
+                Err(e) => e,
+            };
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert!(publish(IssuerTier::Standard, statuses).await.is_ok());
         }
     }
 }

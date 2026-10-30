@@ -1,6 +1,10 @@
 //! Outbound secondary ports defining contracts.
 
-use std::{collections::HashSet, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 
@@ -148,6 +152,10 @@ pub trait StatusListRepo: Send + Sync + 'static {
 
     /// Issuer identifiers that currently own at least one status list.
     async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
+
+    /// Number of status lists each issuer holds against its list quota.
+    /// Issuers without a list are absent.
+    async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
 
     /// Reserve `count` unused indices for `list_id`, returning the newly
     /// allocated indices in ascending order.

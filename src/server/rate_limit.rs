@@ -1,142 +1,395 @@
-use std::net::{IpAddr, SocketAddr};
+//! Rate limiting on the management listener.
+//!
+//! [`AuthFailureGate`] wraps `auth`, keyed on the client address, and counts
+//! rejected authentications only. [`IssuerRateLimiter`] runs after `auth`,
+//! keyed on the verified issuer, so a forged `iss` cannot reach a bucket.
+//! State is per replica.
+//!
+//! The client address is the peer, unless the peer is a trusted proxy: then it
+//! is the rightmost `X-Forwarded-For` entry that is not a trusted proxy, which
+//! a client cannot choose.
 
-use axum::http::{HeaderMap, Request, header};
-use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
+use std::{
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-/// Key extractor that reads the `iss` claim from a Bearer JWT without
-/// verification.
-///
-/// **Deprecated**: No longer used in production. Rate limiting on write
-/// endpoints now uses `SmartIpKeyExtractor` (IP-based via trusted proxy
-/// headers or peer IP), so JWT claim forgery no longer changes the write
-/// rate-limit key. Deployments behind ingress must configure trusted proxy
-/// headers via ingress-nginx ConfigMap settings (e.g., `use-forwarded-headers`,
-/// `set-real-ip-from`) since `configuration-snippet` annotations are disabled
-/// by default in production (allow-snippet-annotations: false). The type
-/// and its tests are retained for unit-test coverage of the extraction logic.
-///
-/// Falls back to the peer IP when the token is absent or malformed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IssuerKeyExtractor;
+use axum::{
+    extract::{ConnectInfo, Request, State},
+    http::HeaderMap,
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use governor::{
+    DefaultKeyedRateLimiter, Quota, RateLimiter,
+    clock::{Clock, DefaultClock},
+};
+use ipnet::IpNet;
+use tower_governor::GovernorError;
 
-impl KeyExtractor for IssuerKeyExtractor {
-    type Key = String;
+use crate::domain::models::credential::Issuer;
+use crate::domain::models::tier::{IssuerTier, TierLimits, Tiers};
+use crate::server::{
+    AppState,
+    auth::{AuthenticatedIssuer, errors::AuthenticationRejected},
+    error::ApiError,
+};
 
-    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        if let Some(issuer) = extract_issuer_from_jwt(req.headers()) {
-            return Ok(issuer);
+/// How often idle buckets are dropped. Gate keys come from client addresses
+/// and issuer keys include hosted issuers, so neither key set is bounded.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Drops idle buckets every [`PRUNE_INTERVAL`] until `limiter` is dropped.
+fn spawn_pruner<T: Send + Sync + 'static>(limiter: &Arc<T>, prune: fn(&T)) {
+    let limiter = Arc::downgrade(limiter);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            prune(&limiter);
         }
-        peer_ip(req)
-            .map(|ip| ip.to_string())
-            .ok_or(GovernorError::UnableToExtractKey)
+    });
+}
+
+/// Budget of rejected authentications per client address. A request that
+/// authenticates spends nothing and is never refused here, so a client sending
+/// bad tokens cannot lock out a verified issuer behind the same address. A
+/// rejection past the budget is answered with `429` instead of `401`.
+#[derive(Debug)]
+pub struct AuthFailureGate {
+    limiter: DefaultKeyedRateLimiter<IpAddr>,
+    clock: DefaultClock,
+    trusted_proxies: Vec<IpNet>,
+    /// Warn once, not per request.
+    warned_untrusted_forwarding: AtomicBool,
+}
+
+impl AuthFailureGate {
+    /// `None` when `burst` or `period` is zero.
+    pub(crate) fn new(burst: u32, period: Duration, trusted_proxies: Vec<IpNet>) -> Option<Self> {
+        let quota = Quota::with_period(period)?.allow_burst(NonZeroU32::new(burst)?);
+        Some(Self {
+            limiter: RateLimiter::keyed(quota),
+            clock: DefaultClock::default(),
+            trusted_proxies,
+            warned_untrusted_forwarding: AtomicBool::new(false),
+        })
+    }
+
+    fn is_trusted(&self, ip: IpAddr) -> bool {
+        self.trusted_proxies.iter().any(|net| net.contains(&ip))
+    }
+
+    fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        let peer = peer.to_canonical();
+        let forwarded = headers.get_all("x-forwarded-for");
+        if !self.is_trusted(peer) {
+            if forwarded.iter().next().is_some()
+                && !self
+                    .warned_untrusted_forwarding
+                    .swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    peer = %peer,
+                    "ignoring X-Forwarded-For from a peer outside rate_limit.trusted_proxies; \
+                     the management authentication gate keys on the peer address"
+                );
+            }
+            return peer;
+        }
+        let hops: Vec<&str> = forwarded
+            .iter()
+            .flat_map(|value| value.to_str().unwrap_or("").split(','))
+            .map(str::trim)
+            .collect();
+        let mut client = peer;
+        for hop in hops.iter().rev() {
+            // Nothing left of an unreadable hop is vouched for.
+            let Ok(ip) = hop.parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
+                break;
+            };
+            client = ip;
+            if !self.is_trusted(ip) {
+                break;
+            }
+        }
+        client
+    }
+
+    /// Spends one token of `ip`'s budget; `Err` carries the wait once spent.
+    fn record_failure(&self, ip: IpAddr) -> Result<(), Duration> {
+        self.limiter
+            .check_key(&ip)
+            .map_err(|not_until| not_until.wait_time_from(self.clock.now()))
+    }
+
+    pub fn spawn_pruner(gate: &Arc<Self>) {
+        spawn_pruner(gate, |gate| {
+            gate.limiter.retain_recent();
+            gate.limiter.shrink_to_fit();
+        });
     }
 }
 
-fn extract_issuer_from_jwt(headers: &HeaderMap) -> Option<String> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))?;
-
-    let mut parts = token.split('.');
-    parts.next()?;
-    let payload = parts.next()?;
-    let decoded = base64url::decode(payload).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    value.get("iss")?.as_str().map(|s| s.to_string())
+/// Must wrap `auth`, which marks its rejections with [`AuthenticationRejected`].
+pub async fn auth_failure_gate(
+    State(gate): State<Arc<AuthFailureGate>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(peer) = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+    else {
+        return governor_error_response(GovernorError::UnableToExtractKey);
+    };
+    let ip = gate.client_ip(peer, request.headers());
+    let response = next.run(request).await;
+    if response
+        .extensions()
+        .get::<AuthenticationRejected>()
+        .is_some()
+        && let Err(wait) = gate.record_failure(ip)
+    {
+        return ApiError::too_many_requests(
+            wait,
+            "Too many failed authentications from this address",
+        )
+        .into_response();
+    }
+    response
 }
 
-fn peer_ip<T>(req: &Request<T>) -> Option<IpAddr> {
-    req.extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|addr| addr.ip())
+/// One bucket per issuer and tier, pruned once idle.
+#[derive(Debug)]
+pub struct IssuerRateLimiter {
+    standard: DefaultKeyedRateLimiter<Issuer>,
+    sandbox: DefaultKeyedRateLimiter<Issuer>,
+    clock: DefaultClock,
+}
+
+impl IssuerRateLimiter {
+    pub fn new(tiers: &Tiers) -> Self {
+        Self {
+            standard: RateLimiter::keyed(request_quota(&tiers.standard)),
+            sandbox: RateLimiter::keyed(request_quota(&tiers.sandbox)),
+            clock: DefaultClock::default(),
+        }
+    }
+
+    fn limiter(&self, tier: IssuerTier) -> &DefaultKeyedRateLimiter<Issuer> {
+        match tier {
+            IssuerTier::Standard => &self.standard,
+            IssuerTier::Sandbox => &self.sandbox,
+        }
+    }
+
+    pub fn check(&self, issuer: &Issuer, tier: IssuerTier) -> Result<(), Duration> {
+        self.limiter(tier)
+            .check_key(issuer)
+            .map_err(|not_until| not_until.wait_time_from(self.clock.now()))
+    }
+
+    pub fn spawn_pruner(limiter: &Arc<Self>) {
+        spawn_pruner(limiter, |limiter| {
+            for tier in [&limiter.standard, &limiter.sandbox] {
+                tier.retain_recent();
+                tier.shrink_to_fit();
+            }
+        });
+    }
+}
+
+fn request_quota(limits: &TierLimits) -> Quota {
+    Quota::with_period(limits.write_period)
+        .expect("tier write period is validated as non-zero")
+        .allow_burst(limits.write_burst_size)
+}
+
+/// Must run inside `auth`, so an unauthenticated request never reaches a bucket.
+pub async fn issuer_rate_limit(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(principal) = request.extensions().get::<AuthenticatedIssuer>() else {
+        return ApiError::internal("issuer rate limit ran without an authenticated issuer")
+            .into_response();
+    };
+    if let Err(wait) = state
+        .issuer_rate_limiter
+        .check(principal.issuer(), principal.tier())
+    {
+        crate::utils::metrics::record_issuer_rate_limited(principal.as_ref(), principal.tier());
+        return ApiError::too_many_requests(wait, "The issuer's request budget is spent")
+            .into_response();
+    }
+    next.run(request).await
+}
+
+pub fn governor_error_response(error: GovernorError) -> Response {
+    match error {
+        // `tower_governor` truncates the wait; round up so `Retry-After` suffices.
+        GovernorError::TooManyRequests { wait_time, .. } => ApiError::too_many_requests(
+            Duration::from_secs(wait_time.saturating_add(1)),
+            "Too many requests from this address",
+        )
+        .into_response(),
+        GovernorError::UnableToExtractKey => {
+            ApiError::internal("rate limiter could not determine the client address")
+                .into_response()
+        }
+        GovernorError::Other { code, msg, .. } => ApiError::internal(format!(
+            "rate limiter failed with {code}: {}",
+            msg.as_deref().unwrap_or("no detail")
+        ))
+        .into_response(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
-    use axum::body::Body;
-    use axum::extract::ConnectInfo;
-    use axum::http::Request as HttpRequest;
-    use std::net::SocketAddr;
 
-    fn make_request(headers: HeaderMap, ext: Option<ConnectInfo<SocketAddr>>) -> HttpRequest<Body> {
-        let mut builder = HttpRequest::builder();
-        for (name, value) in headers.iter() {
-            builder = builder.header(name, value);
-        }
-        if let Some(ci) = ext {
-            builder = builder.extension(ci);
-        }
-        builder.body(Body::empty()).unwrap()
+    fn gate(trusted: &[&str]) -> AuthFailureGate {
+        AuthFailureGate::new(
+            1,
+            Duration::from_secs(60),
+            trusted.iter().map(|net| net.parse().unwrap()).collect(),
+        )
+        .unwrap()
     }
 
-    fn dummy_jwt(iss: &str) -> String {
-        let header = base64url::encode(br#"{"alg":"ES256"}"#);
-        let payload_json = format!(r#"{{"iss":"{iss}","exp":9999999999}}"#);
-        let payload = base64url::encode(payload_json.as_bytes());
-        format!("{header}.{payload}.signature")
-    }
-
-    #[test]
-    fn test_extract_issuer_from_valid_jwt() {
+    fn client(gate: &AuthFailureGate, peer: &str, forwarded: &[&str]) -> IpAddr {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", dummy_jwt("issuer-123"))
-                .parse()
-                .unwrap(),
+        for value in forwarded {
+            headers.append("x-forwarded-for", value.parse().unwrap());
+        }
+        gate.client_ip(peer.parse().unwrap(), &headers)
+    }
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn forwarding_headers_from_an_untrusted_peer_are_ignored() {
+        let gate = gate(&[]);
+        assert_eq!(
+            client(&gate, "198.51.100.4", &["203.0.113.5"]),
+            ip("198.51.100.4")
         );
-        let req = make_request(headers, None);
-        let key = IssuerKeyExtractor.extract(&req).unwrap();
-        assert_eq!(key, "issuer-123");
-    }
-
-    #[test]
-    fn test_falls_back_to_peer_ip_when_no_auth_header() {
-        let headers = HeaderMap::new();
-        let addr: SocketAddr = "1.2.3.4:5678".parse().unwrap();
-        let req = make_request(headers, Some(ConnectInfo(addr)));
-        let key = IssuerKeyExtractor.extract(&req).unwrap();
-        assert_eq!(key, "1.2.3.4");
-    }
-
-    #[test]
-    fn test_falls_back_to_peer_ip_when_malformed_jwt() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer invalid-jwt".parse().unwrap());
-        let addr: SocketAddr = "10.0.0.1:1234".parse().unwrap();
-        let req = make_request(headers, Some(ConnectInfo(addr)));
-        let key = IssuerKeyExtractor.extract(&req).unwrap();
-        assert_eq!(key, "10.0.0.1");
+        headers.insert("x-real-ip", "203.0.113.5".parse().unwrap());
+        headers.insert("forwarded", "for=203.0.113.5".parse().unwrap());
+        assert_eq!(
+            gate.client_ip(ip("198.51.100.4"), &headers),
+            ip("198.51.100.4")
+        );
     }
 
     #[test]
-    fn test_returns_error_when_no_token_and_no_peer_ip() {
-        let headers = HeaderMap::new();
-        let req = make_request(headers, None);
-        let result = IssuerKeyExtractor.extract(&req);
-        assert!(result.is_err());
+    fn behind_trusted_proxies_the_rightmost_untrusted_hop_is_the_client() {
+        let gate = gate(&["10.0.0.0/8"]);
+        assert_eq!(
+            client(&gate, "10.0.0.2", &["203.0.113.5"]),
+            ip("203.0.113.5")
+        );
+        // A client-supplied entry left of the one the proxy appended is ignored.
+        assert_eq!(
+            client(&gate, "10.0.0.2", &["192.0.2.1, 203.0.113.5"]),
+            ip("203.0.113.5")
+        );
+        // Trusted hops are skipped, across repeated headers too.
+        assert_eq!(
+            client(&gate, "10.0.0.2", &["192.0.2.1, 203.0.113.5", "10.1.1.1"]),
+            ip("203.0.113.5")
+        );
+        assert_eq!(client(&gate, "10.0.0.2", &[]), ip("10.0.0.2"));
     }
 
     #[test]
-    fn test_different_issuers_produce_different_keys() {
-        let mut headers1 = HeaderMap::new();
-        headers1.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", dummy_jwt("issuer-a")).parse().unwrap(),
+    fn an_unreadable_hop_falls_back_to_the_nearest_trusted_address() {
+        let gate = gate(&["10.0.0.0/8"]);
+        assert_eq!(
+            client(&gate, "10.0.0.2", &["203.0.113.5, not-an-ip, 10.9.9.9"]),
+            ip("10.9.9.9")
         );
-        let req1 = make_request(headers1, None);
+        assert_eq!(client(&gate, "10.0.0.2", &["unknown"]), ip("10.0.0.2"));
+    }
 
-        let mut headers2 = HeaderMap::new();
-        headers2.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", dummy_jwt("issuer-b")).parse().unwrap(),
+    #[test]
+    fn an_all_trusted_chain_keys_on_its_first_hop() {
+        let gate = gate(&["10.0.0.0/8"]);
+        assert_eq!(
+            client(&gate, "10.0.0.2", &["10.3.0.1, 10.2.0.1"]),
+            ip("10.3.0.1")
         );
-        let req2 = make_request(headers2, None);
+    }
 
-        let key1 = IssuerKeyExtractor.extract(&req1).unwrap();
-        let key2 = IssuerKeyExtractor.extract(&req2).unwrap();
-        assert_ne!(key1, key2);
+    #[test]
+    fn ipv4_mapped_peers_are_matched_and_keyed_as_ipv4() {
+        let gate = gate(&["10.0.0.0/8"]);
+        assert_eq!(
+            client(&gate, "::ffff:10.0.0.2", &["203.0.113.5"]),
+            ip("203.0.113.5")
+        );
+        assert_eq!(
+            client(&gate, "::ffff:198.51.100.4", &[]),
+            ip("198.51.100.4")
+        );
+    }
+
+    fn tiers(standard_burst: u32, sandbox_burst: u32) -> Tiers {
+        let limits = |burst| TierLimits {
+            max_lists: 10,
+            max_status_index: 100,
+            max_statuses_per_request: 10,
+            max_keys: 2,
+            write_burst_size: NonZeroU32::new(burst).unwrap(),
+            write_period: Duration::from_secs(60),
+        };
+        Tiers {
+            standard: limits(standard_burst),
+            sandbox: limits(sandbox_burst),
+        }
+    }
+
+    #[test]
+    fn issuers_have_independent_buckets() {
+        let limiter = IssuerRateLimiter::new(&tiers(1, 1));
+        let a = Issuer("issuer-a".into());
+        let b = Issuer("issuer-b".into());
+
+        assert!(limiter.check(&a, IssuerTier::Standard).is_ok());
+        let wait = limiter.check(&a, IssuerTier::Standard).unwrap_err();
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(60));
+        assert!(limiter.check(&b, IssuerTier::Standard).is_ok());
+    }
+
+    #[test]
+    fn each_tier_uses_its_own_burst() {
+        let limiter = IssuerRateLimiter::new(&tiers(3, 1));
+        let standard = Issuer("standard".into());
+        let sandbox = Issuer("sandbox".into());
+
+        for _ in 0..3 {
+            assert!(limiter.check(&standard, IssuerTier::Standard).is_ok());
+        }
+        assert!(limiter.check(&standard, IssuerTier::Standard).is_err());
+        assert!(limiter.check(&sandbox, IssuerTier::Sandbox).is_ok());
+        assert!(limiter.check(&sandbox, IssuerTier::Sandbox).is_err());
     }
 }

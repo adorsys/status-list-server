@@ -100,7 +100,7 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production Helm renders fail without a registry volume; without one in development, the server warns and trusts no issuers. The release-tag workflow deploys with `statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers` and nothing creates that ConfigMap, so it must already exist in the target namespace before the first release; the deploy job fails fast with a clear message when it is missing, and without it the pods would sit in `ContainerCreating` for the whole `--wait` window and then roll back.
-- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
+- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material, or for an issuer holding more keys than its tier's `max_keys`.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
 ### Rotate or revoke issuer keys
@@ -131,6 +131,52 @@ For a zero-downtime rotation:
 To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
+
+### Issuer tiers
+
+Each registry issuer has a `tier`, `standard` (the default) or `sandbox`, which
+selects its rate limit, list quota and request bounds from
+`APP_TIERS__*` (see [architecture](architecture.md#issuer-tiers-app_tiers__)).
+A registry with any other tier value is rejected, and a failed reload keeps the
+previous registry. A registry is also rejected when an issuer holds more keys
+whose `not_after` has not passed than its tier's `max_keys`: a pod refuses to
+start with it, and a reload with it keeps the previous registry.
+`status-list-server issuer-registry` reports the same error before a
+deployment. Retire a key by setting its `not_after` before adding a new one
+beyond the limit.
+
+Moving an issuer to another tier takes effect on the next reload. Lists it
+already holds are kept even when they exceed the new quota, and statuses at
+indices those lists already hold stay updatable even above the new tier's
+`max_status_index`. The issuer starts with a full bucket of the new tier.
+
+Per-issuer usage is exported with `issuer` and `tier` labels:
+
+| Metric                      | Meaning                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `issuer_lists`              | Status lists counted against the issuer's quota                       |
+| `issuer_lists_limit`        | The tier's `max_lists`                                                |
+| `issuer_keys`               | Registry keys whose `not_after` has not passed                        |
+| `issuer_keys_limit`         | The tier's `max_keys`                                                 |
+| `issuer_rate_limited_total` | Management requests refused with `429` by the issuer's tier rate limit |
+
+The gauges list exactly the issuers of the current registry, under their
+current tier. Each pod reads them from the database at startup and every 60
+seconds, so every pod reports the cluster-wide value, at most a minute old:
+aggregate `issuer_lists` across pods with `max`, not `sum`. `issuer_lists` is
+the per-issuer counter the list quota is enforced against; while the quota
+awaits `list-quota enable`, pods of the previous release leave it short.
+`issuer_rate_limited_total` is per pod, so `sum` it. Rate limits are held per
+replica, so an issuer's cluster-wide budget is the tier budget times the
+replica count; set a global cap at the ingress or API gateway.
+
+The management authentication gate keys on the TCP peer address. Behind an
+ingress, set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress controller's
+addresses or CIDRs, so the gate keys on the client address the ingress appends
+to `X-Forwarded-For`; without it, every client behind the ingress shares one
+budget for rejected authentications. The gate never refuses a request that
+authenticates. Make sure the ingress appends the peer address it saw rather
+than passing a client's `X-Forwarded-For` through unchanged.
 
 ## Redis Status-List Cache
 

@@ -117,6 +117,19 @@ impl ApiError {
         .retry_after(1)
     }
 
+    /// 429 for an exhausted rate-limit bucket. `Retry-After` is the wait until
+    /// the next token, rounded up so a client that honours it is admitted.
+    /// The description tells the client which budget it spent.
+    pub fn too_many_requests(wait: std::time::Duration, description: impl Into<String>) -> Self {
+        let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            Some(description.into()),
+        )
+        .retry_after(secs.max(1))
+    }
+
     pub fn internal(source: impl std::fmt::Display) -> Self {
         tracing::error!(error = %source, "internal server error");
         Self::new(
@@ -616,6 +629,27 @@ mod tests {
                     .get(axum::http::header::RETRY_AFTER)
                     .is_none(),
                 "{error_code} must not advertise Retry-After"
+            );
+        }
+    }
+
+    #[test]
+    fn test_too_many_requests_rounds_retry_after_up() {
+        for (wait, expected) in [
+            (std::time::Duration::ZERO, "1"),
+            (std::time::Duration::from_millis(200), "1"),
+            (std::time::Duration::from_millis(1_200), "2"),
+            (std::time::Duration::from_secs(6), "6"),
+        ] {
+            let response = ApiError::too_many_requests(wait, "Too many requests").into_response();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .unwrap(),
+                expected,
+                "{wait:?}"
             );
         }
     }

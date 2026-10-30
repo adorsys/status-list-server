@@ -109,11 +109,12 @@ ignored by Git. Existing files are kept unless you pass `--force`.
 Then start the server with in-memory storage from the root of the repository;
 no `.env` file or database is needed.
 
-The server rate-limits credential registration and status list writes per
-client IP address. By default each allows 10 requests and then gets back one
-request per minute, which is less than the workflow scripts need when run back
-to back. The commands below raise the limit to 100 for this local server,
-enough for several full runs of all four workflow scripts.
+The server limits rejected authentications per client IP address: by default
+10, then one more per minute. Workflows 03 and 04 send three requests with
+missing or unregistered credentials on purpose, so only a few full runs fit
+back to back. The commands below raise the limit to 100 for this local server,
+enough for many runs. Verified requests are limited per issuer instead, by the
+issuer's tier, which the workflows stay well within.
 
 macOS or Linux (bash / zsh):
 
@@ -142,9 +143,9 @@ set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
 cargo run
 ```
 
-If a workflow still fails with HTTP `429`, restart the server. The limit
-refills slowly, so waiting a minute only allows one more request, and requests
-rejected for missing or invalid authentication count against it too.
+If a workflow still fails with HTTP `429` where it expects `401`, restart the
+server. The limit refills slowly, so waiting a minute only allows one more
+rejected request.
 
 The workflow scripts connect to `http://localhost:8000` by default. If
 `APP_SERVER__PORT` is set in the environment, or in a `.env` file at the root of

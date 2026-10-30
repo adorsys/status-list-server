@@ -8,6 +8,7 @@ pub mod health;
 pub mod rate_limit;
 
 use crate::domain::models::credential::{AggregationId, Issuer};
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::service::{Service, StatusListPolicy};
 use axum::{Json, extract::State};
 use std::collections::HashSet;
@@ -73,10 +74,11 @@ pub struct AppState {
     pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    pub max_status_index: i32,
-    pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
-    pub max_lists_per_issuer: u64,
+    /// Per-tier quotas and request bounds, resolved from `tiers.*`.
+    pub tiers: Arc<Tiers>,
+    /// Per-replica write budgets keyed on the authenticated issuer.
+    pub issuer_rate_limiter: Arc<rate_limit::IssuerRateLimiter>,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
     /// Last-known-good operator-managed issuer trust registry snapshot.
@@ -113,13 +115,26 @@ impl AppState {
         Some(uri.into())
     }
 
-    pub fn status_list_policy(&self) -> StatusListPolicy {
+    pub fn status_list_policy(&self, tier: IssuerTier) -> StatusListPolicy {
+        let limits = self.tiers.get(tier);
         StatusListPolicy {
             token_exp_secs: self.token_exp_secs,
-            max_status_index: self.max_status_index,
-            max_statuses_per_request: self.max_statuses_per_request,
+            max_status_index: limits.max_status_index,
+            max_statuses_per_request: limits.max_statuses_per_request,
             max_serialized_list_size: self.max_serialized_list_size,
-            max_lists_per_issuer: self.max_lists_per_issuer,
+            max_lists_per_issuer: limits.max_lists,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tier_limits_mut(
+        &mut self,
+        tier: IssuerTier,
+    ) -> &mut crate::domain::models::tier::TierLimits {
+        let tiers = Arc::make_mut(&mut self.tiers);
+        match tier {
+            IssuerTier::Standard => &mut tiers.standard,
+            IssuerTier::Sandbox => &mut tiers.sandbox,
         }
     }
 }

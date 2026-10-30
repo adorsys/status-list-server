@@ -7,6 +7,7 @@
 
 use crate::domain::models::credential::{AggregationId, Credential, Issuer, PublicJwk};
 use crate::domain::models::status_list::{StatusListError, StatusListRecord};
+use crate::domain::models::tier::Tiers;
 use crate::domain::ports::{
     CredentialRepo, StatusListCache, StatusListRepo, StatusListSnapshotRepo,
 };
@@ -20,12 +21,29 @@ use crate::outbound::sql::{
 use crate::server::AppState;
 use crate::server::auth::AuthenticatedIssuer;
 use crate::server::health::Readiness;
+use crate::server::rate_limit::IssuerRateLimiter;
 #[cfg(feature = "acme")]
 use crate::{cert_manager::storage::StorageError, utils::cert_manager::storage::Storage};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// The tier limits the default configuration resolves to. Built from fixed
+/// values, not by loading configuration, so `APP_*` variables in the
+/// developer's environment cannot change test outcomes.
+pub(crate) fn test_tiers() -> Tiers {
+    crate::config::TiersConfig::default()
+        .resolve(&crate::config::LimitsConfig {
+            max_body_size_bytes: 2_097_152,
+            max_status_index: 100_000,
+            max_statuses_per_request: 5_000,
+            max_serialized_list_size: 1_048_576,
+            max_lists_per_issuer: 1_000,
+            list_quota_transition: false,
+        })
+        .expect("default tiers resolve")
+}
 
 pub(crate) fn authenticated_issuer(issuer: impl Into<String>) -> AuthenticatedIssuer {
     AuthenticatedIssuer::new(Issuer(issuer.into()))
@@ -187,10 +205,9 @@ pub(crate) async fn test_app_state_with_cert_provider(
         aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
-        max_status_index: 100_000,
-        max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
-        max_lists_per_issuer: 1_000,
+        tiers: Arc::new(test_tiers()),
+        issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
@@ -238,10 +255,9 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
-        max_status_index: 100_000,
-        max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
-        max_lists_per_issuer: 1_000,
+        tiers: Arc::new(test_tiers()),
+        issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
@@ -279,10 +295,9 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
-        max_status_index: 100_000,
-        max_statuses_per_request: 5_000,
         max_serialized_list_size: 1_048_576,
-        max_lists_per_issuer: 1_000,
+        tiers: Arc::new(test_tiers()),
+        issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),
@@ -467,10 +482,9 @@ async fn build_test_app_state(
         aggregation_withheld_from: Default::default(),
         token_exp_secs: 900,
         token_ttl_secs: 300,
-        max_status_index: 100_000,
-        max_statuses_per_request: 5_000,
         max_serialized_list_size,
-        max_lists_per_issuer: 1_000,
+        tiers: Arc::new(test_tiers()),
+        issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
         issuer_registry: registry.clone(),

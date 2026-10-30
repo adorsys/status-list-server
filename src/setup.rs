@@ -55,7 +55,10 @@ use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
-    models::credential::Issuer,
+    models::{
+        credential::Issuer,
+        tier::{IssuerUsage, Tiers},
+    },
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
@@ -400,19 +403,23 @@ type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // Validate operator input before connecting to the database or running migrations.
+    let tiers = Arc::new(config.tier_limits()?);
     #[cfg_attr(
         not(any(feature = "memory", feature = "history")),
         allow(unused_variables)
     )]
-    let issuer_registry = Arc::new(match config.management_auth.issuers_file.as_deref() {
-        Some(path) if !path.is_empty() => {
-            crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+    let issuer_registry = Arc::new(
+        match config.management_auth.issuers_file.as_deref() {
+            Some(path) if !path.is_empty() => {
+                crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+            }
+            _ => {
+                tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
+                crate::server::auth::issuer_registry::RegistryHandle::empty()
+            }
         }
-        _ => {
-            tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
-            crate::server::auth::issuer_registry::RegistryHandle::empty()
-        }
-    });
+        .with_key_limits(tiers.clone()),
+    );
     // Hoisted DB handle captured from the backend branches below so the
     // readiness probe can reach the real adapter (the domain ports only expose
     // the higher-level repositories).
@@ -892,6 +899,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     );
     warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
         .await;
+    let issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(&tiers));
+    crate::server::rate_limit::IssuerRateLimiter::spawn_pruner(&issuer_rate_limiter);
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -899,10 +908,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         aggregation_withheld_from: Arc::new(aggregation_withheld_from),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
         issuer_key_resolver: build_issuer_key_resolver(
@@ -919,6 +927,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ),
         readiness,
     };
+    spawn_issuer_usage_refresh(issuer_registry.clone(), &state.service, tiers);
 
     if let Some(path) = config
         .management_auth
@@ -1144,6 +1153,56 @@ async fn validate_registry_aggregation_ids(
         }
     }
     Ok(())
+}
+
+/// How often each pod refreshes the issuer usage gauges. A reload, a list
+/// another pod creates and a key whose `not_after` passes all show within one
+/// interval.
+const ISSUER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Refreshes the usage gauges at once, then on every interval, until the
+/// service is dropped.
+fn spawn_issuer_usage_refresh(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    service: &Arc<Service>,
+    tiers: Arc<Tiers>,
+) {
+    let service = Arc::downgrade(service);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ISSUER_USAGE_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(service) = service.upgrade() else {
+                break;
+            };
+            refresh_issuer_usage(&service, &registry.snapshot(), &tiers).await;
+        }
+    });
+}
+
+/// Publishes every registered issuer's list and key usage against its tier.
+async fn refresh_issuer_usage(
+    service: &Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    tiers: &Tiers,
+) {
+    let counts = match service.status_list_repo().list_counts_by_issuer().await {
+        Ok(counts) => counts,
+        Err(error) => {
+            tracing::warn!(%error, "could not count status lists per issuer; usage metrics keep their previous values");
+            return;
+        }
+    };
+    let now = time::OffsetDateTime::now_utc();
+    crate::utils::metrics::set_issuer_usage(registry.issuers().iter().map(|issuer| {
+        let usage = IssuerUsage::new(
+            counts.get(&issuer.id).copied().unwrap_or(0),
+            issuer.active_key_count(now),
+            tiers.get(issuer.tier),
+        );
+        (issuer.id.clone(), issuer.tier, usage)
+    }));
 }
 
 async fn warn_missing_registry_issuers(

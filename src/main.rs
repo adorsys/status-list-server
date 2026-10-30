@@ -49,6 +49,8 @@ async fn main() -> Result<()> {
             })?;
         let registry =
             status_list_server::server::auth::issuer_registry::IssuerRegistry::from_file(path)?;
+        // The same tier key limits a pod enforces at startup and on reload.
+        registry.validate_key_limits(&config.tier_limits()?, time::OffsetDateTime::now_utc())?;
         println!(
             "issuer registry is valid: {} trusted keys",
             registry.key_count()

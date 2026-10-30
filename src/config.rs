@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{collections::HashMap, fmt, marker::PhantomData};
+use std::{collections::HashMap, fmt, marker::PhantomData, num::NonZeroU32, time::Duration};
 
 use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
@@ -9,6 +9,7 @@ use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 use url::Url;
 
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
+use crate::domain::models::tier::{TierLimits, Tiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -163,6 +164,8 @@ pub struct Config {
     pub management_auth: ManagementAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub tiers: TiersConfig,
     pub telemetry: TelemetryConfig,
     pub watcher: WatcherConfig,
 }
@@ -173,13 +176,45 @@ pub struct WatcherConfig {
     pub poll_interval_secs: u64,
 }
 
-/// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
+/// Per-client-IP rate limits. `strict_*` is the management authentication
+/// gate, which counts rejected authentications only; `permissive_*` covers
+/// public reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
     pub strict_period_secs: u64,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
+    /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
+    /// management authentication gate believes. Empty keys every request on
+    /// its peer address.
+    #[serde(default, deserialize_with = "deserialize_trimmed_list")]
+    pub trusted_proxies: Vec<String>,
+}
+
+impl RateLimitConfig {
+    /// `trusted_proxies`, parsed. Loading fails when any entry is malformed.
+    pub(crate) fn trusted_proxy_networks(&self) -> Result<Vec<ipnet::IpNet>, ConfigError> {
+        self.trusted_proxies
+            .iter()
+            .map(|value| {
+                value
+                    .parse::<ipnet::IpNet>()
+                    .or_else(|_| {
+                        // A bare address is a single host. An IPv4-mapped one
+                        // is stored as IPv4, as peers are compared.
+                        value
+                            .parse::<std::net::IpAddr>()
+                            .map(|ip| ipnet::IpNet::from(ip.to_canonical()))
+                    })
+                    .map_err(|_| {
+                        ConfigError::Message(format!(
+                            "rate_limit.trusted_proxies: `{value}` is not an IP address or CIDR network"
+                        ))
+                    })
+            })
+            .collect()
+    }
 }
 
 /// Hard bounds on incoming requests and persisted status lists.
@@ -216,6 +251,223 @@ impl LimitsConfig {
     }
 }
 
+/// Per-tier issuer limits (`tiers.standard.*`, `tiers.sandbox.*`). Unset
+/// values take the tier's default; see [`TiersConfig::resolve`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TiersConfig {
+    #[serde(default)]
+    pub standard: TierConfig,
+    #[serde(default)]
+    pub sandbox: TierConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TierConfig {
+    #[serde(default)]
+    pub max_lists: Option<u64>,
+    #[serde(default)]
+    pub max_status_index: Option<i32>,
+    #[serde(default)]
+    pub max_statuses_per_request: Option<usize>,
+    #[serde(default)]
+    pub max_keys: Option<usize>,
+    #[serde(default)]
+    pub write_burst_size: Option<u32>,
+    #[serde(default)]
+    pub write_period_secs: Option<u64>,
+}
+
+const STANDARD_MAX_KEYS: usize = 5;
+const STANDARD_WRITE_BURST_SIZE: u32 = 100;
+const STANDARD_WRITE_PERIOD_SECS: u64 = 1;
+const SANDBOX_MAX_LISTS: u64 = 10;
+const SANDBOX_MAX_STATUS_INDEX: i32 = 10_000;
+const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
+const SANDBOX_MAX_KEYS: usize = 2;
+const SANDBOX_WRITE_BURST_SIZE: u32 = 10;
+const SANDBOX_WRITE_PERIOD_SECS: u64 = 6;
+
+impl TiersConfig {
+    /// Fill defaults and check that every tier stays within the global
+    /// `limits.*` caps and that sandbox is never looser than standard.
+    ///
+    /// Standard defaults to the `limits.*` values. Unset sandbox values are
+    /// clamped to the resolved standard value so lowering a global cap never
+    /// makes a default invalid; explicitly set values are validated, never
+    /// clamped.
+    pub fn resolve(&self, limits: &LimitsConfig) -> Result<Tiers, ConfigError> {
+        let standard = RawTier {
+            max_lists: self
+                .standard
+                .max_lists
+                .unwrap_or(limits.max_lists_per_issuer),
+            max_status_index: self
+                .standard
+                .max_status_index
+                .unwrap_or(limits.max_status_index),
+            max_statuses_per_request: self
+                .standard
+                .max_statuses_per_request
+                .unwrap_or(limits.max_statuses_per_request),
+            max_keys: self.standard.max_keys.unwrap_or(STANDARD_MAX_KEYS),
+            write_burst_size: self
+                .standard
+                .write_burst_size
+                .unwrap_or(STANDARD_WRITE_BURST_SIZE),
+            write_period_secs: self
+                .standard
+                .write_period_secs
+                .unwrap_or(STANDARD_WRITE_PERIOD_SECS),
+        };
+        let sandbox = RawTier {
+            max_lists: self
+                .sandbox
+                .max_lists
+                .unwrap_or(SANDBOX_MAX_LISTS.min(standard.max_lists)),
+            max_status_index: self
+                .sandbox
+                .max_status_index
+                .unwrap_or(SANDBOX_MAX_STATUS_INDEX.min(standard.max_status_index)),
+            max_statuses_per_request: self
+                .sandbox
+                .max_statuses_per_request
+                .unwrap_or(SANDBOX_MAX_STATUSES_PER_REQUEST.min(standard.max_statuses_per_request)),
+            max_keys: self
+                .sandbox
+                .max_keys
+                .unwrap_or(SANDBOX_MAX_KEYS.min(standard.max_keys)),
+            write_burst_size: self
+                .sandbox
+                .write_burst_size
+                .unwrap_or(SANDBOX_WRITE_BURST_SIZE.min(standard.write_burst_size)),
+            write_period_secs: self
+                .sandbox
+                .write_period_secs
+                .unwrap_or(SANDBOX_WRITE_PERIOD_SECS.max(standard.write_period_secs)),
+        };
+
+        standard.validate_caps("standard", limits)?;
+        sandbox.validate_caps("sandbox", limits)?;
+        sandbox.validate_within(&standard)?;
+
+        Ok(Tiers {
+            standard: standard.into_limits(),
+            sandbox: sandbox.into_limits(),
+        })
+    }
+}
+
+struct RawTier {
+    max_lists: u64,
+    max_status_index: i32,
+    max_statuses_per_request: usize,
+    max_keys: usize,
+    write_burst_size: u32,
+    write_period_secs: u64,
+}
+
+impl RawTier {
+    fn validate_caps(&self, tier: &str, limits: &LimitsConfig) -> Result<(), ConfigError> {
+        let positive = [
+            ("max_lists", self.max_lists > 0),
+            ("max_status_index", self.max_status_index > 0),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request > 0,
+            ),
+            ("max_keys", self.max_keys > 0),
+            ("write_burst_size", self.write_burst_size > 0),
+            ("write_period_secs", self.write_period_secs > 0),
+        ];
+        if let Some((key, _)) = positive.iter().find(|(_, ok)| !ok) {
+            return Err(ConfigError::Message(format!(
+                "tiers.{tier}.{key} must be greater than 0"
+            )));
+        }
+        let caps = [
+            (
+                "max_lists",
+                self.max_lists,
+                "limits.max_lists_per_issuer",
+                limits.max_lists_per_issuer,
+            ),
+            (
+                "max_status_index",
+                self.max_status_index as u64,
+                "limits.max_status_index",
+                limits.max_status_index.max(0) as u64,
+            ),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request as u64,
+                "limits.max_statuses_per_request",
+                limits.max_statuses_per_request as u64,
+            ),
+        ];
+        for (key, value, cap_key, cap) in caps {
+            if value > cap {
+                return Err(ConfigError::Message(format!(
+                    "tiers.{tier}.{key} ({value}) must not exceed {cap_key} ({cap})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_within(&self, standard: &RawTier) -> Result<(), ConfigError> {
+        let not_above = [
+            ("max_lists", self.max_lists, standard.max_lists),
+            (
+                "max_status_index",
+                self.max_status_index as u64,
+                standard.max_status_index as u64,
+            ),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request as u64,
+                standard.max_statuses_per_request as u64,
+            ),
+            ("max_keys", self.max_keys as u64, standard.max_keys as u64),
+            (
+                "write_burst_size",
+                u64::from(self.write_burst_size),
+                u64::from(standard.write_burst_size),
+            ),
+        ];
+        for (key, sandbox, standard) in not_above {
+            if sandbox > standard {
+                return Err(ConfigError::Message(format!(
+                    "tiers.sandbox.{key} ({sandbox}) must not exceed tiers.standard.{key} \
+                     ({standard})"
+                )));
+            }
+        }
+        // A longer period replenishes more slowly, so sandbox must not be shorter.
+        if self.write_period_secs < standard.write_period_secs {
+            return Err(ConfigError::Message(format!(
+                "tiers.sandbox.write_period_secs ({}) must not be shorter than \
+                 tiers.standard.write_period_secs ({})",
+                self.write_period_secs, standard.write_period_secs
+            )));
+        }
+        Ok(())
+    }
+
+    fn into_limits(self) -> TierLimits {
+        TierLimits {
+            max_lists: self.max_lists,
+            max_status_index: self.max_status_index,
+            max_statuses_per_request: self.max_statuses_per_request,
+            max_keys: self.max_keys,
+            write_burst_size: NonZeroU32::new(self.write_burst_size)
+                .expect("validated as non-zero"),
+            write_period: Duration::from_secs(self.write_period_secs),
+        }
+    }
+}
+
 /// JWT validation policy for protected management endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagementAuthConfig {
@@ -226,7 +478,7 @@ pub struct ManagementAuthConfig {
     /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
     pub max_token_lifetime_secs: u64,
     /// Accepted management-token audiences. Empty means the `aud` claim is not required.
-    #[serde(deserialize_with = "deserialize_audience_list")]
+    #[serde(deserialize_with = "deserialize_trimmed_list")]
     pub audiences: Vec<String>,
 }
 
@@ -258,7 +510,7 @@ impl ManagementAuthConfig {
     }
 }
 
-fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+fn deserialize_trimmed_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1700,6 +1952,12 @@ impl Config {
         Self::load_from_overrides(&[])
     }
 
+    /// Per-tier limits: `tiers` with defaults filled from `limits`, validated
+    /// against the global caps. Loading fails when this does.
+    pub fn tier_limits(&self) -> Result<Tiers, ConfigError> {
+        self.tiers.resolve(&self.limits)
+    }
+
     pub fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
         let mut builder = base_builder()?
             // Override config values via environment variables
@@ -1763,6 +2021,8 @@ impl Config {
             .validate(config.telemetry.environment)?;
         config.status_list.validate()?;
         config.limits.validate()?;
+        config.rate_limit.trusted_proxy_networks()?;
+        config.tier_limits()?;
         config
             .server
             .aggregation_uri(config.telemetry.environment)?;
@@ -1884,6 +2144,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
@@ -2877,6 +3138,227 @@ mod tests {
 
         let at_page = AGGREGATION_DEFAULT_LIMIT.to_string();
         assert!(Config::load_from_overrides(&[("limits.max_lists_per_issuer", &at_page)]).is_ok());
+    }
+
+    #[test]
+    fn test_trusted_proxies_parse_from_a_comma_separated_list() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert!(
+            config
+                .rate_limit
+                .trusted_proxy_networks()
+                .unwrap()
+                .is_empty()
+        );
+
+        let config = Config::load_from_overrides(&[(
+            "APP_RATE_LIMIT__TRUSTED_PROXIES",
+            "10.0.0.0/8, fd00::/8,192.0.2.7,::ffff:192.0.2.8",
+        )])
+        .unwrap();
+        let networks: Vec<String> = config
+            .rate_limit
+            .trusted_proxy_networks()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            networks,
+            ["10.0.0.0/8", "fd00::/8", "192.0.2.7/32", "192.0.2.8/32"]
+        );
+    }
+
+    #[test]
+    fn test_malformed_trusted_proxy_fails_loading() {
+        for value in ["10.0.0.0/40", "fd00::/129", "10.0.0.0/x", "example.com/8"] {
+            let err = Config::load_from_overrides(&[("rate_limit.trusted_proxies", value)])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("rate_limit.trusted_proxies"), "{value}: {err}");
+        }
+    }
+
+    fn resolved_tiers(overrides: &[(&str, &str)]) -> Result<Tiers, ConfigError> {
+        Config::load_from_overrides(overrides)?.tier_limits()
+    }
+
+    fn tier_error(overrides: &[(&str, &str)]) -> String {
+        Config::load_from_overrides(overrides)
+            .expect_err("invalid tier configuration must fail config loading")
+            .to_string()
+    }
+
+    #[test]
+    fn test_tier_defaults() {
+        let tiers = resolved_tiers(&[]).unwrap();
+        assert_eq!(
+            tiers.standard,
+            TierLimits {
+                max_lists: 1_000,
+                max_status_index: 100_000,
+                max_statuses_per_request: 5_000,
+                max_keys: 5,
+                write_burst_size: NonZeroU32::new(100).unwrap(),
+                write_period: Duration::from_secs(1),
+            }
+        );
+        assert_eq!(
+            tiers.sandbox,
+            TierLimits {
+                max_lists: 10,
+                max_status_index: 10_000,
+                max_statuses_per_request: 1_000,
+                max_keys: 2,
+                write_burst_size: NonZeroU32::new(10).unwrap(),
+                write_period: Duration::from_secs(6),
+            }
+        );
+    }
+
+    #[test]
+    fn test_standard_tier_follows_global_limits() {
+        let tiers = resolved_tiers(&[
+            ("limits.max_lists_per_issuer", "50"),
+            ("limits.max_status_index", "20000"),
+            ("limits.max_statuses_per_request", "2000"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.standard.max_lists, 50);
+        assert_eq!(tiers.standard.max_status_index, 20_000);
+        assert_eq!(tiers.standard.max_statuses_per_request, 2_000);
+    }
+
+    #[test]
+    fn test_sandbox_defaults_clamp_to_lowered_global_limits() {
+        let tiers = resolved_tiers(&[
+            ("limits.max_lists_per_issuer", "5"),
+            ("limits.max_status_index", "4096"),
+            ("limits.max_statuses_per_request", "256"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 5);
+        assert_eq!(tiers.sandbox.max_status_index, 4_096);
+        assert_eq!(tiers.sandbox.max_statuses_per_request, 256);
+    }
+
+    #[test]
+    fn test_sandbox_defaults_clamp_to_a_lowered_standard_tier() {
+        let tiers = resolved_tiers(&[
+            ("tiers.standard.max_lists", "4"),
+            ("tiers.standard.max_keys", "1"),
+            ("tiers.standard.write_burst_size", "3"),
+            ("tiers.standard.write_period_secs", "30"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 4);
+        assert_eq!(tiers.sandbox.max_keys, 1);
+        assert_eq!(tiers.sandbox.write_burst_size.get(), 3);
+        assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_unknown_tier_keys_are_rejected() {
+        for key in ["tiers.sandbox.max_list", "tiers.premium.max_lists"] {
+            let err = tier_error(&[(key, "5")]);
+            assert!(err.contains("unknown field"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_tier_env_overrides() {
+        let tiers = resolved_tiers(&[
+            ("APP_TIERS__SANDBOX__MAX_LISTS", "3"),
+            ("APP_TIERS__SANDBOX__WRITE_PERIOD_SECS", "30"),
+            ("APP_TIERS__STANDARD__MAX_KEYS", "4"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 3);
+        assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
+        assert_eq!(tiers.standard.max_keys, 4);
+    }
+
+    #[test]
+    fn test_tier_above_global_cap_is_rejected() {
+        let err = tier_error(&[("tiers.standard.max_status_index", "100001")]);
+        assert!(
+            err.contains("tiers.standard.max_status_index (100001) must not exceed limits.max_status_index (100000)"),
+            "{err}"
+        );
+        let err = tier_error(&[
+            ("limits.max_statuses_per_request", "500"),
+            ("tiers.sandbox.max_statuses_per_request", "600"),
+        ]);
+        assert!(
+            err.contains("tiers.sandbox.max_statuses_per_request (600) must not exceed limits.max_statuses_per_request (500)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_tier_max_lists_is_bounded_by_the_aggregation_page() {
+        let over = (AGGREGATION_DEFAULT_LIMIT + 1).to_string();
+        // `limits.max_lists_per_issuer` is itself at most the page size, so
+        // bounding each tier by it bounds the tier by the page.
+        let err = tier_error(&[("tiers.standard.max_lists", &over)]);
+        assert!(
+            err.contains(
+                "tiers.standard.max_lists (1001) must not exceed limits.max_lists_per_issuer"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_looser_than_standard_is_rejected() {
+        for (key, standard, sandbox) in [
+            ("max_lists", "5", "6"),
+            ("max_status_index", "500", "501"),
+            ("max_statuses_per_request", "50", "51"),
+            ("max_keys", "1", "2"),
+            ("write_burst_size", "4", "5"),
+        ] {
+            let standard_key = format!("tiers.standard.{key}");
+            let sandbox_key = format!("tiers.sandbox.{key}");
+            let err = tier_error(&[(&standard_key, standard), (&sandbox_key, sandbox)]);
+            assert!(
+                err.contains(&format!(
+                    "tiers.sandbox.{key} ({sandbox}) must not exceed tiers.standard.{key} ({standard})"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_write_period_shorter_than_standard_is_rejected() {
+        let err = tier_error(&[
+            ("tiers.standard.write_period_secs", "10"),
+            ("tiers.sandbox.write_period_secs", "5"),
+        ]);
+        assert!(
+            err.contains("tiers.sandbox.write_period_secs (5) must not be shorter than"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_zero_tier_values_are_rejected() {
+        for key in [
+            "max_lists",
+            "max_status_index",
+            "max_statuses_per_request",
+            "max_keys",
+            "write_burst_size",
+            "write_period_secs",
+        ] {
+            let sandbox_key = format!("tiers.sandbox.{key}");
+            let err = tier_error(&[(&sandbox_key, "0")]);
+            assert!(
+                err.contains(&format!("tiers.sandbox.{key} must be greater than 0")),
+                "{err}"
+            );
+        }
     }
 
     fn aggregation_uri(uri: &str) -> Result<Option<Url>, ConfigError> {

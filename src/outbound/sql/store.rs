@@ -739,6 +739,31 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    /// Reads the `issuers.list_count` counter the quota is enforced against,
+    /// one row per issuer, rather than counting `status_lists`.
+    #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
+    pub async fn count_status_lists_by_issuer(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, RepositoryError> {
+        time_query("count_by_issuer", "issuers", async {
+            let db = self.db.current();
+            let rows = issuers::Entity::find()
+                .select_only()
+                .column(issuers::Column::Issuer)
+                .column(issuers::Column::ListCount)
+                .filter(issuers::Column::ListCount.gt(0))
+                .into_tuple::<(String, i64)>()
+                .all(&*db)
+                .await
+                .map_err(find_err)?;
+            Ok(rows
+                .into_iter()
+                .map(|(issuer, count)| (issuer, u64::try_from(count).unwrap_or(0)))
+                .collect())
+        })
+        .await
+    }
+
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn allocate_indices(
         &self,

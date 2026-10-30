@@ -247,6 +247,18 @@ impl StatusListRepo for MemoryStatusLists {
         Ok(issuers)
     }
 
+    async fn list_counts_by_issuer(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        let values = self.values.read().await;
+        Ok(values
+            .per_issuer
+            .iter()
+            .filter(|(_, lists)| !lists.is_empty())
+            .map(|(issuer, lists)| (issuer.clone(), lists.len() as u64))
+            .collect())
+    }
+
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,
