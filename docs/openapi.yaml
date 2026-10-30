@@ -705,8 +705,9 @@ paths:
             response is returned only when a retained token validity window
             covers this instant (`iat <= time < exp`). Invalid, zero, negative,
             or future values return `400`; a valid time without a retained
-            snapshot returns `404`. When retention is disabled, requests also
-            return `404` rather than the `501` SHOULD in draft-21 §8.4.
+            snapshot returns `404 historical_status_list_not_found`. When
+            retention is disabled, requests for an existing list return `404
+            status_list_not_found` rather than the `501` SHOULD in draft-21 §8.4.
           schema:
             type: integer
             format: int64
@@ -862,9 +863,11 @@ paths:
         "404":
           description: |
             Status list or historical snapshot not found. A valid historical
-            `time` without a retained snapshot returns `404`. This implementation
-            also returns `404` when snapshot retention is disabled, although
-            draft-21 §8.4 says unsupported `time` parameters SHOULD return `501`.
+            `time` without a retained snapshot returns `404`. When snapshot
+            retention is disabled, a `?time=` request for an existing list
+            returns `404 status_list_not_found` (rather than
+            `historical_status_list_not_found`), although draft-21 §8.4 says
+            unsupported `time` parameters SHOULD return `501`.
           content:
             application/json:
               schema:
