@@ -8,7 +8,7 @@ use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
 };
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
 };
 
 /// Resolve a trusted signing key without exposing the backing trust source to
@@ -27,6 +27,17 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Return a bounded page ordered by issuer id, strictly after `after`.
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+    /// Return all signing-key metadata for one hosted issuer.
+    async fn issuer_keys(&self, issuer_id: &str)
+    -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
     /// The issuer owning a registered management-token key ID.
     async fn find_key_by_kid(
         &self,
@@ -40,10 +51,28 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// mapping in one unit; both rows commit or neither does. Returns the
     /// stored issuer: an aggregation ID that collided with one already in use
     /// was regenerated server-side, because identifiers are server-assigned.
-    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError>;
+    async fn create_issuer(
+        &self,
+        issuer: HostedIssuer,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
 
     /// Register a signing key for an existing hosted issuer.
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
+
+    /// Register a signing key only while the issuer is still at
+    /// `expected_version`. The default preserves the store's existing API for
+    /// test-only adapters; durable stores override it to make an HTTP
+    /// `If-Match` precondition atomic with the insertion.
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<(), HostedIssuerError> {
+        let _ = expected_version;
+        self.add_key(key, actor).await
+    }
 
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
@@ -63,6 +92,28 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Used by the startup/reload warning path so it does not run one
     /// `find_issuer` per owner.
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;
+}
+
+/// Durable lifecycle changes for hosted issuers. Each method commits the state
+/// transition and its audit record in one transaction.
+#[async_trait]
+pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
+    async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.
@@ -115,6 +166,9 @@ pub struct AllocateStatusListIndices {
 
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
+    /// Count all lists owned by one issuer, including during quota transitions.
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError>;
+
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 

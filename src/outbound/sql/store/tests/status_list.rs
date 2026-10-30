@@ -1187,3 +1187,27 @@ async fn test_postgres_list_count_migration_backfills_existing_rows() {
         assert_list_count_migration_backfills(&test_db.db, column_already_added, "Postgres").await;
     }
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn admin_usage_count_is_scoped_and_reads_actual_lists() {
+    let db = fixtures::sqlite_connection().await;
+    fixtures::seed_credential(&db, "one").await;
+    fixtures::seed_credential(&db, "two").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db);
+    for (id, issuer) in [("a", "one"), ("b", "two"), ("c", "one")] {
+        store
+            .insert_one(
+                fixtures::record(id, issuer, "compressed", "sub", 0),
+                fixtures::NO_LIST_QUOTA,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.count_status_lists_by_issuer("one").await.unwrap(), 2);
+    assert_eq!(store.count_status_lists_by_issuer("two").await.unwrap(), 1);
+    assert_eq!(
+        store.count_status_lists_by_issuer("unknown").await.unwrap(),
+        0
+    );
+}

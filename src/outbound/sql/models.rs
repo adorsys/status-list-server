@@ -166,6 +166,31 @@ pub(crate) mod hosted_issuer_keys {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// Append-only hosted issuer lifecycle audit. Payloads contain state metadata only.
+pub(crate) mod issuer_audit_events {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "issuer_audit_events")]
+    pub(crate) struct Model {
+        #[sea_orm(primary_key)]
+        pub id: String,
+        pub issuer_id: Option<String>,
+        pub actor: Option<String>,
+        pub action: String,
+        #[sea_orm(column_type = "Json")]
+        pub before: Option<serde_json::Value>,
+        #[sea_orm(column_type = "Json")]
+        pub after: Option<serde_json::Value>,
+        pub created_at: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub(crate) enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 // Statuses entries
 pub(crate) mod status_lists {
     use super::*;

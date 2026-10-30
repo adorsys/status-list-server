@@ -38,3 +38,8 @@ admins:
           kty: OKP
           crv: Ed25519
           x: "qoyIh_A133b772ZBFHksvC6Zq18NygYQRSDeHVnGRDM"
+
+# When a static key is revoked, move its complete public record here instead
+# of deleting it. Tombstones never authenticate and permanently reserve the
+# kid and JWK material.
+revoked_keys: []

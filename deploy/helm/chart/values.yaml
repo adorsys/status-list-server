@@ -95,6 +95,8 @@ statuslist:
     APP_ENV: "production"
     # Required in production: a per-deployment audience, different for staging and production.
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
+    # Must be distinct from management audiences when the registry defines admins.
+    APP_ADMIN_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
     # private (default): operator registry only. hosted: also the SQL issuer store (docs/architecture.md).
@@ -128,6 +130,8 @@ statuslist:
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
     APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
+    APP_RATE_LIMIT__ADMIN_BURST_SIZE: "30"
+    APP_RATE_LIMIT__ADMIN_PERIOD_SECS: "60"
     APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
     APP_LIMITS__MAX_STATUS_INDEX: "100000"
     APP_LIMITS__MAX_STATUSES_PER_REQUEST: "5000"

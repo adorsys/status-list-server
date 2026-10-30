@@ -27,14 +27,14 @@ pub enum Principal {
         aggregation_id: AggregationId,
     },
     /// A management admin principal, which authenticates with no aggregation.
-    Admin { id: String },
+    Admin { id: String, scopes: Vec<String> },
 }
 
 impl Principal {
     /// The principal identifier, shared by both variants.
     pub fn id(&self) -> &str {
         match self {
-            Principal::Issuer { id, .. } | Principal::Admin { id } => id,
+            Principal::Issuer { id, .. } | Principal::Admin { id, .. } => id,
         }
     }
 

@@ -42,6 +42,23 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    pub audiences: Vec<String>,
+}
+
+impl From<&crate::config::AdminAuthConfig> for AdminAuthConfig {
+    fn from(config: &crate::config::AdminAuthConfig) -> Self {
+        Self {
+            leeway_secs: config.leeway_secs,
+            max_token_lifetime_secs: config.max_token_lifetime_secs,
+            audiences: config.audiences.clone(),
+        }
+    }
+}
+
 /// Links exposed in the `GET /` service document.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceLinks {
@@ -58,7 +75,7 @@ pub struct ServiceDocument {
 }
 
 /// Shared application state injected into web handlers.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
     /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
@@ -79,10 +96,15 @@ pub struct AppState {
     pub max_lists_per_issuer: u64,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
+    pub admin_registry: Arc<auth::issuer_registry::RegistryHandle>,
+    pub hosted_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     /// Last-known-good operator-managed issuer trust registry snapshot.
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
     pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
+    /// Hosted-profile lifecycle commands, absent in the private profile.
+    pub hosted_lifecycle_service: Option<Arc<auth::hosted_service::HostedIssuerLifecycleService>>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.
@@ -91,9 +113,16 @@ pub struct AppState {
     pub readiness: health::Readiness,
 }
 
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState").finish_non_exhaustive()
+    }
+}
+
 impl AppState {
     pub fn set_issuer_registry(&mut self, registry: Arc<auth::issuer_registry::RegistryHandle>) {
         self.issuer_key_resolver = registry.clone();
+        self.admin_registry = registry.clone();
         self.issuer_registry = registry;
     }
     /// The issuer's aggregation URI, or `None` when aggregation is not

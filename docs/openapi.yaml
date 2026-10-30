@@ -3,11 +3,15 @@ info:
   title: Status List Server
   version: 0.1.0
   description: |
+    The admin listener's issuer API — reads and lifecycle changes (suspend,
+    resume, key revocation) — is documented separately in
+    [the Admin API contract](./openapi-admin.yaml).
+
     REST API for the Status List Server.
 
     This service implements the
     [Token Status List specification](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
-    and allows provisioned credential issuers to publish and update status lists.
+    and allows trusted credential issuers to publish and update status lists.
     Relying parties can retrieve status list tokens in JWT or CWT format.
 
     Error responses are JSON objects of the form
@@ -26,7 +30,7 @@ info:
 
     ## Rate limiting
 
-    The server applies two independent token-bucket governor tiers, each
+    The server applies three independent token-bucket governor tiers, each
     operator-configurable through the `APP_RATE_LIMIT__*` environment
     variables (see `RateLimitConfig`):
 
@@ -35,13 +39,19 @@ info:
         the peer IP) — `PUT`/`PATCH`
         `/api/v1/status-lists/{list_id}/statuses` and the authenticated
         `GET /api/v1/credentials`.
-        Tunables: `strict_burst_size`, `strict_period_secs` (defaults: 10 / 60s).
+        Tunables: `strict_burst_size`, `strict_period_secs`
+        (defaults: 10 / 60s).
       * **permissive** (per source IP) — public read routes
         (`GET /api/v1/aggregation/{aggregation_id}`,
         `GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
         Tunables: `permissive_burst_size`, `permissive_period_secs`
         (defaults: 100 / 60s).
+      * **admin** (per source IP) — the admin issuer API on the admin
+        listener (see the Admin API contract). Every change costs a `GET` plus
+        a `PATCH`, so its budget is independent of the writes tier.
+        Tunables: `admin_burst_size`, `admin_period_secs`
+        (defaults: 30 / 60s).
 
     When a quota is exhausted the server returns `429 Too Many Requests`.
 
@@ -230,8 +240,8 @@ paths:
       summary: Get the calling issuer's aggregation ID and URI
       description: |
         Returns the aggregation ID and URI of the issuer the Bearer token
-        belongs to. Legacy issuers created before aggregation IDs existed may
-        not have received one then; this endpoint returns their assigned ID.
+        belongs to. Issuers provisioned before aggregation IDs existed can get
+        their assigned ID here.
 
         MANAGEMENT LISTENER: served on the management listener (default :8001).
       servers:
@@ -243,7 +253,7 @@ paths:
               description: Host name and port of the management listener.
       responses:
         "200":
-          description: Issuer identity and aggregation URI.
+          description: The issuer's aggregation information.
           content:
             application/json:
               schema:
@@ -279,8 +289,8 @@ paths:
           in: path
           required: true
           description: |
-            The issuer's aggregation ID, as returned by
-            `GET /api/v1/credentials`.
+            The issuer's aggregation ID, available from the authenticated
+            `GET /api/v1/credentials` endpoint.
           schema:
             type: string
             format: uuid

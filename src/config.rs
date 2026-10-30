@@ -161,6 +161,7 @@ pub struct Config {
     pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
@@ -173,13 +174,16 @@ pub struct WatcherConfig {
     pub poll_interval_secs: u64,
 }
 
-/// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
+/// Rate-limit configuration with strict (writes), permissive (reads), and
+/// admin (admin issuer API) tiers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
     pub strict_period_secs: u64,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
+    pub admin_burst_size: u32,
+    pub admin_period_secs: u64,
 }
 
 /// Hard bounds on incoming requests and persisted status lists.
@@ -254,6 +258,26 @@ impl ManagementAuthConfig {
             );
         }
 
+        Ok(())
+    }
+}
+
+/// JWT audience and lifetime policy for admin endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    #[serde(deserialize_with = "deserialize_audience_list")]
+    pub audiences: Vec<String>,
+}
+
+impl AdminAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "admin_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -1761,6 +1785,7 @@ impl Config {
         config
             .management_auth
             .validate(config.telemetry.environment)?;
+        config.admin_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
         config
@@ -1880,10 +1905,15 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("management_auth.issuers_file", Option::<String>::None)?
+        .set_default("admin_auth.leeway_secs", 60)?
+        .set_default("admin_auth.max_token_lifetime_secs", 300)?
+        .set_default("admin_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.admin_burst_size", 30)?
+        .set_default("rate_limit.admin_period_secs", 60)?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
@@ -2005,6 +2035,8 @@ mod tests {
         assert_eq!(config.rate_limit.strict_period_secs, 60);
         assert_eq!(config.rate_limit.permissive_burst_size, 100);
         assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.admin_burst_size, 30);
+        assert_eq!(config.rate_limit.admin_period_secs, 60);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -2091,6 +2123,8 @@ mod tests {
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
             ("rate_limit.permissive_period_secs", "10"),
+            ("rate_limit.admin_burst_size", "7"),
+            ("rate_limit.admin_period_secs", "30"),
             ("limits.max_body_size_bytes", "65536"),
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
@@ -2218,6 +2252,8 @@ mod tests {
         assert_eq!(overridden.rate_limit.strict_period_secs, 120);
         assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
         assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(overridden.rate_limit.admin_burst_size, 7);
+        assert_eq!(overridden.rate_limit.admin_period_secs, 30);
         assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
@@ -2689,6 +2725,17 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_admin_auth_defaults_and_zero_lifetime_validation() {
+        let defaults = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(defaults.admin_auth.leeway_secs, 60);
+        assert_eq!(defaults.admin_auth.max_token_lifetime_secs, 300);
+        assert!(defaults.admin_auth.audiences.is_empty());
+        assert!(
+            Config::load_from_overrides(&[("admin_auth.max_token_lifetime_secs", "0")]).is_err()
         );
     }
 

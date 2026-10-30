@@ -15,14 +15,14 @@ use crate::domain::models::credential::{
 #[non_exhaustive]
 pub enum HostedIssuerState {
     Active,
-    Disabled,
+    Suspended,
 }
 
 impl HostedIssuerState {
     pub fn as_str(&self) -> &'static str {
         match self {
             HostedIssuerState::Active => "active",
-            HostedIssuerState::Disabled => "disabled",
+            HostedIssuerState::Suspended => "suspended",
         }
     }
 }
@@ -44,12 +44,48 @@ pub struct HostedIssuer {
     pub aggregation_id: AggregationId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedIssuerLifecycleState {
+    Active,
+    Suspended,
+    Expired,
+}
+
 impl HostedIssuer {
+    /// Expiry is derived at verification time, without a cleanup job.
+    /// Suspension wins over expiry so an operator never sees a suspended
+    /// issuer reported as merely expired.
+    pub fn lifecycle_state(&self, now: OffsetDateTime) -> HostedIssuerLifecycleState {
+        if self.state == HostedIssuerState::Suspended {
+            HostedIssuerLifecycleState::Suspended
+        } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            HostedIssuerLifecycleState::Expired
+        } else {
+            HostedIssuerLifecycleState::Active
+        }
+    }
+
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.state == HostedIssuerState::Active && self.expires_at.is_none_or(|expiry| now < expiry)
+        self.lifecycle_state(now) == HostedIssuerLifecycleState::Active
     }
+}
+
+/// Metadata filters applied before bounding an admin issuer page.
+#[derive(Clone, Debug, Default)]
+pub struct HostedIssuerFilter {
+    pub tier: Option<String>,
+    pub state: Option<HostedIssuerReadState>,
+    pub owner: Option<String>,
+}
+
+/// Admin-visible lifecycle derived from persisted state and expiry.
+#[derive(Clone, Copy, Debug)]
+pub enum HostedIssuerReadState {
+    Active,
+    Suspended,
+    Expired,
 }
 
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
@@ -146,12 +182,17 @@ pub enum HostedIssuerError {
     InvalidPublicJwk(String),
     #[error("invalid expiry: {0}")]
     InvalidExpiry(String),
+    #[error("issuer version has changed; read the current state before retrying")]
+    VersionMismatch,
     /// A persisted hosted row is malformed and can never parse: a permanent
     /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]
     Corrupt(String),
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
+    /// The store could not be reached: retry later with the same request.
+    #[error("the issuer store is currently unavailable")]
+    Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -242,9 +283,9 @@ mod tests {
     }
 
     #[test]
-    fn disabled_issuer_fails_closed() {
+    fn suspended_issuer_fails_closed() {
         let entry = entry_with(
-            HostedIssuerState::Disabled,
+            HostedIssuerState::Suspended,
             None,
             HostedIssuerKeyState::Active,
             (None, None),
@@ -264,10 +305,28 @@ mod tests {
             HostedIssuerKeyState::Active,
             (None, None),
         );
+        assert_eq!(
+            entry.issuer.lifecycle_state(now()),
+            HostedIssuerLifecycleState::Expired
+        );
         assert!(matches!(
             entry.resolved_key(now()),
             Err(KeyResolveError::PrincipalDisabled)
         ));
+    }
+
+    #[test]
+    fn suspension_takes_precedence_over_expiry() {
+        let entry = entry_with(
+            HostedIssuerState::Suspended,
+            Some(now() - time::Duration::seconds(1)),
+            HostedIssuerKeyState::Active,
+            (None, None),
+        );
+        assert_eq!(
+            entry.issuer.lifecycle_state(now()),
+            HostedIssuerLifecycleState::Suspended
+        );
     }
 
     #[test]
