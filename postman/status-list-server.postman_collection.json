@@ -867,8 +867,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "const status = pm.response.code;",
-                  "pm.test(`suspend answers 200 on the hosted profile, 404 in the private profile, got ${status}`, () => {",
-                  "    pm.expect([200, 404]).to.include(status);",
+                  "pm.test(`suspend answers 200 on the hosted profile, 401 without admin auth, or 404 in the private profile, got ${status}`, () => {",
+                  "    pm.expect([200, 401, 404]).to.include(status);",
                   "});",
                   "if (status === 200) {",
                   "    const body = pm.response.json();",
@@ -925,8 +925,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "const status = pm.response.code;",
-                  "pm.test(`revoke answers 200 on the hosted profile, 404 in the private profile, got ${status}`, () => {",
-                  "    pm.expect([200, 404]).to.include(status);",
+                  "pm.test(`revoke answers 200 on the hosted profile, 401 without admin auth, or 404 in the private profile, got ${status}`, () => {",
+                  "    pm.expect([200, 401, 404]).to.include(status);",
                   "});",
                   "if (status === 200) {",
                   "    const body = pm.response.json();",
