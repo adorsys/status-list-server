@@ -151,7 +151,7 @@ async fn validate_dynamic_write(
     };
     // `resolve` is O(1) and complete, catching a kid whose material
     // normalization fails, unlike iterating `all_principal_keys`.
-    if snapshot.resolve(&key.kid).is_some() {
+    if snapshot.resolve(&key.kid).is_some() || snapshot.has_revoked_kid(&key.kid) {
         return Err(HostedIssuerError::AlreadyExists);
     }
     let registers = material_of(&key.jwk).ok_or_else(|| {
