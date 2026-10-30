@@ -97,6 +97,10 @@ statuslist:
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     APP_SERVER__HOST: "0.0.0.0"
     APP_SERVER__PORT: "8000"
+    # Deployment profile: private (default, operator registry only) or hosted
+    # (also trusts issuer keys in the SQL hosted issuer store). See
+    # docs/architecture.md.
+    # APP_SERVER__PROFILE: "private"
     # Service document links (GET /). Defaults to the repository URL.
     # APP_SERVER__LINKS__DOCUMENTATION: "https://github.com/adorsys/status-list-server"
     # APP_SERVER__LINKS__PORTAL: "https://statuslist.example.com"

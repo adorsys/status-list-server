@@ -124,8 +124,25 @@ The project strictly follows **Hexagonal Architecture (Ports and Adapters)**:
 The HTTP surface is split into three structurally separate listeners (`src/startup.rs`), each built from its own route set so a route is only reachable on the listener that owns it (a request for it on any other listener returns `404`):
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
-- **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and credential registration (`POST`/`GET /api/v1/credentials`).
+- **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and issuer identity lookup (`GET /api/v1/credentials`).
 - **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+
+#### Deployment profiles
+
+`server.profile` (`APP_SERVER__PROFILE`, default `private`) selects one of two
+deployment profiles (ADR 0002). A profile only adds trust sources and limits; it
+never relaxes a rule:
+
+- **private** (default): only issuers an operator has listed in the operator
+  trust registry are trusted. The hosted issuer store is not constructed, so a
+  registry-only deployment is unaffected by the hosted key resolution path.
+- **hosted**: the server also trusts issuer keys held in the SQL hosted issuer
+  store (see [database-backends.md](database-backends.md)). The composite key resolver
+  serves static keys first, then the hosted store, and fails closed on any
+  cross-source collision.
+
+Both profiles share the same three listeners; the profile changes which trust
+sources back the management listener's authentication, not which routes exist.
 
 ### Data Flow
 
@@ -167,7 +184,6 @@ each tier keyed and tuned independently:
 
 | Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
 | -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| **strict**     | `POST /api/v1/credentials`                                      | peer IP (`PeerIpKeyExtractor`)                              | `strict_burst_size` (10), `strict_period_secs` (60s)          |
 | **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,          | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
 |                | `GET /api/v1/credentials` (authenticated)                       | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
 | **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
@@ -223,21 +239,20 @@ exclusive lock while it checks, so a publish in flight is either counted by
 the check or refused by the enforced quota. The memory backend enforces the
 quota from startup.
 
-It bounds lists **per issuer**, not in total: while
-`POST /api/v1/credentials` accepts unauthenticated registrations, a new issuer
-brings a fresh quota. Lists cannot be deleted through the API, so an issuer at
-its quota stays there until the operator raises it, which is possible only up
-to the aggregation page size (see
+It bounds lists **per issuer**, not in total. Only the operator can add an
+issuer, so the registry bounds the number of issuers. Lists cannot be deleted
+through the API, so an issuer at its quota stays there until the operator
+raises it, which is possible only up to the aggregation page size (see
 [troubleshooting](troubleshooting.md#status-list-quota)).
 
 ### Status list aggregation
 
 `GET /api/v1/aggregation/{aggregation_id}` returns one issuer's status list URIs
-(draft-21 §9). Each issuer gets a random `aggregation_id` at registration,
-returned in the registration response and by the authenticated
-`GET /api/v1/credentials`. An issuer registered before aggregation IDs existed
-gets one the first time it is looked up. Public URIs name the issuer by that ID,
-so tokens never disclose the issuer identifier, which may be an internal tenant
+(draft-21 §9). The operator-managed registry assigns each issuer a random
+`aggregation_id`; the authenticated `GET /api/v1/credentials` returns that ID
+and its URI to the issuer. Legacy issuers without an ID receive the registry's
+ID when migrated or first looked up. Public URIs name the issuer by that ID, so
+tokens never disclose the issuer identifier, which may be an internal tenant
 name. With `server.aggregation_uri` set, each status list token carries its
 issuer's URI, `<aggregation_uri>/<aggregation_id>`.
 

@@ -5,7 +5,7 @@
 
 use arc_swap::ArcSwap;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -35,6 +35,8 @@ pub enum RegistryError {
     },
     #[error("failed to parse issuer registry YAML: {0}")]
     Parse(#[from] serde_saphyr::Error),
+    #[error("failed to serialize issuer registry YAML: {0}")]
+    Serialize(#[from] serde_saphyr::SerializeError),
     #[error("issuer registry schema validation failed: {0}")]
     Schema(String),
     #[error("issuer registry semantic validation failed: {0}")]
@@ -94,6 +96,7 @@ pub struct ValidatedRegistry {
     keys: HashMap<String, Arc<ResolvedKey>>,
     issuer_aggregations: HashMap<String, AggregationId>,
     aggregation_issuers: HashMap<AggregationId, String>,
+    materials: HashSet<String>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -103,6 +106,7 @@ pub struct RegistryHandle {
     active: ArcSwap<ValidatedRegistry>,
     aggregation_history: Mutex<AggregationHistory>,
     reload_failures: AtomicU64,
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -145,7 +149,12 @@ impl RegistryHandle {
             }),
             reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
+            write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub async fn write_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().await
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
@@ -226,8 +235,9 @@ impl RegistryHandle {
     }
 }
 
+#[async_trait::async_trait]
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+    async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         self.resolve_with_reason(kid)
     }
 }
@@ -245,6 +255,73 @@ impl IssuerDirectory for RegistryHandle {
 }
 
 impl IssuerRegistry {
+    /// Convert durable legacy credential rows into an operator-reviewed registry draft.
+    pub fn export_legacy_issuers(
+        credentials: impl IntoIterator<Item = (String, String, Value)>,
+    ) -> Result<String, RegistryError> {
+        let mut issuers = Vec::new();
+        let mut errors = Vec::new();
+        for (id, aggregation_id, key) in credentials {
+            let mut issuer_errors = Vec::new();
+            if uuid::Uuid::parse_str(&aggregation_id).is_err() {
+                issuer_errors.push(format!("issuer `{id}` has an invalid aggregation ID"));
+            }
+            let jwk: Option<jsonwebtoken::jwk::Jwk> = match serde_json::from_value(key.clone()) {
+                Ok(jwk) => Some(jwk),
+                Err(err) => {
+                    issuer_errors.push(format!("issuer `{id}` has an invalid public JWK: {err}"));
+                    None
+                }
+            };
+            let kid = jwk.and_then(|jwk| {
+                match jwk.thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256) {
+                    Ok(kid) => Some(kid),
+                    Err(err) => {
+                        issuer_errors.push(format!("issuer `{id}` JWK thumbprint failed: {err}"));
+                        None
+                    }
+                }
+            });
+            let alg = key.get("alg").and_then(Value::as_str).map(str::to_owned);
+            if alg.is_none() {
+                issuer_errors.push(format!("issuer `{id}` public key has no alg"));
+            }
+            let mut public_key = key;
+            if let Some(object) = public_key.as_object_mut() {
+                for field in ["kid", "alg", "use", "key_ops"] {
+                    object.remove(field);
+                }
+            } else {
+                issuer_errors.push(format!("issuer `{id}` public key is not an object"));
+            }
+            if !issuer_errors.is_empty() {
+                errors.extend(issuer_errors);
+                continue;
+            }
+            if let (Some(kid), Some(alg)) = (kid, alg) {
+                issuers.push(serde_json::json!({
+                    "id": id,
+                    "aggregation_id": aggregation_id,
+                    "tier": "standard",
+                    "keys": [{"kid": kid, "alg": alg, "jwk": public_key}],
+                }));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(RegistryError::Semantic(format!(
+                "issuer export found {} problem(s):\n - {}",
+                errors.len(),
+                errors.join("\n - ")
+            )));
+        }
+        serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": issuers,
+            "admins": [],
+        }))
+        .map_err(RegistryError::Serialize)
+    }
+
     pub fn from_file(path: impl AsRef<Path>) -> Result<ValidatedRegistry, RegistryError> {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|source| RegistryError::Read {
@@ -307,12 +384,21 @@ impl IssuerRegistry {
             }
         }
 
-        Ok(ValidatedRegistry {
+        let validated = ValidatedRegistry {
             registry,
             fingerprint: hex::encode(Sha256::digest(content.as_bytes())),
             keys,
             issuer_aggregations,
             aggregation_issuers,
+            materials: HashSet::new(),
+        };
+        Ok(ValidatedRegistry {
+            materials: validated
+                .all_principal_keys()
+                .into_iter()
+                .map(|(_, _, material)| material)
+                .collect(),
+            ..validated
         })
     }
 }
@@ -379,6 +465,44 @@ impl ValidatedRegistry {
 
     pub fn key_count(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Every (principal id, kid, key material) across issuers and admins, so
+    /// cross-source uniqueness checks cannot miss admin credentials. Key
+    /// material is the canonical per-type string (RFC 7638 §7).
+    pub fn all_principal_keys(&self) -> Vec<(&str, &str, String)> {
+        let mut out = Vec::new();
+        for issuer in &self.registry.issuers {
+            for key in &issuer.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((issuer.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        for admin in &self.registry.admins {
+            for key in &admin.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((admin.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any principal (issuer or admin) carries this id.
+    pub fn has_principal_id(&self, id: &str) -> bool {
+        self.registry.issuers.iter().any(|i| i.id == id)
+            || self.registry.admins.iter().any(|a| a.id == id)
+    }
+
+    /// Whether any principal's key material matches `material`. Precomputed in
+    /// `from_yaml`, so the resolver's per-request recheck is O(1).
+    pub fn has_key_material(&self, material: &str) -> bool {
+        self.materials.contains(material)
     }
 }
 
@@ -576,62 +700,11 @@ fn validate_ec_point(jwk: &Value) -> Result<(), RegistryError> {
     Ok(())
 }
 
+/// Canonical string form of a JWK's normalized key parameters (RFC 7638 §7),
+/// per-type members decoded and rendered byte-for-byte, member order ignored.
+/// Uniqueness checks compare this, never a thumbprint.
 fn canonical_public_material(jwk: &Value) -> Result<String, RegistryError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let object = jwk
-        .as_object()
-        .ok_or_else(|| RegistryError::Semantic("JWK must be an object".into()))?;
-    let kty = object
-        .get("kty")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RegistryError::Semantic("JWK is missing kty".into()))?;
-    let string = |field: &str| {
-        object
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| RegistryError::Semantic(format!("JWK is missing {field}")))
-    };
-    let decode = |field: &str| {
-        URL_SAFE_NO_PAD
-            .decode(string(field)?)
-            .map_err(|error| RegistryError::Semantic(format!("invalid JWK {field}: {error}")))
-    };
-    match kty {
-        "EC" => Ok(format!(
-            "EC|{}|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?),
-            hex::encode(decode("y")?)
-        )),
-        "RSA" => {
-            let mut modulus = decode("n")?;
-            let mut exponent = decode("e")?;
-            let first_modulus_byte = modulus
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(modulus.len());
-            let first_exponent_byte = exponent
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(exponent.len());
-            modulus.drain(..first_modulus_byte);
-            exponent.drain(..first_exponent_byte);
-            Ok(format!(
-                "RSA|{}|{}",
-                hex::encode(modulus),
-                hex::encode(exponent)
-            ))
-        }
-        "OKP" => Ok(format!(
-            "OKP|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?)
-        )),
-        _ => Err(RegistryError::Semantic(format!(
-            "unsupported JWK kty `{kty}`"
-        ))),
-    }
+    crate::domain::models::credential::canonical_jwk_material(jwk).map_err(RegistryError::Semantic)
 }
 
 fn default_tier() -> String {
@@ -668,6 +741,23 @@ mod tests {
                 .id(),
             "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
         );
+    }
+
+    #[test]
+    fn legacy_export_reports_every_invalid_key() {
+        let mut key: Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        key.as_object_mut().unwrap().remove("alg");
+        let error = IssuerRegistry::export_legacy_issuers([
+            ("issuer-one".into(), "invalid-id".into(), key.clone()),
+            ("issuer-two".into(), uuid::Uuid::new_v4().to_string(), key),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("issuer-one"));
+        assert!(error.contains("issuer-two"));
+        assert!(error.contains("issuer `issuer-one` has an invalid aggregation ID"));
+        assert!(error.contains("3 problem(s)"));
     }
 
     #[test]

@@ -175,3 +175,18 @@ the pip fallback, then commit both:
 uv lock
 uv export --format requirements-txt -o requirements.txt
 ```
+
+## Issuer registry fixture
+
+The workflows use fixed issuer identities that must be trusted before the
+server starts. Generate the local public-key registry fixture, then mount it
+with the issuer-registry Compose override:
+
+```bash
+uv run python -c 'from workflows.helpers.fixtures import write_registry_fixture; write_registry_fixture()'
+ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
+  docker compose -f ../docker-compose.yml -f ../compose/issuer-registry.yml up -d --build
+```
+
+The fixture contains public keys only. Its private keys are demo material and
+must never be used outside local development.

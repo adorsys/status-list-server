@@ -49,9 +49,8 @@ impl Principal {
 
 /// Why a key could not be used to authenticate a request.
 ///
-/// The response to a client is identical for every variant; the discriminant
-/// exists so operators can log the real reason instead of a generic "unknown
-/// kid".
+/// The response to a client is identical for every variant except
+/// [`BackendUnavailable`](KeyResolveError::BackendUnavailable), a retryable 503.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeyResolveError {
     #[error("unknown kid")]
@@ -62,6 +61,21 @@ pub enum KeyResolveError {
     NotYetValid,
     #[error("key has expired")]
     Expired,
+    #[error("key has been revoked")]
+    Revoked,
+    /// A carried-over key held so its identifier is preserved but not
+    /// trusted: nothing authenticates until an operator adopts it into the
+    /// registry.
+    #[error("key is reserved and does not authenticate")]
+    Reserved,
+    /// A malformed stored key row that can never authenticate: non-retryable,
+    /// so it fails closed as a 401 rather than a retryable 503.
+    #[error("stored key data is corrupt")]
+    Corrupt,
+    #[error("a hosted key collides with the static registry")]
+    SourceConflict,
+    #[error("the trust backend is unavailable")]
+    BackendUnavailable,
 }
 
 use jsonwebtoken::{
@@ -268,6 +282,7 @@ impl PublicJwk {
             }
         };
         let kid = key_id.to_owned();
+        validate_curve_point(&jwk)?;
         jsonwebtoken::DecodingKey::from_jwk(&jwk).map_err(|err| {
             CredentialError::InvalidPublicJwk(format!("invalid verification key: {err}"))
         })?;
@@ -293,6 +308,125 @@ impl PublicJwk {
 
     pub fn jwk(&self) -> &Jwk {
         &self.jwk
+    }
+
+    /// Canonical string form of this key's normalized parameters
+    /// (RFC 7638 §7): per-type members decoded and compared byte-for-byte,
+    /// JWK member order ignored. Key-material reuse is decided against this,
+    /// never against a thumbprint.
+    pub fn normalized_material(&self) -> Result<String, CredentialError> {
+        let value =
+            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&self.bytes))
+                .map_err(|err| CredentialError::InvalidPublicJwk(format!("invalid JWK: {err}")))?;
+        canonical_jwk_material(&value).map_err(CredentialError::InvalidPublicJwk)
+    }
+}
+
+/// Verify EC point membership and coordinate/OKP length so malformed or
+/// off-curve keys cannot enter any trust source.
+fn validate_curve_point(jwk: &Jwk) -> Result<(), CredentialError> {
+    use aws_lc_rs::agreement::{ECDH_P256, ECDH_P384, ParsedPublicKey, UnparsedPublicKey};
+    use base64::Engine as _;
+    match &jwk.algorithm {
+        AlgorithmParameters::EllipticCurve(params) => {
+            let (algorithm, coordinate_len) = match params.curve {
+                jsonwebtoken::jwk::EllipticCurve::P256 => (&ECDH_P256, 32),
+                jsonwebtoken::jwk::EllipticCurve::P384 => (&ECDH_P384, 48),
+                _ => return Ok(()),
+            };
+            let coordinate = |field: &str, value: &str| {
+                URL_SAFE_NO_PAD
+                    .decode(value)
+                    .map_err(|_| {
+                        CredentialError::InvalidPublicJwk(format!("invalid EC JWK {field}"))
+                    })
+                    .and_then(|bytes| {
+                        if bytes.len() != coordinate_len {
+                            return Err(CredentialError::InvalidPublicJwk(format!(
+                                "EC JWK {field} must be {coordinate_len} bytes for its curve"
+                            )));
+                        }
+                        Ok(bytes)
+                    })
+            };
+            let x = coordinate("x", &params.x)?;
+            let y = coordinate("y", &params.y)?;
+            let mut point = Vec::with_capacity(1 + x.len() + y.len());
+            point.push(0x04);
+            point.extend(x);
+            point.extend(y);
+            let _: ParsedPublicKey = UnparsedPublicKey::new(algorithm, point)
+                .try_into()
+                .map_err(|_| {
+                    CredentialError::InvalidPublicJwk("EC JWK point is not on its curve".into())
+                })?;
+        }
+        AlgorithmParameters::OctetKeyPair(params) => {
+            let expected = match params.curve {
+                jsonwebtoken::jwk::EllipticCurve::Ed25519 => 32,
+                _ => return Ok(()),
+            };
+            let x = URL_SAFE_NO_PAD
+                .decode(&params.x)
+                .map_err(|_| CredentialError::InvalidPublicJwk("invalid OKP x encoding".into()))?;
+            if x.len() != expected {
+                return Err(CredentialError::InvalidPublicJwk(format!(
+                    "OKP x must be {expected} bytes for its curve"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Per-type normalized key parameters: `EC` → `crv|x|y`, `RSA` → `n|e` with
+/// leading zero bytes stripped, `OKP` → `crv|x`. `kty=oct` never passes
+/// [`PublicJwk`] validation, so it has no normal form here.
+pub(crate) fn canonical_jwk_material(jwk: &serde_json::Value) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let object = jwk
+        .as_object()
+        .ok_or_else(|| "JWK must be a JSON object".to_string())?;
+    let string = |field: &str| -> Result<&str, String> {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("JWK is missing {field}"))
+    };
+    let decode = |field: &str| -> Result<Vec<u8>, String> {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(string(field)?)
+            .map_err(|error| format!("invalid JWK {field}: {error}"))
+    };
+    let normalized = |field: &str| -> Result<Vec<u8>, String> {
+        let mut bytes = decode(field)?;
+        let first = bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(bytes.len());
+        bytes.drain(..first);
+        Ok(bytes)
+    };
+    match string("kty")? {
+        "EC" => Ok(format!(
+            "EC|{}|{}|{}",
+            string("crv")?,
+            hex::encode(decode("x")?),
+            hex::encode(decode("y")?)
+        )),
+        "RSA" => Ok(format!(
+            "RSA|{}|{}",
+            hex::encode(normalized("n")?),
+            hex::encode(normalized("e")?)
+        )),
+        "OKP" => Ok(format!(
+            "OKP|{}|{}",
+            string("crv")?,
+            hex::encode(decode("x")?)
+        )),
+        other => Err(format!("unsupported JWK kty `{other}`")),
     }
 }
 

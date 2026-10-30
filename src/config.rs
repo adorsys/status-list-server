@@ -73,6 +73,31 @@ impl DatabaseBackend {
     }
 }
 
+/// Deployment profile (ADR 0002). In the `private` profile only issuers listed
+/// in the operator registry are trusted. In the `hosted` profile the server
+/// also trusts issuer keys held in the SQL hosted issuer store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerProfile {
+    #[default]
+    Private,
+    Hosted,
+}
+
+impl ServerProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServerProfile::Private => "private",
+            ServerProfile::Hosted => "hosted",
+        }
+    }
+
+    /// Whether the hosted deployment profile is selected.
+    pub fn is_hosted(self) -> bool {
+        self == ServerProfile::Hosted
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheBackend {
@@ -315,6 +340,8 @@ pub struct ServerConfig {
     pub host: String,
     pub domain: String,
     pub port: u16,
+    #[serde(default)]
+    pub profile: ServerProfile,
     pub management: ListenerConfig,
     pub admin: ListenerConfig,
     pub links: LinksConfig,
@@ -1724,6 +1751,13 @@ impl Config {
             })?;
         }
         config.cache.validate(config.telemetry.environment)?;
+        if config.server.profile.is_hosted() && config.database.backend == DatabaseBackend::Memory {
+            return Err(ConfigError::Message(format!(
+                "server.profile={} requires a durable SQL backend (postgres, mysql or sqlite); \
+                 the memory backend would drop registered issuers on restart",
+                config.server.profile.as_str()
+            )));
+        }
         config
             .management_auth
             .validate(config.telemetry.environment)?;
@@ -1767,6 +1801,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.admin.port", 8002)?
         .set_default("server.links.documentation", REPOSITORY_URL)?
         .set_default("server.links.portal", Option::<String>::None)?
+        .set_default("server.profile", "private")?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
@@ -3586,6 +3621,44 @@ mod tests {
                 "raw APP_ENV {raw:?} must be development"
             );
             assert!(!classify_app_env(raw).is_production());
+        }
+    }
+
+    #[test]
+    fn profile_defaults_to_private() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(config.server.profile, ServerProfile::Private);
+        // A hosted parse requires a backend the feature profile carries, so
+        // the hosted variant lives in `hosted_profile_refuses_the_memory_backend`
+        // and in the per-backend pass-through below (feature-gated).
+        #[cfg(feature = "sqlite")]
+        {
+            let config = Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", "sqlite"),
+            ])
+            .unwrap();
+            assert_eq!(config.server.profile, ServerProfile::Hosted);
+        }
+    }
+
+    #[test]
+    fn hosted_profile_refuses_the_memory_backend() {
+        let error = Config::load_from_overrides(&[
+            ("server.profile", "hosted"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a durable SQL backend"),
+            "the refusal must name the fix, got {error}"
+        );
+        for backend in ["sqlite", "postgres", "mysql"] {
+            Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", backend),
+            ])
+            .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
     }
 }
