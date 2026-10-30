@@ -10,11 +10,13 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
 };
 use prometheus::{Encoder, Registry, TextEncoder};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::TelemetryConfig;
+use crate::domain::models::tier::{IssuerTier, IssuerUsage};
 
 #[cfg(test)]
 static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -169,6 +171,86 @@ pub(crate) fn record_list_quota_enforced(enforced: bool) {
     gauge.record(u64::from(enforced), &[]);
 }
 
+static ISSUER_RATE_LIMITED: InstrumentSlot<Counter<u64>> = OnceLock::new();
+
+/// Each registered issuer's tier and usage, counted from the database.
+/// Replaced wholesale on startup, on every registry reload and on a fixed
+/// interval, and read by observable gauges, so an issuer that leaves the
+/// registry or changes tier stops being exported under its old labels.
+static ISSUER_USAGE: Mutex<BTreeMap<String, (IssuerTier, IssuerUsage)>> =
+    Mutex::new(BTreeMap::new());
+
+// Labelled per issuer: cardinality is bounded by the operator-managed registry.
+fn issuer_tier_attrs(issuer: &str, tier: IssuerTier) -> [KeyValue; 2] {
+    [
+        KeyValue::new("issuer", issuer.to_owned()),
+        KeyValue::new("tier", tier.as_str()),
+    ]
+}
+
+pub(crate) fn record_issuer_rate_limited(issuer: &str, tier: IssuerTier) {
+    let counter = cached_instruments(&ISSUER_RATE_LIMITED, || {
+        global::meter("status-list-server")
+            // Exported as `issuer_rate_limited_total`: the exporter adds the suffix.
+            .u64_counter("issuer_rate_limited")
+            .with_description("Management requests rejected by the issuer's tier rate limit.")
+            .build()
+    });
+    counter.add(1, &issuer_tier_attrs(issuer, tier));
+}
+
+fn issuer_usage() -> std::sync::MutexGuard<'static, BTreeMap<String, (IssuerTier, IssuerUsage)>> {
+    ISSUER_USAGE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Replaces the exported usage with one entry per registered issuer.
+pub(crate) fn set_issuer_usage(usage: impl IntoIterator<Item = (String, IssuerTier, IssuerUsage)>) {
+    *issuer_usage() = usage
+        .into_iter()
+        .map(|(issuer, tier, usage)| (issuer, (tier, usage)))
+        .collect();
+}
+
+/// Name, description and the usage field one gauge exports.
+type UsageGauge = (&'static str, &'static str, fn(&IssuerUsage) -> u64);
+
+fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
+    let meter = provider.meter("status-list-server");
+    let gauges: [UsageGauge; 4] = [
+        ("issuer_lists", "Status lists the issuer holds.", |usage| {
+            usage.lists
+        }),
+        (
+            "issuer_lists_limit",
+            "The issuer's tier list quota.",
+            |usage| usage.lists_limit,
+        ),
+        (
+            "issuer_keys",
+            "Registry keys of the issuer whose not_after has not passed.",
+            |usage| usage.keys as u64,
+        ),
+        (
+            "issuer_keys_limit",
+            "The issuer's tier key limit.",
+            |usage| usage.keys_limit as u64,
+        ),
+    ];
+    for (name, description, value) in gauges {
+        meter
+            .u64_observable_gauge(name)
+            .with_description(description)
+            .with_callback(move |observer| {
+                for (issuer, (tier, usage)) in issuer_usage().iter() {
+                    observer.observe(value(usage), &issuer_tier_attrs(issuer, *tier));
+                }
+            })
+            .build();
+    }
+}
+
 /// Initialize the OpenTelemetry metrics pipeline before any instruments are
 /// created. Metrics are always exposed through the in-process Prometheus
 /// registry. In production, they are also pushed to the Collector over OTLP.
@@ -197,6 +279,7 @@ pub(crate) fn setup_metrics(
 
     let provider = builder.build();
     register_process_observers(&provider);
+    register_issuer_usage_observers(&provider);
 
     // Install as global so `opentelemetry::global::meter()` works everywhere
     opentelemetry::global::set_meter_provider(provider.clone());
@@ -506,6 +589,72 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with("list_quota_enforced")),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn issuer_usage_drops_issuers_that_left_or_changed_tier() {
+        let usage = |lists, keys| IssuerUsage {
+            lists,
+            lists_limit: 10,
+            keys,
+            keys_limit: 2,
+        };
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        // One provider for both scrapes: series a previous collection
+        // exported must disappear, not merely be absent from a fresh provider.
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let scrape = |samples: Vec<(String, IssuerTier, IssuerUsage)>| {
+            set_issuer_usage(samples);
+            runtime.block_on(metrics_handler(registry.clone()))
+        };
+        let series = |rendered: &str, name: &str, issuer: &str, tier: &str| {
+            rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(&format!("{name}{{"))
+                        && line.contains(&format!("issuer=\"{issuer}\""))
+                        && line.contains(&format!("tier=\"{tier}\""))
+                })
+                .map(|line| line.rsplit(' ').next().unwrap().to_owned())
+        };
+
+        let before = scrape(vec![
+            ("moving".into(), IssuerTier::Sandbox, usage(3, 1)),
+            ("leaving".into(), IssuerTier::Standard, usage(5, 2)),
+        ]);
+        assert_eq!(
+            series(&before, "issuer_lists", "moving", "sandbox").as_deref(),
+            Some("3"),
+            "{before}"
+        );
+        assert!(series(&before, "issuer_keys", "leaving", "standard").is_some());
+
+        let after = scrape(vec![("moving".into(), IssuerTier::Standard, usage(3, 1))]);
+        assert_eq!(
+            series(&after, "issuer_lists", "moving", "standard").as_deref(),
+            Some("3"),
+            "{after}"
+        );
+        assert_eq!(series(&after, "issuer_lists", "moving", "sandbox"), None);
+        assert!(
+            !after.contains("issuer=\"leaving\""),
+            "an issuer that left the registry must not be exported: {after}"
         );
     }
 }

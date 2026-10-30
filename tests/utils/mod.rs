@@ -105,6 +105,7 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(registry_yaml)
             .unwrap(),
     );
+    let tiers = Arc::new(config.tier_limits().unwrap());
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -124,12 +125,15 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         aggregation_withheld_from: Default::default(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter: Arc::new(
+            status_list_server::server::rate_limit::IssuerRateLimiter::new(&tiers),
+        ),
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        admin_auth: status_list_server::server::AdminAuthConfig::from_config(config),
+        registry_handle: registry.clone(),
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: status_list_server::server::ServiceLinks {

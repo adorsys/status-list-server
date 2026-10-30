@@ -31,6 +31,21 @@ info:
     in the `hosted` profile. In the `private` profile, creating one returns
     `409 dynamic_issuers_disabled`.
 
+    ## What this server serves
+
+    `listIssuers` and `getIssuer`. The other operations change portal
+    issuers, which need the `hosted` profile, and are not routed: they
+    return `404`. Every issuer reported is therefore `source: static`, with
+    `owner`, `created_at` and `expires_at` set to `null`, `state` either
+    `active` or `suspended` (`disabled: true`), and every key `active`. Keys
+    are listed in reverse registry order, newest last added first. The
+    `ETag` of a static issuer is a digest of its registry entry and changes
+    whenever the entry does. `usage.lists` is counted from storage on each
+    request; `usage.keys` counts keys whose `not_after` has not passed.
+
+    In production, every token is rejected while `admin_auth.audiences` is
+    empty.
+
     ## Conventions
 
     - Errors use the same envelope as the public API:

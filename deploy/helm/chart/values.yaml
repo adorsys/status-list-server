@@ -235,6 +235,12 @@ statuslist:
     # than exp; the application rejects violations at startup.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    # Per client IP. STRICT counts rejected management authentications only;
+    # verified issuers are limited by their tier (APP_TIERS__*). STRICT keys on
+    # the peer address; set TRUSTED_PROXIES to the ingress controller's
+    # addresses (CIDRs) so it keys on the client from X-Forwarded-For instead.
+    # Without it every client behind the ingress shares one STRICT budget.
+    # APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.0.0/8"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
@@ -253,6 +259,18 @@ statuslist:
     # that rollout only, then run `list-quota recount` and `list-quota enable`
     # and remove it (see docs/troubleshooting.md, "Upgrading to the list quota").
     # APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
+    # Issuer tiers: the registry assigns each issuer `standard` or `sandbox`.
+    # Unset standard values follow APP_LIMITS__*; every value must stay within
+    # its APP_LIMITS__* cap and sandbox within standard (pods refuse to start
+    # otherwise). WRITE_* budgets every authenticated management request and
+    # is per replica. See docs/architecture.md.
+    # APP_TIERS__STANDARD__WRITE_BURST_SIZE: "100"
+    # APP_TIERS__STANDARD__WRITE_PERIOD_SECS: "1"
+    # APP_TIERS__SANDBOX__MAX_LISTS: "10"
+    # APP_TIERS__SANDBOX__MAX_STATUS_INDEX: "10000"
+    # APP_TIERS__SANDBOX__MAX_STATUSES_PER_REQUEST: "1000"
+    # APP_TIERS__SANDBOX__WRITE_BURST_SIZE: "10"
+    # APP_TIERS__SANDBOX__WRITE_PERIOD_SECS: "6"
     # Telemetry / OpenTelemetry
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"

@@ -1,6 +1,6 @@
 //! Outbound secondary ports defining contracts.
 
-use std::{fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
@@ -95,6 +95,10 @@ pub trait StatusListRepo: Send + Sync + 'static {
 
     /// Issuer identifiers that currently own at least one status list.
     async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
+
+    /// Number of status lists each issuer owns, counted from the stored lists.
+    /// Issuers without a list are absent.
+    async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
 
     /// Reserve `count` unused indices for `list_id`, returning the newly
     /// allocated indices in ascending order.

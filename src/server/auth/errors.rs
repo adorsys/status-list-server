@@ -60,9 +60,19 @@ impl IntoApiError for AuthenticationError {
     }
 }
 
+/// Response extension marking a request the client failed to authenticate,
+/// which the management write gate charges to the client address.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthenticationRejected;
+
 impl IntoResponse for AuthenticationError {
     fn into_response(self) -> axum::response::Response {
-        self.into_api_error().into_response()
+        let rejected = !matches!(self, AuthenticationError::InternalServer);
+        let mut response = self.into_api_error().into_response();
+        if rejected {
+            response.extensions_mut().insert(AuthenticationRejected);
+        }
+        response
     }
 }
 

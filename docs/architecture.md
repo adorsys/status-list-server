@@ -125,7 +125,7 @@ The HTTP surface is split into three structurally separate listeners (`src/start
 
 - **Public** (`server.host:server.port`, default `localhost:8000`): status-list reads, aggregation reads, liveness (`/health`, `/health/live`), and the JSON service document (`GET /`).
 - **Management** (`server.management.host:server.management.port`, default `localhost:8001`): authenticated issuer writes (`PUT`/`PATCH .../statuses`, `POST .../allocations`) and issuer identity lookup (`GET /api/v1/credentials`).
-- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`) and metrics (`/metrics` when `server.enable_metrics`).
+- **Admin** (`server.admin.host:server.admin.port`, default `localhost:8002`): readiness (`/health/ready`), metrics (`/metrics` when `server.enable_metrics`) and the admin API's issuer reads (`GET /admin/v1/issuers`, `GET /admin/v1/issuers/{issuer_id}`, see [`openapi-admin.yaml`](openapi-admin.yaml)).
 
 ### Data Flow
 
@@ -162,26 +162,112 @@ operator-configurable through environment variables prefixed with `APP_`.
 
 ### Rate-limiting tiers (`APP_RATE_LIMIT__*`)
 
-A token-bucket governor (`tower-governor`) is applied per route group, with
-each tier keyed and tuned independently:
+Token buckets (`governor`) are applied per route group, with each tier keyed
+and tuned independently:
 
 | Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
 | -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| **writes**     | `PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,          | smart IP (`SmartIpKeyExtractor`) — reads `X-Forwarded-For`, | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                | `GET /api/v1/credentials` (authenticated)                       | `X-Real-Ip`, `Forwarded` headers, fallback to peer IP       |                                                               |
+| **writes**     | every authenticated management route: `PUT`/`PATCH`             | peer IP, or behind `trusted_proxies` the rightmost          | `strict_burst_size` (10), `strict_period_secs` (60s)          |
+|                | `.../statuses`, `POST .../allocations`, `GET /api/v1/credentials` | untrusted `X-Forwarded-For` entry                         |                                                               |
 | **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
 |                | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` |                                                             |                                                               |
 
-The writes tier is applied **before** the `auth` middleware (rate limiting by IP
-happens first, then authentication rejects unauthenticated requests with `401`).
-When a bucket is exhausted the server returns `429 Too Many Requests`.
+The writes tier is a gate in front of the `auth` middleware that counts
+**rejected authentications** only. Each request `auth` answers with `401`
+spends one token of the client address's bucket; requests that authenticate
+spend nothing, so verified issuers behind one address never share it. Once an
+address has spent its bucket, every request from it, including one with a
+valid token, gets `429` before its token is verified, until the next token is
+replenished. This keeps floods of bad tokens from one address away from
+signature verification. Per-issuer budgets come from the issuer's tier (see
+[Issuer tiers](#issuer-tiers-app_tiers__)), applied after `auth`.
 
-> **Note:** Governor state is held in-memory per-replica. In a horizontally
-> scaled deployment each instance maintains its own token bucket, so the
+The writes gate keys on the TCP peer address. Only when the peer is listed
+in `rate_limit.trusted_proxies` (`APP_RATE_LIMIT__TRUSTED_PROXIES`, a
+comma-separated list of addresses or CIDR networks, empty by default) does it
+read `X-Forwarded-For`, from the right: it skips entries that are themselves
+trusted proxies and keys on the first one that is not. That entry was
+appended by a trusted proxy, so a client cannot choose it; anything a client
+puts further left is ignored, as are `X-Real-Ip` and `Forwarded`. An
+unparsable entry ends the walk at the nearest trusted address.
+
+Behind an ingress or load balancer, list its addresses (for example the pod
+CIDR of the ingress controller). Otherwise every client shares the ingress
+address and one client sending bad tokens blocks all of them until a token is
+replenished. The first `X-Forwarded-For` received from an untrusted peer is
+logged as a warning. Clients behind one NAT address still share the gate.
+
+The order on management routes is: writes gate, `auth`, issuer limit,
+handler. When any bucket is exhausted the server returns
+`429 Too Many Requests` with the JSON body
+`{"error": "too_many_requests", ...}` and a `Retry-After` header giving the
+whole seconds until the next token, rounded up.
+
+> **Note:** Rate-limit state is held in memory per replica. In a horizontally
+> scaled deployment each instance maintains its own token buckets, so the
 > effective cluster-wide rate limit is `burst_size × replica_count`. Rate-limit
-> state is not shared between instances; see
-> [tower-governor](https://crates.io/crates/tower-governor) for
-> alternative storage backends.
+> state is not shared between instances.
+
+### Issuer tiers (`APP_TIERS__*`)
+
+Every issuer in the registry has a `tier`, `standard` (the default) or
+`sandbox`. The tier selects the issuer's rate limit, list quota and
+request bounds. Each value is set as `tiers.<tier>.<key>`, for example
+`APP_TIERS__SANDBOX__MAX_LISTS=5`.
+
+| Key                        | `standard` default                | `sandbox` default |
+| -------------------------- | --------------------------------- | ----------------- |
+| `max_lists`                | `limits.max_lists_per_issuer`     | 10                |
+| `max_status_index`         | `limits.max_status_index`         | 10000             |
+| `max_statuses_per_request` | `limits.max_statuses_per_request` | 1000              |
+| `max_keys`                 | 5                                 | 2                 |
+| `write_burst_size`         | 100                               | 10                |
+| `write_period_secs`        | 1                                 | 6                 |
+| `max_lifetime_days`        | unset (no bound)                  | 30                |
+
+An unset `sandbox` value is lowered to the resolved `standard` value when the
+default would exceed it, so lowering a `limits.*` cap never breaks startup.
+Values that are set explicitly are never adjusted. A pod refuses to start
+unless:
+
+- every value is greater than 0;
+- each tier's `max_lists`, `max_status_index` and `max_statuses_per_request`
+  is at most its `limits.*` cap, and `max_lists` is at most the aggregation
+  page size (1000);
+- every `sandbox` value is at most the `standard` value. `write_period_secs`
+  is the exception: a longer period is stricter, so `sandbox` must be at
+  least the `standard` period. When `standard` sets `max_lifetime_days`,
+  `sandbox` must not exceed it.
+
+The issuer rate limit covers every authenticated management route:
+`PUT`/`PATCH .../statuses`, `POST .../allocations` and `GET /credentials`,
+which share one bucket. Each issuer gets a bucket of `write_burst_size`
+tokens, one replenished every `write_period_secs`. An issuer over its budget
+still has its token verified before it gets `429`, because the bucket is only
+known once `auth` has identified the issuer. The bucket is keyed on the issuer
+identity that `auth` verified, so issuers behind one IP have independent
+budgets, and a request with a forged `iss` fails authentication without
+touching any issuer bucket. Each tier keeps its own buckets, so an issuer
+moved to another tier starts with a full bucket of the new tier.
+
+Tier bounds limit growth. `max_status_index` applies to publishing and to
+updates that would grow a list; an update to an index the list already holds
+is always accepted, so an issuer moved to a tier with a lower bound can still
+revoke the statuses it issued.
+
+`max_keys` is enforced on the issuer registry: a registry in which an issuer
+holds more keys whose `not_after` has not passed than its tier allows stops a
+pod from starting, and a reload with such a registry is refused and keeps the
+previous one. `max_lifetime_days` is validated at startup but not applied,
+because the registry records no creation time for an issuer.
+
+Rate-limit state is per replica: the effective cluster-wide budget of an
+issuer is `write_burst_size × replica_count`, and the same holds for the IP
+tiers. A global cap belongs at the edge (ingress or API gateway). The list
+quota is different: it is enforced in the database, so it holds across all
+replicas. While the list quota awaits `list-quota enable` (see
+[troubleshooting](troubleshooting.md#upgrading-to-the-list-quota)), no tier's
+`max_lists` is enforced either.
 
 ### Request & persistence bounds (`APP_LIMITS__*`)
 
@@ -195,6 +281,10 @@ persisted status lists:
 | `max_statuses_per_request` | 5000    | `400 Bad Request` — too many entries      | publish / update handlers                      |
 | `max_serialized_list_size` | 1 MiB   | `422 Unprocessable Entity`                | application services                           |
 | `max_lists_per_issuer`     | 1000    | `400 Bad Request` — `list_quota_exceeded` | publish transaction (`issuers.list_count`) |
+
+`max_status_index`, `max_statuses_per_request` and `max_lists_per_issuer` are
+global caps. The bound applied to a request is the issuer's tier value (see
+[Issuer tiers](#issuer-tiers-app_tiers__)), which is at most the cap.
 
 These bounds protect the server from oversized payloads and unbounded list
 growth. The default schema maximums (`StatusEntry.index.maximum`,
@@ -296,7 +386,7 @@ listing did not attribute. Tell tenants before setting `server.aggregation_uri`.
 | `409`  | List/credentials already exist, or a concurrent update won the race                                 |
 | `413`  | Request body exceeds `max_body_size_bytes`                                                          |
 | `422`  | Serialized list exceeds `max_serialized_list_size`, or unparsable JWK                               |
-| `429`  | Rate-limit quota exhausted                                                                          |
+| `429`  | Rate-limit quota exhausted; `Retry-After` gives the wait in seconds                                 |
 | `500`  | Internal server error                                                                               |
 | `503`  | Service temporarily unavailable                                                                     |
 

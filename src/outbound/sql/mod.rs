@@ -266,6 +266,15 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
+    async fn list_counts_by_issuer(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.store
+            .count_status_lists_by_issuer()
+            .await
+            .map_err(Into::into)
+    }
+
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,

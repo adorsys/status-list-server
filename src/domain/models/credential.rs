@@ -3,6 +3,8 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::{fmt, str::FromStr, sync::Arc};
 
+use crate::domain::models::tier::IssuerTier;
+
 /// Validated public key and principal data supplied by a trust source.
 ///
 /// The principal is carried as a typed [`Principal`] so an issuer is guaranteed
@@ -25,6 +27,7 @@ pub enum Principal {
     Issuer {
         id: String,
         aggregation_id: AggregationId,
+        tier: IssuerTier,
     },
     /// A management admin principal, which authenticates with no aggregation.
     Admin { id: String },
