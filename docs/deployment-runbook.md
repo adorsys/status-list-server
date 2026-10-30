@@ -130,21 +130,30 @@ For a zero-downtime rotation:
 
 For emergency revocation, remove the compromised key from `keys`; to suspend the whole issuer, set its `disabled` field to `true`. Commit the change when the operator-managed registry is version-controlled, validate the file, then publish it to the mounted source. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer needs to authenticate, and do not delete the durable mapping while published tokens may still reference its URL. Public status-list reads continue while the issuer is disabled.
 
+Static revocation has no tombstone: removing the kid is the entire action, and nothing in this release prevents the same kid from being re-registered later. Permanence (a revoked kid is never reused) is enforced for hosted-profile keys, whose rows stay reserved in the database; for static issuers it is an operational invariant the registry file's history and review must uphold.
+
 Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
 
 For a hosted issuer, use the admin listener with a registry admin JWT carrying
-`issuers:write`. Read the current version with
-`GET /api/v1/issuers/{issuer_id}/state`, then send
-`PATCH /api/v1/issuers/{issuer_id}/state` with
-`{"state":"suspended","expected_version":1}` suspends it when the
-current version is 1; a stale version returns `409 issuer_version_mismatch` and
-requires reading the current version before retrying. The revoke endpoint
-`POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes a key.
-The committed state and actor audit event are written in one database
-transaction. Send the old issuer token to each pod's management listener and
-confirm `401`; public status-list reads remain available. A revoked `kid`
-remains stored and cannot be reused. An expired hosted issuer is rejected at
-verification time, even if no cleanup job has run.
+`issuers:write` — see [the admin API guide](admin-api.md) for how to mint it
+(header `typ: statuslist-admin+jwt`, the admin's `kid`, `iss` equal to the
+admin id, `aud` from `APP_ADMIN_AUTH__AUDIENCES`, `exp - iat` within
+`APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS`, default 300s). Read the issuer and
+its `ETag` with `GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`. A missing `If-Match` returns `428
+precondition_required`; a stale `ETag` returns `412 precondition_failed`, so
+re-read and retry. `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with
+`If-Match` and `{"state":"revoked"}` permanently revokes one key; repeating it
+returns the key unchanged. The committed state and actor audit event are
+written in one database transaction. The admin routes have their own
+rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults 30 per 60s),
+and a write that already authenticated before the change can still commit.
+Send the old issuer token to each pod's management listener
+(`GET /api/v1/credentials` must answer `401`); public status-list reads remain
+available. A revoked `kid` remains stored and cannot be reused. An expired
+hosted issuer is rejected at verification time, even if no cleanup job has
+run.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 

@@ -412,6 +412,14 @@ impl ValidatedRegistry {
         self.keys.get(kid).cloned()
     }
 
+    /// Resolve a key only when its registry principal is an admin.
+    pub fn resolve_admin_key(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
+        self.keys
+            .get(kid)
+            .filter(|key| matches!(&key.principal, Principal::Admin { .. }))
+            .cloned()
+    }
+
     /// Resolve a key that is active at the supplied Unix timestamp.
     pub fn resolve_at(&self, kid: &str, unix_timestamp: u64) -> Option<Arc<ResolvedKey>> {
         let now =
@@ -457,6 +465,10 @@ impl ValidatedRegistry {
 
     pub fn admin(&self, id: &str) -> Option<&AdminEntry> {
         self.registry.admins.iter().find(|admin| admin.id == id)
+    }
+
+    pub fn admins(&self) -> &[AdminEntry] {
+        &self.registry.admins
     }
 
     pub fn has_admin_scope(&self, id: &str, scope: &str) -> bool {

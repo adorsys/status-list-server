@@ -104,10 +104,14 @@ impl HostedIssuerService {
     }
 }
 
-/// Applies operator lifecycle commands to durable state. The store commits
-/// each transition together with its audit event.
+/// Applies operator lifecycle commands to durable state. The decision rules
+/// (no reactivation after expiry, the no-op case) live here behind an
+/// injectable clock, so they are testable without a database and a second
+/// backend does not have to copy them; the store commits each transition
+/// together with its audit event.
 pub struct HostedIssuerLifecycleService {
     store: Arc<dyn HostedIssuerLifecycleStore>,
+    clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
 }
 
 impl std::fmt::Debug for HostedIssuerLifecycleService {
@@ -119,7 +123,14 @@ impl std::fmt::Debug for HostedIssuerLifecycleService {
 
 impl HostedIssuerLifecycleService {
     pub fn new(store: Arc<dyn HostedIssuerLifecycleStore>) -> Self {
-        Self { store }
+        Self::with_clock(store, Arc::new(OffsetDateTime::now_utc))
+    }
+
+    pub fn with_clock(
+        store: Arc<dyn HostedIssuerLifecycleStore>,
+        clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+    ) -> Self {
+        Self { store, clock }
     }
 
     pub async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError> {
@@ -133,6 +144,21 @@ impl HostedIssuerLifecycleService {
         expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
+        let current = self.store.get_issuer(issuer_id).await?;
+        if state == HostedIssuerState::Active
+            && current
+                .expires_at
+                .is_some_and(|expiry| expiry <= (self.clock)())
+        {
+            return Err(HostedIssuerError::InvalidExpiry(
+                "an expired issuer cannot be reactivated".into(),
+            ));
+        }
+        // Re-applying the stored state is a no-op: report it unchanged
+        // without a version bump or an audit event.
+        if current.state == state {
+            return Ok(current);
+        }
         self.store
             .set_issuer_state(issuer_id, state, expected_version, actor)
             .await
@@ -164,6 +190,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for RecordingStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,
@@ -353,5 +395,157 @@ mod tests {
                 "expires_at={expires:?} must be rejected as already in the past"
             );
         }
+    }
+
+    /// A lifecycle store that records guarded writes without a database, so
+    /// the service rules are testable on their own.
+    struct RecordingLifecycleStore {
+        issuer: Mutex<HostedIssuer>,
+        writes: Mutex<Vec<(HostedIssuerState, u64)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostedIssuerLifecycleStore for RecordingLifecycleStore {
+        async fn get_issuer(&self, _id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+            Ok(self.issuer.lock().unwrap().clone())
+        }
+
+        async fn set_issuer_state(
+            &self,
+            _id: &str,
+            state: HostedIssuerState,
+            expected_version: u64,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((state.clone(), expected_version));
+            let mut issuer = self.issuer.lock().unwrap();
+            if issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            issuer.state = state;
+            issuer.version += 1;
+            Ok(issuer.clone())
+        }
+
+        async fn revoke_key(
+            &self,
+            _issuer_id: &str,
+            _kid: &str,
+            _actor: &str,
+        ) -> Result<HostedIssuerKey, HostedIssuerError> {
+            unreachable!("these rule tests do not revoke")
+        }
+    }
+
+    fn lifecycle_fixture(
+        state: HostedIssuerState,
+        expires_at: Option<OffsetDateTime>,
+    ) -> HostedIssuer {
+        HostedIssuer {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            display_name: None,
+            tier: "standard".into(),
+            state,
+            owner: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            expires_at,
+            version: 1,
+            aggregation_id: AggregationId::generate(),
+        }
+    }
+
+    fn lifecycle_service_with_clock(
+        store: Arc<RecordingLifecycleStore>,
+        now: OffsetDateTime,
+    ) -> HostedIssuerLifecycleService {
+        HostedIssuerLifecycleService::with_clock(store, Arc::new(move || now))
+    }
+
+    #[tokio::test]
+    async fn reactivating_an_expired_issuer_is_rejected_before_any_write() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let store = Arc::new(RecordingLifecycleStore {
+            issuer: Mutex::new(lifecycle_fixture(
+                HostedIssuerState::Suspended,
+                Some(now - time::Duration::days(1)),
+            )),
+            writes: Mutex::new(Vec::new()),
+        });
+        let service = lifecycle_service_with_clock(store.clone(), now);
+
+        let result = service
+            .set_issuer_state(
+                "00000000-0000-4000-8000-000000000001",
+                HostedIssuerState::Active,
+                1,
+                "portal-admin",
+            )
+            .await;
+        assert!(matches!(result, Err(HostedIssuerError::InvalidExpiry(_))));
+        assert!(
+            store.writes.lock().unwrap().is_empty(),
+            "the rejected reactivation must not reach the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_applying_the_stored_state_is_a_noop_without_a_write() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let store = Arc::new(RecordingLifecycleStore {
+            issuer: Mutex::new(lifecycle_fixture(
+                HostedIssuerState::Suspended,
+                Some(now + time::Duration::days(1)),
+            )),
+            writes: Mutex::new(Vec::new()),
+        });
+        let service = lifecycle_service_with_clock(store.clone(), now);
+
+        let issuer = service
+            .set_issuer_state(
+                "00000000-0000-4000-8000-000000000001",
+                HostedIssuerState::Suspended,
+                1,
+                "portal-admin",
+            )
+            .await
+            .unwrap();
+        assert_eq!(issuer.state, HostedIssuerState::Suspended);
+        assert_eq!(
+            issuer.version, 1,
+            "a no-op must not bump the version or write an audit event"
+        );
+        assert!(store.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_real_change_reaches_the_store_with_the_read_version() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let store = Arc::new(RecordingLifecycleStore {
+            issuer: Mutex::new(lifecycle_fixture(
+                HostedIssuerState::Active,
+                Some(now + time::Duration::days(1)),
+            )),
+            writes: Mutex::new(Vec::new()),
+        });
+        let service = lifecycle_service_with_clock(store.clone(), now);
+
+        let issuer = service
+            .set_issuer_state(
+                "00000000-0000-4000-8000-000000000001",
+                HostedIssuerState::Suspended,
+                1,
+                "portal-admin",
+            )
+            .await
+            .unwrap();
+        assert_eq!(issuer.state, HostedIssuerState::Suspended);
+        assert_eq!(issuer.version, 2);
+        assert_eq!(
+            *store.writes.lock().unwrap(),
+            vec![(HostedIssuerState::Suspended, 1)]
+        );
     }
 }

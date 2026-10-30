@@ -53,11 +53,13 @@ pub enum HostedIssuerLifecycleState {
 
 impl HostedIssuer {
     /// Expiry is derived at verification time, without a cleanup job.
+    /// Suspension wins over expiry so an operator never sees a suspended
+    /// issuer reported as merely expired.
     pub fn lifecycle_state(&self, now: OffsetDateTime) -> HostedIssuerLifecycleState {
-        if self.expires_at.is_some_and(|expiry| now >= expiry) {
-            HostedIssuerLifecycleState::Expired
-        } else if self.state == HostedIssuerState::Suspended {
+        if self.state == HostedIssuerState::Suspended {
             HostedIssuerLifecycleState::Suspended
+        } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            HostedIssuerLifecycleState::Expired
         } else {
             HostedIssuerLifecycleState::Active
         }
@@ -68,6 +70,22 @@ impl HostedIssuer {
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
         self.lifecycle_state(now) == HostedIssuerLifecycleState::Active
     }
+}
+
+/// Metadata filters applied before bounding an admin issuer page.
+#[derive(Clone, Debug, Default)]
+pub struct HostedIssuerFilter {
+    pub tier: Option<String>,
+    pub state: Option<HostedIssuerReadState>,
+    pub owner: Option<String>,
+}
+
+/// Admin-visible lifecycle derived from persisted state and expiry.
+#[derive(Clone, Copy, Debug)]
+pub enum HostedIssuerReadState {
+    Active,
+    Suspended,
+    Expired,
 }
 
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
@@ -172,6 +190,9 @@ pub enum HostedIssuerError {
     Corrupt(String),
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
+    /// The store could not be reached: retry later with the same request.
+    #[error("the issuer store is currently unavailable")]
+    Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -292,6 +313,20 @@ mod tests {
             entry.resolved_key(now()),
             Err(KeyResolveError::PrincipalDisabled)
         ));
+    }
+
+    #[test]
+    fn suspension_takes_precedence_over_expiry() {
+        let entry = entry_with(
+            HostedIssuerState::Suspended,
+            Some(now() - time::Duration::seconds(1)),
+            HostedIssuerKeyState::Active,
+            (None, None),
+        );
+        assert_eq!(
+            entry.issuer.lifecycle_state(now()),
+            HostedIssuerLifecycleState::Suspended
+        );
     }
 
     #[test]

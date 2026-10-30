@@ -68,7 +68,7 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let (strict_governor, issuer_governor, permissive_governor) =
+        let (admin_governor, issuer_governor, permissive_governor) =
             build_governor_configs(&config.rate_limit)?;
 
         let public_router = with_listener_name(
@@ -97,8 +97,8 @@ impl HttpServer {
 
         let admin_router = with_listener_name(
             with_common_layers(
-                admin_routes(config, prometheus_registry)
-                    .merge(hosted_admin_routes(state.clone(), strict_governor)),
+                admin_routes(state.clone(), config, prometheus_registry)
+                    .merge(hosted_admin_routes(state.clone(), admin_governor)),
                 config,
             ),
             "admin",
@@ -289,12 +289,12 @@ type GovernorPolicies = (
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let strict = Arc::new(
+    let admin = Arc::new(
         GovernorConfigBuilder::default()
-            .burst_size(config.strict_burst_size)
-            .period(Duration::from_secs(config.strict_period_secs))
+            .burst_size(config.admin_burst_size)
+            .period(Duration::from_secs(config.admin_period_secs))
             .finish()
-            .ok_or_else(|| eyre!("strict governor requires non-zero burst_size and period"))?,
+            .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
     );
     let issuer = Arc::new(
         GovernorConfigBuilder::default()
@@ -311,7 +311,7 @@ fn build_governor_configs(
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((strict, issuer, permissive))
+    Ok((admin, issuer, permissive))
 }
 
 /// Routes owned by the public listener: status-list reads, aggregation reads,
@@ -359,30 +359,47 @@ fn management_routes(
 /// Routes owned by the admin listener: readiness and (optionally) metrics.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
-fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
-    let router = Router::new().route("/health/ready", get(health::ready));
+fn admin_routes(state: AppState, config: &Config, registry: Registry) -> Router<AppState> {
+    let admin_api = Router::new()
+        .route(
+            "/issuers",
+            get(crate::server::handlers::admin::list_issuers),
+        )
+        .route(
+            "/issuers/{issuer_id}",
+            get(crate::server::handlers::admin::get_issuer),
+        );
+    let router = Router::new()
+        .route("/health/ready", get(health::ready))
+        .nest(
+            "/admin/v1",
+            admin_api.route_layer(from_fn_with_state(state, crate::server::auth::admin_auth)),
+        );
     attach_metrics(router, config, registry)
 }
 
+/// Hosted-profile lifecycle routes on the admin listener: suspend/resume an
+/// issuer and revoke one of its keys, as `PATCH` operations on the admin
+/// issuer API. Mounted only when the hosted profile provides the lifecycle
+/// service, so the routes are structurally absent in the private profile.
 fn hosted_admin_routes(
     state: AppState,
-    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
     if state.hosted_lifecycle_service.is_none() {
         return Router::new();
     }
     Router::new()
         .route(
-            "/api/v1/issuers/{issuer_id}/state",
-            get(crate::server::handlers::hosted_lifecycle::get_issuer_state)
-                .patch(crate::server::handlers::hosted_lifecycle::change_issuer_state),
+            "/admin/v1/issuers/{issuer_id}",
+            patch(crate::server::handlers::hosted_lifecycle::update_issuer),
         )
         .route(
-            "/api/v1/issuers/{issuer_id}/keys/{kid}/revoke",
-            post(crate::server::handlers::hosted_lifecycle::revoke_hosted_key),
+            "/admin/v1/issuers/{issuer_id}/keys/{kid}",
+            patch(crate::server::handlers::hosted_lifecycle::revoke_issuer_key),
         )
         .route_layer(from_fn_with_state(state, admin_auth))
-        .layer(GovernorLayer::new(strict_governor))
+        .layer(GovernorLayer::new(admin_governor))
 }
 
 /// Axum middleware recording HTTP latency + request-count SLIs.
@@ -570,7 +587,8 @@ mod tests {
 
         let public = public_routes(permissive).with_state(state.clone());
         let management = management_routes(state.clone(), issuer).with_state(state.clone());
-        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
+        let admin =
+            admin_routes(state.clone(), &config, prometheus::Registry::new()).with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
             let request = Request::builder()
@@ -637,6 +655,8 @@ mod tests {
             // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
+            (Method::GET, "/admin/v1/issuers", ADMIN),
+            (Method::GET, "/admin/v1/issuers/example", ADMIN),
         ];
 
         for (method, path, owner) in routes {
@@ -1354,5 +1374,196 @@ mod tests {
                 && body.contains("status_class=\"5xx\""),
             "expected 5xx counter for a panicking handler; body:\n{body}"
         );
+    }
+
+    /// The lifecycle routes exist only on the admin listener and only in the
+    /// hosted profile; everywhere else the request never reaches a
+    /// lifecycle handler.
+    #[tokio::test]
+    async fn lifecycle_routes_are_mounted_only_on_the_admin_listener() {
+        use crate::domain::models::hosted_issuer::{
+            HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerState,
+        };
+        use crate::domain::ports::HostedIssuerLifecycleStore;
+        use axum::http::header;
+
+        struct UnreachableLifecycleStore;
+        #[async_trait::async_trait]
+        impl HostedIssuerLifecycleStore for UnreachableLifecycleStore {
+            async fn get_issuer(&self, _id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn set_issuer_state(
+                &self,
+                _id: &str,
+                _state: HostedIssuerState,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn revoke_key(
+                &self,
+                _issuer_id: &str,
+                _kid: &str,
+                _actor: &str,
+            ) -> Result<HostedIssuerKey, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+        }
+
+        fn admin_registry() -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
+            let public_jwk: serde_json::Value =
+                serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+            let yaml = serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [],
+                "admins": [{
+                    "id": "admin-1",
+                    "scopes": ["issuers:write"],
+                    "keys": [{
+                        "kid": "test-key",
+                        "alg": "ES256",
+                        "jwk": public_jwk,
+                    }],
+                }],
+            }))
+            .unwrap();
+            Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap(),
+            )
+        }
+
+        fn admin_token() -> String {
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+            header.typ = Some("statuslist-admin+jwt".into());
+            header.kid = Some("test-key".into());
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+                crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+            )
+            .unwrap();
+            jsonwebtoken::encode(
+                &header,
+                &serde_json::json!({
+                    "iss": "admin-1",
+                    "iat": now,
+                    "exp": now + 300,
+                    "aud": ["status-list-server-admin"],
+                }),
+                &secret,
+            )
+            .unwrap()
+        }
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (admin_governor, issuer, permissive) =
+            build_governor_configs(&config.rate_limit).unwrap();
+        let registry = admin_registry();
+        let mut hosted = crate::test_utils::test_app_state(None).await;
+        hosted.admin_registry = registry.clone();
+        hosted.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+        hosted.hosted_lifecycle_service = Some(Arc::new(
+            crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(Arc::new(
+                UnreachableLifecycleStore,
+            )),
+        ));
+        let mut private = crate::test_utils::test_app_state(None).await;
+        private.admin_registry = registry;
+        private.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+
+        let admin = admin_routes(hosted.clone(), &config, Registry::new())
+            .merge(hosted_admin_routes(hosted.clone(), admin_governor.clone()))
+            .with_state(hosted);
+        let public = {
+            let state = crate::test_utils::test_app_state(None).await;
+            public_routes(permissive).with_state(state)
+        };
+        let management = {
+            let state = crate::test_utils::test_app_state(None).await;
+            management_routes(state.clone(), issuer).with_state(state)
+        };
+        let private_admin = {
+            admin_routes(private.clone(), &config, Registry::new())
+                .merge(hosted_admin_routes(private.clone(), admin_governor))
+                .with_state(private)
+        };
+
+        let token = admin_token();
+        let send = |router: Router, uri: String, token: Option<&str>, body: &'static str| {
+            let mut builder = Request::builder()
+                .method(Method::PATCH)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            if let Some(token) = token {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            router.oneshot(builder.body(Body::from(body)).unwrap())
+        };
+
+        for (uri, body) in [
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001",
+                r#"{"state":"suspended"}"#,
+            ),
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001/keys/some-kid",
+                r#"{"state":"revoked"}"#,
+            ),
+        ] {
+            // Other listeners have no admin route at all.
+            let response = send(public.clone(), uri.into(), None, body).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "public listener");
+            let response = send(management.clone(), uri.into(), None, body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "management listener"
+            );
+
+            // Private profile: the issuer read route exists (GET), so a PATCH
+            // is a method-not-allowed on it, and the key route does not exist.
+            let response = send(private_admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            let expected = if uri.ends_with("/keys/some-kid") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::METHOD_NOT_ALLOWED
+            };
+            assert_eq!(
+                response.status(),
+                expected,
+                "private profile must not mount lifecycle routes"
+            );
+
+            // Hosted profile: the lifecycle handlers answer — without the
+            // precondition the request stops at 428, never at the store.
+            let response = send(admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PRECONDITION_REQUIRED,
+                "hosted admin listener"
+            );
+        }
     }
 }

@@ -320,6 +320,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for InMemoryHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             kid: &str,
@@ -733,6 +749,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for GatedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             kid: &str,
@@ -979,6 +1011,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for FailingHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,
@@ -1053,6 +1101,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for CorruptHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,
@@ -1141,9 +1205,37 @@ mod tests {
         publish_first_list_flow(test_db.db.clone(), "Postgres").await;
     }
 
+    #[cfg(all(feature = "memory", feature = "mysql"))]
+    #[tokio::test]
+    async fn hosted_issuer_publishes_first_list_like_a_static_issuer_mysql() {
+        use crate::outbound::sql::test_containers::mysql_helpers;
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        publish_first_list_flow(test_db.connection().await, "MySQL").await;
+    }
+
+    /// The public half of a second EC pair, distinct from `key()`'s, so the
+    /// revocation of one key can be observed while the issuer stays writable
+    /// through the other.
     #[cfg(all(
         feature = "memory",
-        any(feature = "sqlite", feature = "postgres-tests")
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
+    ))]
+    const SECOND_EC_JWK: &str = r#"{
+        "kty":"EC", "crv": "P-256", "kid": "ignored", "alg": "ES256",
+        "x": "qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E",
+        "y": "c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"
+    }"#;
+
+    /// The private half of [`SECOND_EC_JWK`].
+    #[cfg(all(
+        feature = "memory",
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
+    ))]
+    const SECOND_EC_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIIBeQIBADCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0BAQIhAP////8AAAAB\nAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAABAAAAAAAAAAAAAAAA\n///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxTsPY7zjw+J9JgSwMV\nAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg\n9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9QIhAP////8A\nAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBBG0wawIBAQQgyO8dO/IXvyo2\nloV5QPB42Gv31v5U5pik40FfQ12VVzWhRANCAASozvoFuoPcmZaeJPgC5JgzkrDE\nLlYA1w9cGkJRB8B/UXP3TuiR9gairPTOlLAzTEO0bGDIMKjjeU4tfYCm/Jy5\n-----END PRIVATE KEY-----";
+
+    #[cfg(all(
+        feature = "memory",
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
     ))]
     async fn publish_first_list_flow(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
@@ -1171,8 +1263,10 @@ mod tests {
         // the resolver's read both hit this database.
         let mut state = crate::test_utils::test_app_state(Some(db.clone())).await;
         state.set_issuer_registry(registry.clone());
-        state.issuer_key_resolver =
-            Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
+        state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            registry,
+            Some(store.clone()),
+        ));
         let mut other_state = crate::test_utils::test_app_state(Some(db.clone())).await;
         let other_registry = Arc::new(RegistryHandle::empty());
         other_state.set_issuer_registry(other_registry.clone());
@@ -1262,6 +1356,28 @@ mod tests {
             .unwrap()
             .status()
         }
+        async fn public_read(app: &Router, list_id: &str) -> StatusCode {
+            use tower::ServiceExt;
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/status-lists/{list_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        // The second replica must prove it can publish at all before any
+        // lifecycle change, or its later 401 would show nothing.
+        assert_eq!(
+            write(other.clone(), &token).await,
+            StatusCode::CREATED,
+            "the second replica must publish on {backend} before suspension"
+        );
+
         use crate::domain::ports::HostedIssuerLifecycleStore;
         let lifecycle = crate::outbound::sql::SqlHostedIssuerStore::new(db.clone());
         lifecycle
@@ -1277,16 +1393,7 @@ mod tests {
             assert_eq!(write(replica, &token).await, StatusCode::UNAUTHORIZED);
         }
         for replica in [app.clone(), other.clone()] {
-            let public = replica
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/api/v1/status-lists/{list_id}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(public.status(), StatusCode::OK);
+            assert_eq!(public_read(&replica, &list_id).await, StatusCode::OK);
         }
         lifecycle
             .set_issuer_state(
@@ -1297,6 +1404,58 @@ mod tests {
             )
             .await
             .unwrap();
+        // Writes must work again after reactivation: the expiry check below
+        // would otherwise pass even if reactivation had silently failed.
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica, &token).await,
+                StatusCode::CREATED,
+                "writes must recover after reactivation on {backend}"
+            );
+        }
+        // Revocation blocks the next write on every replica, not just key
+        // resolution.
+        lifecycle
+            .revoke_key(&hosted.id, "portal-key", "portal-operator")
+            .await
+            .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica, &token).await,
+                StatusCode::UNAUTHORIZED,
+                "a revoked key must block the next write on {backend}"
+            );
+        }
+        // A second key keeps the issuer writable; expiry then blocks it while
+        // the published lists stay publicly readable.
+        register_hosted_issuer_key(
+            &Arc::new(RegistryHandle::empty()),
+            &store,
+            key_with_material("portal-key-2", SECOND_EC_JWK),
+            "portal-operator",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("registering the second portal key on {backend}: {e}"));
+        let mut second_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        second_header.typ = Some("statuslist-management+jwt".to_string());
+        second_header.kid = Some("portal-key-2".to_string());
+        let second_token = jsonwebtoken::encode(
+            &second_header,
+            &serde_json::json!({
+                "iss": hosted.id,
+                "iat": now,
+                "exp": now + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_ec_pem(SECOND_EC_PRIVATE_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica.clone(), &second_token).await,
+                StatusCode::CREATED,
+                "the second key must publish on {backend}"
+            );
+        }
         use crate::outbound::sql::issuers;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
         issuers::Entity::update_many()
@@ -1308,8 +1467,17 @@ mod tests {
             .exec(db.as_ref())
             .await
             .unwrap();
-        for replica in [app, other] {
-            assert_eq!(write(replica, &token).await, StatusCode::UNAUTHORIZED);
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica.clone(), &second_token).await,
+                StatusCode::UNAUTHORIZED,
+                "an expired issuer must block writes on {backend}"
+            );
+            assert_eq!(
+                public_read(&replica, &list_id).await,
+                StatusCode::OK,
+                "an expired issuer's lists must stay publicly readable on {backend}"
+            );
         }
     }
 
@@ -1361,8 +1529,10 @@ mod tests {
 
         let mut state = crate::test_utils::test_app_state(Some(db.clone())).await;
         state.set_issuer_registry(registry.clone());
-        state.issuer_key_resolver =
-            Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
+        state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            registry,
+            Some(store.clone()),
+        ));
 
         let token = portal_token(&hosted.id);
         let app = Router::new()

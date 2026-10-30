@@ -151,41 +151,6 @@
       ]
     },
     {
-      "name": "Issuer Management",
-      "item": [
-        {
-          "name": "Suspend hosted issuer (admin listener)",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "Authorization", "value": "Bearer {{adminToken}}" }
-            ],
-            "body": { "mode": "raw", "raw": "{\"state\":\"suspended\",\"expected_version\":1}" },
-            "url": {
-              "raw": "{{adminUrl}}/api/v1/issuers/{{issuer_id}}/state",
-              "host": ["{{adminUrl}}"],
-              "path": ["api", "v1", "issuers", "{{issuer_id}}", "state"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Revoke hosted key (admin listener)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Authorization", "value": "Bearer {{adminToken}}" }],
-            "url": {
-              "raw": "{{adminUrl}}/api/v1/issuers/{{issuer_id}}/keys/{{kid}}/revoke",
-              "host": ["{{adminUrl}}"],
-              "path": ["api", "v1", "issuers", "{{issuer_id}}", "keys", "{{kid}}", "revoke"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
       "name": "Status Lists",
       "item": [
         {
@@ -744,6 +709,272 @@
               }
             }
           ]
+        }
+      ]
+    },
+    {
+      "name": "Admin API",
+      "item": [
+        {
+          "name": "List issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?limit=50",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
+                  "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
+                  "pm.test(\"No key-count quota is reported as null\", () => pm.expect(pm.response.json().usage.keys_limit).to.eql(null));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Issuer Lifecycle (destructive, hosted profile)",
+      "description": "Emergency operations on a portal issuer: suspend it and revoke one of its keys. Destructive: run only against a hosted-profile server you control, with an admin token (`statuslist-admin+jwt`) carrying `issuers:write`. This folder runs last so earlier requests run against a live issuer. Each change needs the issuer's current ETag from `GET /admin/v1/issuers/{issuer_id}`; without `If-Match` the server answers 428. In the private profile the routes are absent by design and these requests answer 404 (401 on the read, which is always mounted), which the assertions accept.",
+      "item": [
+        {
+          "name": "Get issuer and read its ETag",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const status = pm.response.code;",
+                  "pm.test(`get issuer answers 200 or 401 without an admin audience, got ${status}`, () => {",
+                  "    pm.expect([200, 401]).to.include(status);",
+                  "});",
+                  "if (status === 200) {",
+                  "    const etag = pm.response.headers.get('ETag');",
+                  "    pm.test('response carries an ETag', () => pm.expect(etag).to.be.a('string'));",
+                  "    pm.collectionVariables.set('etag', etag);",
+                  "    const state = pm.response.json().state;",
+                  "    pm.test(`issuer state is reported, got ${state}`, () => pm.expect(state).to.be.oneOf(['active', 'suspended', 'expired']));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Suspend hosted issuer (destructive)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const status = pm.response.code;",
+                  "pm.test(`suspend answers 200 on the hosted profile, 404 in the private profile, got ${status}`, () => {",
+                  "    pm.expect([200, 404]).to.include(status);",
+                  "});",
+                  "if (status === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.test('issuer is suspended', () => pm.expect(body.state).to.eql('suspended'));",
+                  "    const etag = pm.response.headers.get('ETag');",
+                  "    pm.test('response carries the new ETag', () => pm.expect(etag).to.be.a('string'));",
+                  "    pm.collectionVariables.set('etag', etag);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"suspended\"}"
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke hosted key (destructive)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const status = pm.response.code;",
+                  "pm.test(`revoke answers 200 on the hosted profile, 404 in the private profile, got ${status}`, () => {",
+                  "    pm.expect([200, 404]).to.include(status);",
+                  "});",
+                  "if (status === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.test('key is revoked', () => {",
+                  "        pm.expect(body.kid).to.eql(pm.variables.get('kid'));",
+                  "        pm.expect(body.state).to.eql('revoked');",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"revoked\"}"
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}/keys/{{kid}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys",
+                "{{kid}}"
+              ]
+            }
+          },
+          "response": []
         }
       ]
     }

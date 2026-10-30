@@ -16,6 +16,10 @@ pub enum RepositoryError {
     DeleteError(String),
     #[error("Could not store entity")]
     CouldNotStoreEntity,
+    /// A database connection could not be acquired or the driver lost its
+    /// connection while executing the operation. Safe to retry as a request.
+    #[error("Database is currently unavailable")]
+    Unavailable,
     #[error("Repository not set")]
     RepositoryNotSet,
     #[error("Duplicate entry")]

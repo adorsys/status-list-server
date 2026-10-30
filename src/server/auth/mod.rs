@@ -28,6 +28,160 @@ use crate::server::{AppState, error::ApiError};
 const JWT_REQUIRED_SPEC_CLAIMS: &[&str] = &["iss", "exp"];
 const JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE: &[&str] = &["iss", "exp", "aud"];
 const MANAGEMENT_TOKEN_TYPE: &str = "statuslist-management+jwt";
+const ADMIN_TOKEN_TYPE: &str = "statuslist-admin+jwt";
+
+/// Verified admin identity and registry-defined scopes for one request.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedAdmin {
+    pub id: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminClaims {
+    iss: String,
+    iat: u64,
+    exp: u64,
+}
+
+/// Verify an admin JWT against admin registry entries only.
+pub async fn admin_auth(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AuthenticationError> {
+    let Some(raw) = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Err(AuthenticationError::MissingToken);
+    };
+    let Some((scheme, token)) = raw.split_once(char::is_whitespace) else {
+        if raw.eq_ignore_ascii_case("Bearer") {
+            return Err(invalid_admin_auth(None, None, "empty Bearer token"));
+        }
+        return Err(AuthenticationError::MissingToken);
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(AuthenticationError::MissingToken);
+    }
+    if token.trim().is_empty() {
+        return Err(invalid_admin_auth(None, None, "empty Bearer token"));
+    }
+    let jwt = token.trim();
+    let h = jsonwebtoken::decode_header(jwt)
+        .map_err(|_| invalid_admin_auth(None, None, "invalid JWT header"))?;
+    let typ = h.typ.as_deref().unwrap_or("");
+    let typ = if typ
+        .get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/"))
+    {
+        &typ[12..]
+    } else {
+        typ
+    };
+    if !typ.eq_ignore_ascii_case(ADMIN_TOKEN_TYPE)
+        || h.crit.is_some()
+        || !MANAGEMENT_SIGNING_ALGORITHMS.contains(&h.alg)
+    {
+        return Err(invalid_admin_auth(
+            h.kid.as_deref(),
+            None,
+            "invalid typ, crit, or alg",
+        ));
+    }
+    let kid = h
+        .kid
+        .as_deref()
+        .filter(|v| !v.is_empty() && v.chars().count() <= 255)
+        .ok_or_else(|| invalid_admin_auth(None, None, "missing or invalid kid"))?;
+    if state.admin_auth.audiences.is_empty() {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            None,
+            "no admin audience is configured",
+        ));
+    }
+    let snapshot = state.admin_registry.snapshot();
+    let resolved = snapshot
+        .resolve_admin_key(kid)
+        .ok_or_else(|| invalid_admin_auth(Some(kid), None, "kid is not registered to an admin"))?;
+    let now_time = time::OffsetDateTime::now_utc();
+    if !resolved.enabled
+        || resolved.not_before.is_some_and(|start| now_time < start)
+        || resolved.not_after.is_some_and(|end| now_time >= end)
+    {
+        let iss = match &resolved.principal {
+            Principal::Admin { id, .. } => Some(id.as_str()),
+            Principal::Issuer { .. } => None,
+        };
+        return Err(invalid_admin_auth(
+            Some(kid),
+            iss,
+            "admin key is disabled or outside its validity window",
+        ));
+    }
+    let Principal::Admin { id, .. } = &resolved.principal else {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            None,
+            "key is not owned by an admin",
+        ));
+    };
+    if resolved.public_key.key_id() != kid || resolved.public_key.algorithm() != h.alg {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            "registered key id or algorithm mismatch",
+        ));
+    }
+    let key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|_| {
+        invalid_admin_auth(Some(kid), Some(id), "invalid registered verification key")
+    })?;
+    let mut validation = Validation::new(resolved.public_key.algorithm());
+    validation.leeway = state.admin_auth.leeway_secs;
+    validation.validate_nbf = true;
+    validation.set_issuer(&[id]);
+    validation.set_audience(&state.admin_auth.audiences);
+    validation.set_required_spec_claims(&["iss", "iat", "exp", "aud"]);
+    let data = jsonwebtoken::decode::<AdminClaims>(jwt, &key, &validation).map_err(|_| {
+        invalid_admin_auth(Some(kid), Some(id), "signature or claims validation failed")
+    })?;
+    let now = current_unix_timestamp()
+        .map_err(|_| invalid_admin_auth(Some(kid), Some(id), "system clock unavailable"))?;
+    if data.claims.iss != *id
+        || data.claims.exp <= data.claims.iat
+        || data.claims.iat > now.saturating_add(state.admin_auth.leeway_secs)
+        || data.claims.exp - data.claims.iat > state.admin_auth.max_token_lifetime_secs
+    {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            "issuer or token lifetime claim is invalid",
+        ));
+    }
+    let entry = snapshot.admin(id).ok_or_else(|| {
+        invalid_admin_auth(Some(kid), Some(id), "admin principal is not registered")
+    })?;
+    if entry.disabled {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            "admin principal is disabled",
+        ));
+    }
+    request.extensions_mut().insert(AuthenticatedAdmin {
+        id: id.clone(),
+        scopes: entry.scopes.clone(),
+    });
+    Ok(next.run(request).await)
+}
+
+fn invalid_admin_auth(kid: Option<&str>, iss: Option<&str>, reason: &str) -> AuthenticationError {
+    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason, "Admin JWT rejected");
+    AuthenticationError::InvalidToken
+}
 
 /// Required management claims are non-optional (`iss`, `iat`, `exp`).
 /// Optional claims are deserialized as `Option` and validated when present.
@@ -173,24 +327,6 @@ impl std::fmt::Display for AuthenticatedIssuer {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct AuthenticatedAdmin {
-    pub id: String,
-}
-
-#[derive(Clone)]
-struct AdminAuthRequest;
-
-/// Only a registry admin with `issuers:write` may change hosted lifecycle state.
-pub async fn admin_auth(
-    State(state): State<AppState>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Result<impl IntoResponse, AuthenticationError> {
-    request.extensions_mut().insert(AdminAuthRequest);
-    auth(State(state), request, next).await
-}
-
 /// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
@@ -269,28 +405,15 @@ pub async fn auth(
         }
         result => result.map_err(|reason| invalid_auth(Some(&kid), None, reason))?,
     };
-    let admin_request = request.extensions().get::<AdminAuthRequest>().is_some();
     let (registered_issuer, registered_aggregation_id) = match &resolved.principal {
-        Principal::Issuer { id, aggregation_id } if !admin_request => {
-            (id.as_str(), Some(*aggregation_id))
-        }
-        Principal::Admin { id, scopes }
-            if admin_request && scopes.iter().any(|scope| scope == "issuers:write") =>
-        {
-            (id.as_str(), None)
-        }
+        Principal::Issuer { id, aggregation_id } => (id.as_str(), Some(*aggregation_id)),
+        // Admin principals authenticate only through [`admin_auth`] on the
+        // admin listener, never through the management flow (RFC 8725 §3.12).
         Principal::Admin { id, .. } => {
             return Err(invalid_auth(
                 Some(&kid),
                 Some(id),
-                "admin scope is insufficient",
-            ));
-        }
-        Principal::Issuer { id, .. } => {
-            return Err(invalid_auth(
-                Some(&kid),
-                Some(id),
-                "issuer keys cannot authenticate admin requests",
+                "admin keys cannot authenticate management requests",
             ));
         }
     };
@@ -344,18 +467,21 @@ pub async fn auth(
         )
         .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
-    if let Some(aggregation_id) = registered_aggregation_id {
-        request
-            .extensions_mut()
-            .insert(AuthenticatedIssuer::with_aggregation_id(
-                Issuer(registered_issuer.to_owned()),
-                aggregation_id,
-            ));
-    } else {
-        request.extensions_mut().insert(AuthenticatedAdmin {
-            id: registered_issuer.to_owned(),
-        });
-    }
+    // Only issuer principals reach this point; admin principals are rejected
+    // above and authenticate through `admin_auth` instead.
+    let Some(aggregation_id) = registered_aggregation_id else {
+        return Err(invalid_auth(
+            Some(&kid),
+            Some(registered_issuer),
+            "issuer principal carries no aggregation id",
+        ));
+    };
+    request
+        .extensions_mut()
+        .insert(AuthenticatedIssuer::with_aggregation_id(
+            Issuer(registered_issuer.to_owned()),
+            aggregation_id,
+        ));
     let metric_issuer = bounded_identifier(Some(registered_issuer));
     let metric_kid = bounded_identifier(Some(&kid));
     crate::utils::metrics::record_management_auth_request(
@@ -776,46 +902,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn admin_lifecycle_auth_requires_issuer_write_scope() {
-        async fn admin_handler(Extension(admin): Extension<AuthenticatedAdmin>) -> String {
-            admin.id
-        }
-        let key = test_public_jwk();
-        let token = create_test_token(
-            "portal-backend",
-            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
-            Algorithm::ES256,
-        );
-        for (scopes, expected) in [
-            (vec!["issuers:write"], StatusCode::OK),
-            (vec!["issuers:read"], StatusCode::UNAUTHORIZED),
-        ] {
-            let registry = serde_saphyr::to_string(&serde_json::json!({
-                "version": 1,
-                "issuers": [],
-                "admins": [{
-                    "id": "portal-backend",
-                    "scopes": scopes,
-                    "keys": [{"kid": key.key_id(), "alg": "ES256", "jwk": key.jwk()}],
-                }],
-            }))
-            .unwrap();
-            let mut state = test_app_state(None).await;
-            state.set_issuer_registry(Arc::new(
-                issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
-            ));
-            let app = Router::new()
-                .route("/test", get(admin_handler))
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    admin_auth,
-                ))
-                .with_state(state);
-            assert_eq!(call_with_token(app, token.clone()).await.status(), expected);
-        }
-    }
-
     fn set_registry(state: &mut AppState, issuer: &str, keys: &[PublicJwk]) {
         let entries: Vec<_> = keys
             .iter()
@@ -1208,8 +1294,13 @@ mod tests {
         );
     }
 
+    /// Each replica owns its registry handle and trusts only its own
+    /// reloads, so this proves that a disabled registry entry blocks the
+    /// next write on every replica after that replica reloaded — not that
+    /// the file change propagates by itself. Public reads of the shared
+    /// store remain available on both.
     #[tokio::test]
-    async fn disabling_static_issuer_stops_writes_on_both_replicas_but_keeps_public_list() {
+    async fn disabling_a_static_issuer_blocks_writes_after_each_replicas_registry_reload() {
         use crate::server::handlers::{get_status_list, publish_status_route};
 
         async fn write(app: Router, list_id: &str, token: &str) -> StatusCode {
@@ -2273,5 +2364,397 @@ mod tests {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["error"], "missing_auth_context");
+    }
+
+    #[tokio::test]
+    async fn admin_auth_resolves_admin_keys_and_ignores_token_scope() {
+        let public_jwk: serde_json::Value =
+            serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+        let yaml = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1, "issuers": [], "admins": [{"id":"admin-1", "scopes":["issuers:read"], "keys":[{"kid":"test-key", "alg":"ES256", "jwk":public_jwk}]}]
+        })).unwrap();
+        let registry = Arc::new(issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap());
+        let mut state = test_app_state(None).await;
+        state.admin_registry = registry;
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+
+        async fn scope_handler(Extension(admin): Extension<AuthenticatedAdmin>) -> String {
+            admin.scopes.join(",")
+        }
+        let app = Router::new()
+            .route("/test", get(scope_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth,
+            ))
+            .with_state(state);
+        let now = now();
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some(ADMIN_TOKEN_TYPE.into());
+        header.kid = Some("test-key".into());
+        let token = encode(&header, &serde_json::json!({"iss":"admin-1","iat":now,"exp":now+300,"aud":["other", "status-list-server-admin"],"scope":"issuers:write"}), &secret).unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            "issuers:read"
+        );
+
+        let mut management_header = header;
+        management_header.typ = Some(MANAGEMENT_TOKEN_TYPE.into());
+        let wrong_type = encode(&management_header, &serde_json::json!({"iss":"admin-1","iat":now,"exp":now+300,"aud":"status-list-server-admin"}), &secret).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header(header::AUTHORIZATION, format!("Bearer {wrong_type}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn admin_registry_yaml(
+        disabled: bool,
+        not_before: Option<String>,
+        not_after: Option<String>,
+    ) -> String {
+        let public_jwk: serde_json::Value =
+            serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+        let mut key = serde_json::json!({
+            "kid":"test-key", "alg":"ES256", "jwk":public_jwk
+        });
+        if let Some(value) = not_before {
+            key["not_before"] = value.into();
+        }
+        if let Some(value) = not_after {
+            key["not_after"] = value.into();
+        }
+        serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{"id":"admin-1", "disabled":disabled, "scopes":["issuers:read"], "keys":[key]}]
+        }))
+        .unwrap()
+    }
+
+    fn admin_token(claims: serde_json::Value, algorithm: Algorithm, typ: &str) -> String {
+        let mut header = Header::new(algorithm);
+        header.typ = Some(typ.into());
+        header.kid = Some("test-key".into());
+        let secret = if algorithm == Algorithm::HS256 {
+            EncodingKey::from_secret(b"not-an-admin-key")
+        } else {
+            EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap()
+        };
+        encode(&header, &claims, &secret).unwrap()
+    }
+
+    async fn admin_auth_response(registry: &str, token: &str) -> axum::response::Response {
+        admin_auth_header_response(registry, Some(&format!("Bearer {token}"))).await
+    }
+
+    async fn admin_auth_header_response(
+        registry: &str,
+        authorization: Option<&str>,
+    ) -> axum::response::Response {
+        let mut state = test_app_state(None).await;
+        state.admin_registry =
+            Arc::new(issuer_registry::RegistryHandle::from_yaml(registry).unwrap());
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+        async fn ok() -> &'static str {
+            "ok"
+        }
+        let mut request = Request::builder().uri("/admin/v1/issuers");
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        Router::new()
+            .route("/admin/v1/issuers", get(ok))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth,
+            ))
+            .with_state(state)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_auth_rejects_invalid_claims_alg_disabled_principal_and_key_windows_uniformly() {
+        let now = now();
+        let valid_claims = serde_json::json!({"iss":"admin-1", "iat":now, "exp":now+300,
+            "aud":["status-list-server-admin"], "scope":"ignored"});
+        let normal_registry = admin_registry_yaml(false, None, None);
+        let cases = [
+            (
+                normal_registry.clone(),
+                admin_token(
+                    serde_json::json!({"iss":"wrong", "iat":now, "exp":now+300, "aud":"status-list-server-admin"}),
+                    Algorithm::ES256,
+                    ADMIN_TOKEN_TYPE,
+                ),
+            ),
+            (
+                normal_registry.clone(),
+                admin_token(
+                    serde_json::json!({"iss":"admin-1", "iat":now, "exp":now+300, "aud":"wrong"}),
+                    Algorithm::ES256,
+                    ADMIN_TOKEN_TYPE,
+                ),
+            ),
+            (
+                normal_registry.clone(),
+                admin_token(
+                    serde_json::json!({"iss":"admin-1", "iat":now-301, "exp":now+300, "aud":"status-list-server-admin"}),
+                    Algorithm::ES256,
+                    ADMIN_TOKEN_TYPE,
+                ),
+            ),
+            (
+                normal_registry.clone(),
+                admin_token(valid_claims.clone(), Algorithm::HS256, ADMIN_TOKEN_TYPE),
+            ),
+            (
+                normal_registry.clone(),
+                admin_token(
+                    valid_claims.clone(),
+                    Algorithm::ES256,
+                    MANAGEMENT_TOKEN_TYPE,
+                ),
+            ),
+            (
+                admin_registry_yaml(true, None, None),
+                admin_token(valid_claims.clone(), Algorithm::ES256, ADMIN_TOKEN_TYPE),
+            ),
+            (
+                admin_registry_yaml(
+                    false,
+                    Some(
+                        (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap(),
+                    ),
+                    None,
+                ),
+                admin_token(valid_claims.clone(), Algorithm::ES256, ADMIN_TOKEN_TYPE),
+            ),
+            (
+                admin_registry_yaml(
+                    false,
+                    None,
+                    Some(
+                        (time::OffsetDateTime::now_utc() - time::Duration::hours(1))
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap(),
+                    ),
+                ),
+                admin_token(valid_claims, Algorithm::ES256, ADMIN_TOKEN_TYPE),
+            ),
+        ];
+        let mut expected_body: Option<Vec<u8>> = None;
+        for (registry, token) in cases {
+            let response = admin_auth_response(&registry, &token).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers()[header::WWW_AUTHENTICATE],
+                "Bearer error=\"invalid_token\""
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            if let Some(expected) = &expected_body {
+                assert_eq!(body.as_ref(), expected);
+            } else {
+                expected_body = Some(body.to_vec());
+            }
+        }
+
+        let state = test_app_state(None).await;
+        let mut state = state;
+        state.set_issuer_registry(Arc::new(
+            issuer_registry::RegistryHandle::from_yaml(&normal_registry).unwrap(),
+        ));
+        let admin_token = admin_token(
+            serde_json::json!({"iss":"admin-1", "iat":now, "exp":now+300, "aud":"status-list-server-admin"}),
+            Algorithm::ES256,
+            ADMIN_TOKEN_TYPE,
+        );
+        assert_eq!(
+            call_with_token(create_test_router(state), admin_token)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    #[tokio::test]
+    async fn admin_auth_missing_credentials_have_bare_challenge() {
+        let registry = admin_registry_yaml(false, None, None);
+        for authorization in [None, Some("Basic ignored")] {
+            let response = admin_auth_header_response(&registry, authorization).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store, max-age=0"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["error"], "missing_token");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_auth_header_and_claim_failures_have_identical_responses() {
+        use base64::Engine as _;
+        let registry = admin_registry_yaml(false, None, None);
+        let now = now();
+        let claims = serde_json::json!({"iss":"admin-1", "iat":now, "exp":now+300, "aud":"status-list-server-admin"});
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some(ADMIN_TOKEN_TYPE.into());
+        header.kid = Some("test-key".into());
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        let mut tokens = vec![String::new(), "not-a-jwt".into()];
+        for field in ["iss", "iat", "exp", "aud"] {
+            let mut missing = claims.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            tokens.push(encode(&header, &missing, &secret).unwrap());
+        }
+        for (field, value) in [
+            ("iat", serde_json::json!(now + 120)),
+            ("nbf", serde_json::json!(now + 120)),
+            ("nbf", serde_json::json!("not-a-time")),
+            ("exp", serde_json::json!(now)),
+        ] {
+            let mut invalid = claims.clone();
+            invalid[field] = value;
+            tokens.push(encode(&header, &invalid, &secret).unwrap());
+        }
+        let mut expired = claims.clone();
+        expired["iat"] = (now - 600).into();
+        expired["exp"] = (now - 300).into();
+        tokens.push(encode(&header, &expired, &secret).unwrap());
+        for altered in [
+            Header {
+                kid: None,
+                ..header.clone()
+            },
+            Header {
+                kid: Some("unknown-key".into()),
+                ..header.clone()
+            },
+            Header {
+                typ: None,
+                ..header.clone()
+            },
+            Header {
+                typ: Some("JWT".into()),
+                ..header.clone()
+            },
+            Header {
+                crit: Some(vec![]),
+                ..header.clone()
+            },
+        ] {
+            tokens.push(encode(&altered, &claims, &secret).unwrap());
+        }
+        let valid = encode(&header, &claims, &secret).unwrap();
+        let parts: Vec<_> = valid.split('.').collect();
+        let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut wrong_algorithm = serde_json::to_value(&header).unwrap();
+        wrong_algorithm["alg"] = "ES384".into();
+        tokens.push(format!(
+            "{}.{}.{}",
+            encoding.encode(serde_json::to_vec(&wrong_algorithm).unwrap()),
+            parts[1],
+            parts[2]
+        ));
+        let mut signature = encoding.decode(parts[2]).unwrap();
+        signature[0] ^= 1;
+        tokens.push(format!(
+            "{}.{}.{}",
+            parts[0],
+            parts[1],
+            encoding.encode(signature)
+        ));
+        let expected = admin_auth_response(&registry, "invalid").await;
+        let expected_body = to_bytes(expected.into_body(), 1024).await.unwrap();
+        for token in tokens {
+            let response = admin_auth_response(&registry, &token).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers()[header::WWW_AUTHENTICATE],
+                "Bearer error=\"invalid_token\""
+            );
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store, max-age=0"
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), 1024).await.unwrap(),
+                expected_body
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_auth_ignores_embedded_keys_and_accepts_typ_prefix_and_leeway() {
+        let registry = admin_registry_yaml(false, None, None);
+        let now = now();
+        let mut header = Header::new(Algorithm::ES256);
+        header.typ = Some("APPLICATION/STATUSLIST-ADMIN+JWT".into());
+        header.kid = Some("test-key".into());
+        header.jwk =
+            Some(serde_json::from_value(serde_json::json!({"kty":"oct", "k":"YWJj"})).unwrap());
+        header.jku = Some("https://invalid.example/jwks".into());
+        header.x5u = Some("https://invalid.example/cert".into());
+        header.x5c = Some(vec!["ignored".into()]);
+        let secret = EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap();
+        for audience in [
+            serde_json::json!("status-list-server-admin"),
+            serde_json::json!(["other", "status-list-server-admin"]),
+        ] {
+            let token = encode(&header, &serde_json::json!({"iss":"admin-1", "iat":now+30, "nbf":now+30, "exp":now+300, "aud":audience}), &secret).unwrap();
+            assert_eq!(
+                admin_auth_response(&registry, &token).await.status(),
+                StatusCode::OK
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_auth_never_resolves_issuer_owned_keys() {
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version":1, "admins":[], "issuers":[{
+                "id":"admin-1", "aggregation_id":uuid::Uuid::new_v4(),
+                "keys":[{"kid":"test-key", "alg":"ES256", "jwk":test_public_jwk().jwk()}]
+            }]
+        }))
+        .unwrap();
+        let now = now();
+        let token = admin_token(
+            serde_json::json!({"iss":"admin-1", "iat":now, "exp":now+300, "aud":"status-list-server-admin"}),
+            Algorithm::ES256,
+            ADMIN_TOKEN_TYPE,
+        );
+        let response = admin_auth_response(&registry, &token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            "Bearer error=\"invalid_token\""
+        );
     }
 }

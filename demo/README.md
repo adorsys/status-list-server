@@ -191,14 +191,30 @@ ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
 The fixture contains public keys only. Its private keys are demo material and
 must never be used outside local development.
 
+## Admin issuer reads
+
+Configure an admin principal, `issuers:read`, and a distinct admin audience as
+explained in the [operator guide](../docs/admin-api.md). Obtain a signed admin
+token from your operator tooling. From the `demo` directory, run:
+
+```bash
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --issuer example
+```
+
+The script prompts for the token without echoing it. The first command walks
+all pages; the second displays one issuer and its ETag. Tokens are never printed.
+
 ## Hosted issuer emergency actions
 
 In the hosted profile, an operator uses the admin listener with a registry admin
-JWT carrying `issuers:write`. Read the current version with
-`GET /api/v1/issuers/{issuer_id}/state`, then send
-`PATCH /api/v1/issuers/{issuer_id}/state` with
-`{"state":"suspended","expected_version":1}` blocks the issuer's next
-management request when the issuer is still at version 1. A stale version
-returns `409 issuer_version_mismatch`; read the current version before retrying.
-`POST /api/v1/issuers/{issuer_id}/keys/{kid}/revoke` permanently revokes one
-key. The public status-list endpoint remains readable after either action.
+JWT carrying `issuers:write`. Read the issuer and its `ETag` with
+`GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`; the issuer's next management request is blocked. A
+missing `If-Match` returns `428 precondition_required`; a stale `ETag` returns
+`412 precondition_failed`, so re-read the issuer and retry.
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with `If-Match` and
+`{"state":"revoked"}` permanently revokes one key; revoking an already revoked
+key returns `200` unchanged. The public status-list endpoint remains readable
+after either action.
