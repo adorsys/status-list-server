@@ -1,14 +1,4 @@
-{{/*
-PrometheusRule shipping SLI recording rules and SLO burn-rate / error-budget alerting rules
-(monitoring.coreos.com/v1), gated on statuslist.enabled and prometheusRule.enabled.
-
-Thresholds are injected from .Values.slo. CI (lint-thresholds.mjs) only compares the
-values.yaml slo.* DEFAULTS against deploy/observability/slo/thresholds.json and greps the
-standalone rules - it does NOT re-read this template. Consequently the hard-coded alert
-summary strings (e.g. "300ms", "14.4x over 0.5%", "85%", "10%", "14 days") and the %.3f
-burn-threshold rounding here are NOT covered by CI: changing a threshold moves the alert but
-the summary text stays stale.
-*/}}
+{{/* Alert summaries hard-code the default thresholds; CI doesn't check them against .Values.slo. */}}
 {{- if and .Values.statuslist.enabled .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -77,26 +67,10 @@ spec:
 
     - name: status-list-server-slo-alerts
       rules:
-        # NOTE: this deployed rule intentionally ships NO Watchdog alert. The shared
-        # kube-prometheus-stack 91.4.0 already deploys its own always-firing Watchdog;
-        # a per-release copy would duplicate it, and because production leaves the
-        # optional app AlertmanagerConfig disabled, the merged platform's matcher-free
-        # fallback would receive this app's Watchdog as a normal notification instead
-        # of the dead-man's-switch receiver. Application scrape health is covered by
-        # StatusListMetricsAbsent below. The standalone Docker rules
-        # (deploy/observability/prometheus/rules/alerting.rules.yml) retain their own
-        # Watchdog for the self-hosted pipeline. CI's drift guard documents this
-        # intentional difference.
+        # No Watchdog here: kube-prometheus-stack already ships one, and a copy would page as a normal alert.
         - alert: StatusListMetricsAbsent
-          # Alert on the scrape-generated `up` series, not the request histogram:
-          # /metrics and health routes are excluded from the HTTP metrics
-          # middleware, so a healthy but idle deployment never produces the
-          # histogram and a histogram-based absence check pages falsely. The `up`
-          # series is created by the ServiceMonitor scrape itself, so
-          # `max(up) == 0` catches a target that is present but failing scrapes
-          # while `absent(up)` catches a target that is gone entirely. The
-          # `service` label matches the rendered Service the ServiceMonitor
-          # selects (the chart fullname followed by `-service`).
+          # Use up, not the request histogram, which an idle deployment never produces.
+          # absent catches a missing target, max(up) == 0 a failing one.
           expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) == 0
           for: 5m
           labels:

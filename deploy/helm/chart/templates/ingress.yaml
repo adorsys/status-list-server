@@ -71,8 +71,7 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
-    # Route by path with a regex so the management writes that share the
-    # /api/v1/status-lists/ prefix with public reads resolve here.
+    # Regex paths: management writes share /api/v1/status-lists/ with public reads.
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- if and (ne $mgmtHost "localhost") (ne (.Values.statuslist.ingress.management.hostname | default "") "") }}
     external-dns.alpha.kubernetes.io/hostname: {{ $mgmtHost }}
@@ -93,12 +92,7 @@ spec:
             name: {{ include "status-list-server-chart.fullname" . }}-internal-service
             port:
               number: {{ .Values.statuslist.service.managementPort }}
-{{- /* Resolve the TLS secret for the management Ingress:
-     - Use the dedicated management secret when explicitly set (ideal for
-       separate hostnames with their own cert).
-     - Otherwise fall back to the public TLS secret (works for wildcard
-       certs covering both hostnames). $mgmtTlsHosts already holds the
-       correct hostname(s), so the hosts: field is always right. */}}
+{{- /* Falls back to the public TLS secret, fine for a wildcard cert covering both hosts. */}}
 {{- $mgmtTlsSecret := .Values.statuslist.ingress.management.tls.secretName | default "" }}
 {{- if and (eq $mgmtTlsSecret "") .Values.statuslist.ingress.tls.secretName }}
 {{- $mgmtTlsSecret = .Values.statuslist.ingress.tls.secretName }}

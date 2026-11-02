@@ -1,25 +1,3 @@
-{{/*
-Deployment of the status-list-server application pod.
-
-Guard rails enforced at render time:
-- externalSecret.enabled and statuslist.fallbackSecret.enabled are mutually exclusive; the
-  chart fails if both are true.
-- Only the "postgres" and "mysql" database backends are accepted (via
-  APP_DATABASE__BACKEND); anything else fails. postgres.enabled=true requires backend
-  postgres; mysql.enabled (a values key) is rejected - this chart never deploys MySQL.
-- Image resolution: digest (pinned, IfNotPresent) > tag (Always) > derived
-  <baseAppVersion>-<variant>. An invalid digest fails.
-- APP_DATABASE__URL and APP_DATABASE__PASSWORD are rejected as plain env values; the
-  password is delivered through statuslist.secretMounts file mounts
-  (APP_DATABASE__PASSWORD_FILE). secretMounts fileEnv is validated against mounted items.
-
-Replicas are omitted when autoscaling.enabled=true so the HPA controls the count.
-The prometheus.io/scrape + port + path Pod annotations are emitted only when
-statuslist.prometheusAnnotations is true (they are OFF by default: kube-prometheus-stack
-discovers targets via the ServiceMonitor, not annotations). These merge with the optional
-TOP-LEVEL .Values.podAnnotations (a documented empty-by-default map - note it is distinct
-from statuslist.podLabels, which are merged into the pod template LABELS).
-*/}}
 {{- if .Values.statuslist.enabled }}
 {{- if eq (trim (toString .Values.statuslist.issuerRegistry.path)) "" }}
 {{- fail "statuslist.issuerRegistry.path is required" }}
@@ -120,9 +98,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           {{- $image := .Values.statuslist.image }}
-          {{- /* `default ""` rather than `toString`: toString renders a nil digest as
-                 "<nil>", so `--set statuslist.image.digest=null` -- the documented way
-                 to clear it -- would pin the image to a literal "<nil>". */}}
+          {{- /* default "", not toString, which turns a null digest into the string "<nil>". */}}
           {{- $digest := $image.digest | default "" }}
           {{- if and $digest (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) }}
           {{- fail (printf "statuslist.image.digest must be sha256:<64 hex chars>, got %q" $digest) }}
@@ -135,9 +111,6 @@ spec:
           {{- if and (eq (include "status-list-server-chart.dbBackend" .) "mysql") (not $image.tag) (not $digest) }}
           {{- fail "statuslist.env.APP_DATABASE__BACKEND=mysql requires an explicit MySQL-capable image tag or digest; set statuslist.image.tag or statuslist.image.digest" }}
           {{- end }}
-          {{- /* Digest pins the exact scanned artifact; tag falls back to appVersion plus
-                 the selected variant, never to "latest". An empty pullPolicy derives from
-                 which one is in use: a digest is content-addressed, a tag is mutable. */}}
           image: "{{ $image.repository }}{{ if $pinned }}@{{ $digest }}{{ else }}:{{ $effectiveTag }}{{ end }}"
           imagePullPolicy: {{ $image.pullPolicy | default (ternary "IfNotPresent" "Always" $pinned) }}
           ports:
@@ -246,11 +219,7 @@ spec:
               {{- end }}
               {{- if not (hasKey $env "APP_TELEMETRY__OTLP_ENDPOINT") }}
                 {{- $otlpPort := dig "ports" "otlp" "servicePort" 4317 $otel }}
-                {{- /* Mirror the upstream opentelemetry-collector.fullname helper exactly:        */}}
-                {{- /* 1. fullnameOverride → use as-is (trunc 63)                                */}}
-                {{- /* 2. else: effectiveName = nameOverride ?? chart name                        */}}
-                {{- /*    if release.contains(effectiveName) → use release (trunc 63)            */}}
-                {{- /*    else → "$release-$effectiveName" (trunc 63)                            */}}
+                {{- /* Must mirror the upstream opentelemetry-collector.fullname helper. */}}
                 {{- $collectorSvcName := "" }}
                 {{- if $otel.fullnameOverride }}
                   {{- $collectorSvcName = $otel.fullnameOverride | trunc 63 | trimSuffix "-" }}
@@ -351,7 +320,6 @@ spec:
             - name: {{ $name }}
               value: {{ $path | quote }}
             {{- end }}
-            {{- /* Watcher poll interval for credential rotation detection */}}
             {{- if and (ne $watcherPollInterval "") (not (hasKey $env "APP_WATCHER__POLL_INTERVAL_SECS")) }}
             - name: APP_WATCHER__POLL_INTERVAL_SECS
               value: {{ $watcherPollInterval | quote }}

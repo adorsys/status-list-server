@@ -1,19 +1,5 @@
-{{/*
-Opt-in NetworkPolicy (statuslist.networkPolicy.enabled, default OFF).
-
-Ingress: a port-only rule for the service targetPort. With an EMPTY statuslist.networkPolicy.ingress
-this allows ANY source in the cluster; you MUST restrict sources to your ingress controller.
-
-Egress:
-- Database rule: scoped to the database port, `to:` = statuslist.networkPolicy.databaseEgress
-  if set, otherwise the in-cluster postgres pod selector. statuslist.networkPolicy.egressInternal
-  entries are appended to THIS rule, so each inherits the database port - they are NOT general
-  outbound destinations.
-- Ports 443/53 are always allowed with NO `to:` entry, i.e. open to 0.0.0.0/0. This policy
-  does NOT constrain outbound exfiltration.
-- When the opentelemetry-collector is enabled, OTLP ports 4317/4318 are scoped to the
-  collector pods only.
-*/}}
+{{/* With an empty ingress list any pod in the cluster can reach the service.
+egressInternal shares the database port; 443 and 53 are open to 0.0.0.0/0. */}}
 {{- if .Values.statuslist.networkPolicy.enabled }}
 {{- $otel := index .Values "opentelemetry-collector" | default dict -}}
 {{- $backend := include "status-list-server-chart.dbBackend" . -}}
@@ -51,8 +37,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Public port: a port-only rule (empty `from`) allows ANY source, matching
-    # historical behavior. Restrict with statuslist.networkPolicy.ingress.
+    # Public port: no `from` means any source; restrict it with networkPolicy.ingress.
     - ports:
         - port: {{ .Values.statuslist.service.targetPort | int }}
           protocol: TCP
@@ -60,9 +45,7 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    # Management port: an EMPTY from (no selectors) means NO rule is emitted for
-    # this port, so all management traffic is DENIED. Only when selectors are
-    # given is management reachable.
+    # Management port: no rule without selectors, so it's denied by default.
     {{- with .Values.statuslist.networkPolicy.managementIngress }}
     - ports:
         - port: {{ $.Values.statuslist.service.managementTargetPort | int }}
@@ -70,8 +53,7 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
     {{- end }}
-    # Admin port: same deny-by-default as management, so /metrics and
-    # /health/ready are only reachable from allowed sources.
+    # Admin port: denied by default too, like management.
     {{- with .Values.statuslist.networkPolicy.adminIngress }}
     - ports:
         - port: {{ $.Values.statuslist.service.adminTargetPort | int }}
@@ -115,7 +97,6 @@ spec:
           protocol: TCP
         - port: 4318
           protocol: TCP
-      # Scope OTLP egress to the opentelemetry-collector pods only.
       to:
         - podSelector:
             matchLabels:
