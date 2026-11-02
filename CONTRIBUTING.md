@@ -91,6 +91,11 @@ The normal promotion path is:
 6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
+   The final tag does not rebuild the image. It promotes the image digest of
+   the highest-numbered `v<version>-rc.<N>`, and the release fails unless that
+   candidate's `deploy.yml` run passed and the tagged `main` commit has the
+   same file tree as the candidate's commit. Cut a new candidate whenever
+   `stage` changes after the last one.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.
@@ -98,7 +103,9 @@ The final `v<version>` tag is created only from `main`.
 For a hotfix, branch `hotfix/*` from the released `main` state, then manually
 dispatch **Release-plz PR** with that branch selected. Review and merge the
 resulting patch-version and changelog PR into the hotfix branch before
-validation and the `hotfix/*` to `main` promotion.
+validation and the `hotfix/*` to `main` promotion. Validation means tagging the
+hotfix branch head as `v<version>-rc.<N>` and letting its `deploy.yml` run
+pass: the final tag promotes that candidate's image and fails without one.
 
 After the hotfix release, merge `main` back into `develop` with a merge commit
 before the next `develop` to `stage` promotion. If `develop` already contains a

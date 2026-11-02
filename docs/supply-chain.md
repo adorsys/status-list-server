@@ -28,6 +28,8 @@ Provenance and SBOM are also attached to the image itself: `docker buildx imaget
 
 `build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags with OCI description annotations (which re-serializes the multi-arch index into a promoted index digest). `deploy` runs last and resolves the promoted variant tag to its index digest before deploying to Helm.
 
+A final tag (`v1.2.3`, no prerelease suffix) is not rebuilt. After `ci` and `helm-checks` pass on the final commit (`deploy` installs that commit's chart), `resolve-rc` runs `scripts/resolve-rc.sh`. It picks the highest-numbered `v<version>-rc.<N>` tag, requires the final commit to have the same file tree as the candidate's commit, and requires the latest push run of `deploy.yml` for that tag to have completed with `success` on the tagged commit. A run still in progress is refused, not awaited. `build-and-push`, `scan-image` and `verify-provenance` are skipped. `promote-tags` instead reads the digest from that run's `image-digest-<variant>` artifact, checks that the candidate's `<version>-rc.<N>-<variant>` tag still resolves to it, verifies its signed provenance against the candidate's ref, and applies the final tags to that same digest. The release fails if no candidate exists, if the latest one did not pass, if its tree differs from the release's, if its run's digest artifacts have expired, or if any of these digests disagree. It never falls back to an older candidate or to a fresh build. The job summaries record the candidate, its run and the promoted digest of each variant.
+
 A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>-<variant>` images to GHCR — it publishes images, it just never advertises or ships them.
 
 The image is pushed before it can be scanned. That is not a tradeoff, it is a constraint: BuildKit attestations can only be produced when pushing directly to a registry, because the local image store cannot hold an image carrying attestations. What the pipeline controls is not whether the artifact exists in GHCR, but what it is _called_. An image that has not passed the scan is reachable only by its commit SHA tag. It never becomes `latest`, never becomes `v1.2.3`, and never reaches production.
@@ -138,6 +140,8 @@ When findings clear, the issue is updated to say so and **left open** — closin
 
 The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `deploy/helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
 
+A final release extends the same binding across runs: it promotes the digest its release candidate's run scanned, so production runs exactly the image the candidate run validated.
+
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
 Two `concurrency` groups back that up. The workflow-level group is keyed on the ref, so re-runs of the same tag do not overlap. The `deploy` job declares a second one keyed on `deploy-production`, because two tags pushed in quick succession are _different_ refs and the workflow-level group would let both drive `helm upgrade --wait --rollback-on-failure` against the same release at once. What guarantees production runs the scanned artifact is the digest binding; what the second group prevents is two deploys racing for the Helm release lock.
@@ -200,6 +204,8 @@ Disagreement here means one specific thing: the registry content and the signed 
 - The signed attestation names a workflow, repository or ref that is not the release you expect. This one is enforced rather than left to your eye: the wrapper pins the certificate identity to `deploy.yml` at a specific ref, so a signature from another workflow, another repository or another ref of `deploy.yml` fails the command rather than passing it with a surprising line in the output.
 
 On the release path the same disagreement surfaces at whichever of three points reaches it first — `verify-provenance` before any release tag is applied, `promote-tags` against the digest the tag resolves to, or `deploy` against the digest about to reach the cluster. Which one failed narrows the cause: the first is a signing or build fault, the second and third mean the tag moved after it was gated.
+
+A final tag skips `verify-provenance`; `promote-tags` verifies the release candidate's digest against the candidate's ref before applying any tag, so the first point moves there. On that path the signing identity is `deploy.yml` at `refs/tags/v<version>-rc.<N>`, not at the final tag, because the final run signs nothing.
 
 **Do this, in order:**
 
@@ -303,7 +309,7 @@ bash scripts/verify-attestation.sh \
 --deny-self-hosted-runners
 ```
 
-Without one, it uses a `--cert-identity-regex` anchored at both ends that accepts only a release-tag ref. Do not substitute `--repo` or `--signer-workflow`: neither pins the ref, so a signature from any branch of this workflow would pass. [ADR 0001](adr/0001-container-image-provenance.md) has the reasoning.
+For a final release, the ref is the release candidate it promoted, such as `refs/tags/v1.2.3-rc.2`, because that run built and signed the image. Without one, it uses a `--cert-identity-regex` anchored at both ends that accepts only a release-tag ref. Do not substitute `--repo` or `--signer-workflow`: neither pins the ref, so a signature from any branch of this workflow would pass. [ADR 0001](adr/0001-container-image-provenance.md) has the reasoning.
 
 **Requirements.** `gh` 2.67.0 or newer (older releases exit 0 when no attestation exists; the wrapper refuses to run on them) and `jq`.
 
