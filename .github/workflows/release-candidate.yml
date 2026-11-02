@@ -1,0 +1,62 @@
+name: Tag Release Candidate
+
+on:
+  push:
+    branches: [stage]
+
+permissions: {}
+
+concurrency:
+  group: stage-release-candidate
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag release candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: ${{ github.repository == 'adorsys/status-list-server' }}
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout stage
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: stable
+          rustflags: ''
+
+      - name: Select the next release candidate tag
+        id: candidate
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "status-list-server") | .version')
+          tag=$(git ls-remote --tags origin 'v*' \
+            | bash scripts/next-rc-tag.sh "$version")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create release candidate tag
+        env:
+          RELEASE_BOT_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "release-bot[bot]"
+          git config user.email "release-bot[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$GITHUB_SHA" -m "Release candidate $TAG"
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$RELEASE_BOT_TOKEN"; }; f' \
+            push origin "refs/tags/$TAG"

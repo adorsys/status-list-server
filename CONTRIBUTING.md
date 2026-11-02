@@ -87,7 +87,10 @@ The normal promotion path is:
 5. Merge `develop` into `stage`. The RC automation creates
    `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
    Release-plz ignores RC tags because its `git_only` final-tag match is
-   `^v(\d+\.\d+\.\d+)$`.
+   `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
+   than the latest final tag, the stage workflow fails before it creates an RC
+   tag; prepare the next release-plz version instead. A tag whose deployment
+   fails is not a validated candidate and cannot later be promoted.
 6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
