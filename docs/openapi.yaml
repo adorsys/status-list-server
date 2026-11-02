@@ -21,8 +21,9 @@ info:
 
     Status list tokens are signed by the server and delivered as
     `application/statuslist+jwt` or `application/statuslist+cwt`. JWT-format
-    tokens are gzip-compressed only when the client requests it via
-    `Accept-Encoding: gzip`; CWT-format tokens are never compressed.
+    tokens are gzip-compressed only when `Accept-Encoding` permits gzip;
+    otherwise they are returned without content encoding. CWT-format tokens
+    are never compressed.
 
     ## Rate limiting
 
@@ -644,11 +645,14 @@ paths:
         status-list variant is introduced.
 
         JWT-format responses are gzip-compressed (`Content-Encoding: gzip`)
-        only when the client has advertised support via `Accept-Encoding: gzip`
-        (see draft-ietf-oauth-status-list-21 §8.2). CWT-format responses are
-        never gzip-compressed. Because the representation varies by both `Accept`
-        and `Accept-Encoding`, the `200`, `304` and `406` responses carry
-        `Vary: Accept, Accept-Encoding`.
+        only when `Accept-Encoding` permits gzip: an explicit `gzip` entry with
+        positive `q`, or a positive `*` entry when `gzip` is not listed. An
+        explicit `gzip;q=0` excludes gzip even when `*` is positive. With no
+        `Accept-Encoding` field, JWT responses are returned without content
+        encoding. CWT-format responses are never gzip-compressed (see
+        draft-ietf-oauth-status-list-21 §8.2). Because the representation varies
+        by both `Accept` and `Accept-Encoding`, the `200`, `304` and `406`
+        responses carry `Vary: Accept, Accept-Encoding`.
 
         The decoded token conforms to the
         [OAuth Status List](https://datatracker.ietf.org/doc/draft-ietf-oauth-status-list/)
@@ -657,9 +661,13 @@ paths:
         (CWT) for verification.
 
         Supplying `?time=<unix-timestamp>` performs draft-21 §8.4 historical
-        resolution. Historical snapshots are privacy-sensitive because they
-        disclose timing information; deploy this capability only after
-        considering the privacy implications in §12.7.
+        resolution. Snapshot retention defaults to 90 days and can be disabled
+        with `APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=0`. Historical snapshots
+        are privacy-sensitive because they disclose timing information; deploy
+        this capability only after considering the privacy implications in §12.7.
+        When retention is disabled, `?time=` requests return `404`; draft-21
+        §8.4 says unsupported `time` parameters SHOULD return `501`, so this is
+        a documented implementation limitation.
       security: []
       parameters:
         - name: list_id
@@ -693,9 +701,13 @@ paths:
           in: query
           required: false
           description: |
-            Unix timestamp for a historical Status List Token. A response is
-            returned only when a retained token validity window covers this
-            instant (`iat <= time < exp`).
+            Positive Unix timestamp for a historical Status List Token. A
+            response is returned only when a retained token validity window
+            covers this instant (`iat <= time < exp`). Invalid, zero, negative,
+            or future values return `400`; a valid time without a retained
+            snapshot returns `404 historical_status_list_not_found`. When
+            retention is disabled, requests for an existing list return `404
+            status_list_not_found` rather than the `501` SHOULD in draft-21 §8.4.
           schema:
             type: integer
             format: int64
@@ -742,10 +754,12 @@ paths:
           in: header
           required: false
           description: |
-            Content codings the client is willing to accept. When `gzip` is
-            advertised (default q-value), JWT-format responses are
-            gzip-compressed and carry `Content-Encoding: gzip`. CWT-format
-            responses are never compressed regardless of this header.
+            Content codings the client is willing to accept. JWT-format
+            responses are gzip-compressed when `gzip` is listed with positive
+            `q`, or when `gzip` is absent and `*` is listed with positive `q`.
+            An explicit `gzip;q=0` excludes gzip even if `*` is positive. If this
+            field is absent or does not permit gzip, JWT responses are returned
+            without content encoding. CWT-format responses are never compressed.
           schema:
             type: string
             example: gzip
@@ -774,11 +788,10 @@ paths:
                 type: string
               description: |
                 Present with value `gzip` only when the response body has been
-                gzip-compressed. Compression is applied to JWT-format tokens
-                (`application/statuslist+jwt`) exclusively, and only when the
-                client has advertised support for it via an
-                `Accept-Encoding: gzip` request header. CWT-format tokens are
-                never compressed. Absent otherwise.
+                gzip-compressed. Compression is applied only to JWT-format tokens
+                (`application/statuslist+jwt`) when `Accept-Encoding` permits gzip
+                as described above. CWT-format tokens are never compressed.
+                Absent otherwise.
               example: gzip
             Vary:
               schema:
@@ -848,7 +861,26 @@ paths:
                 error: "invalid_list_id"
                 error_description: "list_id must not contain NUL"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: |
+            Status list or historical snapshot not found. A valid historical
+            `time` without a retained snapshot returns `404`. When snapshot
+            retention is disabled, a `?time=` request for an existing list
+            returns `404 status_list_not_found` (rather than
+            `historical_status_list_not_found`), although draft-21 §8.4 says
+            unsupported `time` parameters SHOULD return `501`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                listNotFound:
+                  value:
+                    error: "status_list_not_found"
+                    error_description: "Status list was not found"
+                historicalSnapshotNotFound:
+                  value:
+                    error: "historical_status_list_not_found"
+                    error_description: "Historical status list token not found"
         "406":
           $ref: "#/components/responses/NotAcceptable"
         "429":
@@ -1099,7 +1131,7 @@ components:
       description: |
         Decoded payload of a JWT or CWT status list token. The actual response
         from `GET /statuslists/{list_id}` is the signed token — a JWT string
-        (optionally gzip-compressed when the client requests it) or raw
+        (optionally gzip-compressed when `Accept-Encoding` permits gzip) or raw
         COSE_Sign1_Tagged CBOR bytes for CWT. The token is signed by the server
         using the configured signing key and contains the certificate chain in
         the `x5c` header (JWT) or protected header (CWT).
