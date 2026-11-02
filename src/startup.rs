@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use axum::{
     routing::{get, patch, post, put},
 };
 use color_eyre::eyre::{Context, eyre};
-use governor::middleware::NoOpMiddleware;
+use governor::{Quota, middleware::NoOpMiddleware};
 use hyper::Method;
 use prometheus::Registry;
 use tokio::net::TcpListener;
@@ -283,16 +284,21 @@ type GovernorPolicies = (
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let auth_gate = Arc::new(
-        AuthFailureGate::new(
-            config.strict_burst_size,
-            Duration::from_secs(config.strict_period_secs),
-            config.trusted_proxy_networks()?,
-        )
+    let admission = NonZeroU32::new(config.admission_per_second)
+        .zip(NonZeroU32::new(config.admission_burst_size))
+        .map(|(rate, burst)| Quota::per_second(rate).allow_burst(burst))
+        .ok_or_else(|| eyre!("management admission requires non-zero burst_size and per_second"))?;
+    let failures = Quota::with_period(Duration::from_secs(config.strict_period_secs))
+        .zip(NonZeroU32::new(config.strict_burst_size))
+        .map(|(quota, burst)| quota.allow_burst(burst))
         .ok_or_else(|| {
             eyre!("management authentication gate requires non-zero burst_size and period")
-        })?,
-    );
+        })?;
+    let auth_gate = Arc::new(AuthFailureGate::new(
+        admission,
+        failures,
+        config.trusted_proxy_networks()?,
+    ));
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
@@ -324,9 +330,10 @@ fn public_routes(
 
 /// Routes owned by the management listener: authenticated issuer operations.
 fn management_routes(state: AppState, auth_gate: Arc<AuthFailureGate>) -> Router<AppState> {
-    // Order: authentication gate -> auth -> issuer limiter -> handler. Only a
+    // Order: authentication gate -> auth -> issuer limiter -> handler. The gate
+    // admits a coarse per-address budget before `auth` does any work. Only a
     // verified identity reaches an issuer bucket, and only rejected
-    // authentications spend the per-address gate. Every authenticated route
+    // authentications spend the gate's failure budget. Every authenticated route
     // spends the issuer's bucket, so no route lets one issuer load the server
     // unbounded.
     let protected = Router::new()
@@ -1395,6 +1402,82 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS
         );
         assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
+    }
+
+    /// Answers every `kid` as unknown and counts how often it was asked, as a
+    /// hosted store does with one query per lookup.
+    #[derive(Debug, Default)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::IssuerKeyResolver for CountingResolver {
+        async fn resolve(
+            &self,
+            _kid: &str,
+        ) -> Result<
+            Arc<crate::domain::models::credential::ResolvedKey>,
+            crate::domain::models::credential::KeyResolveError,
+        > {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::domain::models::credential::KeyResolveError::UnknownKid)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_bounds_key_lookups_before_auth() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        let config = Config::load_from_overrides(&[
+            ("tiers.standard.write_burst_size", "2"),
+            ("rate_limit.admission_burst_size", "2"),
+            ("rate_limit.admission_per_second", "1"),
+        ])
+        .unwrap();
+        let resolver = Arc::new(CountingResolver::default());
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.issuer_key_resolver = resolver.clone();
+        let management = management_with_budgets(&config, state, 2);
+        let token = issuer_token("issuer-x", "unknown-kid", &test_ec_private_pem());
+
+        let mut refused = 0;
+        for _ in 0..10 {
+            let response = patch_statuses(&management, &token).await;
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                refused += 1;
+                assert_contract_429(response).await;
+            }
+        }
+        let lookups = resolver.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            lookups + refused,
+            10,
+            "a refused request never reached auth"
+        );
+        // The burst, plus at most one token replenished on a slow runner.
+        assert!(lookups <= 3, "{lookups} key lookups passed admission");
+    }
+
+    #[tokio::test]
+    async fn test_admission_never_refuses_a_lone_issuer_within_its_budget() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        // The smallest admission budget startup accepts for this tier.
+        let management = two_issuer_management_with(
+            &[
+                ("tiers.standard.write_burst_size", "5"),
+                ("rate_limit.admission_burst_size", "5"),
+                ("rate_limit.admission_per_second", "1"),
+            ],
+            5,
+        )
+        .await;
+        let token = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        for _ in 0..5 {
+            assert_ne!(
+                patch_statuses(&management, &token).await.status(),
+                StatusCode::TOO_MANY_REQUESTS
+            );
+        }
     }
 
     #[tokio::test]

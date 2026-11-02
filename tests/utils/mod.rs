@@ -72,6 +72,7 @@ fn fixture_config() -> Config {
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
         "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
+            "admission_burst_size": 1000, "admission_per_second": 100,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
             "max_statuses_per_request": 5000, "max_serialized_list_size": 1048576,

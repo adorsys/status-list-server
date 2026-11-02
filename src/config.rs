@@ -177,12 +177,15 @@ pub struct WatcherConfig {
 }
 
 /// Per-client-IP rate limits. `strict_*` is the management authentication
-/// gate, which counts rejected authentications only; `permissive_*` covers
+/// gate, which counts rejected authentications only; `admission_*` bounds every
+/// management request before `auth` does any work; `permissive_*` covers
 /// public reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
     pub strict_period_secs: u64,
+    pub admission_burst_size: u32,
+    pub admission_per_second: u32,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
     /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
@@ -214,6 +217,26 @@ impl RateLimitConfig {
                     })
             })
             .collect()
+    }
+
+    /// The admission bound is shared by every issuer behind one address, so it
+    /// must never refuse a lone standard issuer before its own budget does.
+    fn validate_admission(&self, standard: &TierLimits) -> Result<(), ConfigError> {
+        if self.admission_burst_size == 0 || self.admission_per_second == 0 {
+            return Err(ConfigError::Message(
+                "rate_limit.admission_burst_size and rate_limit.admission_per_second must be \
+                 greater than 0"
+                    .to_string(),
+            ));
+        }
+        if self.admission_burst_size < standard.write_burst_size.get() {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.admission_burst_size ({}) must be at least \
+                 tiers.standard.write_burst_size ({})",
+                self.admission_burst_size, standard.write_burst_size
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2022,7 +2045,9 @@ impl Config {
         config.status_list.validate()?;
         config.limits.validate()?;
         config.rate_limit.trusted_proxy_networks()?;
-        config.tier_limits()?;
+        config
+            .rate_limit
+            .validate_admission(&config.tier_limits()?.standard)?;
         config
             .server
             .aggregation_uri(config.telemetry.environment)?;
@@ -2142,6 +2167,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.issuers_file", Option::<String>::None)?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
+        .set_default("rate_limit.admission_burst_size", 1000)?
+        .set_default("rate_limit.admission_per_second", 100)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
         .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
@@ -3176,6 +3203,36 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("rate_limit.trusted_proxies"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_admission_below_the_standard_budget_fails_loading() {
+        let err = Config::load_from_overrides(&[
+            ("tiers.standard.write_burst_size", "50"),
+            ("rate_limit.admission_burst_size", "49"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("rate_limit.admission_burst_size (49)"),
+            "{err}"
+        );
+        assert!(
+            Config::load_from_overrides(&[
+                ("tiers.standard.write_burst_size", "50"),
+                ("rate_limit.admission_burst_size", "50"),
+            ])
+            .is_ok()
+        );
+        for key in [
+            "rate_limit.admission_burst_size",
+            "rate_limit.admission_per_second",
+        ] {
+            let err = Config::load_from_overrides(&[(key, "0")])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be greater than 0"), "{key}: {err}");
         }
     }
 

@@ -1,9 +1,10 @@
 //! Rate limiting on the management listener.
 //!
-//! [`AuthFailureGate`] wraps `auth`, keyed on the client address, and counts
-//! rejected authentications only. [`IssuerRateLimiter`] runs after `auth`,
-//! keyed on the verified issuer, so a forged `iss` cannot reach a bucket.
-//! State is per replica.
+//! [`AuthFailureGate`] wraps `auth`, keyed on the client address. It admits a
+//! coarse number of requests before `auth` resolves a key or verifies a
+//! signature, and counts rejected authentications. [`IssuerRateLimiter`] runs
+//! after `auth`, keyed on the verified issuer, so a forged `iss` cannot reach a
+//! bucket. State is per replica.
 //!
 //! The client address is the peer, unless the peer is a trusted proxy: then it
 //! is the rightmost `X-Forwarded-For` entry that is not a trusted proxy, which
@@ -11,7 +12,6 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -60,12 +60,15 @@ fn spawn_pruner<T: Send + Sync + 'static>(limiter: &Arc<T>, prune: fn(&T)) {
     });
 }
 
-/// Budget of rejected authentications per client address. A request that
-/// authenticates spends nothing and is never refused here, so a client sending
-/// bad tokens cannot lock out a verified issuer behind the same address. A
-/// rejection past the budget is answered with `429` instead of `401`.
+/// Two budgets per client address. Admission is spent by every request before
+/// `auth` runs, bounding key lookups and signature checks; it is sized above a
+/// standard issuer's own budget. Failures are spent only by rejected
+/// authentications, so a client sending bad tokens cannot lock out a verified
+/// issuer behind the same address; a rejection past that budget is answered
+/// with `429` instead of `401`.
 #[derive(Debug)]
 pub struct AuthFailureGate {
+    admission: DefaultKeyedRateLimiter<IpAddr>,
     limiter: DefaultKeyedRateLimiter<IpAddr>,
     clock: DefaultClock,
     trusted_proxies: Vec<IpNet>,
@@ -74,15 +77,14 @@ pub struct AuthFailureGate {
 }
 
 impl AuthFailureGate {
-    /// `None` when `burst` or `period` is zero.
-    pub(crate) fn new(burst: u32, period: Duration, trusted_proxies: Vec<IpNet>) -> Option<Self> {
-        let quota = Quota::with_period(period)?.allow_burst(NonZeroU32::new(burst)?);
-        Some(Self {
-            limiter: RateLimiter::keyed(quota),
+    pub(crate) fn new(admission: Quota, failures: Quota, trusted_proxies: Vec<IpNet>) -> Self {
+        Self {
+            admission: RateLimiter::keyed(admission),
+            limiter: RateLimiter::keyed(failures),
             clock: DefaultClock::default(),
             trusted_proxies,
             warned_untrusted_forwarding: AtomicBool::new(false),
-        })
+        }
     }
 
     fn is_trusted(&self, ip: IpAddr) -> bool {
@@ -125,17 +127,32 @@ impl AuthFailureGate {
         client
     }
 
-    /// Spends one token of `ip`'s budget; `Err` carries the wait once spent.
+    /// Spends one admission token of `ip`; `Err` carries the wait once spent.
+    fn admit(&self, ip: IpAddr) -> Result<(), Duration> {
+        Self::spend(&self.admission, &self.clock, ip)
+    }
+
+    /// Spends one failure token of `ip`; `Err` carries the wait once spent.
     fn record_failure(&self, ip: IpAddr) -> Result<(), Duration> {
-        self.limiter
+        Self::spend(&self.limiter, &self.clock, ip)
+    }
+
+    fn spend(
+        limiter: &DefaultKeyedRateLimiter<IpAddr>,
+        clock: &DefaultClock,
+        ip: IpAddr,
+    ) -> Result<(), Duration> {
+        limiter
             .check_key(&ip)
-            .map_err(|not_until| not_until.wait_time_from(self.clock.now()))
+            .map_err(|not_until| not_until.wait_time_from(clock.now()))
     }
 
     pub fn spawn_pruner(gate: &Arc<Self>) {
         spawn_pruner(gate, |gate| {
-            gate.limiter.retain_recent();
-            gate.limiter.shrink_to_fit();
+            for limiter in [&gate.admission, &gate.limiter] {
+                limiter.retain_recent();
+                limiter.shrink_to_fit();
+            }
         });
     }
 }
@@ -154,6 +171,10 @@ pub async fn auth_failure_gate(
         return governor_error_response(GovernorError::UnableToExtractKey);
     };
     let ip = gate.client_ip(peer, request.headers());
+    if let Err(wait) = gate.admit(ip) {
+        return ApiError::too_many_requests(wait, "Too many requests from this address")
+            .into_response();
+    }
     let response = next.run(request).await;
     if response
         .extensions()
@@ -264,12 +285,12 @@ mod tests {
     use super::*;
 
     fn gate(trusted: &[&str]) -> AuthFailureGate {
+        let quota = Quota::with_period(Duration::from_secs(60)).unwrap();
         AuthFailureGate::new(
-            1,
-            Duration::from_secs(60),
+            quota,
+            quota,
             trusted.iter().map(|net| net.parse().unwrap()).collect(),
         )
-        .unwrap()
     }
 
     fn client(gate: &AuthFailureGate, peer: &str, forwarded: &[&str]) -> IpAddr {

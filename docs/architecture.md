@@ -194,11 +194,19 @@ The writes tier is a gate around the `auth` middleware that counts
 spends one token of the client address's bucket. Once an address has spent its
 bucket, each further rejected authentication from it is answered with `429`
 instead of `401`, until the next token is replenished. A request that
-authenticates spends nothing and is never refused by the gate, so a client
+authenticates spends nothing and is never refused by that budget, so a client
 sending bad tokens cannot lock out a verified issuer behind the same address.
-Every request still has its token verified; floods of bad tokens belong at the
-edge. Per-issuer budgets come from the issuer's tier (see
+Per-issuer budgets come from the issuer's tier (see
 [Issuer tiers](#issuer-tiers-app_tiers__)), applied after `auth`.
+
+Before `auth` resolves a key or verifies a signature, the gate also spends one
+token of the address's **admission** budget, `admission_burst_size` (1000)
+refilled at `admission_per_second` (100). Every management request spends it,
+so a flood of bad tokens cannot drive unbounded key lookups or signature
+checks. It is a coarse bound shared by every issuer behind one address, and
+startup fails unless `admission_burst_size` is at least
+`tiers.standard.write_burst_size`, so it never refuses a single standard
+issuer before that issuer's own budget does.
 
 The writes gate keys on the TCP peer address. Only when the peer is listed
 in `rate_limit.trusted_proxies` (`APP_RATE_LIMIT__TRUSTED_PROXIES`, a
@@ -215,9 +223,9 @@ address, and so one budget of rejected authentications. The first
 `X-Forwarded-For` received from an untrusted peer is logged as a warning.
 Clients behind one NAT address still share the gate.
 
-The order on management routes is: writes gate, `auth`, issuer limit,
-handler. When any bucket is exhausted the server returns
-`429 Too Many Requests` with the JSON body
+The order on management routes is: writes gate (admission, then `auth`,
+then failure accounting), issuer limit, handler. When any bucket is
+exhausted the server returns `429 Too Many Requests` with the JSON body
 `{"error": "too_many_requests", ...}` and a `Retry-After` header giving the
 whole seconds until the next token, rounded up.
 
@@ -275,7 +283,10 @@ revoke the statuses it issued.
 holds more keys whose `not_after` has not passed than its tier allows stops a
 pod from starting, and a reload with such a registry is refused and keeps the
 previous one. `status-list-server issuer-registry` applies the same check
-before a deployment.
+before a deployment. A hosted issuer gets the same limit from its stored tier
+when a key is added: an active key whose `not_after` has not passed is refused
+once the issuer holds `max_keys` of them. Hosted issuers already over the limit
+keep authenticating and are logged as a warning at startup.
 
 Rate-limit state is per replica: the effective cluster-wide budget of an
 issuer is `write_burst_size × replica_count`, and the same holds for the IP

@@ -368,6 +368,69 @@ async fn test_sqlite_stored_alg_is_the_jose_name() {
     );
 }
 
+/// A key with freshly generated material, for tests that need more distinct
+/// keys than the fixtures provide.
+#[cfg(feature = "sqlite")]
+fn fresh_key(issuer_id: &str, kid: &str) -> HostedIssuerKey {
+    let signing =
+        crate::crypto::SigningKey::generate(crate::crypto::SigningAlgorithm::Es256).unwrap();
+    let secret =
+        jsonwebtoken::EncodingKey::from_ec_pem(signing.to_pkcs8_pem().unwrap().as_bytes()).unwrap();
+    let jwk =
+        jsonwebtoken::jwk::Jwk::from_encoding_key(&secret, jsonwebtoken::Algorithm::ES256).unwrap();
+    key_with_material(issuer_id, kid, &serde_json::to_string(&jwk).unwrap())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_add_key_enforces_the_stored_tiers_key_limit() {
+    let mut tiers = crate::test_utils::test_tiers();
+    tiers.sandbox.max_keys = 2;
+    tiers.standard.max_keys = 3;
+    let store = sqlite_store()
+        .await
+        .with_key_limits(std::sync::Arc::new(tiers));
+    let mut sandbox = issuer("00000000-0000-4000-8000-000000000101");
+    sandbox.tier = "sandbox".into();
+    let standard = issuer("00000000-0000-4000-8000-000000000102");
+    for hosted in [&sandbox, &standard] {
+        store.create_issuer(hosted.clone()).await.unwrap();
+    }
+
+    // Keys that can no longer authenticate do not hold a slot.
+    let mut revoked = fresh_key(&sandbox.id, "sandbox-revoked");
+    revoked.state = HostedIssuerKeyState::Revoked;
+    store.add_key(revoked).await.unwrap();
+    let mut ended = fresh_key(&sandbox.id, "sandbox-ended");
+    ended.not_after = Some(OffsetDateTime::now_utc() - time::Duration::days(1));
+    store.add_key(ended).await.unwrap();
+    for kid in ["sandbox-1", "sandbox-2"] {
+        store.add_key(fresh_key(&sandbox.id, kid)).await.unwrap();
+    }
+
+    assert!(
+        matches!(
+            store.add_key(fresh_key(&sandbox.id, "sandbox-3")).await,
+            Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 2 })
+        ),
+        "a sandbox issuer at its key limit must be refused"
+    );
+    assert!(store.find_key_by_kid("sandbox-3").await.unwrap().is_none());
+    // A key that would not hold a slot is still accepted at the limit.
+    let mut reserved = fresh_key(&sandbox.id, "sandbox-reserved");
+    reserved.state = HostedIssuerKeyState::Reserved;
+    store.add_key(reserved).await.unwrap();
+
+    // The standard issuer is unaffected and gets its own tier's limit.
+    for kid in ["standard-1", "standard-2", "standard-3"] {
+        store.add_key(fresh_key(&standard.id, kid)).await.unwrap();
+    }
+    assert!(matches!(
+        store.add_key(fresh_key(&standard.id, "standard-4")).await,
+        Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 3 })
+    ));
+}
+
 #[cfg(feature = "sqlite")]
 async fn sqlite_store() -> SqlHostedIssuerStore {
     // One store per helper: each helper seeds its own namespace rather than

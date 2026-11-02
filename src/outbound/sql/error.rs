@@ -28,6 +28,9 @@ pub enum RepositoryError {
     /// another hosted issuer; the owner is logged server-side, never returned.
     #[error("key material was already registered")]
     KeyMaterialReused,
+    /// The hosted issuer already holds its tier's `max_keys` keys.
+    #[error("hosted issuer key quota exceeded: at most {max_keys} keys")]
+    KeyQuotaExceeded { max_keys: usize },
     /// The statement lost a lock race and was rolled back. Distinct from
     /// [`DuplicateEntry`] and from the optimistic-guard miss: nothing was
     /// written, nobody won, and the request is safe to retry verbatim.

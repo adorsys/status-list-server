@@ -149,6 +149,9 @@ mod tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(self.key.lock().unwrap().clone().into_iter().collect())
         }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Ok(self.issuer.lock().unwrap().clone().into_iter().collect())
+        }
         async fn find_key_by_material(
             &self,
             _material: &str,

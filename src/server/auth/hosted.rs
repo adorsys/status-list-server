@@ -371,6 +371,10 @@ mod tests {
             Ok(self.keys.lock().await.values().cloned().collect())
         }
 
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Ok(self.issuer.iter().cloned().collect())
+        }
+
         async fn find_key_by_material(
             &self,
             material: &str,
@@ -749,6 +753,9 @@ mod tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
         }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            self.inner.all_issuers().await
+        }
         async fn find_key_by_material(
             &self,
             material: &str,
@@ -997,6 +1004,11 @@ mod tests {
                 "backend down",
             ))))
         }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "backend down",
+            ))))
+        }
         async fn find_key_by_material(
             &self,
             _material: &str,
@@ -1054,6 +1066,9 @@ mod tests {
             Ok(())
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
             Ok(Vec::new())
         }
         async fn find_key_by_material(

@@ -230,7 +230,7 @@ fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
         ),
         (
             "issuer_keys",
-            "Registry keys of the issuer whose not_after has not passed.",
+            "Active keys of the issuer whose not_after has not passed.",
             |usage| usage.keys as u64,
         ),
         (

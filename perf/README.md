@@ -104,11 +104,13 @@ The values below (the highest of the four) are safe for every suite. Raising
 the issuer request limit especially matters, since the authenticated update
 flows send two writes back to back and every suite writes as one issuer, so
 `APP_TIERS__STANDARD__WRITE_BURST_SIZE` needs the same headroom as
-`STRICT_BURST_SIZE`. Use the per-suite values above when running
-a single suite so the limits stay high enough to avoid `429`s yet still let the
-server shed truly excessive load. `APP_SERVER__AGGREGATION_URI` makes every
-served token carry `aggregation_uri`, so the read scenarios also measure the
-aggregation ID lookup that comes with it:
+`STRICT_BURST_SIZE`, and `APP_RATE_LIMIT__ADMISSION_BURST_SIZE` must be at
+least that value or the server refuses to start. Use the per-suite values
+above when running a single suite so the limits stay high enough to avoid
+`429`s yet still let the server shed truly excessive load.
+`APP_SERVER__AGGREGATION_URI` makes every served token carry
+`aggregation_uri`, so the read scenarios also measure the aggregation ID lookup
+that comes with it:
 
 ```bash
 APP_SERVER__ENABLE_METRICS=true \
@@ -119,6 +121,7 @@ APP_RATE_LIMIT__STRICT_BURST_SIZE=60000 \
 APP_RATE_LIMIT__STRICT_PERIOD_SECS=60 \
 APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE=60000 \
 APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS=60 \
+APP_RATE_LIMIT__ADMISSION_BURST_SIZE=60000 \
 APP_TIERS__STANDARD__WRITE_BURST_SIZE=60000 \
 RUST_LOG=info \
 ./target/debug/status-list-server

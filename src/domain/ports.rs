@@ -53,6 +53,9 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
 
+    /// Every hosted issuer, for the per-issuer usage gauges.
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+
     /// The hosted key that already holds the given normalized key material
     /// (RFC 7638 §7 parameters), if any. Returns `None` when the material is
     /// free. The `issuer_id` and `state` of the returned key let callers

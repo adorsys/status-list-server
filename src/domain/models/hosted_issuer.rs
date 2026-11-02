@@ -116,6 +116,13 @@ impl HostedIssuerKeyState {
 }
 
 impl HostedIssuerKey {
+    /// Whether the key holds one of its issuer's `max_keys` slots at `now`.
+    /// Like a registry key, it counts until `not_after` passes; a reserved or
+    /// revoked key never authenticates, so it counts against nothing.
+    pub fn counts_against_quota(&self, now: OffsetDateTime) -> bool {
+        self.state == HostedIssuerKeyState::Active && self.not_after.is_none_or(|end| now < end)
+    }
+
     /// Whether the key is inside its validity window at `now`.
     pub fn is_currently_valid(&self, now: OffsetDateTime) -> bool {
         self.state == HostedIssuerKeyState::Active
@@ -143,6 +150,9 @@ pub enum HostedIssuerError {
     /// the owner is logged server-side, never returned to the caller.
     #[error("key material was already registered by another issuer")]
     KeyMaterialReused,
+    /// The issuer already holds its tier's `max_keys` keys.
+    #[error("the issuer already holds its tier's maximum of {max_keys} keys")]
+    KeyQuotaExceeded { max_keys: usize },
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
     #[error("invalid expiry: {0}")]

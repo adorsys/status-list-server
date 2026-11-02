@@ -156,16 +156,18 @@ Per-issuer usage is exported with `issuer` and `tier` labels:
 | --------------------------- | --------------------------------------------------------------------- |
 | `issuer_lists`              | Status lists counted against the issuer's quota                       |
 | `issuer_lists_limit`        | The tier's `max_lists`                                                |
-| `issuer_keys`               | Registry keys whose `not_after` has not passed                        |
+| `issuer_keys`               | Active keys whose `not_after` has not passed                          |
 | `issuer_keys_limit`         | The tier's `max_keys`                                                 |
 | `issuer_rate_limited_total` | Management requests refused with `429` by the issuer's tier rate limit |
 
-The gauges list exactly the issuers of the current registry, under their
-current tier. Each pod reads them from the database at startup and every 60
-seconds, so every pod reports the cluster-wide value, at most a minute old:
-aggregate `issuer_lists` across pods with `max`, not `sum`. `issuer_lists` is
-the per-issuer counter the list quota is enforced against; while the quota
-awaits `list-quota enable`, pods of the previous release leave it short.
+The gauges list exactly the issuers of the current registry and, in the
+`hosted` profile, every active hosted issuer the registry does not own, each
+under its current tier. Each pod reads them from the database at startup and
+every 60 seconds, so every pod reports the cluster-wide value, at most a minute
+old: aggregate `issuer_lists` across pods with `max`, not `sum`.
+`issuer_lists` is the per-issuer counter the list quota is enforced against;
+while the quota awaits `list-quota enable`, pods of the previous release leave
+it short.
 `issuer_rate_limited_total` is per pod, so `sum` it. Rate limits are held per
 replica, so an issuer's cluster-wide budget is the tier budget times the
 replica count; set a global cap at the ingress or API gateway.
@@ -174,7 +176,9 @@ The management authentication gate keys on the TCP peer address. Behind an
 ingress, set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress controller's
 addresses or CIDRs, so the gate keys on the client address the ingress appends
 to `X-Forwarded-For`; without it, every client behind the ingress shares one
-budget for rejected authentications. The gate never refuses a request that
+budget for rejected authentications and one admission budget
+(`APP_RATE_LIMIT__ADMISSION_*`), which every management request spends before
+its token is checked. The failure budget never refuses a request that
 authenticates. Make sure the ingress appends the peer address it saw rather
 than passing a client's `X-Forwarded-For` through unchanged.
 

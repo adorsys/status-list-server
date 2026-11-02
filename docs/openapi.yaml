@@ -43,6 +43,10 @@ info:
         `X-Forwarded-For` from any other peer is ignored, so a client cannot
         choose its own key.
         Tunables: `strict_burst_size`, `strict_period_secs` (defaults: 10 / 60s).
+        Every management request from the same address, authenticated or
+        not, also spends a coarse admission budget before its token is
+        checked. Tunables: `admission_burst_size`, `admission_per_second`
+        (defaults: 1000 / 100 per second).
       * **permissive** (per source IP) — public read routes
         (`GET /api/v1/aggregation/{aggregation_id}`,
         `GET /api/v1/aggregation`,
