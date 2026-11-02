@@ -208,6 +208,16 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
+    async fn count_by_issuers(
+        &self,
+        issuers: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.store
+            .count_status_lists_by_issuers(issuers)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         self.store
             .find_one_by(list_id)

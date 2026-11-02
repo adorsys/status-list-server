@@ -4,7 +4,7 @@ The admin listener (default `localhost:8002`) serves `GET /admin/v1/issuers`
 and `GET /admin/v1/issuers/{issuer_id}`. The public and management listeners
 return 404 for these routes. Keep the admin listener on a private network.
 The [Admin OpenAPI contract](openapi-admin.yaml) describes the response fields.
-Issuer mutation operations in that contract are not implemented by this change.
+The server implements only the read operations in that contract.
 
 ## Authentication and configuration
 
@@ -46,21 +46,19 @@ returns portal issuers from SQL. Filter with `source`, `tier`, `state`, or
 The default page size is 50; `limit` must be between 1 and 100.
 
 Follow `next_cursor` or the `Link` header with the same filters. Ordering is
-ascending by issuer ID. Issuers present at the start that remain present and
-matching when their page is read appear exactly once. Concurrent inserts
-before the current cursor are not included; inserts after it may be included.
-This is a forward traversal, not a database snapshot. Start another traversal
-to observe insertions behind the cursor.
+ascending by issuer ID. The cursor keeps independent positions for static and
+portal issuers, so database collation cannot change their merged order. Issuers
+present at the start that remain present and matching when their page is read
+appear exactly once. Concurrent inserts after a source position may appear once;
+inserts before that position are observed on a new traversal.
 
 ## Usage and validators
 
 Usage reports the actual number of persisted lists, including during a quota
 transition, and the configured per-issuer list limit. Key usage counts active
 (non-revoked) keys, including keys outside their validity windows.
-`keys_limit: null` explicitly means no key-count quota is enforced. This is an
-intentional extension of the earlier integer-only API schema; clients must
-accept null and must not treat it as zero. Tier-specific key caps are outside
-this read-endpoint implementation.
+`keys_limit: null` means no key-count quota is enforced; clients must not treat
+it as zero.
 
 The detail ETag identifies the complete JSON representation for either source.
 It changes when returned keys, usage, metadata, or derived expiry state change.

@@ -84,14 +84,15 @@ paths:
       summary: List issuers
       description: |
         Static and portal issuers together, ordered by `id` ascending, one
-        bounded page per request. Requires `issuers:read`.
+        bounded page per request. The opaque cursor keeps independent positions
+        for static and portal issuers so database collation cannot mix their
+        ordering. Requires `issuers:read`.
 
         Pass `next_cursor` back as `cursor` to read the next page with the same
         filters. A full walk returns every matching issuer present at the start
         that remains present and matching when its page is read, exactly once.
-        A concurrently added issuer whose id
-        sorts before the current cursor may be absent from that walk; begin a
-        new walk to observe it.
+        A concurrently added issuer after its source position may appear once;
+        an issuer inserted before that source position is observed on a new walk.
       parameters:
         - name: source
           in: query
@@ -490,7 +491,7 @@ components:
       description: The issuer's current `ETag` (RFC 9110 §13.1.1).
       schema:
         type: string
-        example: '"7"'
+        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
 
   headers:
     CacheControl:
@@ -506,7 +507,7 @@ components:
         updating a portal issuer.
       schema:
         type: string
-        example: '"7"'
+        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
     IssuerLocation:
       description: "`/admin/v1/issuers/{id}` of the created issuer."
       schema:
@@ -634,9 +635,8 @@ components:
       required: [lists, lists_limit, keys, keys_limit]
       description: |
         Current use against enforced limits. `lists_limit` is the configured
-        server-wide per-issuer cap. `keys_limit` is null because this release
-        does not enforce a key-count quota; clients must not interpret it as zero.
-        This nullable field extends the earlier integer-only contract.
+        server-wide per-issuer cap. `keys_limit` is null when no key-count quota
+        is enforced; clients must not interpret it as zero.
       properties:
         lists:
           type: integer

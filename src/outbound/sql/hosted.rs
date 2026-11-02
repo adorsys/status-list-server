@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use sea_orm::{
     ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -592,6 +592,29 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .map(parse_key)
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    async fn issuer_keys_for(
+        &self,
+        issuer_ids: &[String],
+    ) -> Result<HashMap<String, Vec<HostedIssuerKey>>, HostedIssuerError> {
+        if issuer_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let keys = hosted_issuer_keys::Entity::find()
+            .filter(hosted_issuer_keys::Column::IssuerId.is_in(issuer_ids.iter().cloned()))
+            .order_by_asc(hosted_issuer_keys::Column::IssuerId)
+            .order_by_desc(hosted_issuer_keys::Column::CreatedAt)
+            .order_by_asc(hosted_issuer_keys::Column::Kid)
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?;
+        let mut grouped: HashMap<String, Vec<HostedIssuerKey>> = HashMap::new();
+        for row in keys {
+            let issuer_id = row.issuer_id.clone();
+            grouped.entry(issuer_id).or_default().push(parse_key(row)?);
+        }
+        Ok(grouped)
     }
 
     async fn find_key_by_kid(

@@ -733,6 +733,35 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
+    pub async fn count_status_lists_by_issuers(
+        &self,
+        issuer_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, RepositoryError> {
+        if issuer_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        time_query("count_by_issuers", "status_list", async {
+            let rows = status_lists::Entity::find()
+                .select_only()
+                .column(status_lists::Column::Issuer)
+                .column_as(status_lists::Column::ListId.count(), "list_count")
+                .filter(status_lists::Column::Issuer.is_in(issuer_ids.iter().cloned()))
+                .group_by(status_lists::Column::Issuer)
+                .into_tuple::<(String, i64)>()
+                .all(self.db.current().as_ref())
+                .await
+                .map_err(find_err)?;
+            rows.into_iter()
+                .map(|(issuer, count)| {
+                    u64::try_from(count)
+                        .map(|count| (issuer, count))
+                        .map_err(|error| RepositoryError::DataError(error.to_string()))
+                })
+                .collect()
+        })
+        .await
+    }
+
     #[tracing::instrument(skip(self), fields(db.system = "sea-orm"))]
     pub async fn find_status_list_issuers(&self) -> Result<Vec<String>, RepositoryError> {
         time_query("list_issuers", "status_list", async {
@@ -1387,8 +1416,9 @@ fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::DeleteError(e.to_string()))
 }
 
-/// Not a classifier, unlike its `map_*_err` siblings: contention maps to 409,
-/// and a 409 on a read claims a conflict with state the request never proposed.
+/// Connection acquisition and transport failures map to `Unavailable` (503).
+/// Other read failures remain backend errors; contention is deliberately not
+/// mapped to 409 because a read did not propose conflicting state.
 fn find_err(e: sea_orm::DbErr) -> RepositoryError {
     use sea_orm::{ConnAcquireErr, DbErr, RuntimeErr, SqlxError};
 

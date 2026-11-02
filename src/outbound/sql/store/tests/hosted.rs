@@ -230,6 +230,18 @@ async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
         keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
         ["newer-key", "older-key", "same-time-key"]
     );
+    let grouped_keys = store
+        .issuer_keys_for(&[first.id.clone(), second.id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        grouped_keys[&first.id]
+            .iter()
+            .map(|key| key.kid.as_str())
+            .collect::<Vec<_>>(),
+        ["newer-key", "older-key", "same-time-key"]
+    );
+    assert!(grouped_keys.get(&second.id).is_none_or(Vec::is_empty));
 }
 
 #[cfg(feature = "sqlite")]

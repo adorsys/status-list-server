@@ -82,12 +82,34 @@ pub struct IssuerPage {
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct Cursor {
-    after: String,
+    after_static: Option<String>,
+    after_portal: Option<String>,
     filters: Filters,
 }
 
 fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError::new(status, code, Some(message.into()))
+}
+fn hosted_store_error(err: crate::domain::models::hosted_issuer::HostedIssuerError) -> ApiError {
+    use crate::domain::models::hosted_issuer::HostedIssuerError;
+    match err {
+        HostedIssuerError::Backend(source) => {
+            tracing::error!(error = %source, "admin issuer storage is unavailable");
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "issuer store unavailable",
+            )
+        }
+        HostedIssuerError::Corrupt(source) => {
+            tracing::error!(error = %source, "admin issuer storage contains corrupt data");
+            ApiError::internal("issuer storage contains corrupt data")
+        }
+        other => {
+            tracing::error!(error = %other, "unexpected admin issuer storage error");
+            ApiError::internal("issuer storage read failed")
+        }
+    }
 }
 fn require_scope(admin: &AuthenticatedAdmin, needed: &'static str) -> Result<(), ApiError> {
     if admin.scopes.iter().any(|scope| scope == needed) {
@@ -176,9 +198,8 @@ async fn list_count(state: &AppState, id: &str) -> Result<u64, ApiError> {
         .await
         .map_err(IntoApiError::into_api_error)
 }
-async fn static_dto(state: &AppState, entry: &IssuerEntry) -> Result<IssuerDto, ApiError> {
-    let count = list_count(state, &entry.id).await?;
-    Ok(IssuerDto {
+fn static_dto(state: &AppState, entry: &IssuerEntry, count: u64) -> IssuerDto {
+    IssuerDto {
         id: entry.id.clone(),
         aggregation_id: entry.aggregation_id.to_string(),
         aggregation_uri: state.aggregation_uri_for(
@@ -199,29 +220,17 @@ async fn static_dto(state: &AppState, entry: &IssuerEntry) -> Result<IssuerDto, 
             keys: entry.keys.len() as u64,
             keys_limit: None,
         },
-    })
+    }
 }
-async fn hosted_dto(state: &AppState, issuer: HostedIssuer) -> Result<IssuerDto, ApiError> {
-    let id = issuer.id.clone();
-    let count = list_count(state, &id).await?;
-    let keys = if let Some(store) = &state.hosted_issuer_store {
-        store
-            .issuer_keys(&id)
-            .await
-            .map_err(|_| {
-                error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    "issuer key store unavailable",
-                )
-            })?
-            .into_iter()
-            .map(key_from_hosted)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+fn hosted_dto(
+    state: &AppState,
+    issuer: HostedIssuer,
+    count: u64,
+    keys: Vec<HostedIssuerKey>,
+    now: time::OffsetDateTime,
+) -> IssuerDto {
+    let keys: Vec<_> = keys.into_iter().map(key_from_hosted).collect();
+    let now = now.unix_timestamp();
     let state_name = if issuer.state.as_str() == "disabled" {
         "suspended"
     } else if issuer.expires_at.is_some_and(|v| v.unix_timestamp() <= now) {
@@ -229,7 +238,7 @@ async fn hosted_dto(state: &AppState, issuer: HostedIssuer) -> Result<IssuerDto,
     } else {
         "active"
     };
-    Ok(IssuerDto {
+    IssuerDto {
         aggregation_uri: state
             .aggregation_uri_for(&Issuer(issuer.id.clone()), issuer.aggregation_id),
         id: issuer.id,
@@ -248,13 +257,12 @@ async fn hosted_dto(state: &AppState, issuer: HostedIssuer) -> Result<IssuerDto,
             keys: keys.iter().filter(|k| k.state == "active").count() as u64,
             keys_limit: None,
         },
-    })
+    }
 }
-fn cursor_encode(after: String, filters: Filters) -> String {
-    URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&Cursor { after, filters }).expect("cursor serializes"))
+fn cursor_encode(cursor: Cursor) -> String {
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).expect("cursor serializes"))
 }
-fn cursor_decode(raw: &str, filters: &Filters) -> Result<String, ApiError> {
+fn cursor_decode(raw: &str, filters: &Filters) -> Result<Cursor, ApiError> {
     let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
@@ -276,7 +284,7 @@ fn cursor_decode(raw: &str, filters: &Filters) -> Result<String, ApiError> {
             "cursor does not match filters",
         ));
     }
-    Ok(cursor.after)
+    Ok(cursor)
 }
 
 pub async fn list_issuers(
@@ -341,11 +349,17 @@ pub async fn list_issuers(
         state: query.state,
         owner: query.owner,
     };
-    let after = query
+    let mut cursor = query
         .cursor
         .as_deref()
         .map(|c| cursor_decode(c, &filters))
-        .transpose()?;
+        .transpose()?
+        .unwrap_or(Cursor {
+            after_static: None,
+            after_portal: None,
+            filters: filters.clone(),
+        });
+    let now = time::OffsetDateTime::now_utc();
     let snapshot = state.admin_registry.snapshot();
     enum Row<'a> {
         Static(&'a IssuerEntry),
@@ -365,7 +379,10 @@ pub async fn list_issuers(
             .issuers()
             .iter()
             .filter(|entry| {
-                after.as_deref().is_none_or(|a| entry.id.as_str() > a)
+                cursor
+                    .after_static
+                    .as_deref()
+                    .is_none_or(|a| entry.id.as_str() > a)
                     && filter_matches(&filters, "static", &entry.tier, static_state(entry), None)
             })
             .collect();
@@ -388,19 +405,13 @@ pub async fn list_issuers(
         rows.extend(
             store
                 .list_issuers_after(
-                    after.as_deref(),
+                    cursor.after_portal.as_deref(),
                     limit + 1,
                     &hosted_filters,
-                    time::OffsetDateTime::now_utc(),
+                    now,
                 )
                 .await
-                .map_err(|_| {
-                    error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "service_unavailable",
-                        "issuer store unavailable",
-                    )
-                })?
+                .map_err(hosted_store_error)?
                 .into_iter()
                 .map(Row::Hosted),
         );
@@ -409,17 +420,51 @@ pub async fn list_issuers(
     rows.dedup_by(|a, b| a.id() == b.id());
     let has_more = rows.len() > limit;
     rows.truncate(limit);
+    let issuer_ids: Vec<_> = rows.iter().map(|row| row.id().to_owned()).collect();
+    let counts = state
+        .service
+        .issuer_status_list_counts(&issuer_ids)
+        .await
+        .map_err(IntoApiError::into_api_error)?;
+    let hosted_ids: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Hosted(issuer) => Some(issuer.id.clone()),
+            Row::Static(_) => None,
+        })
+        .collect();
+    let hosted_keys = if let Some(store) = &state.hosted_issuer_store {
+        store
+            .issuer_keys_for(&hosted_ids)
+            .await
+            .map_err(hosted_store_error)?
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut issuers = Vec::with_capacity(rows.len());
     for row in rows {
-        issuers.push(match row {
-            Row::Static(entry) => static_dto(&state, entry).await?,
-            Row::Hosted(issuer) => hosted_dto(&state, issuer).await?,
-        });
+        let issuer = match row {
+            Row::Static(entry) => {
+                let id = entry.id.clone();
+                cursor.after_static = Some(id.clone());
+                static_dto(&state, entry, counts.get(&id).copied().unwrap_or(0))
+            }
+            Row::Hosted(hosted) => {
+                let id = hosted.id.clone();
+                cursor.after_portal = Some(id.clone());
+                hosted_dto(
+                    &state,
+                    hosted,
+                    counts.get(&id).copied().unwrap_or(0),
+                    hosted_keys.get(&id).cloned().unwrap_or_default(),
+                    now,
+                )
+            }
+        };
+        issuers.push(issuer);
     }
     let next_cursor = if has_more {
-        issuers
-            .last()
-            .map(|last| cursor_encode(last.id.clone(), filters.clone()))
+        Some(cursor_encode(cursor))
     } else {
         None
     };
@@ -473,18 +518,13 @@ pub async fn get_issuer(
     })?;
     let snapshot = state.admin_registry.snapshot();
     let dto = if let Some(entry) = snapshot.issuer(&id) {
-        static_dto(&state, entry).await?
+        let count = list_count(&state, &id).await?;
+        static_dto(&state, entry, count)
     } else if let Some(store) = &state.hosted_issuer_store {
         let issuer = store
             .find_issuer(&id)
             .await
-            .map_err(|_| {
-                error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    "issuer store unavailable",
-                )
-            })?
+            .map_err(hosted_store_error)?
             .ok_or_else(|| {
                 error(
                     StatusCode::NOT_FOUND,
@@ -492,7 +532,9 @@ pub async fn get_issuer(
                     "no issuer has this id",
                 )
             })?;
-        hosted_dto(&state, issuer).await?
+        let keys = store.issuer_keys(&id).await.map_err(hosted_store_error)?;
+        let count = list_count(&state, &id).await?;
+        hosted_dto(&state, issuer, count, keys, time::OffsetDateTime::now_utc())
     } else {
         return Err(error(
             StatusCode::NOT_FOUND,
@@ -640,13 +682,17 @@ mod tests {
         }
     }
 
+    fn static_registry_with_id(
+        id: &str,
+    ) -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
+        let yaml = format!(
+            "version: 1\nissuers:\n  - id: {id}\n    aggregation_id: 00000000-0000-4000-8000-000000000001\n    tier: standard\n    keys:\n      - kid: static-key\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: static-key\n          alg: ES256\n          x: NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\n          y: eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\nadmins: []\n"
+        );
+        Arc::new(crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap())
+    }
+
     fn static_registry() -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
-        Arc::new(
-            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(
-                "version: 1\nissuers:\n  - id: b\n    aggregation_id: 00000000-0000-4000-8000-000000000001\n    tier: standard\n    keys:\n      - kid: static-key\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: static-key\n          alg: ES256\n          x: NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8\n          y: eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M\nadmins: []\n",
-            )
-            .unwrap(),
-        )
+        static_registry_with_id("b")
     }
 
     async fn query_page(
@@ -708,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_inserts_after_cursor_are_seen_and_before_cursor_are_skipped() {
+    async fn concurrent_inserts_do_not_skip_preexisting_issuers_or_repeat_results() {
         let hosted = Arc::new(Mutex::new(vec![hosted_issuer("a"), hosted_issuer("c")]));
         let mut state = crate::test_utils::test_app_state(None).await;
         state.admin_registry = static_registry();
@@ -742,8 +788,48 @@ mod tests {
                 .iter()
                 .map(|issuer| issuer.id.as_str())
                 .collect::<Vec<_>>(),
-            ["bb", "c"]
+            ["aa", "bb"]
         );
+        let third = query_page(state, &admin, second.next_cursor, 2).await;
+        assert_eq!(
+            third
+                .issuers
+                .iter()
+                .map(|issuer| issuer.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
+        let visited: Vec<_> = first
+            .issuers
+            .iter()
+            .chain(second.issuers.iter())
+            .chain(third.issuers.iter())
+            .map(|issuer| issuer.id.as_str())
+            .collect();
+        assert_eq!(visited.iter().filter(|id| **id == "a").count(), 1);
+        assert_eq!(visited.iter().filter(|id| **id == "b").count(), 1);
+        assert_eq!(visited.iter().filter(|id| **id == "c").count(), 1);
+        assert_eq!(visited.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn portal_cursor_is_not_advanced_by_static_id_collation() {
+        let portal_id = "a0000000-0000-4000-8000-000000000001";
+        let hosted = Arc::new(Mutex::new(vec![hosted_issuer(portal_id)]));
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = static_registry_with_id("Issuer-A");
+        state.hosted_issuer_store = Some(Arc::new(MutableHostedStore {
+            issuers: hosted,
+            keys: Arc::default(),
+        }));
+        let admin = AuthenticatedAdmin {
+            id: "operator".into(),
+            scopes: vec!["issuers:read".into()],
+        };
+        let first = query_page(state.clone(), &admin, None, 1).await;
+        assert_eq!(first.issuers[0].id, "Issuer-A");
+        let second = query_page(state, &admin, first.next_cursor, 1).await;
+        assert_eq!(second.issuers[0].id, portal_id);
         assert!(second.next_cursor.is_none());
     }
 
@@ -769,8 +855,17 @@ mod tests {
             source: Some("static".into()),
             ..Filters::default()
         };
-        let cursor = cursor_encode("issuer-1".into(), filters.clone());
-        assert_eq!(cursor_decode(&cursor, &filters).unwrap(), "issuer-1");
+        let cursor = cursor_encode(Cursor {
+            after_static: Some("issuer-1".into()),
+            after_portal: Some("00000000-0000-4000-8000-000000000001".into()),
+            filters: filters.clone(),
+        });
+        let decoded = cursor_decode(&cursor, &filters).unwrap();
+        assert_eq!(decoded.after_static.as_deref(), Some("issuer-1"));
+        assert_eq!(
+            decoded.after_portal.as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
         assert!(cursor_decode(&cursor, &Filters::default()).is_err());
     }
 
@@ -780,6 +875,21 @@ mod tests {
             .into_api_error()
             .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn hosted_storage_corruption_is_internal_error_not_unavailable() {
+        use crate::domain::models::hosted_issuer::HostedIssuerError;
+
+        let unavailable = hosted_store_error(HostedIssuerError::Backend(Box::new(
+            std::io::Error::other("connection failed"),
+        )))
+        .into_response();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let corrupt =
+            hosted_store_error(HostedIssuerError::Corrupt("bad row".into())).into_response();
+        assert_eq!(corrupt.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
