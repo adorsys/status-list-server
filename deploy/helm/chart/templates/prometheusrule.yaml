@@ -96,8 +96,8 @@ spec:
           # `max(up) == 0` catches a target that is present but failing scrapes
           # while `absent(up)` catches a target that is gone entirely. The
           # `service` label matches the rendered Service the ServiceMonitor
-          # selects (the chart fullname followed by `-service`).
-          expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) == 0
+          # selects (the chart fullname followed by `-internal-service`).
+          expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) == 0
           for: 5m
           labels:
             severity: page
@@ -305,4 +305,43 @@ spec:
             description: 'namespace {{ `{{ $labels.namespace }}` }}: time to expiry is {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
+
+    - name: hosted-trust-alerts
+      rules:
+        - alert: IssuerRegistryReloadFailures
+          expr: sum by (namespace)(increase(issuer_registry_reload_failures_total_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warn
+            team: statuslist
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+          annotations:
+            summary: "Issuer registry reload failed"
+            description: "namespace {{ `{{ $labels.namespace }}` }}: The last valid registry remains active; repair the mounted registry."
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
+        - alert: ListQuotaRejectionsSpike
+          expr: sum by (namespace)(increase(list_quota_rejections_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[5m])) > {{ .Values.slo.listQuotaRejections }}
+          for: 5m
+          labels:
+            severity: warn
+            team: statuslist
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+          annotations:
+            summary: "Issuer list quota rejections are elevated"
+            description: "namespace {{ `{{ $labels.namespace }}` }}: Inspect issuer usage before changing sandbox quotas."
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
+        - alert: ManagementAuthFailuresSpike
+          expr: sum by (namespace)(increase(management_auth_requests_total_total{otel_scope_name="status-list-server",outcome=~"missing_token|rejected",namespace="{{ .Release.Namespace }}"}[5m])) > {{ .Values.slo.managementAuthFailures }}
+          for: 5m
+          labels:
+            severity: warn
+            team: statuslist
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+          annotations:
+            summary: "Management authentication failures are elevated"
+            description: "namespace {{ `{{ $labels.namespace }}` }}: Check issuer configuration and investigate abusive clients."
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
 {{- end }}

@@ -437,9 +437,9 @@ statuslist:
     # namespace). Do NOT leave it empty if you expose management via Ingress.
     managementIngress: []
     # Source selectors for the ADMIN port (/metrics, /health/ready). When this
-    # list is EMPTY the template omits the admin port rule, so NO source can
+    # list and the active prometheusIngress list are EMPTY, NO source can
     # reach the admin listener. This means Prometheus scraping is silently
-    # broken whenever serviceMonitor.enabled=true and adminIngress is empty.
+    # broken if serviceMonitor.enabled=true and neither list admits Prometheus.
     # At minimum add a selector for the Prometheus Operator scrape pods:
     #   adminIngress:
     #     - namespaceSelector:
@@ -449,6 +449,8 @@ statuslist:
     #         matchLabels:
     #           app.kubernetes.io/name: prometheus
     adminIngress: []
+    # Additional admin sources used only when ServiceMonitor discovery is enabled.
+    prometheusIngress: []
     # Additional internal egress destinations. IMPORTANT: these entries are appended to the
     # DATABASE egress rule (the one scoped to the DB port), so each inherits the database
     # port and can only reach that port - a selector for e.g. a cache on 6379 will be
@@ -762,6 +764,9 @@ slo:
   # a rate() over a fixed window (which is 0/0 = NaN between renewals).
   certExpiryWarnSeconds: 1209600
   certExpiryCriticalSeconds: 604800
+  # Rejections/failures in a rolling 5-minute window, sustained for 5 minutes.
+  listQuotaRejections: 10
+  managementAuthFailures: 50
 
 postgres:
   # Bundled in-cluster PostgreSQL (the CloudPirates subchart). This is the application's

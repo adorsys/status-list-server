@@ -72,7 +72,11 @@ spec:
     {{- end }}
     # Admin port: same deny-by-default as management, so /metrics and
     # /health/ready are only reachable from allowed sources.
-    {{- with .Values.statuslist.networkPolicy.adminIngress }}
+    {{- $adminSources := .Values.statuslist.networkPolicy.adminIngress | default list }}
+    {{- if .Values.serviceMonitor.enabled }}
+    {{- $adminSources = concat $adminSources (.Values.statuslist.networkPolicy.prometheusIngress | default list) }}
+    {{- end }}
+    {{- with $adminSources }}
     - ports:
         - port: {{ $.Values.statuslist.service.adminTargetPort | int }}
           protocol: TCP

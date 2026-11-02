@@ -59,7 +59,10 @@ fn issuer_registry_metrics() -> IssuerRegistryMetrics {
 }
 
 pub(crate) fn set_issuer_registry_keys(count: usize) {
-    issuer_registry_metrics().keys.record(count as u64, &[]);
+    let instruments = issuer_registry_metrics();
+    instruments.keys.record(count as u64, &[]);
+    // Seed a baseline so increase() observes the first failed reload.
+    instruments.reload_failures.add(0, &[]);
 }
 
 pub(crate) fn record_issuer_registry_reload_failure() {
@@ -79,6 +82,20 @@ pub(crate) fn record_management_auth_request(
             KeyValue::new("outcome", outcome),
         ],
     );
+}
+
+fn list_quota_rejections() -> Counter<u64> {
+    static COUNTER: InstrumentSlot<Counter<u64>> = OnceLock::new();
+    cached_instruments(&COUNTER, || {
+        global::meter("status-list-server")
+            .u64_counter("list_quota_rejections")
+            .with_description("HTTP requests rejected because an issuer's list quota is full.")
+            .build()
+    })
+}
+
+pub(crate) fn record_list_quota_rejection() {
+    list_quota_rejections().add(1, &[]);
 }
 
 /// The current global meter-provider generation.
@@ -201,6 +218,7 @@ pub(crate) fn setup_metrics(
     // Install as global so `opentelemetry::global::meter()` works everywhere
     opentelemetry::global::set_meter_provider(provider.clone());
     METER_PROVIDER_GENERATION.fetch_add(1, Ordering::Relaxed);
+    list_quota_rejections().add(0, &[]);
     Ok(provider)
 }
 
@@ -472,6 +490,62 @@ mod tests {
         assert!(rendered.contains("target=\"token_signing_key\""));
         assert!(rendered.contains("outcome=\"success\""));
         assert!(rendered.contains("outcome=\"failure\""));
+    }
+
+    #[test]
+    fn hosted_alert_counters_are_exported() {
+        use crate::server::error::IntoApiError;
+        use axum::response::IntoResponse;
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+        set_issuer_registry_keys(0);
+        record_issuer_registry_reload_failure();
+        record_management_auth_request(None, None, "rejected");
+        assert_eq!(
+            crate::domain::models::status_list::StatusListError::InvalidIndex
+                .into_api_error()
+                .into_response()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST,
+        );
+        let error = crate::domain::models::status_list::StatusListError::QuotaExceeded {
+            count: 10,
+            max: 10,
+        };
+        assert_eq!(
+            error.into_api_error().into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let rendered = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(metrics_handler(registry));
+        for name in [
+            "list_quota_rejections_total{",
+            "issuer_registry_reload_failures_total_total{",
+            "management_auth_requests_total_total{",
+        ] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.starts_with(name) && line.ends_with(" 1")),
+                "{rendered}"
+            );
+        }
     }
 
     #[cfg(feature = "history")]

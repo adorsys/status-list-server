@@ -1272,3 +1272,239 @@ fn rendered_chart_supports_aks_workload_identity_dns_example() {
         );
     }
 }
+
+fn helm_documents(rendered: &str) -> Vec<serde_json::Value> {
+    rendered
+        .split("\n---")
+        .map(|document| serde_saphyr::from_str(document).expect("rendered YAML is valid"))
+        .filter(|document: &serde_json::Value| !document.is_null())
+        .collect()
+}
+
+#[test]
+fn hosted_ingress_isolates_admin_with_shared_and_separate_hostnames() {
+    for management_host in ["", "management.sandbox.invalid"] {
+        let Some(rendered) = render_helm(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+            "--set",
+            &format!("statuslist.ingress.management.hostname={management_host}"),
+            "--set",
+            "statuslist.service.managementPort=18001",
+            "--set",
+            "statuslist.service.adminPort=18002",
+        ]) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        let ingresses: Vec<_> = documents
+            .iter()
+            .filter(|doc| doc["kind"] == "Ingress")
+            .collect();
+        assert_eq!(ingresses.len(), 2);
+        for ingress in ingresses {
+            let management = ingress["metadata"]["name"]
+                .as_str()
+                .unwrap()
+                .ends_with("-management-ingress");
+            let rule = &ingress["spec"]["rules"][0];
+            assert_eq!(
+                rule["host"],
+                if management && !management_host.is_empty() {
+                    management_host
+                } else {
+                    "sandbox.invalid"
+                }
+            );
+            for path in rule["http"]["paths"].as_array().unwrap() {
+                assert_eq!(
+                    path["backend"]["service"]["port"]["number"],
+                    if management { 18001 } else { 8081 }
+                );
+                assert_eq!(
+                    path["path"],
+                    if management {
+                        "/api/v1/(status-lists/[^/]+/(statuses|allocations)|credentials)$"
+                    } else {
+                        "/"
+                    }
+                );
+            }
+            let annotations = &ingress["metadata"]["annotations"];
+            assert_eq!(
+                annotations["nginx.ingress.kubernetes.io/limit-rps"],
+                if management { "10" } else { "100" }
+            );
+            assert_eq!(
+                annotations["nginx.ingress.kubernetes.io/force-ssl-redirect"],
+                "true"
+            );
+        }
+        let env = rendered_env(&rendered);
+        assert!(env.contains(&("APP_SERVER__PROFILE".into(), "hosted".into())));
+        assert!(env.contains(&("APP_DATABASE__BACKEND".into(), "postgres".into())));
+        assert!(env.contains(&(
+            "APP_SERVER__CERT__STORE__SIGNING_KEY_PATH".into(),
+            "/var/run/status-list-server/signing/tls.key".into()
+        )));
+        let rules = documents
+            .iter()
+            .find(|doc| doc["kind"] == "PrometheusRule")
+            .unwrap();
+        let alert = rules["spec"]["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["rules"].as_array().unwrap())
+            .find(|rule| rule["alert"] == "StatusListMetricsAbsent")
+            .unwrap();
+        assert!(
+            alert["expr"]
+                .as_str()
+                .unwrap()
+                .contains("-internal-service")
+        );
+    }
+}
+
+#[test]
+fn hosted_policy_scopes_admin_and_conditionally_allows_prometheus() {
+    for monitor in ["true", "false"] {
+        let Some(rendered) = render_helm(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+            "--set",
+            &format!("serviceMonitor.enabled={monitor}"),
+        ]) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        let policy = documents
+            .iter()
+            .find(|doc| doc["kind"] == "NetworkPolicy")
+            .unwrap();
+        let ingress = policy["spec"]["ingress"].as_array().unwrap();
+        let admin = ingress
+            .iter()
+            .find(|rule| rule["ports"][0]["port"] == 8002)
+            .unwrap();
+        let peers = admin["from"].as_array().unwrap();
+        assert_eq!(peers.len(), if monitor == "true" { 2 } else { 1 });
+        assert_eq!(
+            peers[0],
+            serde_json::json!({
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "sandbox-portal"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "sandbox-portal-backend"}}
+            })
+        );
+        if monitor == "true" {
+            assert_eq!(
+                peers[1],
+                serde_json::json!({
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
+                    "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}}
+                })
+            );
+        }
+        for port in [8000, 8001] {
+            let rule = ingress
+                .iter()
+                .find(|rule| rule["ports"][0]["port"] == port)
+                .unwrap();
+            assert_eq!(
+                rule["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+                "ingress-nginx"
+            );
+            assert_eq!(
+                rule["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"],
+                "controller"
+            );
+        }
+        let deployment = documents
+            .iter()
+            .find(|doc| doc["kind"] == "Deployment")
+            .unwrap();
+        let probe =
+            &deployment["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"];
+        assert_eq!(probe["path"], "/health/ready");
+        assert_eq!(probe["port"], "admin");
+    }
+}
+
+#[test]
+fn hosted_edge_overwrites_untrusted_forwarded_headers() {
+    let controller: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../deploy/helm/ingress-nginx-hosted.yaml")).unwrap();
+    for key in [
+        "use-forwarded-headers",
+        "compute-full-forwarded-for",
+        "enable-real-ip",
+        "use-proxy-protocol",
+    ] {
+        assert_eq!(controller["controller"]["config"][key], "false");
+    }
+    assert_eq!(
+        controller["controller"]["service"]["externalTrafficPolicy"],
+        "Local"
+    );
+}
+
+#[test]
+fn hosted_ingress_requires_explicit_hostname_and_tls() {
+    for extra in [
+        vec![],
+        vec![
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+        ],
+    ] {
+        let mut args = vec![
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+        ];
+        args.extend(extra);
+        let Some(output) = helm_template(&args) else {
+            return;
+        };
+        assert!(
+            !output.status.success(),
+            "hosted ingress must reject missing site values"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("hosted ingress requires"));
+    }
+}
+
+#[test]
+fn hosted_scan_script_rejects_exposure_and_missing_authentication() {
+    let output = Command::new("python3")
+        .args([
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "scripts",
+            "-p",
+            "test_check_hosted_sandbox.py",
+        ])
+        .output()
+        .expect("python3 is required to test the hosted scan script");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

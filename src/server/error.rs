@@ -129,6 +129,9 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.error == "list_quota_exceeded" {
+            crate::utils::metrics::record_list_quota_rejection();
+        }
         match self.status {
             // 409 Conflict is logged at INFO level to avoid tripping alert systems during high write contention.
             StatusCode::CONFLICT => {

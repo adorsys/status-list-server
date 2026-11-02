@@ -1,4 +1,8 @@
 {{- if .Values.statuslist.ingress.enabled }}
+{{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
+{{- $_ := required "hosted ingress requires statuslist.ingress.externalDnsHostname" .Values.statuslist.ingress.externalDnsHostname }}
+{{- $_ := required "hosted ingress requires statuslist.ingress.tls.secretName" .Values.statuslist.ingress.tls.secretName }}
+{{- end }}
 {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
 {{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" | lower }}
 {{- if and (eq $ingressHost "") $globalDomain }}
