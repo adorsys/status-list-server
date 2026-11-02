@@ -236,7 +236,9 @@ fn exact_text_eq(
 ) -> sea_orm::sea_query::SimpleExpr {
     let expression = match backend {
         DatabaseBackend::MySql => format!("BINARY {column} = ?"),
-        DatabaseBackend::Postgres => format!(r#"{column} COLLATE "C" = ?"#),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') = convert_to(?::text, 'UTF8')")
+        }
         DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
         _ => format!("{column} = ?"),
     };
