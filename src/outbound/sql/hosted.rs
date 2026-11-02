@@ -714,4 +714,3 @@ impl From<CredentialError> for HostedIssuerError {
         }
     }
 }
-
