@@ -95,7 +95,11 @@ The normal promotion path is:
    the highest-numbered `v<version>-rc.<N>`, and the release fails unless that
    candidate's `deploy.yml` run passed and the tagged `main` commit has the
    same file tree as the candidate's commit. Cut a new candidate whenever
-   `stage` changes after the last one.
+   `stage` changes after the last one, including documentation or workflow
+   changes, since any difference in the tree fails the release. If the
+   candidate's run failed only in **Deploy to Production**, re-run that job;
+   once the run concludes `success`, the candidate can be promoted without
+   cutting a new one.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.

@@ -74,22 +74,29 @@ jobs:
       contents: read
       security-events: write
 
-  resolve-rc:
-    name: Resolve Validated Release Candidate
+  # Names the run whose image this run scans and promotes, and the ref that signed it.
+  # Needs only validate-tag, so a final tag without a promotable RC fails before the CI suite.
+  image-source:
+    name: Resolve Image Source
     runs-on: ubuntu-latest
-    # ci and helm-checks gate the final commit too: deploy installs its chart, not the RC's.
-    needs: [ci, helm-checks, validate-tag]
-    if: ${{ needs.validate-tag.outputs.is_final == 'true' }}
+    needs: validate-tag
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
+    # Exactly one of the two steps runs, so neither path can inherit the other's values.
     outputs:
       rc_tag: ${{ steps.rc.outputs.rc_tag }}
-      rc_ref: ${{ steps.rc.outputs.rc_ref }}
-      rc_run_id: ${{ steps.rc.outputs.rc_run_id }}
+      source_ref: ${{ steps.rc.outputs.rc_ref || steps.own.outputs.source_ref }}
+      source_run_id: ${{ steps.rc.outputs.rc_run_id || steps.own.outputs.source_run_id }}
     steps:
+      - name: Use this run's own build
+        id: own
+        if: needs.validate-tag.outputs.is_final != 'true'
+        run: printf '%s\n' "source_ref=${GITHUB_REF}" "source_run_id=${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
       - name: Fetch Repository
+        if: needs.validate-tag.outputs.is_final == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -97,6 +104,7 @@ jobs:
 
       - name: Select the latest RC and require its release run to have passed
         id: rc
+        if: needs.validate-tag.outputs.is_final == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -262,7 +270,10 @@ jobs:
   scan-image:
     name: Scan Image for Vulnerabilities (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [validate-tag, build-and-push, image-source]
+    # A final tag rescans its RC's digest: advisories published since the RC run must still block.
+    # !cancelled(): build-and-push is skipped on that path, and a skipped need would skip this job.
+    if: ${{ !cancelled() && needs.image-source.result == 'success' && (needs.build-and-push.result == 'success' || needs.validate-tag.outputs.is_final == 'true') }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -283,6 +294,7 @@ jobs:
       # Declared so static analysis knows them; set at runtime.
       SCAN_REF_AMD64: ""
       SCAN_REF_ARM64: ""
+      SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -299,7 +311,7 @@ jobs:
       - name: Download built digest
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
+        run: gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" --name "image-digest-${{ matrix.variant.suffix }}" --dir .
 
       - name: Resolve the architecture manifests to scan
         env:
@@ -585,13 +597,17 @@ jobs:
     name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
     needs:
-      - build-and-push
+      - validate-tag
+      - ci
+      - helm-checks
+      - image-source
       - scan-image
       - verify-provenance
-      - resolve-rc
     # Check the event too: workflow_dispatch can run on tag refs.
-    # !cancelled(): one of the two paths is always skipped, and a skipped need would skip this job.
-    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.resolve-rc.result == 'success' || (needs.scan-image.result == 'success' && needs.verify-provenance.result == 'success')) }}
+    # !cancelled() drops the implicit all-needs-succeeded rule, so every gate is spelled out here.
+    # ci and helm-checks are listed because image-source does not wait for them. A final tag skips
+    # verify-provenance; this job verifies the RC's digest against the RC's ref instead.
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.ci.result == 'success' && needs.helm-checks.result == 'success' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && (needs.verify-provenance.result == 'success' || needs.validate-tag.outputs.is_final == 'true') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -615,9 +631,9 @@ jobs:
     env:
       SUFFIX: ${{ matrix.variant.suffix }}
       # A final tag reads the digest its RC run gated and verifies the RC's signing ref.
-      SOURCE_RUN_ID: ${{ needs.resolve-rc.outputs.rc_run_id || github.run_id }}
-      SOURCE_REF: ${{ needs.resolve-rc.outputs.rc_ref || github.ref }}
-      RC_TAG: ${{ needs.resolve-rc.outputs.rc_tag }}
+      SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
+      SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
+      RC_TAG: ${{ needs.image-source.outputs.rc_tag }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -645,26 +661,13 @@ jobs:
 
       - name: Verify the release candidate's digest before promotion
         # Replaces verify-provenance, which final tags skip: no digest is tagged unverified.
-        if: needs.resolve-rc.result == 'success'
+        if: needs.validate-tag.outputs.is_final == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           rc_digest=$(cat "image-digest-${SUFFIX}.txt")
-          [[ "$rc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo "::error::invalid release candidate digest for ${SUFFIX}: ${rc_digest}"
-            exit 1
-          }
-
-          rc_image="${IMAGE_BASE}:${RC_TAG#v}-${SUFFIX}"
-          tagged_digest=$(docker buildx imagetools inspect "$rc_image" --format '{{ .Manifest.Digest }}')
-          if [ "$tagged_digest" != "$rc_digest" ]; then
-            echo "::error::${rc_image} resolves to '${tagged_digest}', not ${rc_digest}, the digest run ${SOURCE_RUN_ID} scanned."
-            echo "The candidate's tag moved after it was validated, so it is unclear which image was tested."
-            echo "Cut a new release candidate rather than promoting either digest."
-            exit 1
-          fi
-
+          bash scripts/verify-rc-digest.sh "$IMAGE_BASE" "$RC_TAG" "$SUFFIX" "$rc_digest"
           bash scripts/verify-attestation.sh \
             "${IMAGE_BASE}@${rc_digest}" "$GITHUB_REPOSITORY" "$SOURCE_REF"
           echo "- \`${SUFFIX}\`: \`${rc_digest}\` from \`${RC_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -767,7 +770,7 @@ jobs:
     # promote-tags succeeds only for a scanned, verified digest, so it gates both paths.
     needs:
       - promote-tags
-      - resolve-rc
+      - image-source
     if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.promote-tags.result == 'success' }}
     timeout-minutes: 30
     environment: production
@@ -783,7 +786,7 @@ jobs:
     env:
       # Pushed-ref values go through env, never ${{ }} in run:, since the pusher controls them.
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
-      SOURCE_REF: ${{ needs.resolve-rc.outputs.rc_ref || github.ref }}
+      SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

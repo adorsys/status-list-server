@@ -40,6 +40,10 @@ _FAKE_GH = textwrap.dedent(
 
     if args[:1] == ["api"]:
         path = [a for a in args[1:] if not a.startswith("--")][0]
+        # One page holds 100 refs; without --paginate later candidates would be missed.
+        if "/git/matching-refs/" in path and "--paginate" not in args:
+            print(f"fake gh: {path} must be read with --paginate", file=sys.stderr)
+            sys.exit(2)
         if path not in fixture["api"]:
             print(f"gh: Not Found (HTTP 404) for {path}", file=sys.stderr)
             sys.exit(1)
