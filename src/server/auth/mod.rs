@@ -15,6 +15,7 @@ use axum::{
 use errors::AuthenticationError;
 use hyper::{StatusCode, header};
 use jsonwebtoken::{DecodingKey, Validation};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,7 +40,8 @@ pub struct AuthenticatedAdmin {
 
 #[derive(Debug, Deserialize)]
 struct AdminClaims {
-    iss: String,
+    #[serde(rename = "iss")]
+    _iss: String,
     iat: u64,
     exp: u64,
 }
@@ -55,15 +57,18 @@ pub async fn admin_auth(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     else {
+        crate::utils::metrics::record_admin_auth_request("missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     let Some((scheme, token)) = raw.split_once(char::is_whitespace) else {
         if raw.eq_ignore_ascii_case("Bearer") {
             return Err(invalid_admin_auth(None, None, "empty Bearer token"));
         }
+        crate::utils::metrics::record_admin_auth_request("missing_token");
         return Err(AuthenticationError::MissingToken);
     };
     if !scheme.eq_ignore_ascii_case("Bearer") {
+        crate::utils::metrics::record_admin_auth_request("missing_token");
         return Err(AuthenticationError::MissingToken);
     }
     if token.trim().is_empty() {
@@ -71,17 +76,8 @@ pub async fn admin_auth(
     }
     let jwt = token.trim();
     let h = jsonwebtoken::decode_header(jwt)
-        .map_err(|_| invalid_admin_auth(None, None, "invalid JWT header"))?;
-    let typ = h.typ.as_deref().unwrap_or("");
-    let typ = if typ
-        .get(..12)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/"))
-    {
-        &typ[12..]
-    } else {
-        typ
-    };
-    if !typ.eq_ignore_ascii_case(ADMIN_TOKEN_TYPE)
+        .map_err(|error| invalid_admin_auth(None, None, format!("invalid JWT header: {error}")))?;
+    if !token_type_matches(h.typ.as_deref(), ADMIN_TOKEN_TYPE)
         || h.crit.is_some()
         || !MANAGEMENT_SIGNING_ALGORITHMS.contains(&h.alg)
     {
@@ -107,28 +103,18 @@ pub async fn admin_auth(
     let resolved = snapshot
         .resolve_admin_key(kid)
         .ok_or_else(|| invalid_admin_auth(Some(kid), None, "kid is not registered to an admin"))?;
+    let id = resolved.admin_id.as_str();
     let now_time = time::OffsetDateTime::now_utc();
     if !resolved.enabled
         || resolved.not_before.is_some_and(|start| now_time < start)
         || resolved.not_after.is_some_and(|end| now_time >= end)
     {
-        let iss = match &resolved.principal {
-            Principal::Admin { id } => Some(id.as_str()),
-            Principal::Issuer { .. } => None,
-        };
         return Err(invalid_admin_auth(
             Some(kid),
-            iss,
+            Some(id),
             "admin key is disabled or outside its validity window",
         ));
     }
-    let Principal::Admin { id } = &resolved.principal else {
-        return Err(invalid_admin_auth(
-            Some(kid),
-            None,
-            "key is not owned by an admin",
-        ));
-    };
     if resolved.public_key.key_id() != kid || resolved.public_key.algorithm() != h.alg {
         return Err(invalid_admin_auth(
             Some(kid),
@@ -136,24 +122,41 @@ pub async fn admin_auth(
             "registered key id or algorithm mismatch",
         ));
     }
-    let key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|_| {
-        invalid_admin_auth(Some(kid), Some(id), "invalid registered verification key")
+    let key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|error| {
+        invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            format!("invalid registered verification key: {error}"),
+        )
     })?;
-    let mut validation = Validation::new(resolved.public_key.algorithm());
-    validation.leeway = state.admin_auth.leeway_secs;
-    validation.validate_nbf = true;
-    validation.set_issuer(&[id]);
-    validation.set_audience(&state.admin_auth.audiences);
-    validation.set_required_spec_claims(&["iss", "iat", "exp", "aud"]);
-    let data = jsonwebtoken::decode::<AdminClaims>(jwt, &key, &validation).map_err(|_| {
-        invalid_admin_auth(Some(kid), Some(id), "signature or claims validation failed")
+    let claims = decode_registered_jwt::<AdminClaims>(
+        jwt,
+        &key,
+        resolved.public_key.algorithm(),
+        id,
+        &state.admin_auth.audiences,
+        state.admin_auth.leeway_secs,
+    )
+    .map_err(|error| {
+        invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            format!("signature or claims validation failed: {error}"),
+        )
     })?;
-    let now = current_unix_timestamp()
-        .map_err(|_| invalid_admin_auth(Some(kid), Some(id), "system clock unavailable"))?;
-    if data.claims.iss != *id
-        || data.claims.exp <= data.claims.iat
-        || data.claims.iat > now.saturating_add(state.admin_auth.leeway_secs)
-        || data.claims.exp - data.claims.iat > state.admin_auth.max_token_lifetime_secs
+    let now = current_unix_timestamp().map_err(|error| {
+        crate::utils::metrics::record_admin_auth_request("internal_error");
+        tracing::error!(error = %error, "admin JWT validation could not read the system clock");
+        error
+    })?;
+    if validate_lifetime_claims(
+        claims.iat,
+        claims.exp,
+        now,
+        state.admin_auth.leeway_secs,
+        state.admin_auth.max_token_lifetime_secs,
+    )
+    .is_err()
     {
         return Err(invalid_admin_auth(
             Some(kid),
@@ -161,26 +164,78 @@ pub async fn admin_auth(
             "issuer or token lifetime claim is invalid",
         ));
     }
-    let entry = snapshot.admin(id).ok_or_else(|| {
-        invalid_admin_auth(Some(kid), Some(id), "admin principal is not registered")
-    })?;
-    if entry.disabled {
-        return Err(invalid_admin_auth(
-            Some(kid),
-            Some(id),
-            "admin principal is disabled",
-        ));
-    }
+    let entry = snapshot
+        .admin(id)
+        .expect("a resolved admin key belongs to a registered principal");
     request.extensions_mut().insert(AuthenticatedAdmin {
-        id: id.clone(),
+        id: id.to_owned(),
         scopes: entry.scopes.clone(),
     });
+    crate::utils::metrics::record_admin_auth_request("success");
     Ok(next.run(request).await)
 }
 
-fn invalid_admin_auth(kid: Option<&str>, iss: Option<&str>, reason: &str) -> AuthenticationError {
-    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason, "Admin JWT rejected");
+fn invalid_admin_auth(
+    kid: Option<&str>,
+    iss: Option<&str>,
+    reason: impl std::fmt::Display,
+) -> AuthenticationError {
+    crate::utils::metrics::record_admin_auth_request("rejected");
+    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason = %reason, "Admin JWT rejected");
     AuthenticationError::InvalidToken
+}
+
+fn token_type_matches(actual: Option<&str>, expected: &str) -> bool {
+    actual.is_some_and(|actual| {
+        actual.eq_ignore_ascii_case(expected)
+            || actual
+                .get(.."application/".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/"))
+                && actual
+                    .get("application/".len()..)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn decode_registered_jwt<T: DeserializeOwned>(
+    token: &str,
+    key: &DecodingKey,
+    algorithm: jsonwebtoken::Algorithm,
+    issuer: &str,
+    audiences: &[String],
+    leeway_secs: u64,
+) -> Result<T, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::new(algorithm);
+    validation.leeway = leeway_secs;
+    validation.validate_nbf = true;
+    validation.set_issuer(&[issuer]);
+    if audiences.is_empty() {
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
+        validation.validate_aud = false;
+    } else {
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
+        validation.set_audience(audiences);
+    }
+    jsonwebtoken::decode::<T>(token, key, &validation).map(|data| data.claims)
+}
+
+fn validate_lifetime_claims(
+    issued_at: u64,
+    expires_at: u64,
+    now: u64,
+    leeway_secs: u64,
+    max_lifetime_secs: u64,
+) -> Result<(), &'static str> {
+    if expires_at <= issued_at {
+        return Err("exp must be later than iat");
+    }
+    if issued_at > now.saturating_add(leeway_secs) {
+        return Err("iat is in the future beyond configured leeway");
+    }
+    if expires_at - issued_at > max_lifetime_secs {
+        return Err("token lifetime exceeds configured maximum");
+    }
+    Ok(())
 }
 
 /// Required management claims are non-optional (`iss`, `iat`, `exp`).
@@ -201,21 +256,13 @@ impl ManagementClaims {
         leeway_secs: u64,
         max_token_lifetime_secs: u64,
     ) -> Result<(), &'static str> {
-        if self.exp <= self.iat {
-            return Err("exp must be later than iat");
-        }
-
-        if self.iat > now.saturating_add(leeway_secs) {
-            return Err("iat is in the future beyond configured leeway");
-        }
-
-        // exp > iat was established above, so unsigned subtraction is safe.
-        let lifetime = self.exp - self.iat;
-        if lifetime > max_token_lifetime_secs {
-            return Err("token lifetime exceeds configured maximum");
-        }
-
-        Ok(())
+        validate_lifetime_claims(
+            self.iat,
+            self.exp,
+            now,
+            leeway_secs,
+            max_token_lifetime_secs,
+        )
     }
 }
 
@@ -355,25 +402,17 @@ pub async fn auth(
     if token.trim().is_empty() {
         return Err(invalid_auth(None, None, "empty Bearer token"));
     }
+    let token = token.trim();
 
     let header = jsonwebtoken::decode_header(token)
         .map_err(|e| invalid_auth(None, None, format!("invalid JWT header: {e}")))?;
-    let typ_ok = header.typ.as_deref().is_some_and(|typ| {
-        typ.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE)
-            || typ.get(.."application/".len()).is_some_and(|prefix| {
-                prefix.eq_ignore_ascii_case("application/")
-                    && typ
-                        .get("application/".len()..)
-                        .is_some_and(|value| value.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE))
-            })
-    });
     let Some(kid) = header.kid.clone() else {
         return Err(invalid_auth(None, None, "missing kid"));
     };
     if kid.is_empty() || kid.chars().count() > 255 {
         return Err(invalid_auth(Some(&kid), None, "invalid kid length"));
     }
-    if !typ_ok {
+    if !token_type_matches(header.typ.as_deref(), MANAGEMENT_TOKEN_TYPE) {
         return Err(invalid_auth(Some(&kid), None, "missing or invalid typ"));
     }
     if header.crit.is_some() {
@@ -433,31 +472,23 @@ pub async fn auth(
         )
     })?;
 
-    let mut validation = Validation::new(registered_alg);
-    validation.leeway = state.management_auth.leeway_secs;
-    validation.validate_nbf = true;
-    validation.set_issuer(&[registered_issuer]);
-    if !state.management_auth.audiences.is_empty() {
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
-        validation.set_audience(&state.management_auth.audiences);
-    } else {
-        // jsonwebtoken can require registered claims like `iss` and `exp`;
-        // `iat` is required by deserializing into `ManagementClaims`.
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
-        validation.validate_aud = false;
-    }
-
-    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
-        .map_err(|e| {
-            invalid_auth(
-                Some(&kid),
-                Some(registered_issuer),
-                format!("claim or signature validation failed: {e}"),
-            )
-        })?;
+    let claims = decode_registered_jwt::<ManagementClaims>(
+        token,
+        &decoding_key,
+        registered_alg,
+        registered_issuer,
+        &state.management_auth.audiences,
+        state.management_auth.leeway_secs,
+    )
+    .map_err(|e| {
+        invalid_auth(
+            Some(&kid),
+            Some(registered_issuer),
+            format!("claim or signature validation failed: {e}"),
+        )
+    })?;
     let now = current_unix_timestamp()?;
-    token_data
-        .claims
+    claims
         .validate_policy(
             now,
             state.management_auth.leeway_secs,
@@ -748,6 +779,11 @@ mod tests {
             None,
             file.clone(),
             Duration::from_secs(1),
+            crate::setup::RegistryWatcherAuthValidation {
+                environment: crate::config::TelemetryEnvironment::Development,
+                admin_audiences: Vec::new(),
+                management_audiences: Vec::new(),
+            },
         );
         std::fs::write(&file, "version: 1\nissuers: []\nadmins: []\n").unwrap();
 
@@ -1499,6 +1535,11 @@ mod tests {
                 None,
                 file.clone(),
                 Duration::from_secs(1),
+                crate::setup::RegistryWatcherAuthValidation {
+                    environment: crate::config::TelemetryEnvironment::Development,
+                    admin_audiences: Vec::new(),
+                    management_audiences: Vec::new(),
+                },
             );
             let duplicate_key_jwk = serde_json::to_value(test_public_jwk().jwk()).unwrap();
             let mut duplicate_key_jwk = duplicate_key_jwk;

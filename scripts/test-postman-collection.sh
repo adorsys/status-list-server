@@ -221,8 +221,8 @@ else
   RESOLVED_ADMIN_URL="$(endpoint_for_container "$ADMIN_URL")"
 fi
 
-generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 wait_for_api
+generate_postman_artifacts "$collection_artifact" "$environment_artifact"
 # Wait for the generated key to authenticate instead of guessing how long
 # the server's registry file watcher will take to reload.
 token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="token").value)' "$environment_artifact")"

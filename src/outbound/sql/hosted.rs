@@ -6,8 +6,10 @@
 //! with no cache, so revocation takes effect on the next request.
 
 use async_trait::async_trait;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -211,7 +213,12 @@ async fn load_issuer(
     id: &str,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Option<HostedIssuer>, RepositoryError> {
-    let issuer = issuers::Entity::find_by_id(id)
+    let issuer = issuers::Entity::find()
+        .filter(exact_text_eq(
+            "issuers.issuer",
+            id,
+            db.get_database_backend(),
+        ))
         .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
         .one(db)
         .await
@@ -220,6 +227,20 @@ async fn load_issuer(
         Some(row) => Ok(Some(parse_issuer(row)?)),
         None => Ok(None),
     }
+}
+
+fn exact_text_eq(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} = ?"),
+        DatabaseBackend::Postgres => format!(r#"{column} COLLATE "C" = ?"#),
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
+        _ => format!("{column} = ?"),
+    };
+    Expr::cust_with_values(expression, [value])
 }
 
 async fn insert_issuer_row(
@@ -539,6 +560,7 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         filters: &HostedIssuerFilter,
         now: OffsetDateTime,
     ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        let db = self.store.current();
         let mut query = issuers::Entity::find()
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .order_by_asc(issuers::Column::Issuer)
@@ -550,7 +572,11 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             query = query.filter(issuers::Column::Tier.eq(tier));
         }
         if let Some(owner) = &filters.owner {
-            query = query.filter(issuers::Column::Owner.eq(owner));
+            query = query.filter(exact_text_eq(
+                "issuers.owner",
+                owner,
+                db.get_database_backend(),
+            ));
         }
         let unexpired = Condition::any()
             .add(issuers::Column::ExpiresAt.is_null())
@@ -568,7 +594,7 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             None => query,
         };
         query
-            .all(self.store.current().as_ref())
+            .all(db.as_ref())
             .await
             .map_err(find_err)?
             .into_iter()

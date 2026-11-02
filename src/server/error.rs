@@ -308,7 +308,8 @@ impl IntoApiError for StatusListError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
                 Some("the service is currently unavailable. Please try again later".into()),
-            ),
+            )
+            .retry_after(1),
             StatusListError::Backend(err) => ApiError::internal(err),
             StatusListError::TokenExpiryOverflow { .. } => ApiError::internal(
                 "token exp overflowed the configured token lifetime; check APP_STATUS_LIST__TOKEN_EXP_SECS",
@@ -604,7 +605,6 @@ mod tests {
             StatusListError::AlreadyExists,
             StatusListError::Conflict,
             StatusListError::NotFound,
-            StatusListError::Unavailable,
             StatusListError::QuotaExceeded { count: 1, max: 1 },
         ] {
             let api_err: ApiError = err.into();
@@ -618,6 +618,15 @@ mod tests {
                 "{error_code} must not advertise Retry-After"
             );
         }
+        let unavailable: ApiError = StatusListError::Unavailable.into();
+        let response = unavailable.into_response();
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .expect("transient unavailability includes a retry hint"),
+            "1"
+        );
     }
 
     /// Extra headers attached via `with_header` must land on the wire response,

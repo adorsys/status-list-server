@@ -23,7 +23,7 @@ The environment exposes these variables:
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 
 The collection is organized into Health & Metrics, Status Lists, Aggregation,
-and Admin API folders. Requests include Postman test scripts that check
+and Admin API (Issuer Management) folders. Requests include Postman test scripts that check
 status codes, content types, token response headers, and JSON response shapes.
 
 Protected management routes require a Bearer JWT signed by the private key that

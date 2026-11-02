@@ -1,6 +1,6 @@
 use crate::{
     domain::models::{
-        credential::{AggregationId, Issuer},
+        credential::{AggregationId, Issuer, jose_alg_name},
         hosted_issuer::{
             HostedIssuer, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyState,
             HostedIssuerReadState,
@@ -21,23 +21,73 @@ use axum::{
         Path, Query, State,
         rejection::{PathRejection, QueryRejection},
     },
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum IssuerSource {
+    Static,
+    Portal,
+}
+
+impl IssuerSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Portal => "portal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum IssuerTier {
+    Standard,
+    Sandbox,
+}
+
+impl IssuerTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum IssuerReadState {
+    Active,
+    Suspended,
+    Expired,
+}
+
+impl IssuerReadState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Expired => "expired",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
 struct Filters {
-    source: Option<String>,
-    tier: Option<String>,
-    state: Option<String>,
+    source: Option<IssuerSource>,
+    tier: Option<IssuerTier>,
+    state: Option<IssuerReadState>,
     owner: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    source: Option<String>,
-    tier: Option<String>,
-    state: Option<String>,
+    source: Option<IssuerSource>,
+    tier: Option<IssuerTier>,
+    state: Option<IssuerReadState>,
     owner: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
@@ -75,6 +125,49 @@ struct UsageDto {
     keys: u64,
     keys_limit: Option<u64>,
 }
+
+#[derive(Serialize)]
+struct IssuerWriteVersion<'a> {
+    id: &'a str,
+    display_name: &'a Option<String>,
+    tier: &'a str,
+    state: &'a str,
+    owner: &'a Option<String>,
+    expires_at: Option<i64>,
+    keys: Vec<IssuerKeyWriteVersion<'a>>,
+}
+
+#[derive(Serialize)]
+struct IssuerKeyWriteVersion<'a> {
+    kid: &'a str,
+    state: &'a str,
+    not_before: Option<i64>,
+    not_after: Option<i64>,
+}
+
+fn issuer_write_version(issuer: &IssuerDto) -> String {
+    use sha2::{Digest, Sha256};
+    let write_state = IssuerWriteVersion {
+        id: &issuer.id,
+        display_name: &issuer.display_name,
+        tier: &issuer.tier,
+        state: &issuer.state,
+        owner: &issuer.owner,
+        expires_at: issuer.expires_at,
+        keys: issuer
+            .keys
+            .iter()
+            .map(|key| IssuerKeyWriteVersion {
+                kid: &key.kid,
+                state: &key.state,
+                not_before: key.not_before,
+                not_after: key.not_after,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&write_state).expect("issuer write state serializes");
+    hex::encode(Sha256::digest(bytes))
+}
 #[derive(Debug, Serialize)]
 pub struct IssuerPage {
     issuers: Vec<IssuerDto>,
@@ -87,108 +180,87 @@ struct Cursor {
     filters: Filters,
 }
 
-fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::new(status, code, Some(message.into()))
-}
 fn hosted_store_error(err: crate::domain::models::hosted_issuer::HostedIssuerError) -> ApiError {
     use crate::domain::models::hosted_issuer::HostedIssuerError;
     match err {
         HostedIssuerError::Backend(source) => {
             tracing::error!(error = %source, "admin issuer storage is unavailable");
-            error(
+            ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
-                "issuer store unavailable",
+                Some("issuer store unavailable".into()),
             )
+            .retry_after(1)
         }
-        HostedIssuerError::Corrupt(source) => {
-            tracing::error!(error = %source, "admin issuer storage contains corrupt data");
-            ApiError::internal("issuer storage contains corrupt data")
-        }
-        other => {
-            tracing::error!(error = %other, "unexpected admin issuer storage error");
-            ApiError::internal("issuer storage read failed")
-        }
+        HostedIssuerError::Corrupt(source) => ApiError::internal(source),
+        other => ApiError::internal(other),
     }
 }
 fn require_scope(admin: &AuthenticatedAdmin, needed: &'static str) -> Result<(), ApiError> {
     if admin.scopes.iter().any(|scope| scope == needed) {
         Ok(())
     } else {
-        Err(error(
-            StatusCode::FORBIDDEN,
-            "insufficient_scope",
-            format!("{needed} is required"),
+        Err(
+            ApiError::forbidden("insufficient_scope", format!("{needed} is required")).with_header(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_str(&format!(
+                    "Bearer error=\"insufficient_scope\", scope=\"{needed}\""
+                ))
+                .expect("static scope name is a valid challenge header value"),
+            ),
         )
-        .with_header(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_str(&format!(
-                "Bearer error=\"insufficient_scope\", scope=\"{needed}\""
-            ))
-            .unwrap(),
-        ))
     }
 }
 fn filter_matches(
     filters: &Filters,
-    source: &str,
-    tier: &str,
-    state: &str,
+    source: IssuerSource,
+    tier: IssuerTier,
+    state: IssuerReadState,
     owner: Option<&str>,
 ) -> bool {
-    filters.source.as_deref().is_none_or(|v| v == source)
-        && filters.tier.as_deref().is_none_or(|v| v == tier)
-        && filters.state.as_deref().is_none_or(|v| v == state)
+    filters.source.is_none_or(|v| v == source)
+        && filters.tier.is_none_or(|v| v == tier)
+        && filters.state.is_none_or(|v| v == state)
         && filters.owner.as_deref().is_none_or(|v| Some(v) == owner)
 }
-fn static_state(entry: &IssuerEntry) -> &'static str {
+fn static_state(entry: &IssuerEntry) -> IssuerReadState {
     if entry.disabled {
-        "suspended"
+        IssuerReadState::Suspended
     } else {
-        "active"
+        IssuerReadState::Active
     }
 }
-fn key_from_registry(k: &RegistryKey) -> KeyDto {
+fn key_from_registry(
+    k: &RegistryKey,
+    resolved: &crate::domain::models::credential::ResolvedKey,
+) -> KeyDto {
     KeyDto {
         kid: k.kid.clone(),
-        alg: k.alg.clone(),
+        alg: jose_alg_name(resolved.public_key.algorithm()).to_owned(),
         state: "active".into(),
-        not_before: k
-            .not_before
-            .as_deref()
-            .and_then(|v| {
-                time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc3339).ok()
-            })
-            .map(|v| v.unix_timestamp()),
-        not_after: k
-            .not_after
-            .as_deref()
-            .and_then(|v| {
-                time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc3339).ok()
-            })
-            .map(|v| v.unix_timestamp()),
+        not_before: resolved.not_before.map(|v| v.unix_timestamp()),
+        not_after: resolved.not_after.map(|v| v.unix_timestamp()),
         created_at: None,
-        public_key: k.jwk.clone(),
+        public_key: serde_json::to_value(resolved.public_key.jwk())
+            .expect("validated JWK serializes"),
     }
 }
 fn key_from_hosted(k: HostedIssuerKey) -> KeyDto {
-    let alg = serde_json::from_slice::<serde_json::Value>(k.jwk.as_bytes())
-        .ok()
-        .and_then(|v| v.get("alg").and_then(|a| a.as_str()).map(str::to_owned))
-        .unwrap_or_else(|| format!("{:?}", k.jwk.algorithm()));
+    let public_key =
+        serde_json::from_slice(k.jwk.as_bytes()).expect("validated JWK bytes remain valid JSON");
+    let key_state = match k.state {
+        HostedIssuerKeyState::Active => "active",
+        HostedIssuerKeyState::Reserved => "reserved",
+        HostedIssuerKeyState::Revoked => "revoked",
+    };
     KeyDto {
         kid: k.kid,
-        alg,
-        state: if k.state == HostedIssuerKeyState::Active {
-            "active"
-        } else {
-            "revoked"
-        }
-        .into(),
+        alg: jose_alg_name(k.jwk.algorithm()).to_owned(),
+        state: key_state.into(),
         not_before: k.not_before.map(|v| v.unix_timestamp()),
         not_after: k.not_after.map(|v| v.unix_timestamp()),
         created_at: Some(k.created_at.unix_timestamp()),
-        public_key: serde_json::from_slice(k.jwk.as_bytes()).unwrap_or(serde_json::Value::Null),
+        public_key,
     }
 }
 async fn list_count(state: &AppState, id: &str) -> Result<u64, ApiError> {
@@ -198,7 +270,12 @@ async fn list_count(state: &AppState, id: &str) -> Result<u64, ApiError> {
         .await
         .map_err(IntoApiError::into_api_error)
 }
-fn static_dto(state: &AppState, entry: &IssuerEntry, count: u64) -> IssuerDto {
+fn static_dto(
+    state: &AppState,
+    entry: &IssuerEntry,
+    snapshot: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    count: u64,
+) -> IssuerDto {
     IssuerDto {
         id: entry.id.clone(),
         aggregation_id: entry.aggregation_id.to_string(),
@@ -209,11 +286,20 @@ fn static_dto(state: &AppState, entry: &IssuerEntry, count: u64) -> IssuerDto {
         display_name: entry.display_name.clone(),
         source: "static".into(),
         tier: entry.tier.clone(),
-        state: static_state(entry).into(),
+        state: static_state(entry).as_str().to_owned(),
         owner: None,
         created_at: None,
         expires_at: None,
-        keys: entry.keys.iter().map(|k| key_from_registry(k)).collect(),
+        keys: entry
+            .keys
+            .iter()
+            .map(|key| {
+                let resolved = snapshot
+                    .resolve(&key.kid)
+                    .expect("every registry key has a validated resolution");
+                key_from_registry(key, &resolved)
+            })
+            .collect(),
         usage: UsageDto {
             lists: count,
             lists_limit: state.max_lists_per_issuer,
@@ -230,13 +316,10 @@ fn hosted_dto(
     now: time::OffsetDateTime,
 ) -> IssuerDto {
     let keys: Vec<_> = keys.into_iter().map(key_from_hosted).collect();
-    let now = now.unix_timestamp();
-    let state_name = if issuer.state.as_str() == "disabled" {
-        "suspended"
-    } else if issuer.expires_at.is_some_and(|v| v.unix_timestamp() <= now) {
-        "expired"
-    } else {
-        "active"
+    let state_name = match issuer.read_state(now) {
+        HostedIssuerReadState::Active => "active",
+        HostedIssuerReadState::Suspended => "suspended",
+        HostedIssuerReadState::Expired => "expired",
     };
     IssuerDto {
         aggregation_uri: state
@@ -263,26 +346,23 @@ fn cursor_encode(cursor: Cursor) -> String {
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).expect("cursor serializes"))
 }
 fn cursor_decode(raw: &str, filters: &Filters) -> Result<Cursor, ApiError> {
-    let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "invalid_query",
-            "cursor is invalid",
-        )
-    })?;
-    let cursor: Cursor = serde_json::from_slice(&bytes).map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "invalid_query",
-            "cursor is invalid",
-        )
-    })?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| ApiError::bad_request("invalid_query", "cursor is invalid"))?;
+    let cursor: Cursor = serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::bad_request("invalid_query", "cursor is invalid"))?;
     if &cursor.filters != filters {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::bad_request(
             "invalid_query",
             "cursor does not match filters",
         ));
+    }
+    if cursor.after_static.as_ref().is_some_and(|id| {
+        id.is_empty() || id.chars().count() > 255 || id.chars().any(char::is_control)
+    }) || cursor.after_portal.as_ref().is_some_and(|id| {
+        id.is_empty() || id.chars().count() > 255 || id.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::bad_request("invalid_query", "cursor is invalid"));
     }
     Ok(cursor)
 }
@@ -293,37 +373,14 @@ pub async fn list_issuers(
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<(HeaderMap, Json<IssuerPage>), ApiError> {
     require_scope(&admin, "issuers:read")?;
-    let Query(query) = query.map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "invalid_query",
-            "query parameters are invalid",
-        )
-    })?;
+    let Query(query) = query
+        .map_err(|_| ApiError::bad_request("invalid_query", "query parameters are invalid"))?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=100).contains(&limit) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::bad_request(
             "invalid_query",
             "limit must be between 1 and 100",
         ));
-    }
-    for (value, allowed, name) in [
-        (&query.source, &["static", "portal"][..], "source"),
-        (&query.tier, &["standard", "sandbox"][..], "tier"),
-        (
-            &query.state,
-            &["active", "suspended", "expired"][..],
-            "state",
-        ),
-    ] {
-        if value.as_deref().is_some_and(|v| !allowed.contains(&v)) {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "invalid_query",
-                format!("invalid {name}"),
-            ));
-        }
     }
     if query.owner.as_deref().is_some_and(|owner| {
         let chars = owner.chars().count();
@@ -336,9 +393,9 @@ pub async fn list_issuers(
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
             || subject.is_empty()
+            || subject.chars().any(char::is_control)
     }) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::bad_request(
             "invalid_query",
             "owner must match the <provider>|<subject> format",
         ));
@@ -374,7 +431,7 @@ pub async fn list_issuers(
         }
     }
     let mut rows = Vec::new();
-    if filters.source.as_deref() != Some("portal") {
+    if filters.source != Some(IssuerSource::Portal) {
         let mut entries: Vec<_> = snapshot
             .issuers()
             .iter()
@@ -383,23 +440,31 @@ pub async fn list_issuers(
                     .after_static
                     .as_deref()
                     .is_none_or(|a| entry.id.as_str() > a)
-                    && filter_matches(&filters, "static", &entry.tier, static_state(entry), None)
+                    && filter_matches(
+                        &filters,
+                        IssuerSource::Static,
+                        match entry.tier.as_str() {
+                            "sandbox" => IssuerTier::Sandbox,
+                            _ => IssuerTier::Standard,
+                        },
+                        static_state(entry),
+                        None,
+                    )
             })
             .collect();
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         rows.extend(entries.into_iter().take(limit + 1).map(Row::Static));
     }
-    if filters.source.as_deref() != Some("static")
+    if filters.source != Some(IssuerSource::Static)
         && let Some(store) = &state.hosted_issuer_store
     {
         let hosted_filters = HostedIssuerFilter {
-            tier: filters.tier.clone(),
-            state: match filters.state.as_deref() {
-                Some("active") => Some(HostedIssuerReadState::Active),
-                Some("suspended") => Some(HostedIssuerReadState::Suspended),
-                Some("expired") => Some(HostedIssuerReadState::Expired),
-                _ => None,
-            },
+            tier: filters.tier.map(|tier| tier.as_str().to_owned()),
+            state: filters.state.map(|state| match state {
+                IssuerReadState::Active => HostedIssuerReadState::Active,
+                IssuerReadState::Suspended => HostedIssuerReadState::Suspended,
+                IssuerReadState::Expired => HostedIssuerReadState::Expired,
+            }),
             owner: filters.owner.clone(),
         };
         rows.extend(
@@ -417,7 +482,11 @@ pub async fn list_issuers(
         );
     }
     rows.sort_by(|a, b| a.id().cmp(b.id()));
-    rows.dedup_by(|a, b| a.id() == b.id());
+    if rows.windows(2).any(|pair| pair[0].id() == pair[1].id()) {
+        return Err(ApiError::internal(
+            "static and hosted issuer identifiers are not unique",
+        ));
+    }
     let has_more = rows.len() > limit;
     rows.truncate(limit);
     let issuer_ids: Vec<_> = rows.iter().map(|row| row.id().to_owned()).collect();
@@ -447,7 +516,12 @@ pub async fn list_issuers(
             Row::Static(entry) => {
                 let id = entry.id.clone();
                 cursor.after_static = Some(id.clone());
-                static_dto(&state, entry, counts.get(&id).copied().unwrap_or(0))
+                static_dto(
+                    &state,
+                    entry,
+                    &snapshot,
+                    counts.get(&id).copied().unwrap_or(0),
+                )
             }
             Row::Hosted(hosted) => {
                 let id = hosted.id.clone();
@@ -473,9 +547,9 @@ pub async fn list_issuers(
     if let Some(cursor) = &next_cursor {
         let mut params = vec![format!("cursor={cursor}"), format!("limit={limit}")];
         for (k, v) in [
-            ("source", filters.source.as_deref()),
-            ("tier", filters.tier.as_deref()),
-            ("state", filters.state.as_deref()),
+            ("source", filters.source.map(IssuerSource::as_str)),
+            ("tier", filters.tier.map(IssuerTier::as_str)),
+            ("state", filters.state.map(IssuerReadState::as_str)),
             ("owner", filters.owner.as_deref()),
         ] {
             if let Some(v) = v {
@@ -491,7 +565,7 @@ pub async fn list_issuers(
                 "</admin/v1/issuers?{}>; rel=\"next\"",
                 params.join("&")
             ))
-            .unwrap(),
+            .expect("percent-encoded Link header is valid"),
         );
     }
     Ok((
@@ -509,35 +583,29 @@ pub async fn get_issuer(
     path: Result<Path<String>, PathRejection>,
 ) -> Result<(HeaderMap, Json<IssuerDto>), ApiError> {
     require_scope(&admin, "issuers:read")?;
-    let Path(id) = path.map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
+    let Path(id) =
+        path.map_err(|_| ApiError::bad_request("invalid_input", "issuer_id must be valid UTF-8"))?;
+    if id.is_empty() || id.chars().count() > 255 || id.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
             "invalid_input",
-            "issuer_id must be valid UTF-8",
-        )
-    })?;
+            "issuer_id must not contain control characters",
+        ));
+    }
     let snapshot = state.admin_registry.snapshot();
     let dto = if let Some(entry) = snapshot.issuer(&id) {
         let count = list_count(&state, &id).await?;
-        static_dto(&state, entry, count)
+        static_dto(&state, entry, &snapshot, count)
     } else if let Some(store) = &state.hosted_issuer_store {
         let issuer = store
             .find_issuer(&id)
             .await
             .map_err(hosted_store_error)?
-            .ok_or_else(|| {
-                error(
-                    StatusCode::NOT_FOUND,
-                    "issuer_not_found",
-                    "no issuer has this id",
-                )
-            })?;
+            .ok_or_else(|| ApiError::not_found("issuer_not_found", "no issuer has this id"))?;
         let keys = store.issuer_keys(&id).await.map_err(hosted_store_error)?;
         let count = list_count(&state, &id).await?;
         hosted_dto(&state, issuer, count, keys, time::OffsetDateTime::now_utc())
     } else {
-        return Err(error(
-            StatusCode::NOT_FOUND,
+        return Err(ApiError::not_found(
             "issuer_not_found",
             "no issuer has this id",
         ));
@@ -545,11 +613,18 @@ pub async fn get_issuer(
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(&dto).expect("issuer DTO serializes");
     let etag = hex::encode(Sha256::digest(&bytes));
+    let write_version = issuer_write_version(&dto);
     let mut h = HeaderMap::new();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(
         header::ETAG,
-        HeaderValue::from_str(&format!("\"{etag}\"")).unwrap(),
+        HeaderValue::from_str(&format!("\"{etag}\""))
+            .expect("hexadecimal ETag is a valid header value"),
+    );
+    h.insert(
+        HeaderName::from_static("issuer-version"),
+        HeaderValue::from_str(&write_version)
+            .expect("hexadecimal issuer version is a valid header value"),
     );
     Ok((h, Json(dto)))
 }
@@ -572,8 +647,8 @@ mod tests {
             &self,
             after: Option<&str>,
             limit: usize,
-            _filters: &HostedIssuerFilter,
-            _now: time::OffsetDateTime,
+            filters: &HostedIssuerFilter,
+            now: time::OffsetDateTime,
         ) -> Result<Vec<HostedIssuer>, crate::domain::models::hosted_issuer::HostedIssuerError>
         {
             let mut issuers: Vec<_> = self
@@ -582,6 +657,31 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|issuer| after.is_none_or(|after| issuer.id.as_str() > after))
+                .filter(|issuer| {
+                    filters
+                        .tier
+                        .as_deref()
+                        .is_none_or(|tier| issuer.tier == tier)
+                })
+                .filter(|issuer| {
+                    filters
+                        .owner
+                        .as_deref()
+                        .is_none_or(|owner| issuer.owner.as_deref() == Some(owner))
+                })
+                .filter(|issuer| {
+                    filters.state.is_none_or(|state| match state {
+                        HostedIssuerReadState::Active => {
+                            issuer.read_state(now) == HostedIssuerReadState::Active
+                        }
+                        HostedIssuerReadState::Suspended => {
+                            issuer.read_state(now) == HostedIssuerReadState::Suspended
+                        }
+                        HostedIssuerReadState::Expired => {
+                            issuer.read_state(now) == HostedIssuerReadState::Expired
+                        }
+                    })
+                })
                 .cloned()
                 .collect();
             issuers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -754,6 +854,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_filters_are_applied_before_link_pagination() {
+        let mut other_owner = hosted_issuer("e");
+        other_owner.owner = Some("portal|someone-else".into());
+        let hosted = Arc::new(Mutex::new(vec![
+            hosted_issuer("c"),
+            hosted_issuer("d"),
+            other_owner,
+        ]));
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = static_registry();
+        state.hosted_issuer_store = Some(Arc::new(MutableHostedStore {
+            issuers: hosted,
+            keys: Arc::default(),
+        }));
+        let admin = AuthenticatedAdmin {
+            id: "operator".into(),
+            scopes: vec!["issuers:read".into()],
+        };
+        let (headers, Json(page)) = list_issuers(
+            State(state),
+            Extension(admin),
+            Ok(Query(ListQuery {
+                source: Some(IssuerSource::Portal),
+                tier: Some(IssuerTier::Sandbox),
+                state: Some(IssuerReadState::Active),
+                owner: Some("portal|test-user".into()),
+                cursor: None,
+                limit: Some(1),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.issuers
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
+        assert!(page.next_cursor.is_some());
+        assert!(
+            headers[header::LINK]
+                .to_str()
+                .unwrap()
+                .contains("owner=portal%7Ctest-user")
+        );
+    }
+
+    #[test]
+    fn query_filters_reject_unknown_enum_values() {
+        assert!(serde_json::from_str::<ListQuery>(r#"{"source":"credential"}"#).is_err());
+        assert!(serde_json::from_str::<ListQuery>(r#"{"state":"revoked"}"#).is_err());
+    }
+
+    #[test]
+    fn issuer_write_version_ignores_usage_but_tracks_key_state() {
+        let mut issuer = IssuerDto {
+            id: "issuer-a".into(),
+            aggregation_id: "aggregation-a".into(),
+            aggregation_uri: None,
+            display_name: Some("Issuer A".into()),
+            source: "portal".into(),
+            tier: "sandbox".into(),
+            state: "active".into(),
+            owner: Some("portal|alice".into()),
+            created_at: Some(1),
+            expires_at: Some(2),
+            keys: vec![KeyDto {
+                kid: "key-a".into(),
+                alg: "ES256".into(),
+                state: "active".into(),
+                not_before: None,
+                not_after: None,
+                created_at: Some(1),
+                public_key: serde_json::Value::Null,
+            }],
+            usage: UsageDto {
+                lists: 1,
+                lists_limit: 10,
+                keys: 1,
+                keys_limit: Some(2),
+            },
+        };
+        let original = issuer_write_version(&issuer);
+        issuer.usage.lists += 1;
+        issuer.aggregation_uri = Some("https://example.test/aggregation".into());
+        assert_eq!(issuer_write_version(&issuer), original);
+        issuer.keys[0].state = "revoked".into();
+        assert_ne!(issuer_write_version(&issuer), original);
+    }
+
+    #[tokio::test]
     async fn concurrent_inserts_do_not_skip_preexisting_issuers_or_repeat_results() {
         let hosted = Arc::new(Mutex::new(vec![hosted_issuer("a"), hosted_issuer("c")]));
         let mut state = crate::test_utils::test_app_state(None).await;
@@ -862,7 +1054,7 @@ mod tests {
     #[test]
     fn cursor_is_bound_to_filters() {
         let filters = Filters {
-            source: Some("static".into()),
+            source: Some(IssuerSource::Static),
             ..Filters::default()
         };
         let cursor = cursor_encode(Cursor {
@@ -877,6 +1069,12 @@ mod tests {
             Some("00000000-0000-4000-8000-000000000001")
         );
         assert!(cursor_decode(&cursor, &Filters::default()).is_err());
+        let control_cursor = cursor_encode(Cursor {
+            after_static: None,
+            after_portal: Some("issuer\0id".into()),
+            filters: filters.clone(),
+        });
+        assert!(cursor_decode(&control_cursor, &filters).is_err());
     }
 
     #[test]
@@ -885,6 +1083,7 @@ mod tests {
             .into_api_error()
             .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
     }
 
     #[test]
@@ -922,7 +1121,7 @@ mod tests {
             State(state.clone()),
             Extension(admin.clone()),
             Ok(Query(ListQuery {
-                source: Some("static".into()),
+                source: Some(IssuerSource::Static),
                 tier: None,
                 state: None,
                 owner: None,

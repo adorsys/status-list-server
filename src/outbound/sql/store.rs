@@ -1435,6 +1435,7 @@ fn find_err(e: sea_orm::DbErr) -> RepositoryError {
         _ => false,
     };
     if unavailable {
+        tracing::error!(error = %e, "SQL read failed because the database is unavailable");
         RepositoryError::Unavailable
     } else {
         RepositoryError::FindError(e.to_string())

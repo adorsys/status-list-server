@@ -19,6 +19,10 @@ requests. These values must not overlap `APP_MANAGEMENT_AUTH__AUDIENCES`.
 Startup fails on overlap in every environment. In production, defining any
 admins with no admin audience also fails startup. With no admin audiences,
 admin authentication rejects every token, including in development.
+Registry reloads that introduce admins while the admin audience overlaps
+management audiences are rejected in every environment; in production, a
+missing admin audience also rejects the reload. The last valid registry
+remains active. Configure the audience before adding admin principals.
 
 `APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS` defaults to 300 and must be positive.
 `APP_ADMIN_AUTH__LEEWAY_SECS` defaults to 60. Helm deployments can supply these
@@ -62,8 +66,11 @@ it as zero.
 
 The detail ETag identifies the complete JSON representation for either source.
 It changes when returned keys, usage, metadata, or derived expiry state change.
-It is opaque and is not the database version. The reads do not provide a
-transactional snapshot across issuer metadata, keys, and usage.
+`Issuer-Version` separately covers writable issuer metadata, lifecycle, and
+key ID/state/validity windows. Future mutation endpoints use it through
+`If-Issuer-Version`, so ordinary list publishes do not invalidate writes. The
+reads do not provide a transactional snapshot across issuer metadata, keys,
+and usage.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

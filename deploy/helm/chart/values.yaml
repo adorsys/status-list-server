@@ -61,7 +61,7 @@ statuslist:
     # Must match APP_SERVER__MANAGEMENT__PORT; only the management Ingress targets it.
     managementPort: 8001
     managementTargetPort: 8001
-    # Must match APP_SERVER__ADMIN__PORT; serves /health/ready and /metrics, never behind an Ingress.
+    # Must match APP_SERVER__ADMIN__PORT; serves readiness, metrics, and admin issuer reads, never behind an Ingress.
     adminPort: 8002
     adminTargetPort: 8002
     # Only for type NodePort (30000-32767).

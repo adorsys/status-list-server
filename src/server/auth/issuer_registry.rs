@@ -99,6 +99,15 @@ pub struct ValidatedRegistry {
     materials: HashSet<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResolvedAdminKey {
+    pub admin_id: String,
+    pub public_key: Arc<PublicJwk>,
+    pub enabled: bool,
+    pub not_before: Option<time::OffsetDateTime>,
+    pub not_after: Option<time::OffsetDateTime>,
+}
+
 /// Atomically replaceable, last-known-good registry used by request handlers.
 #[derive(Debug)]
 pub struct RegistryHandle {
@@ -412,11 +421,18 @@ impl ValidatedRegistry {
     }
 
     /// Resolve a key only when its registry principal is an admin.
-    pub fn resolve_admin_key(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
-        self.keys
-            .get(kid)
-            .filter(|key| matches!(&key.principal, Principal::Admin { .. }))
-            .cloned()
+    pub fn resolve_admin_key(&self, kid: &str) -> Option<ResolvedAdminKey> {
+        let key = self.keys.get(kid)?;
+        let Principal::Admin { id } = &key.principal else {
+            return None;
+        };
+        Some(ResolvedAdminKey {
+            admin_id: id.clone(),
+            public_key: key.public_key.clone(),
+            enabled: key.enabled,
+            not_before: key.not_before,
+            not_after: key.not_after,
+        })
     }
 
     /// Resolve a key that is active at the supplied Unix timestamp.

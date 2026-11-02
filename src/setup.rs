@@ -943,6 +943,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             dynamic_issuer_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
+            RegistryWatcherAuthValidation {
+                environment: config.telemetry.environment,
+                admin_audiences: config.admin_auth.audiences.clone(),
+                management_audiences: config.management_auth.audiences.clone(),
+            },
         );
     }
 
@@ -991,12 +996,20 @@ pub(crate) fn build_issuer_key_resolver(
     registry
 }
 
+#[derive(Clone)]
+pub(crate) struct RegistryWatcherAuthValidation {
+    pub(crate) environment: crate::config::TelemetryEnvironment,
+    pub(crate) admin_audiences: Vec<String>,
+    pub(crate) management_audiences: Vec<String>,
+}
+
 pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
     dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
+    auth_validation: RegistryWatcherAuthValidation,
 ) {
     crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval)
         .spawn_with_initial_reconcile("issuer_registry", move || {
@@ -1004,6 +1017,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
             let service = service.clone();
             let dynamic_issuer_store = dynamic_issuer_store.clone();
             let retry_interval = poll_interval;
+            let auth_validation = auth_validation.clone();
             async move {
                 loop {
                     let result = async {
@@ -1011,6 +1025,17 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             crate::server::auth::issuer_registry::IssuerRegistry::from_file(
                                 registry_handle.path(),
                             )?;
+                        validate_admin_auth_settings(
+                            auth_validation.environment,
+                            &auth_validation.admin_audiences,
+                            &auth_validation.management_audiences,
+                            !candidate.admins().is_empty(),
+                        )
+                        .map_err(|message| {
+                            crate::server::auth::issuer_registry::RegistryError::Semantic(
+                                message.into(),
+                            )
+                        })?;
                         registry_handle.validate_candidate(&candidate)?;
                         // Serializes with hosted writes in this process; see
                         // register_hosted_issuer for the cross-pod case.
@@ -1852,6 +1877,11 @@ mod general_tests {
             None,
             file.clone(),
             Duration::from_secs(1),
+            RegistryWatcherAuthValidation {
+                environment: crate::config::TelemetryEnvironment::Development,
+                admin_audiences: Vec::new(),
+                management_audiences: Vec::new(),
+            },
         );
         std::fs::write(&file, registry_yaml(uuid::Uuid::new_v4())).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {

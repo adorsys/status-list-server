@@ -39,12 +39,13 @@ info:
     - Every success response carries `Cache-Control: no-store`; errors carry
       `Cache-Control: no-store, max-age=0`.
     - Instants are Unix timestamps in seconds (UTC).
-    - Each issuer has an `ETag`. Every change to an existing issuer,
-      including adding or revoking one of its keys, requires `If-Match`
-      (RFC 9110 §13.1.1): a stale value returns `412 precondition_failed`
-      (RFC 9110 §15.5.13), a missing one `428 precondition_required`
-      (RFC 6585 §3). Only `createIssuer` is exempt, because a new issuer
-      has no `ETag` yet.
+    - Detail responses have an `ETag` for the complete JSON representation
+      (RFC 9110 §8.8.3) and an `Issuer-Version` for writable issuer metadata,
+      lifecycle, and key state. Mutations require `If-Issuer-Version`; a stale
+      value returns `412 precondition_failed`, a missing one
+      `428 precondition_required`. Usage and derived expiry representation
+      changes do not invalidate this write precondition. `createIssuer` is
+      exempt because a new issuer has no version yet.
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
@@ -180,6 +181,8 @@ paths:
               $ref: "#/components/headers/IssuerLocation"
             ETag:
               $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
           content:
@@ -230,6 +233,8 @@ paths:
           headers:
             ETag:
               $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
           content:
@@ -255,14 +260,14 @@ paths:
       summary: Suspend, resume or renew a portal issuer
       description: |
         Changes exactly one thing: `state` (`suspended` or `active`) or
-        `expires_at`. Requires `issuers:write` and `If-Match`.
+        `expires_at`. Requires `issuers:write` and `If-Issuer-Version`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
         stays `expired` until it is renewed with a later `expires_at`, which
         may not exceed now plus the tier's maximum lifetime. Suspension takes
         effect on the next management request on every replica.
       parameters:
-        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfIssuerVersion"
       requestBody:
         required: true
         content:
@@ -275,6 +280,8 @@ paths:
           headers:
             ETag:
               $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
           content:
@@ -323,9 +330,9 @@ paths:
         Adds an `active` key, for example to start a rotation overlap. The
         server assigns `kid` (RFC 7638 thumbprint). The number of non-revoked
         keys may not exceed the tier's `max_keys`. Requires `issuers:write`
-        and `If-Match` (the issuer's `ETag`), which changes.
+        and `If-Issuer-Version` (the issuer's writable-state version).
       parameters:
-        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfIssuerVersion"
       requestBody:
         required: true
         content:
@@ -342,6 +349,8 @@ paths:
                 type: string
             ETag:
               $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
           content:
@@ -404,9 +413,9 @@ paths:
         request on every replica. Revoking an already revoked key returns
         `200` unchanged. Revoking the last active key is allowed: the issuer
         then cannot write until a new key is added. Requires `issuers:write`
-        and `If-Match` (the issuer's `ETag`).
+        and `If-Issuer-Version` (the issuer's writable-state version).
       parameters:
-        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfIssuerVersion"
       requestBody:
         required: true
         content:
@@ -419,6 +428,8 @@ paths:
           headers:
             ETag:
               $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
           content:
@@ -484,14 +495,14 @@ components:
         type: string
         minLength: 1
         maxLength: 255
-    IfMatch:
-      name: If-Match
+    IfIssuerVersion:
+      name: If-Issuer-Version
       in: header
       required: true
-      description: The issuer's current `ETag` (RFC 9110 §13.1.1).
+      description: The current `Issuer-Version` returned by the issuer detail endpoint.
       schema:
         type: string
-        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
+        example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
   headers:
     CacheControl:
@@ -503,11 +514,19 @@ components:
       description: |
         Opaque strong validator of the complete issuer JSON representation
         (RFC 9110 §8.8.3), including keys, usage, and derived expiry state.
-        It is not the database version. Send it back in `If-Match` when
-        updating a portal issuer.
+        It is not the database version or a mutation precondition.
       schema:
         type: string
         example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
+    IssuerVersion:
+      description: |
+        Opaque version of writable issuer metadata, lifecycle, and key state.
+        It excludes usage and derived expiry state, so ordinary list publishes
+        do not invalidate a mutation precondition. Send it in
+        `If-Issuer-Version` for mutations.
+      schema:
+        type: string
+        example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     IssuerLocation:
       description: "`/admin/v1/issuers/{id}` of the created issuer."
       schema:
@@ -613,7 +632,7 @@ components:
           $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
         state:
           type: string
-          enum: [active, revoked]
+          enum: [active, reserved, revoked]
         not_before:
           oneOf:
             - $ref: "#/components/schemas/UnixTime"
@@ -851,10 +870,10 @@ components:
             error: "issuer_managed_by_configuration"
             error_description: "static issuers are changed through the registry file"
     PreconditionFailed:
-      description: "`precondition_failed` — `If-Match` does not match the issuer's current `ETag`."
+      description: "`precondition_failed` — `If-Issuer-Version` does not match the issuer's current writable-state version."
       headers:
-        ETag:
-          $ref: "#/components/headers/ETag"
+        Issuer-Version:
+          $ref: "#/components/headers/IssuerVersion"
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
       content:
@@ -865,7 +884,7 @@ components:
             error: "precondition_failed"
             error_description: "the issuer changed; re-read it and retry"
     PreconditionRequired:
-      description: "`precondition_required` — `If-Match` is missing."
+      description: "`precondition_required` — `If-Issuer-Version` is missing."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -875,7 +894,7 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "precondition_required"
-            error_description: "send If-Match with the issuer's ETag"
+            error_description: "send If-Issuer-Version with the issuer's current writable-state version"
     PayloadTooLarge:
       description: "`payload_too_large` — the body exceeds `limits.max_body_size_bytes`."
       headers:
