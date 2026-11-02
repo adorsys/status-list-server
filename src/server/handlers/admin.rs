@@ -828,6 +828,16 @@ mod tests {
         };
         let first = query_page(state.clone(), &admin, None, 1).await;
         assert_eq!(first.issuers[0].id, "Issuer-A");
+        let cursor = cursor_decode(
+            first
+                .next_cursor
+                .as_deref()
+                .expect("portal issuer is a next page"),
+            &Filters::default(),
+        )
+        .unwrap();
+        assert_eq!(cursor.after_static.as_deref(), Some("Issuer-A"));
+        assert!(cursor.after_portal.is_none());
         let second = query_page(state, &admin, first.next_cursor, 1).await;
         assert_eq!(second.issuers[0].id, portal_id);
         assert!(second.next_cursor.is_none());
