@@ -1,0 +1,32 @@
+name: gate
+
+on:
+  pull_request:
+    branches: [stage, main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  gate:
+    name: gate
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pull request head and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test promotion policy
+        run: bash scripts/promotion-gate-selftest.sh
+
+      - name: Enforce promotion policy
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/promotion-gate.sh "$BASE_BRANCH" "$HEAD_BRANCH" "$HEAD_SHA" .
