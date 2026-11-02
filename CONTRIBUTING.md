@@ -96,20 +96,32 @@ The normal promotion path is:
    candidate's `deploy.yml` run passed and the tagged `main` commit has the
    same file tree as the candidate's commit. Cut a new candidate whenever
    `stage` changes after the last one, including documentation or workflow
-   changes, since any difference in the tree fails the release. If the
-   candidate's run failed only in **Deploy to Production**, re-run that job;
-   once the run concludes `success`, the candidate can be promoted without
-   cutting a new one.
+   changes, since any difference in the tree fails the release. A candidate is
+   promotable only when its whole run passed, so a **Deploy to Production**
+   failure that recurs blocks the release until its cause is fixed. If the
+   candidate's run failed there for a one-off reason, re-run that job; once
+   the run concludes `success`, the candidate can be promoted without cutting
+   a new one.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.
 
 For a hotfix, branch `hotfix/*` from the released `main` state, then manually
 dispatch **Release-plz PR** with that branch selected. Review and merge the
-resulting patch-version and changelog PR into the hotfix branch before
-validation and the `hotfix/*` to `main` promotion. Validation means tagging the
-hotfix branch head as `v<version>-rc.<N>` and letting its `deploy.yml` run
-pass: the final tag promotes that candidate's image and fails without one.
+resulting patch-version and changelog PR into the hotfix branch. Validate the
+hotfix as a release candidate before the `hotfix/*` to `main` promotion: the
+final tag promotes that candidate's image and fails without one. The RC
+automation runs only for `stage`, so tag the hotfix candidate by hand:
+
+1. Tag only after the patch-version PR is merged, on the hotfix branch head.
+   Its tree must match what `main` will hold after the promotion, so any later
+   change to the hotfix branch needs a new candidate.
+2. Take `<version>` from `Cargo.toml` on that commit. Do not tag when
+   `v<version>` already exists.
+3. Use the next unused `<N>` for that version, starting at 1. List the existing
+   candidates with `git ls-remote --tags origin "v<version>-rc.*"`.
+4. Push `v<version>-rc.<N>` and wait for its `deploy.yml` run to pass before
+   promoting the hotfix branch to `main`.
 
 After the hotfix release, merge `main` back into `develop` with a merge commit
 before the next `develop` to `stage` promotion. If `develop` already contains a
