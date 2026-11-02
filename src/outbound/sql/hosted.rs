@@ -237,7 +237,7 @@ fn exact_text_eq(
     let expression = match backend {
         DatabaseBackend::MySql => format!("BINARY {column} = ?"),
         DatabaseBackend::Postgres => {
-            format!("convert_to({column}, 'UTF8') = convert_to(?::text, 'UTF8')")
+            format!("convert_to({column}, 'UTF8') = convert_to($1, 'UTF8')")
         }
         DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
         _ => format!("{column} = ?"),
@@ -714,3 +714,4 @@ impl From<CredentialError> for HostedIssuerError {
         }
     }
 }
+
