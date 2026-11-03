@@ -667,7 +667,7 @@ components:
         keys:
           type: integer
           minimum: 0
-          description: >-
+          description: |
             Keys counted against `keys_limit`: active keys whose `not_after`
             has not passed, including keys staged for rotation.
           example: 1
