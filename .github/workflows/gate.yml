@@ -1,23 +1,25 @@
 name: gate
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [stage, main]
     types: [opened, synchronize, reopened, edited]
 
-permissions: {}
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   gate:
     name: gate
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
-      - name: Check out pull request head and tags
+      - name: Check out trusted policy and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -29,4 +31,7 @@ jobs:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/promotion-gate.sh "$BASE_BRANCH" "$HEAD_BRANCH" "$HEAD_SHA" .
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/promotion-gate.sh "$BASE_BRANCH" "$HEAD_BRANCH" "$HEAD_SHA" "$HEAD_REPOSITORY" "$BASE_REPOSITORY" .
