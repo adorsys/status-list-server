@@ -6,8 +6,12 @@
 //! with no cache, so revocation takes effect on the next request.
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set};
-use std::collections::HashSet;
+use sea_orm::sea_query::{Expr, Order};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -16,8 +20,8 @@ use super::models::{PublicKey, hosted_issuer_keys, issuers};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
-    HostedIssuerState,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
 };
 use crate::domain::ports::HostedIssuerStore;
 use crate::utils::metrics_db::time_query;
@@ -209,7 +213,12 @@ async fn load_issuer(
     id: &str,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Option<HostedIssuer>, RepositoryError> {
-    let issuer = issuers::Entity::find_by_id(id)
+    let issuer = issuers::Entity::find()
+        .filter(exact_text_eq(
+            "issuers.issuer",
+            id,
+            db.get_database_backend(),
+        ))
         .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
         .one(db)
         .await
@@ -218,6 +227,48 @@ async fn load_issuer(
         Some(row) => Ok(Some(parse_issuer(row)?)),
         None => Ok(None),
     }
+}
+
+fn exact_text_eq(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} = ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') = convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
+        _ => format!("{column} = ?"),
+    };
+    Expr::cust_with_values(expression, [value])
+}
+
+fn bytewise_text_order(column: &str, backend: DatabaseBackend) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column}"),
+        DatabaseBackend::Postgres => format!("convert_to({column}, 'UTF8')"),
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY"),
+        _ => column.to_owned(),
+    };
+    Expr::cust(expression)
+}
+
+fn bytewise_text_after(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} > BINARY ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') > convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY > ?"),
+        _ => format!("{column} > ?"),
+    };
+    Expr::cust_with_values(expression, [value])
 }
 
 async fn insert_issuer_row(
@@ -530,6 +581,103 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 
 #[async_trait]
 impl HostedIssuerStore for SqlHostedIssuerStore {
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        let db = self.store.current();
+        let mut query = issuers::Entity::find()
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .order_by(
+                bytewise_text_order("issuers.issuer", db.get_database_backend()),
+                Order::Asc,
+            )
+            .limit(limit as u64);
+        if let Some(after) = after {
+            query = query.filter(bytewise_text_after(
+                "issuers.issuer",
+                after,
+                db.get_database_backend(),
+            ));
+        }
+        if let Some(tier) = &filters.tier {
+            query = query.filter(issuers::Column::Tier.eq(tier));
+        }
+        if let Some(owner) = &filters.owner {
+            query = query.filter(exact_text_eq(
+                "issuers.owner",
+                owner,
+                db.get_database_backend(),
+            ));
+        }
+        let unexpired = Condition::any()
+            .add(issuers::Column::ExpiresAt.is_null())
+            .add(issuers::Column::ExpiresAt.gt(now.unix_timestamp()));
+        query = match filters.state {
+            Some(HostedIssuerReadState::Suspended) => {
+                query.filter(issuers::Column::State.eq("disabled"))
+            }
+            Some(HostedIssuerReadState::Expired) => query
+                .filter(issuers::Column::State.eq("active"))
+                .filter(issuers::Column::ExpiresAt.lte(now.unix_timestamp())),
+            Some(HostedIssuerReadState::Active) => query
+                .filter(issuers::Column::State.eq("active"))
+                .filter(unexpired),
+            None => query,
+        };
+        query
+            .all(db.as_ref())
+            .await
+            .map_err(find_err)?
+            .into_iter()
+            .map(parse_issuer)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn issuer_keys(
+        &self,
+        issuer_id: &str,
+    ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+        hosted_issuer_keys::Entity::find()
+            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .order_by_desc(hosted_issuer_keys::Column::CreatedAt)
+            .order_by_asc(hosted_issuer_keys::Column::Kid)
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?
+            .into_iter()
+            .map(parse_key)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn issuer_keys_for(
+        &self,
+        issuer_ids: &[String],
+    ) -> Result<HashMap<String, Vec<HostedIssuerKey>>, HostedIssuerError> {
+        if issuer_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let keys = hosted_issuer_keys::Entity::find()
+            .filter(hosted_issuer_keys::Column::IssuerId.is_in(issuer_ids.iter().cloned()))
+            .order_by_asc(hosted_issuer_keys::Column::IssuerId)
+            .order_by_desc(hosted_issuer_keys::Column::CreatedAt)
+            .order_by_asc(hosted_issuer_keys::Column::Kid)
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?;
+        let mut grouped: HashMap<String, Vec<HostedIssuerKey>> = HashMap::new();
+        for row in keys {
+            let issuer_id = row.issuer_id.clone();
+            grouped.entry(issuer_id).or_default().push(parse_key(row)?);
+        }
+        Ok(grouped)
+    }
+
     async fn find_key_by_kid(
         &self,
         kid: &str,

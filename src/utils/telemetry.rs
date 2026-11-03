@@ -69,7 +69,7 @@ pub fn make_http_request_span(request: &axum::http::Request<axum::body::Body>) -
     let span = tracing::info_span!(
         "HTTP request",
         http.method = %request.method(),
-        http.uri = %request.uri(),
+        http.uri = %request.uri().path(),
         otel.kind = "server",
     );
     let _ = span.set_parent(parent_context);
