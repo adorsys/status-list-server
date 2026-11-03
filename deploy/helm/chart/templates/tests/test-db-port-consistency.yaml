@@ -1,9 +1,4 @@
 {{- if .Values.statuslist.enabled }}
-{{- /*
-  Test that the database port configured in APP_DATABASE__PORT matches
-  the egress port in the network policy and initContainer commands.
-  This ensures the port configuration is consistent across all resources.
-*/ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,19 +14,16 @@ data:
     #!/bin/sh
     set -e
 
-    # Get the configured database port from values
     DB_PORT="{{ include "status-list-server-chart.dbPort" . }}"
 
     echo "Testing database port consistency..."
     echo "Configured APP_DATABASE__PORT: $DB_PORT"
 
-    # Validate port is a number
     if ! echo "$DB_PORT" | grep -qE '^[0-9]+$'; then
       echo "ERROR: APP_DATABASE__PORT must be a numeric value"
       exit 1
     fi
 
-    # Validate port is in valid range
     if [ "$DB_PORT" -lt 1 ] || [ "$DB_PORT" -gt 65535 ]; then
       echo "ERROR: APP_DATABASE__PORT must be between 1 and 65535"
       exit 1

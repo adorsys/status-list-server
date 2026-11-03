@@ -1,8 +1,6 @@
 {{- if .Values.statuslist.enabled }}
 {{- if .Values.podDisruptionBudget.enabled }}
-{{- /* Presence checks treat a field as set only when its key is present AND its value
-  is not null. An explicit 0 is preserved as a valid PDB setting, while an explicit
-  null (the documented way to leave a field unset) counts as absent. */}}
+{{- /* 0 is a real setting; only null means unset. */}}
 {{- $min := index .Values.podDisruptionBudget "minAvailable" }}
 {{- $max := index .Values.podDisruptionBudget "maxUnavailable" }}
 {{- $hasMin := and (hasKey .Values.podDisruptionBudget "minAvailable") (ne $min nil) }}
@@ -27,8 +25,7 @@ spec:
   {{- if $hasMax }}
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   {{- end }}
-  # Allow eviction of unhealthy pods so voluntary disruption is not blocked by
-  # unhealthy replicas (kube-linter: pdb-unhealthy-pod-eviction-policy).
+  # Unhealthy pods must not block drains (kube-linter pdb-unhealthy-pod-eviction-policy).
   unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:

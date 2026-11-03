@@ -1,6 +1,4 @@
-# AWS/EKS direct Network Load Balancer exposure overlay.
-# Use this only when the Service itself is the public entry point; the inherited
-# Ingress is disabled so traffic does not bypass the intended exposure mode.
+# Only when the Service itself is the public entry point; Ingress is off so nothing bypasses it.
 
 statuslist:
   ingress:

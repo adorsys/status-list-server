@@ -4,23 +4,9 @@
 {{- if not (has $platform $validPlatforms) }}
   {{- fail (printf "alerting.platform %q is not supported. Must be one of: slack, discord, teams, mattermost, email, webhook" $platform) }}
 {{- end }}
-{{- /* Resolve the Secret name - either the user-provided existing secret or the chart-managed one */ -}}
 {{- $secretName := .Values.alerting.existingSecret | default (printf "%s-alerting" (include "status-list-server-chart.fullname" .)) }}
-# AlertmanagerConfig routes SLO alerts from kube-prometheus-stack's Alertmanager to the
-# configured notification channel. The route tree mirrors the Docker Compose
-# generate-alertmanager-config.sh logic:
-#   severity=none  -> deadmansswitch (Watchdog; pages on ABSENCE, not on firing)
-#   severity=page  -> human channel, repeat every 4h
-#   severity=warn  -> human channel, repeat every 24h
-#   everything else -> noop sink (never spams a human channel)
-#
-# Credentials are read from the Secret rendered by alerting-secret.yaml (or from
-# alerting.existingSecret when operators manage the Secret externally, e.g. via ESO).
-#
-# apiVersion: the pinned kube-prometheus-stack 91.4.0 AlertmanagerConfig CRD
-# (prometheus-operator v0.94.0) serves only monitoring.coreos.com/v1alpha1, so
-# this must stay on v1alpha1 — v1beta1 is not served and any deployment of it on
-# a fresh cluster is rejected by the API server.
+# v1alpha1 only: the pinned kube-prometheus-stack 91.4.0 CRD doesn't serve v1beta1.
+# Routes mirror generate-alertmanager-config.sh.
 apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
@@ -40,20 +26,16 @@ spec:
       - service
     groupWait: 30s
     groupInterval: 5m
-    # Default sink: absorbs anything not explicitly routed so nothing silently
-    # spams a human channel.
+    # Anything unrouted goes nowhere, not to a human.
     receiver: noop
     routes:
-      # Watchdog (severity=none) -> dead-man's-switch. When dmsWebhookUrl is not
-      # set, the deadmansswitch receiver is an empty noop - the Watchdog is
-      # silently absorbed and never reaches a human channel.
+      # Watchdog goes to the dead man's switch, or nowhere if none is set.
       - matchers:
           - name: severity
             value: none
             matchType: "="
         receiver: deadmansswitch
 
-      # Page (act now): re-notify every 4h while still firing.
       - matchers:
           - name: severity
             value: page
@@ -61,7 +43,6 @@ spec:
         receiver: human
         repeatInterval: 4h
 
-      # Warn (act this week): re-notify every 24h while still firing.
       - matchers:
           - name: severity
             value: warn
@@ -70,9 +51,7 @@ spec:
         repeatInterval: 24h
 
   inhibitRules:
-    # Suppress the warn notification for a given SLI+service when the correlated
-    # page alert is already firing (fast-burn page + slow-burn warn fire together
-    # for the same SLI; only the page should reach the channel).
+    # A firing page mutes the matching warn for the same SLI.
     - sourceMatch:
         - name: severity
           value: page
@@ -86,12 +65,8 @@ spec:
         - service
 
   receivers:
-    # Absorbs anything not explicitly routed.
     - name: noop
 
-    # Dead-man's-switch for the always-firing Watchdog. When dmsWebhookUrl / dmsEnabled is not
-    # configured, this is an empty receiver and the Watchdog is silently absorbed.
-    # When using existingSecret, set dmsEnabled: true if the secret contains key "dms-webhook-url".
     - name: deadmansswitch
       {{- if or .Values.alerting.dmsWebhookUrl .Values.alerting.dmsEnabled }}
       webhookConfigs:
@@ -104,10 +79,6 @@ spec:
           sendResolved: false
       {{- end }}
 
-    # Human notification channel. Platform-specific receiver config is rendered
-    # below based on alerting.platform; webhook/discord/slack credentials are
-    # read from the Secret; email endpoint details are plain values because the
-    # EmailConfig CRD defines to/smarthost/from as strings.
     - name: human
       {{- if eq $platform "discord" }}
       discordConfigs:
@@ -133,10 +104,7 @@ spec:
           text: |-
             {{ `{{ template "slack.default.text" . }}` }}
       {{- else if eq $platform "teams" }}
-      # MS Teams classic inbound webhook accepts a generic JSON POST (no native
-      # Alertmanager receiver). Connectors that require Adaptive Cards can be
-      # bridged by an intermediary; the standard Alertmanager JSON carries full
-      # alert context.
+      # Teams gets Alertmanager's generic JSON, not an Adaptive Card.
       webhookConfigs:
         - urlSecret:
             name: {{ $secretName | quote }}
@@ -146,7 +114,6 @@ spec:
           {{- end }}
           sendResolved: true
       {{- else if eq $platform "mattermost" }}
-      # Mattermost incoming webhook accepts a generic JSON POST.
       webhookConfigs:
         - urlSecret:
             name: {{ $secretName | quote }}
@@ -156,7 +123,6 @@ spec:
           {{- end }}
           sendResolved: true
       {{- else if eq $platform "webhook" }}
-      # Generic endpoint accepting Alertmanager's standard JSON notification payload.
       webhookConfigs:
         - urlSecret:
             name: {{ $secretName | quote }}
