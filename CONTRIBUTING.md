@@ -74,6 +74,14 @@ branch may have an open release-plz PR at a time. The workflow refuses to run
 when another target branch already has one; close that PR before dispatching
 for `develop` or a `hotfix/*` branch. A later dispatch recreates it if needed.
 
+Before the first promotion, repository administrators must protect `stage` and
+`hotfix/*` from direct pushes with review and required checks. Configure the
+production environment to require deployment approval for RC and final tags,
+and restrict creation of `v*` tags to the release-bot App. The `stage` ruleset
+can be created before the branch exists; create the branch only after the
+protections are active. Until then, a write-access push or hotfix workflow
+dispatch could deploy unreviewed code to production.
+
 The normal promotion path is:
 
 1. Before preparing a release, ensure the latest final release from `main` has

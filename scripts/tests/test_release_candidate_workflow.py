@@ -63,13 +63,20 @@ class ReleaseCandidateWorkflowTest(unittest.TestCase):
             self.deploy_job["outputs"]["image-digest"],
             "${{ steps.deploy-chart.outputs.image-digest }}",
         )
+        self.assertEqual(
+            self.deploy_job["outputs"]["image-ref"],
+            "${{ steps.deploy-chart.outputs.image-ref }}",
+        )
         self.assertEqual(self.record_job["needs"], "deploy")
         record = self.record_job["steps"][-1]
         self.assertEqual(
             record["env"]["IMAGE_DIGEST"], "${{ needs.deploy.outputs.image-digest }}"
         )
         self.assertIn("commit=$(git rev-parse HEAD)", record["run"])
-        self.assertIn('gh release create "$TAG" --prerelease', record["run"])
+        self.assertEqual(record["env"]["IMAGE_REF"], "${{ needs.deploy.outputs.image-ref }}")
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG"', record["run"])
+        self.assertIn('gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag', record["run"])
+        self.assertIn('gh release edit "$TAG" --repo "$GITHUB_REPOSITORY"', record["run"])
 
 
 if __name__ == "__main__":

@@ -677,6 +677,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image-digest: ${{ steps.deploy-chart.outputs.image-digest }}
+      image-ref: ${{ steps.deploy-chart.outputs.image-ref }}
     # Never deploy an untagged release; recover from a promotion failure by re-running it.
     needs:
       - build-and-push
@@ -796,6 +797,7 @@ jobs:
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
           echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image-ref=${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
 
           # Verify the digest this job resolved: the tag may have moved since promote-tags checked it.
           bash scripts/verify-attestation.sh \
@@ -940,6 +942,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ needs.deploy.outputs.image-digest }}
+          IMAGE_REF: ${{ needs.deploy.outputs.image-ref }}
+          HELM_NAMESPACE: ${{ env.HELM_NAMESPACE }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -948,10 +952,15 @@ jobs:
             exit 1
           }
           commit=$(git rev-parse HEAD)
-          printf 'Validated in the existing EKS deployment by [workflow run](%s/%s/actions/runs/%s).\n\n- Commit: `%s`\n- Deployed image digest: `%s`\n' \
-            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$commit" "$IMAGE_DIGEST" > candidate-notes.md
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
+          [[ "$IMAGE_REF" == *@"$IMAGE_DIGEST" ]] || {
+            echo "::error::deployment image reference does not match its digest"
+            exit 1
+          }
+          printf 'Validated in the production environment (EKS namespace `%s`) by [workflow run](%s/%s/actions/runs/%s).\n\n- Commit: `%s`\n- Image: `%s`\n' \
+            "$HELM_NAMESPACE" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$commit" "$IMAGE_REF" > candidate-notes.md
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
           else
-            gh release create "$TAG" --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
           fi
