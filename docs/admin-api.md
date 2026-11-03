@@ -59,10 +59,10 @@ inserts before that position are observed on a new traversal.
 ## Usage and validators
 
 Usage reports the actual number of persisted lists, including during a quota
-transition, and the configured per-issuer list limit. Key usage counts active
-(non-revoked) keys, including keys outside their validity windows.
-`keys_limit: null` means no key-count quota is enforced; clients must not treat
-it as zero.
+transition, and the issuer tier's `max_lists`. Key usage counts the keys that
+hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
+passed, including keys staged for rotation. `keys_limit` is the tier's
+`max_keys`.
 
 The detail ETag identifies the complete JSON representation for either source.
 It changes when returned keys, usage, metadata, or derived expiry state change.

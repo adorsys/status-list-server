@@ -653,9 +653,8 @@ components:
       type: object
       required: [lists, lists_limit, keys, keys_limit]
       description: |
-        Current use against enforced limits. `lists_limit` is the configured
-        server-wide per-issuer cap. `keys_limit` is null when no key-count quota
-        is enforced; clients must not interpret it as zero.
+        Current use against the limits of the issuer's tier. `lists_limit` is
+        the tier's `max_lists` and `keys_limit` its `max_keys`.
       properties:
         lists:
           type: integer
@@ -668,13 +667,14 @@ components:
         keys:
           type: integer
           minimum: 0
-          description: Non-revoked keys.
+          description: >-
+            Keys counted against `keys_limit`: active keys whose `not_after`
+            has not passed, including keys staged for rotation.
           example: 1
         keys_limit:
-          type: [integer, "null"]
+          type: integer
           minimum: 1
-          description: Null while no key-count quota is enforced. A number denotes an enforced cap.
-          example: null
+          example: 5
 
     IssuerPage:
       type: object

@@ -804,7 +804,7 @@
                   "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
                   "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
                   "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
-                  "pm.test(\"No key-count quota is reported as null\", () => pm.expect(pm.response.json().usage.keys_limit).to.eql(null));"
+                  "pm.test(\"Key usage reports the tier's key limit\", () => { const usage = pm.response.json().usage; pm.expect(usage.keys_limit).to.be.a(\"number\").and.at.least(1); pm.expect(usage.keys).to.be.at.most(usage.keys_limit); });"
                 ]
               }
             }
