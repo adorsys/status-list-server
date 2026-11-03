@@ -126,8 +126,19 @@ statuslist:
     # Token lifetimes in seconds; TTL must stay below EXP.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
+    # Per client IP. STRICT counts rejected management authentications only and
+    # never refuses a request that authenticates; verified issuers are limited by
+    # their tier (APP_TIERS__*). STRICT keys on the peer address; set
+    # TRUSTED_PROXIES to the ingress controller's addresses (CIDRs) so it keys on
+    # the client from X-Forwarded-For instead. Without it every client behind the
+    # ingress shares one budget of rejected authentications.
+    # ADMISSION bounds every management request per client before its token is
+    # checked; the burst must be at least APP_TIERS__STANDARD__WRITE_BURST_SIZE.
+    # APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.0.0/8"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
+    APP_RATE_LIMIT__ADMISSION_BURST_SIZE: "1000"
+    APP_RATE_LIMIT__ADMISSION_PER_SECOND: "100"
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
     APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
     APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"
@@ -139,6 +150,21 @@ statuslist:
     # Upgrading from a release without the list quota: set "true" for that rollout only,
     # then run list-quota recount and enable (docs/troubleshooting.md).
     # APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
+    # Issuer tiers (registry `tier`: standard or sandbox). Unset standard values follow
+    # APP_LIMITS__*; pods refuse to start when a value exceeds its cap or sandbox is looser
+    # than standard. WRITE_* budgets each issuer's authenticated requests, per replica.
+    # MAX_KEYS is checked against the issuer registry at startup and on reload: a pod
+    # refuses to start with a registry over the cap, and a reload keeps the previous one.
+    # It is also checked when a key is added to a hosted issuer.
+    # APP_TIERS__STANDARD__MAX_KEYS: "5"
+    # APP_TIERS__STANDARD__WRITE_BURST_SIZE: "100"
+    # APP_TIERS__STANDARD__WRITE_PERIOD_SECS: "1"
+    # APP_TIERS__SANDBOX__MAX_LISTS: "10"
+    # APP_TIERS__SANDBOX__MAX_STATUS_INDEX: "10000"
+    # APP_TIERS__SANDBOX__MAX_STATUSES_PER_REQUEST: "1000"
+    # APP_TIERS__SANDBOX__MAX_KEYS: "2"
+    # APP_TIERS__SANDBOX__WRITE_BURST_SIZE: "10"
+    # APP_TIERS__SANDBOX__WRITE_PERIOD_SECS: "6"
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     APP_TELEMETRY__SAMPLER_RATIO: "1.0"
