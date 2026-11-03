@@ -6,12 +6,14 @@
 #[cfg(feature = "sqlite")]
 use super::fixtures;
 use crate::domain::models::credential::{AggregationId, PublicJwk};
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use crate::domain::models::hosted_issuer::HostedIssuerFilter;
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::HostedIssuerReadState;
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
-#[cfg(feature = "sqlite")]
-use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
@@ -519,6 +521,39 @@ async fn test_mysql_hosted_round_trip() {
         "MySQL",
     )
     .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_hosted_pagination_uses_bytewise_id_order() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let store = SqlHostedIssuerStore::new(test_db.connection().await);
+    for id in ["a", "B", "c"] {
+        store.create_issuer(issuer(id)).await.unwrap();
+    }
+
+    let mut after = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = store
+            .list_issuers_after(
+                after.as_deref(),
+                1,
+                &HostedIssuerFilter::default(),
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let Some(row) = page.into_iter().next() else {
+            break;
+        };
+        after = Some(row.id.clone());
+        ids.push(row.id);
+    }
+
+    assert_eq!(ids, ["B", "a", "c"]);
 }
 
 #[cfg(feature = "mysql")]
