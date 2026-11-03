@@ -201,6 +201,23 @@ impl CredentialRepo for SqlCredentialRepo {
 
 #[async_trait]
 impl StatusListRepo for SqlStatusListRepo {
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError> {
+        self.store
+            .count_status_lists_by_issuer(issuer)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn count_by_issuers(
+        &self,
+        issuers: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.store
+            .count_status_lists_by_issuers(issuers)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         self.store
             .find_one_by(list_id)
@@ -271,10 +288,7 @@ impl StatusListRepo for SqlStatusListRepo {
     async fn list_counts_by_issuer(
         &self,
     ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
-        self.store
-            .count_status_lists_by_issuer()
-            .await
-            .map_err(Into::into)
+        self.store.list_counts_by_issuer().await.map_err(Into::into)
     }
 
     async fn allocate_indices(
@@ -417,6 +431,7 @@ impl From<RepositoryError> for CredentialError {
 impl From<RepositoryError> for StatusListError {
     fn from(value: RepositoryError) -> Self {
         match value {
+            RepositoryError::Unavailable => StatusListError::Unavailable,
             RepositoryError::DuplicateEntry => StatusListError::AlreadyExists,
             RepositoryError::Contention { code } => StatusListError::Contention { code },
             RepositoryError::QuotaExceeded { count, max } => {

@@ -45,6 +45,7 @@ struct IssuerRegistryMetrics {
     keys: Gauge<u64>,
     reload_failures: Counter<u64>,
     auth_requests: Counter<u64>,
+    admin_auth_requests: Counter<u64>,
 }
 
 fn issuer_registry_metrics() -> IssuerRegistryMetrics {
@@ -56,8 +57,15 @@ fn issuer_registry_metrics() -> IssuerRegistryMetrics {
                 .u64_counter("issuer_registry_reload_failures_total")
                 .build(),
             auth_requests: meter.u64_counter("management_auth_requests_total").build(),
+            admin_auth_requests: meter.u64_counter("admin_auth_requests_total").build(),
         }
     })
+}
+
+pub(crate) fn record_admin_auth_request(outcome: &'static str) {
+    issuer_registry_metrics()
+        .admin_auth_requests
+        .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
 pub(crate) fn set_issuer_registry_keys(count: usize) {

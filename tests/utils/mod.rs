@@ -71,6 +71,7 @@ fn fixture_config() -> Config {
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
         "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
+        "admin_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": ["status-list-server-admin"]},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "admission_burst_size": 1000, "admission_per_second": 100,
             "permissive_burst_size": 100, "permissive_period_secs": 60},
@@ -133,6 +134,9 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         ),
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        admin_auth: (&config.admin_auth).into(),
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: status_list_server::server::ServiceLinks {

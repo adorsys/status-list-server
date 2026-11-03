@@ -12,7 +12,7 @@ use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
 };
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
 };
 
 /// Resolve a trusted signing key without exposing the backing trust source to
@@ -31,6 +31,28 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Return a bounded page ordered by issuer id, strictly after `after`.
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+    /// Return all signing-key metadata for one hosted issuer.
+    async fn issuer_keys(&self, issuer_id: &str)
+    -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
+    /// Return signing-key metadata for a page of hosted issuers in one read.
+    async fn issuer_keys_for(
+        &self,
+        issuer_ids: &[String],
+    ) -> Result<HashMap<String, Vec<HostedIssuerKey>>, HostedIssuerError> {
+        let mut result = HashMap::with_capacity(issuer_ids.len());
+        for issuer_id in issuer_ids {
+            result.insert(issuer_id.clone(), self.issuer_keys(issuer_id).await?);
+        }
+        Ok(result)
+    }
     /// The issuer owning a registered management-token key ID.
     async fn find_key_by_kid(
         &self,
@@ -122,6 +144,22 @@ pub struct AllocateStatusListIndices {
 
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
+    /// Count all lists owned by one issuer, including during quota transitions.
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError>;
+
+    /// Count lists for a page of issuers, allowing SQL adapters to group the
+    /// counts into one query.
+    async fn count_by_issuers(
+        &self,
+        issuers: &[String],
+    ) -> Result<HashMap<String, u64>, StatusListError> {
+        let mut counts = HashMap::with_capacity(issuers.len());
+        for issuer in issuers {
+            counts.insert(issuer.clone(), self.count_by_issuer(issuer).await?);
+        }
+        Ok(counts)
+    }
+
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 

@@ -162,6 +162,7 @@ pub struct Config {
     pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
     #[serde(default)]
@@ -529,6 +530,26 @@ impl ManagementAuthConfig {
             );
         }
 
+        Ok(())
+    }
+}
+
+/// JWT audience and lifetime policy for admin endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    #[serde(deserialize_with = "deserialize_trimmed_list")]
+    pub audiences: Vec<String>,
+}
+
+impl AdminAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "admin_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -2042,6 +2063,7 @@ impl Config {
         config
             .management_auth
             .validate(config.telemetry.environment)?;
+        config.admin_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
         config.rate_limit.trusted_proxy_networks()?;
@@ -2165,6 +2187,9 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("management_auth.issuers_file", Option::<String>::None)?
+        .set_default("admin_auth.leeway_secs", 60)?
+        .set_default("admin_auth.max_token_lifetime_secs", 300)?
+        .set_default("admin_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.admission_burst_size", 1000)?
@@ -2977,6 +3002,17 @@ mod tests {
                 "status-list-server-management".to_string(),
                 "internal-management".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_admin_auth_defaults_and_zero_lifetime_validation() {
+        let defaults = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(defaults.admin_auth.leeway_secs, 60);
+        assert_eq!(defaults.admin_auth.max_token_lifetime_secs, 300);
+        assert!(defaults.admin_auth.audiences.is_empty());
+        assert!(
+            Config::load_from_overrides(&[("admin_auth.max_token_lifetime_secs", "0")]).is_err()
         );
     }
 

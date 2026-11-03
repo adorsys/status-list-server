@@ -51,6 +51,33 @@ impl HostedIssuer {
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
         self.state == HostedIssuerState::Active && self.expires_at.is_none_or(|expiry| now < expiry)
     }
+
+    /// State exposed by admin reads at the supplied instant.
+    pub fn read_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
+        if self.state == HostedIssuerState::Disabled {
+            HostedIssuerReadState::Suspended
+        } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            HostedIssuerReadState::Expired
+        } else {
+            HostedIssuerReadState::Active
+        }
+    }
+}
+
+/// Metadata filters applied before bounding an admin issuer page.
+#[derive(Clone, Debug, Default)]
+pub struct HostedIssuerFilter {
+    pub tier: Option<String>,
+    pub state: Option<HostedIssuerReadState>,
+    pub owner: Option<String>,
+}
+
+/// Admin-visible lifecycle derived from persisted state and expiry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedIssuerReadState {
+    Active,
+    Suspended,
+    Expired,
 }
 
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers

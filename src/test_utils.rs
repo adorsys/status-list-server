@@ -210,6 +210,13 @@ pub(crate) async fn test_app_state_with_cert_provider(
         issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        admin_auth: crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec![],
+        },
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
@@ -260,6 +267,13 @@ pub(crate) async fn test_app_state_without_snapshots() -> AppState {
         issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        admin_auth: crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec![],
+        },
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
@@ -300,6 +314,13 @@ pub(crate) async fn test_app_state_without_cert_chain() -> AppState {
         issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 0,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        admin_auth: crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec![],
+        },
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
@@ -487,6 +508,13 @@ async fn build_test_app_state(
         issuer_rate_limiter: Arc::new(IssuerRateLimiter::new(&test_tiers())),
         snapshot_retention_secs: 7776000,
         management_auth: crate::server::ManagementAuthConfig::default(),
+        admin_auth: crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec![],
+        },
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
         links: crate::server::ServiceLinks {
