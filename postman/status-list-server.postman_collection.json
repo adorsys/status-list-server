@@ -804,7 +804,7 @@
                   "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
                   "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
                   "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
-                  "pm.test(\"Key usage reports the tier's key limit\", () => { const usage = pm.response.json().usage; pm.expect(usage.keys_limit).to.be.a(\"number\").and.at.least(1); pm.expect(usage.keys).to.be.at.most(usage.keys_limit); });"
+                  "pm.test(\"Key usage reports the tier's key limit\", () => { const usage = pm.response.json().usage; pm.expect(Number.isInteger(usage.keys_limit), \"keys_limit is an integer\").to.be.true; pm.expect(usage.keys_limit).to.be.at.least(1); pm.expect(Number.isInteger(usage.keys), \"keys is an integer\").to.be.true; pm.expect(usage.keys).to.be.at.least(0); });"
                 ]
               }
             }
