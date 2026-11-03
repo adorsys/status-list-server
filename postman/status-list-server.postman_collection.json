@@ -715,6 +715,102 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Admin API",
+      "item": [
+        {
+          "name": "List issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?limit=50",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
+                  "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
+                  "pm.test(\"No key-count quota is reported as null\", () => pm.expect(pm.response.json().usage.keys_limit).to.eql(null));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   ],
   "variable": [
@@ -745,6 +841,10 @@
     {
       "key": "historical_time",
       "value": "1686925000"
+    },
+    {
+      "key": "adminToken",
+      "value": ""
     }
   ]
 }
