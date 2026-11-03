@@ -64,7 +64,8 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let (issuer_governor, permissive_governor) = build_governor_configs(&config.rate_limit)?;
+        let (issuer_governor, permissive_governor, admin_governor) =
+            build_governor_configs(&config.rate_limit)?;
 
         let public_router = with_listener_name(
             with_common_layers(
@@ -91,7 +92,10 @@ impl HttpServer {
         .with_state(state.clone());
 
         let admin_router = with_listener_name(
-            with_common_layers(admin_routes(config, prometheus_registry), config),
+            with_common_layers(
+                admin_routes(state.clone(), config, prometheus_registry, admin_governor),
+                config,
+            ),
             "admin",
         )
         .with_state(state);
@@ -274,6 +278,7 @@ async fn shutdown_signal() {
 type GovernorPolicies = (
     Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
     Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 );
 
 fn build_governor_configs(
@@ -294,7 +299,15 @@ fn build_governor_configs(
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((issuer, permissive))
+    let admin = Arc::new(
+        GovernorConfigBuilder::default()
+            .burst_size(config.permissive_burst_size)
+            .period(Duration::from_secs(config.permissive_period_secs))
+            .key_extractor(PeerIpKeyExtractor)
+            .finish()
+            .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
+    );
+    Ok((issuer, permissive, admin))
 }
 
 /// Routes owned by the public listener: status-list reads, aggregation reads,
@@ -339,11 +352,31 @@ fn management_routes(
     Router::new().nest(API_V1_PREFIX, protected)
 }
 
-/// Routes owned by the admin listener: readiness and (optionally) metrics.
+/// Routes owned by the admin listener: readiness, metrics, and authenticated issuer reads.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
-fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
-    let router = Router::new().route("/health/ready", get(health::ready));
+fn admin_routes(
+    state: AppState,
+    config: &Config,
+    registry: Registry,
+    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+) -> Router<AppState> {
+    let admin_api = Router::new()
+        .route(
+            "/issuers",
+            get(crate::server::handlers::admin::list_issuers),
+        )
+        .route(
+            "/issuers/{issuer_id}",
+            get(crate::server::handlers::admin::get_issuer),
+        )
+        .layer(GovernorLayer::new(admin_governor));
+    let router = Router::new()
+        .route("/health/ready", get(health::ready))
+        .nest(
+            "/admin/v1",
+            admin_api.route_layer(from_fn_with_state(state, crate::server::auth::admin_auth)),
+        );
     attach_metrics(router, config, registry)
 }
 
@@ -447,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn test_management_rejects_registration_and_public_serves_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (issuer, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
         let aggregation_id = crate::test_utils::register_issuer(&state.service, "issuer1").await;
         let management = management_routes(state.clone(), issuer).with_state(state.clone());
@@ -521,7 +554,8 @@ mod tests {
             ("APP_SERVER__ENABLE_METRICS", "true"),
         ])
         .unwrap();
-        let (issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (issuer, permissive, admin_governor) =
+            build_governor_configs(&config.rate_limit).unwrap();
 
         // Seed a registered issuer and a published list so the public read
         // routes return a real (non-404) response on their owner.
@@ -532,7 +566,13 @@ mod tests {
 
         let public = public_routes(permissive).with_state(state.clone());
         let management = management_routes(state.clone(), issuer).with_state(state.clone());
-        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
+        let admin = admin_routes(
+            state.clone(),
+            &config,
+            prometheus::Registry::new(),
+            admin_governor,
+        )
+        .with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
             let request = Request::builder()
@@ -599,6 +639,8 @@ mod tests {
             // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
+            (Method::GET, "/admin/v1/issuers", ADMIN),
+            (Method::GET, "/admin/v1/issuers/example", ADMIN),
         ];
 
         for (method, path, owner) in routes {
@@ -636,7 +678,7 @@ mod tests {
         use axum::body::to_bytes;
 
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
         let public = public_routes(permissive).with_state(state);
 
@@ -688,7 +730,7 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let router = public_routes(permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)

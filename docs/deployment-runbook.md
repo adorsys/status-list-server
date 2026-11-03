@@ -103,6 +103,15 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
+The admin listener serves authenticated issuer reads as well as readiness and
+metrics. It is not exposed through an Ingress and has a per-peer rate limit.
+The chart's NetworkPolicy is disabled by default; enable it and configure
+`statuslist.networkPolicy.adminIngress` to restrict which pods can reach the
+admin service when cluster-wide pod access is not acceptable. Set a distinct
+`APP_ADMIN_AUTH__AUDIENCES` in every environment that defines admin principals;
+staging must not reuse the production audience. During upgrades, configure the
+admin audience before adding admin principals to the mounted registry.
+
 ### Rotate or revoke issuer keys
 
 Keep the registry in the operator-controlled source used to publish the mount.
