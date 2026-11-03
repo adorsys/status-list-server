@@ -253,6 +253,22 @@ class DeployReleaseGatingTest(unittest.TestCase):
                     self.assertNotIn("||", env[key], "a fallback would let a final tag read this run's values")
         self.assertIn("SOURCE_RUN_ID", self.jobs["scan-image"]["env"])
         self.assertIn("SOURCE_REF", self.jobs["deploy"]["env"])
+        self.assertIn("SOURCE_RUN_ID", self.jobs["deploy"]["env"])
+
+    def test_deploy_pins_the_digest_the_source_run_gated(self) -> None:
+        # Provenance alone accepts any digest attested from the source ref.
+        script = "\n".join(str(step.get("run", "")) for step in self.jobs["deploy"]["steps"])
+        self.assertRegex(
+            script,
+            r'gh run download "\$SOURCE_RUN_ID"[^\n]*\\\n[^\n]*--name "image-digest-\$\{IMAGE_VARIANT\}"',
+        )
+        self.assertIn('[ "$IMAGE_DIGEST" != "$SOURCE_DIGEST" ]', script)
+        self.assertLess(
+            script.index('"$IMAGE_DIGEST" != "$SOURCE_DIGEST"'),
+            script.index("helm upgrade"),
+            "the digest must be pinned before Helm installs it",
+        )
+        self.assertEqual(self.jobs["deploy"]["permissions"].get("actions"), "read")
 
     def test_release_jobs_verify_provenance_against_the_source_ref(self) -> None:
         call = re.compile(r"bash scripts/verify-attestation\.sh((?:[^\n]*\\\n)*[^\n]*)")

@@ -4,6 +4,8 @@
 # A final release ships this RC's image, so lookalikes such as v1.2.30-rc.1 must never match.
 # Usage: select-latest-rc.sh <version> < tag-names
 set -euo pipefail
+# [[ > ]] collates by locale; C keeps the digit comparison byte-wise.
+export LC_ALL=C
 
 version=${1-}
 
@@ -21,8 +23,10 @@ while IFS= read -r tag || [ -n "$tag" ]; do
     n=${tag#"$prefix"}
     # A string prefix, not a regex, so the dots in the version need no escaping.
     [[ "$n" =~ ^(0|[1-9][0-9]*)$ ]] || continue
-    # Numeric, so rc.10 sorts above rc.9.
-    if [ -z "$best_n" ] || [ "$n" -gt "$best_n" ]; then
+    # Leading zeros are rejected above, so a longer digit string is the larger number and
+    # equal lengths compare lexically. Unlike -gt, this has no integer range to overflow.
+    if [ -z "$best_n" ] || [ "${#n}" -gt "${#best_n}" ] ||
+        { [ "${#n}" -eq "${#best_n}" ] && [[ "$n" > "$best_n" ]]; }; then
         best_n=$n
         best_tag=$tag
     fi

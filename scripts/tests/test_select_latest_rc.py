@@ -60,6 +60,19 @@ class SelectLatestRcTest(unittest.TestCase):
             "v1.2.3-rc.10",
         )
 
+    def test_selects_a_suffix_beyond_the_shell_integer_range(self) -> None:
+        # 2**63 overflows Bash arithmetic; a numeric compare would error and keep rc.1.
+        self.assert_selects(
+            "1.2.3",
+            ["v1.2.3-rc.1", "v1.2.3-rc.9223372036854775808"],
+            "v1.2.3-rc.9223372036854775808",
+        )
+        self.assert_selects(
+            "1.2.3",
+            ["v1.2.3-rc.99999999999999999999", "v1.2.3-rc.100000000000000000000", "v1.2.3-rc.9"],
+            "v1.2.3-rc.100000000000000000000",
+        )
+
     def test_ignores_lookalike_tags(self) -> None:
         self.assert_selects(
             "1.2.3",

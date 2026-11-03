@@ -782,11 +782,13 @@ jobs:
       contents: read
       id-token: write
       packages: read
+      actions: read
       attestations: read
     env:
       # Pushed-ref values go through env, never ${{ }} in run:, since the pusher controls them.
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
       SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
+      SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -882,6 +884,20 @@ jobs:
             echo "::error::Could not resolve a valid image index digest for ${IMAGE_BASE}:${FULL_TAG}"
             exit 1
           }
+
+          # The tag may have moved since promote-tags. Another digest attested from the same ref
+          # would pass the attestation check below, so pin the exact digest the source run gated.
+          SOURCE_DIGEST_DIR="$RUNNER_TEMP/source-digest"
+          if ! gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
+              --name "image-digest-${IMAGE_VARIANT}" --dir "$SOURCE_DIGEST_DIR"; then
+            echo "::error::could not download image-digest-${IMAGE_VARIANT} from run ${SOURCE_RUN_ID}."
+            exit 1
+          fi
+          SOURCE_DIGEST=$(cat "$SOURCE_DIGEST_DIR/image-digest-${IMAGE_VARIANT}.txt")
+          if [ "$IMAGE_DIGEST" != "$SOURCE_DIGEST" ]; then
+            echo "::error::${IMAGE_BASE}:${FULL_TAG} resolves to ${IMAGE_DIGEST}, but run ${SOURCE_RUN_ID} gated ${SOURCE_DIGEST}. Refusing to deploy a digest the release did not promote."
+            exit 1
+          fi
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
 
