@@ -311,6 +311,53 @@ Attach a least-privilege policy to the role (see the example in the Workload Ide
 
 In fallback mode, `aws-credentials-secret` is not provisioned automatically: either create it yourself when `mountCredentials=true`, switch to ESO, or use Workload Identity.
 
+### Release deployment with the fscert profile
+
+The release workflow (`deploy.yml`) deploys the `-fscert` image to the EKS cluster when the repository variable `IMAGE_VARIANT` is `fscert`. It layers [`values-aws-fscert.yaml`](../deploy/helm/chart/values-aws-fscert.yaml) after `values-aws.yaml` and `values-production.yaml`. That overlay:
+
+- turns off `statuslist.aws.mountCredentials`, so no AWS credentials reach the pod and the `statuslist-external-secret-aws-credentials` ExternalSecret is removed on the first upgrade;
+- syncs the database password, the certificate, the token-signing key, and the Redis password from the existing Secrets Manager entry `statuslist-secret` through `ClusterSecretStore/datev-secret-store`, into the single `statuslist-secret` Kubernetes Secret;
+- mounts them as files and sets `APP_SERVER__CERT__STORE__CERTIFICATE_PATH`, `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH`, `APP_DATABASE__PASSWORD_FILE`, and `APP_CACHE__PASSWORD_FILE`;
+- selects the Redis cache with TLS.
+
+The workflow itself authenticates to AWS only through the OIDC deploy role; no long-lived credential is stored in the repository or the workflow.
+
+Before the first deployment:
+
+1. Add the `CERTIFICATE`, `SIGNING_KEY`, and `REDIS_PASSWORD` properties to the Secrets Manager entry `statuslist-secret`. Keep the existing `POSTGRES_PASSWORD`: `put-secret-value` replaces the whole JSON document, so merge rather than overwrite. Generate the key and certificate as described in [Configure Signing Credentials](../deploy/helm/README.md#configure-signing-credentials).
+
+   ```bash
+   umask 077
+   aws secretsmanager get-secret-value --secret-id statuslist-secret \
+     --query SecretString --output text \
+     | jq --rawfile cert issuer-cert.pem --rawfile key signing-key.pem \
+         --rawfile redis redis-password.txt \
+         '. + {CERTIFICATE: $cert, SIGNING_KEY: $key, REDIS_PASSWORD: $redis}' \
+     > merged-secret.json
+   aws secretsmanager put-secret-value --secret-id statuslist-secret \
+     --secret-string file://merged-secret.json
+   shred -u merged-secret.json
+   ```
+
+2. Provide a TLS-enabled Redis reachable from `statuslist-production`, with an ACL user scoped to the cache key prefix (see [Redis Status-List Cache](#redis-status-list-cache)). Production configuration refuses Redis without TLS or a password.
+3. Set the repository variables `IMAGE_VARIANT=fscert` and `APP_CACHE_HOST` (the Redis hostname). Set `IMAGE_VARIANT` at repository scope only: the deploy job fails when an environment-scoped value differs, because the scheduled re-scan reads only the repository scope. The deploy job also fails before `helm upgrade` when `APP_CACHE_HOST` is empty.
+4. Keep the `status-list-server-issuers` ConfigMap in place, as for any release.
+
+Both release candidates (`v<version>-rc.<n>`) and final releases (`v<version>`) deploy through the same job. Each promotes `<version>-fscert`; only a final release also moves `latest-fscert`. To move from the `aws` profile back to the `fscert` profile, or the other way, change `IMAGE_VARIANT` and push the next tag. A `helm rollback` across that change restores the previous profile's values, including its ExternalSecrets.
+
+To rotate the certificate or signing key, update the properties in Secrets Manager. ESO refreshes `statuslist-secret` on its `refreshInterval`, and the server reloads the mounted files without a restart.
+
+Verify after a deployment:
+
+```bash
+kubectl get externalsecret -n statuslist-production
+kubectl get pod -n statuslist-production -o jsonpath='{..imageID}'
+kubectl port-forward svc/statuslist-status-list-server-internal-service -n statuslist-production 8002:8002
+curl -s http://localhost:8002/health/ready
+```
+
+Only `statuslist-external-secret` should exist and report `Ready=True`.
+
 ## Scaling and Resilience (opt-in)
 
 For a production-shape deployment enable scaling and disruption budgets together (disabled by default):
@@ -742,7 +789,9 @@ key. Production chart rendering fails if the audience is empty. Issuers must
 include that configured value in their management tokens' `aud` claim.
 
 The release-tag deployment uses `values-aws.yaml` followed by
-`values-production.yaml`. Its management audience is
+`values-production.yaml`, plus `values-aws-fscert.yaml` when `IMAGE_VARIANT` is
+`fscert` (see [Release deployment with the fscert profile](#release-deployment-with-the-fscert-profile)).
+Its management audience is
 `https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
 deployment must put this exact value in `aud` (as a string or an array member).
 The release workflow selects the `status-list-server-issuers` ConfigMap as its

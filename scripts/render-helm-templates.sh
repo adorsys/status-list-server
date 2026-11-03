@@ -21,6 +21,7 @@ helm lint "$CHART_DIR"
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-aws-fscert.yaml
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
@@ -311,6 +312,32 @@ PROD_STORE_KIND_COUNT=$(grep -c 'kind: ClusterSecretStore' "${RENDER_TEMP}/rende
 if [ "$PROD_STORE_REF_COUNT" -ne "$PROD_ES_COUNT" ] || [ "$PROD_STORE_KIND_COUNT" -ne "$PROD_ES_COUNT" ]; then
   echo "ERROR: every production ExternalSecret must reference ClusterSecretStore/datev-secret-store (refs=$PROD_STORE_REF_COUNT kinds=$PROD_STORE_KIND_COUNT es=$PROD_ES_COUNT)"; exit 1
 fi
+# deploy.yml's fscert path: one ExternalSecret carries every secret, and no AWS credentials reach the pod.
+helm template status-list-server "$CHART_DIR" \
+  -f "$CHART_DIR"/values-aws.yaml \
+  -f "$CHART_DIR"/values-production.yaml \
+  -f "$CHART_DIR"/values-aws-fscert.yaml \
+  --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
+  --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
+  --set "secretStore.enabled=false" \
+  --set-string "statuslist.env.APP_CACHE__HOST=redis.helm-ci.invalid" \
+  --output-dir "${RENDER_TEMP}/rendered/prod-fscert"
+FSCERT_DIR="${RENDER_TEMP}/rendered/prod-fscert/status-list-server/templates"
+FSCERT_ES_COUNT=$(grep -c 'kind: ExternalSecret' "${FSCERT_DIR}/external-secrets.yaml" || true)
+if [ "$FSCERT_ES_COUNT" -ne 1 ]; then
+  echo "ERROR: fscert production render must emit exactly one ExternalSecret (got $FSCERT_ES_COUNT)"; exit 1
+fi
+if ! grep -q 'name: datev-secret-store' "${FSCERT_DIR}/external-secrets.yaml" || ! grep -q 'kind: ClusterSecretStore' "${FSCERT_DIR}/external-secrets.yaml"; then
+  echo "ERROR: fscert production ExternalSecret must reference ClusterSecretStore/datev-secret-store"; exit 1
+fi
+if grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials' "${FSCERT_DIR}/deployment.yaml"; then
+  echo "ERROR: fscert production render must not mount AWS credentials"; exit 1
+fi
+for env_name in APP_SERVER__CERT__STORE__CERTIFICATE_PATH APP_SERVER__CERT__STORE__SIGNING_KEY_PATH APP_CACHE__PASSWORD_FILE APP_CACHE__HOST; do
+  if ! grep -q "name: ${env_name}$" "${FSCERT_DIR}/deployment.yaml"; then
+    echo "ERROR: fscert production render must set ${env_name}"; exit 1
+  fi
+done
 helm template status-list-server "$CHART_DIR" \
   --set serviceAccount.name=azure-app-sa \
   --set 'serviceAccount.annotations.azure\.workload\.identity/client-id=11111111-2222-3333-4444-555555555555' \

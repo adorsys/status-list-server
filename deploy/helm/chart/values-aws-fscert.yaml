@@ -1,0 +1,71 @@
+# Applied after values-aws.yaml and values-production.yaml by deploy.yml when IMAGE_VARIANT=fscert.
+# All secret material comes from the statuslist-secret entry through the ClusterSecretStore.
+
+statuslist:
+  image:
+    variant: fscert
+  aws:
+    # The fscert image has no AWS SDK; static keys in the pod would only be a liability.
+    mountCredentials: false
+  env:
+    # APP_CACHE__HOST comes from deploy.yml; production requires TLS and a password.
+    APP_CACHE__BACKEND: "redis"
+    APP_CACHE__TLS: "true"
+  # Lists replace rather than merge, so the database mount is repeated here.
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: ""
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: signing-material
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cert
+      items:
+        - key: certificate
+          path: certificate.pem
+        - key: signing-key
+          path: signing-key.pem
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: certificate.pem
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: signing-key.pem
+    - name: cache-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cache
+      items:
+        - key: redis-password
+          path: password
+      fileEnv:
+        APP_CACHE__PASSWORD_FILE: password
+
+externalSecret:
+  spec:
+    target:
+      template:
+        type: Opaque
+        data:
+          database-password: "{{ .postgres_password }}"
+          postgres-password: "{{ .postgres_password }}"
+          certificate: "{{ .certificate }}"
+          signing-key: "{{ .signing_key }}"
+          redis-password: "{{ .redis_password }}"
+    data:
+      - secretKey: postgres_password
+        remoteRef:
+          key: statuslist-secret
+          property: POSTGRES_PASSWORD
+      - secretKey: certificate
+        remoteRef:
+          key: statuslist-secret
+          property: CERTIFICATE
+      - secretKey: signing_key
+        remoteRef:
+          key: statuslist-secret
+          property: SIGNING_KEY
+      - secretKey: redis_password
+        remoteRef:
+          key: statuslist-secret
+          property: REDIS_PASSWORD

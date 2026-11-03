@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use status_list_server::config::Config;
+use status_list_server::config::{CacheBackend, Config};
 
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create test chart directory");
@@ -362,6 +362,71 @@ fn release_production_overlays_supply_the_management_audience() {
         config.management_auth.audiences,
         ["https://statuslist.eudi-adorsys.com/api/v1"]
     );
+}
+
+#[test]
+fn release_fscert_overlays_load_as_production_config() {
+    if !helm_available() {
+        assert!(env::var_os("CI").is_none(), "helm is required in CI");
+        return;
+    }
+    // Match deploy.yml's fscert overlays and overrides.
+    let chart_dir = dependency_free_chart();
+    let output = Command::new("helm")
+        .args(["template", "statuslist"])
+        .arg(&chart_dir)
+        .args(["-f", "deploy/helm/chart/values-aws.yaml"])
+        .args(["-f", "deploy/helm/chart/values-production.yaml"])
+        .args(["-f", "deploy/helm/chart/values-aws-fscert.yaml"])
+        .args(["--namespace", "statuslist-production"])
+        .args([
+            "--set",
+            "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",
+        ])
+        .args([
+            "--set-string",
+            "externalSecret.spec.secretStoreRef.name=datev-secret-store",
+        ])
+        .args([
+            "--set-string",
+            "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore",
+        ])
+        .args(["--set", "secretStore.enabled=false"])
+        .args([
+            "--set-string",
+            "statuslist.env.APP_CACHE__HOST=redis.example.internal",
+        ])
+        .args(["--set", "opentelemetry-collector.enabled=false"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !rendered.contains("aws-credentials"),
+        "the fscert profile must not provision or mount AWS credentials"
+    );
+    for remote_property in ["CERTIFICATE", "SIGNING_KEY", "REDIS_PASSWORD"] {
+        assert!(
+            rendered.contains(&format!("property: {remote_property}")),
+            "the ExternalSecret must read {remote_property} from the secret store"
+        );
+    }
+
+    let env = rendered_env(&rendered);
+    let overrides = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let config = Config::load_from_overrides(&overrides).expect("fscert release config must load");
+    assert_eq!(config.cache.backend, CacheBackend::Redis);
+    assert!(config.cache.tls);
+    assert!(config.cache.password_file.is_some());
+    assert!(config.server.cert.store.certificate_path.is_some());
+    assert!(config.server.cert.store.signing_key_path.is_some());
 }
 
 #[test]

@@ -36,6 +36,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
+* [`chart/values-aws-fscert.yaml`](chart/values-aws-fscert.yaml): applied after `values-production.yaml` by release deployments when `IMAGE_VARIANT` is `fscert`; signing material and the Redis password come from ESO as files.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
 * `mysql.auth.username`, `mysql.auth.database`, `mysql.service.port`: connection defaults for an external MySQL database after `APP_DATABASE__HOST` is set.

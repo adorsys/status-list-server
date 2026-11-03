@@ -24,6 +24,8 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
+  # Redis endpoint for the fscert profile; no hostname is committed.
+  APP_CACHE_HOST: ${{ vars.APP_CACHE_HOST }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
   REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
 
@@ -732,6 +734,10 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
+          if [[ "${IMAGE_VARIANT:-aws}" == "fscert" && -z "${APP_CACHE_HOST}" ]]; then
+            echo "::error::APP_CACHE_HOST repository/environment variable is required when IMAGE_VARIANT is fscert"
+            exit 1
+          fi
 
       - name: Assert the issuer registry ConfigMap exists
         # The chart mounts the registry from status-list-server-issuers and nothing
@@ -797,11 +803,23 @@ jobs:
           bash scripts/verify-attestation.sh \
             "${IMAGE_BASE}@${IMAGE_DIGEST}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
 
+          # fscert reads signing material and the Redis password from files and needs no AWS credentials.
+          VARIANT_ARGS=()
+          EXTERNAL_SECRETS="statuslist-external-secret statuslist-external-secret-aws-credentials"
+          if [ "$IMAGE_VARIANT" = "fscert" ]; then
+            VARIANT_ARGS=(
+              -f "$CHART_DIR"/values-aws-fscert.yaml
+              --set-string "statuslist.env.APP_CACHE__HOST=${APP_CACHE_HOST:?APP_CACHE_HOST missing}"
+            )
+            EXTERNAL_SECRETS="statuslist-external-secret"
+          fi
+
           # FULL_TAG carries the variant suffix; the bare tag could hold any feature set.
           # Record each ExternalSecret's refreshTime so the verify step can prove this deploy reconciled.
+          # The verify step reads the names from this file, so list only the ones this release renders.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
-          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+          for es in $EXTERNAL_SECRETS; do
             rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
               -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
@@ -820,6 +838,7 @@ jobs:
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
+            "${VARIANT_ARGS[@]}" \
             --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
             --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
             --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
@@ -847,9 +866,6 @@ jobs:
         # Ready=True can be stale from before the upgrade, so require refreshTime to move past the baseline.
         # ClusterSecretStore isn't readable with the deploy role's namespaced RBAC.
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
-        env:
-          PRIMARY_ES: statuslist-external-secret
-          CREDS_ES: statuslist-external-secret-aws-credentials
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
@@ -882,8 +898,15 @@ jobs:
           }
           trap cleanup_on_failure EXIT
 
+          # The deploy step wrote one line per ExternalSecret this release renders.
+          EXTERNAL_SECRETS=$(awk '{print $1}' "$BASELINES")
+          if [ -z "$EXTERNAL_SECRETS" ]; then
+            echo "::error::No ExternalSecrets recorded in $BASELINES; the deploy step did not run as expected"
+            exit 1
+          fi
+
           # Force a sync: the 30m refreshInterval could outlast the wait.
-          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+          for es in $EXTERNAL_SECRETS; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
               echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
@@ -912,8 +935,8 @@ jobs:
             return 1
           }
 
-          await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
-
-          await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+          for es in $EXTERNAL_SECRETS; do
+            await_synced "$es" "ExternalSecret $es ($NAMESPACE)"
+          done
 
           rollback_done=1
