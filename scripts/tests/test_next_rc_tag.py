@@ -67,7 +67,7 @@ class NextRcTagTest(unittest.TestCase):
         result = self.run_script("1.2.3", "deadbeef\trefs/tags/v1.10.0\n")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("stage version 1.2.3 must be newer", result.stderr)
+        self.assertIn("release branch version 1.2.3 must be newer", result.stderr)
 
     def test_newer_stage_version_is_accepted(self) -> None:
         result = self.run_script("1.10.0", "deadbeef\trefs/tags/v1.2.3\n")

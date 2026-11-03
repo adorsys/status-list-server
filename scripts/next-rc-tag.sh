@@ -33,7 +33,7 @@ while IFS=$'\t' read -r _ ref; do
 done
 
 if [ -n "$highest_final" ] && [ "$(printf '%s\n%s\n' "$VERSION" "$highest_final" | sort -V | tail -n1)" = "$highest_final" ]; then
-  echo "::error::Final release v$highest_final already exists; stage version $VERSION must be newer before creating an RC." >&2
+  echo "::error::Final release v$highest_final already exists; release branch version $VERSION must be newer before creating an RC." >&2
   exit 1
 fi
 

@@ -676,7 +676,7 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
     outputs:
-      image-digest: ${{ steps.deployment-record.outputs.image-digest }}
+      image-digest: ${{ steps.deploy-chart.outputs.image-digest }}
     # Never deploy an untagged release; recover from a promotion failure by re-running it.
     needs:
       - build-and-push
@@ -776,6 +776,7 @@ jobs:
           helm dependency build "$CHART_DIR"
 
       - name: Deploy chart
+        id: deploy-chart
         # :? on the digest: empty would silently deploy the mutable tag, and helm's error points elsewhere.
         env:
           GH_TOKEN: ${{ github.token }}
@@ -794,7 +795,7 @@ jobs:
           }
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
-          printf '%s\n' "$IMAGE_DIGEST" > "$RUNNER_TEMP/deployed-image-digest"
+          echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
           # Verify the digest this job resolved: the tag may have moved since promote-tags checked it.
           bash scripts/verify-attestation.sh \
@@ -920,17 +921,6 @@ jobs:
           await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
 
           rollback_done=1
-
-      - name: Record deployed image
-        id: deployment-record
-        run: |
-          set -euo pipefail
-          image_digest=$(cat "$RUNNER_TEMP/deployed-image-digest")
-          [[ "$image_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo "::error::deployment did not retain a valid image digest"
-            exit 1
-          }
-          echo "image-digest=$image_digest" >> "$GITHUB_OUTPUT"
 
   record-release-candidate:
     name: Record Validated Release Candidate

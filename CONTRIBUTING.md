@@ -90,7 +90,8 @@ The normal promotion path is:
    `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
    than the latest final tag, the stage workflow fails before it creates an RC
    tag; prepare the next release-plz version instead. A tag whose deployment
-   fails is not a validated candidate and cannot later be promoted.
+   fails is not a validated candidate until its run passes. If only the
+   deployment job failed, re-run that job after fixing the cause.
 6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
@@ -100,8 +101,9 @@ The final `v<version>` tag is created only from `main`.
 
 For a hotfix, branch `hotfix/*` from the released `main` state, then manually
 dispatch **Release-plz PR** with that branch selected. Review and merge the
-resulting patch-version and changelog PR into the hotfix branch before
-validation and the `hotfix/*` to `main` promotion.
+resulting patch-version and changelog PR into the hotfix branch, then manually
+dispatch **Tag Release Candidate** with that branch selected. Validate the RC
+deployment before the `hotfix/*` to `main` promotion.
 
 After the hotfix release, merge `main` back into `develop` with a merge commit
 before the next `develop` to `stage` promotion. If `develop` already contains a

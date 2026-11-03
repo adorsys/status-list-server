@@ -3,6 +3,7 @@ name: Tag Release Candidate
 on:
   push:
     branches: [stage]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -16,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    if: ${{ github.repository == 'adorsys/status-list-server' }}
+    if: ${{ github.repository == 'adorsys/status-list-server' && (github.event_name == 'push' && github.ref == 'refs/heads/stage' || github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/hotfix/')) }}
     steps:
       - name: Generate GitHub App Token
         id: app-token
@@ -26,18 +27,12 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
 
-      - name: Checkout stage
+      - name: Checkout release branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          toolchain: stable
-          rustflags: ''
 
       - name: Select the next release candidate tag
         id: candidate
