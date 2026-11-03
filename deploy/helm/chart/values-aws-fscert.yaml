@@ -7,10 +7,14 @@ statuslist:
   aws:
     # The fscert image has no AWS SDK; static keys in the pod would only be a liability.
     mountCredentials: false
+    # An empty region keeps APP_AWS__REGION out of a pod that has no AWS client.
+    region: ""
   env:
-    # APP_CACHE__HOST comes from deploy.yml; production requires TLS and a password.
+    # APP_CACHE__HOST and APP_CACHE__PORT come from deploy.yml; production requires TLS and a password.
     APP_CACHE__BACKEND: "redis"
     APP_CACHE__TLS: "true"
+    # The inherited APP_SERVER__CERT__* ACME settings stay in the pod env: the schema forbids null
+    # env values, and the fscert build has no ACME client, so it ignores them.
   # Lists replace rather than merge, so the database mount is repeated here.
   secretMounts:
     - name: database-credentials
@@ -41,6 +45,10 @@ statuslist:
       fileEnv:
         APP_CACHE__PASSWORD_FILE: password
 
+secretStore:
+  aws:
+    region: ""
+
 externalSecret:
   spec:
     target:
@@ -52,6 +60,7 @@ externalSecret:
           certificate: "{{ .certificate }}"
           signing-key: "{{ .signing_key }}"
           redis-password: "{{ .redis_password }}"
+    # Also a list, so POSTGRES_PASSWORD is repeated from the base values.
     data:
       - secretKey: postgres_password
         remoteRef:

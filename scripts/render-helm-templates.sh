@@ -321,6 +321,7 @@ helm template status-list-server "$CHART_DIR" \
   --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
   --set "secretStore.enabled=false" \
   --set-string "statuslist.env.APP_CACHE__HOST=redis.helm-ci.invalid" \
+  --set-string "statuslist.env.APP_CACHE__PORT=6379" \
   --output-dir "${RENDER_TEMP}/rendered/prod-fscert"
 FSCERT_DIR="${RENDER_TEMP}/rendered/prod-fscert/status-list-server/templates"
 FSCERT_ES_COUNT=$(grep -c 'kind: ExternalSecret' "${FSCERT_DIR}/external-secrets.yaml" || true)
@@ -330,10 +331,10 @@ fi
 if ! grep -q 'name: datev-secret-store' "${FSCERT_DIR}/external-secrets.yaml" || ! grep -q 'kind: ClusterSecretStore' "${FSCERT_DIR}/external-secrets.yaml"; then
   echo "ERROR: fscert production ExternalSecret must reference ClusterSecretStore/datev-secret-store"; exit 1
 fi
-if grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials' "${FSCERT_DIR}/deployment.yaml"; then
-  echo "ERROR: fscert production render must not mount AWS credentials"; exit 1
+if grep -qE 'AWS_SHARED_CREDENTIALS_FILE|aws-credentials|APP_AWS__REGION' "${FSCERT_DIR}/deployment.yaml"; then
+  echo "ERROR: fscert production render must not pass AWS credentials or region to the pod"; exit 1
 fi
-for env_name in APP_SERVER__CERT__STORE__CERTIFICATE_PATH APP_SERVER__CERT__STORE__SIGNING_KEY_PATH APP_CACHE__PASSWORD_FILE APP_CACHE__HOST; do
+for env_name in APP_SERVER__CERT__STORE__CERTIFICATE_PATH APP_SERVER__CERT__STORE__SIGNING_KEY_PATH APP_CACHE__PASSWORD_FILE APP_CACHE__HOST APP_CACHE__PORT; do
   if ! grep -q "name: ${env_name}$" "${FSCERT_DIR}/deployment.yaml"; then
     echo "ERROR: fscert production render must set ${env_name}"; exit 1
   fi

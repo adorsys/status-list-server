@@ -396,6 +396,11 @@ fn release_fscert_overlays_load_as_production_config() {
             "--set-string",
             "statuslist.env.APP_CACHE__HOST=redis.example.internal",
         ])
+        .args(["--set-string", "statuslist.env.APP_CACHE__PORT=6379"])
+        .args([
+            "--set-string",
+            "statuslist.env.APP_CACHE__USERNAME=status-list",
+        ])
         .args(["--set", "opentelemetry-collector.enabled=false"])
         .output()
         .unwrap();
@@ -417,6 +422,10 @@ fn release_fscert_overlays_load_as_production_config() {
     }
 
     let env = rendered_env(&rendered);
+    assert!(
+        !env.iter().any(|(name, _)| name == "APP_AWS__REGION"),
+        "the fscert pod has no AWS client and must not receive an AWS region"
+    );
     let overrides = env
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -424,6 +433,8 @@ fn release_fscert_overlays_load_as_production_config() {
     let config = Config::load_from_overrides(&overrides).expect("fscert release config must load");
     assert_eq!(config.cache.backend, CacheBackend::Redis);
     assert!(config.cache.tls);
+    assert_eq!(config.cache.port, Some(6379));
+    assert_eq!(config.cache.username.as_deref(), Some("status-list"));
     assert!(config.cache.password_file.is_some());
     assert!(config.server.cert.store.certificate_path.is_some());
     assert!(config.server.cert.store.signing_key_path.is_some());

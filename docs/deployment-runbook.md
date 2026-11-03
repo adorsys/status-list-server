@@ -313,50 +313,99 @@ In fallback mode, `aws-credentials-secret` is not provisioned automatically: eit
 
 ### Release deployment with the fscert profile
 
-The release workflow (`deploy.yml`) deploys the `-fscert` image to the EKS cluster when the repository variable `IMAGE_VARIANT` is `fscert`. It layers [`values-aws-fscert.yaml`](../deploy/helm/chart/values-aws-fscert.yaml) after `values-aws.yaml` and `values-production.yaml`. That overlay:
+The release workflow (`deploy.yml`) deploys the `-fscert` image to the EKS cluster when the repository variable `IMAGE_VARIANT` is `fscert`. That deployment is the Datev staging environment: it runs the Datev installation path (the `-fscert` image, secrets delivered as files through ESO, a Redis cache over TLS) on the existing cluster. It keeps the `statuslist-production` namespace, the `production` GitHub environment, and the audiences from `values-production.yaml`, so issuers keep their current management tokens. No other deployment uses those audiences; the rule that staging must not reuse a production audience applies to any further environment.
 
-- turns off `statuslist.aws.mountCredentials`, so no AWS credentials reach the pod and the `statuslist-external-secret-aws-credentials` ExternalSecret is removed on the first upgrade;
+The workflow layers [`values-aws-fscert.yaml`](../deploy/helm/chart/values-aws-fscert.yaml) after `values-aws.yaml` and `values-production.yaml`. That overlay:
+
+- turns off `statuslist.aws.mountCredentials` and clears the AWS region, so no AWS credentials or region reach the pod and the `statuslist-external-secret-aws-credentials` ExternalSecret is removed on the first upgrade;
 - syncs the database password, the certificate, the token-signing key, and the Redis password from the existing Secrets Manager entry `statuslist-secret` through `ClusterSecretStore/datev-secret-store`, into the single `statuslist-secret` Kubernetes Secret;
 - mounts them as files and sets `APP_SERVER__CERT__STORE__CERTIFICATE_PATH`, `APP_SERVER__CERT__STORE__SIGNING_KEY_PATH`, `APP_DATABASE__PASSWORD_FILE`, and `APP_CACHE__PASSWORD_FILE`;
-- selects the Redis cache with TLS.
+- selects the Redis cache with TLS. The workflow passes the host, port, and optional ACL user from repository variables.
+
+The `APP_SERVER__CERT__*` ACME settings from `values-aws.yaml` stay in the pod environment. The `-fscert` build has no ACME client and ignores them.
 
 The workflow itself authenticates to AWS only through the OIDC deploy role; no long-lived credential is stored in the repository or the workflow.
 
-Before the first deployment:
+`statuslist-secret` now holds the token-signing key. A `ClusterSecretStore` serves every namespace unless its `spec.conditions` restrict it, so any namespace allowed to create an ExternalSecret could read the key. Confirm that `datev-secret-store` is limited to `statuslist-production`, or that the IAM role behind it is scoped to this entry and the namespaces that need it. The deploy role cannot read the `ClusterSecretStore`, so check this with cluster-admin access.
 
-1. Add the `CERTIFICATE`, `SIGNING_KEY`, and `REDIS_PASSWORD` properties to the Secrets Manager entry `statuslist-secret`. Keep the existing `POSTGRES_PASSWORD`: `put-secret-value` replaces the whole JSON document, so merge rather than overwrite. Generate the key and certificate as described in [Configure Signing Credentials](../deploy/helm/README.md#configure-signing-credentials).
+#### Signing certificate
+
+Switching the profile changes the certificate in the `x5c` header of every status list token, so verifiers must trust the new chain. Use a certificate that matches what this environment's relying parties validate:
+
+- a P-256 key, so tokens are signed with ES256. An Ed25519 key signs with EdDSA, which not every verifier accepts;
+- issued by a CA the relying parties trust, not self-signed;
+- the public host (`statuslist.eudi-adorsys.com`) as a DNS subject alternative name, and the extended key usage from `APP_SERVER__CERT__EKU` (`1.3.6.1.5.5.7.3.30`), as the ACME path requests;
+- the leaf certificate first in `issuer-cert.pem`, followed by any intermediates.
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out signing-key.pem
+openssl req -new -key signing-key.pem -out signing-key.csr \
+  -subj "/CN=statuslist.eudi-adorsys.com" \
+  -addext "subjectAltName=DNS:statuslist.eudi-adorsys.com" \
+  -addext "extendedKeyUsage=1.3.6.1.5.5.7.3.30"
+```
+
+Nothing renews this certificate or alerts before it expires: the ACME renewal job does not exist in this build, and no metric reports the expiry of a mounted certificate. Record the expiry date with an owner and renew before it, as described under rotation below.
+
+#### Before the first deployment
+
+1. Add the `CERTIFICATE`, `SIGNING_KEY`, and `REDIS_PASSWORD` properties to the Secrets Manager entry `statuslist-secret`. Keep the existing `POSTGRES_PASSWORD`: `put-secret-value` replaces the whole JSON document, so merge rather than overwrite. Run the merge in a subshell so the restrictive `umask` does not outlive it, and remove the secret inputs afterwards. A concurrent update to the entry between the read and the write would be lost, so make sure nobody else changes it meanwhile.
 
    ```bash
-   umask 077
-   aws secretsmanager get-secret-value --secret-id statuslist-secret \
-     --query SecretString --output text \
-     | jq --rawfile cert issuer-cert.pem --rawfile key signing-key.pem \
-         --rawfile redis redis-password.txt \
-         '. + {CERTIFICATE: $cert, SIGNING_KEY: $key, REDIS_PASSWORD: $redis}' \
-     > merged-secret.json
-   aws secretsmanager put-secret-value --secret-id statuslist-secret \
-     --secret-string file://merged-secret.json
-   shred -u merged-secret.json
+   (
+     umask 077
+     aws secretsmanager get-secret-value --secret-id statuslist-secret \
+       --query SecretString --output text \
+       | jq --rawfile cert issuer-cert.pem --rawfile key signing-key.pem \
+           --rawfile redis redis-password.txt \
+           '. + {CERTIFICATE: $cert, SIGNING_KEY: $key, REDIS_PASSWORD: $redis}' \
+       > merged-secret.json
+     aws secretsmanager put-secret-value --secret-id statuslist-secret \
+       --secret-string file://merged-secret.json
+     shred -u merged-secret.json signing-key.pem redis-password.txt
+   )
    ```
 
-2. Provide a TLS-enabled Redis reachable from `statuslist-production`, with an ACL user scoped to the cache key prefix (see [Redis Status-List Cache](#redis-status-list-cache)). Production configuration refuses Redis without TLS or a password.
-3. Set the repository variables `IMAGE_VARIANT=fscert` and `APP_CACHE_HOST` (the Redis hostname). Set `IMAGE_VARIANT` at repository scope only: the deploy job fails when an environment-scoped value differs, because the scheduled re-scan reads only the repository scope. The deploy job also fails before `helm upgrade` when `APP_CACHE_HOST` is empty.
+2. Provide a TLS-enabled Redis reachable from `statuslist-production`, with an ACL user scoped to the cache key prefix (see [Redis Status-List Cache](#redis-status-list-cache)). Its server certificate must be trusted by the default trust store: the overlay does not mount `APP_CACHE__CA_FILE`. Production configuration refuses Redis without TLS or a password.
+3. Set the repository variables:
+   - `IMAGE_VARIANT=fscert`. Set it at repository scope only: the deploy job fails when an environment-scoped value differs, because the scheduled re-scan reads only the repository scope.
+   - `APP_CACHE_HOST`, the Redis hostname.
+   - `APP_CACHE_PORT`, the Redis TLS port. The server defaults to 6380 with TLS, while ElastiCache serves TLS on 6379, so the workflow requires an explicit value.
+   - `APP_CACHE_USERNAME`, the Redis ACL user from step 2. Leave it unset to authenticate as the default user.
+
+   The deploy job fails before `helm upgrade` when `APP_CACHE_HOST` or `APP_CACHE_PORT` is empty.
 4. Keep the `status-list-server-issuers` ConfigMap in place, as for any release.
 
-Both release candidates (`v<version>-rc.<n>`) and final releases (`v<version>`) deploy through the same job. Each promotes `<version>-fscert`; only a final release also moves `latest-fscert`. To move from the `aws` profile back to the `fscert` profile, or the other way, change `IMAGE_VARIANT` and push the next tag. A `helm rollback` across that change restores the previous profile's values, including its ExternalSecrets.
+Both release candidates (`v<version>-rc.<n>`) and final releases (`v<version>`) deploy through the same job into the same namespace. Each promotes `<version>-fscert`; only a final release also moves `latest-fscert`. To move from the `aws` profile back to the `fscert` profile, or the other way, change `IMAGE_VARIANT` and push the next tag. A `helm rollback` across that change restores the previous profile's values, including its ExternalSecrets, and the signing certificate verifiers see.
 
-To rotate the certificate or signing key, update the properties in Secrets Manager. ESO refreshes `statuslist-secret` on its `refreshInterval`, and the server reloads the mounted files without a restart.
+#### Rotation
 
-Verify after a deployment:
+To rotate the certificate or signing key, update both properties in Secrets Manager together. ESO refreshes `statuslist-secret` on its `refreshInterval`, and the server reloads the mounted files without a restart; a certificate that does not match the key is rejected and the previous pair stays in use.
+
+The server reads the Redis password only at startup. To rotate it:
+
+1. Add the new password to the Redis ACL user, keeping the old one.
+2. Update `REDIS_PASSWORD` in Secrets Manager and wait for ESO to sync `statuslist-secret` (or annotate the ExternalSecret with `external-secrets.io/force-sync`).
+3. Restart the pods: `kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production`.
+4. Remove the old password from the Redis ACL user.
+
+#### Verify after a deployment
+
+The deploy job's "Verify the Redis cache connected" step fails the run when a pod logged that Redis was unavailable at startup. The server keeps serving without the shared cache in that case, so the release is not rolled back. To check by hand:
 
 ```bash
 kubectl get externalsecret -n statuslist-production
 kubectl get pod -n statuslist-production -o jsonpath='{..imageID}'
-kubectl port-forward svc/statuslist-status-list-server-internal-service -n statuslist-production 8002:8002
+kubectl logs -n statuslist-production --tail=-1 --prefix -c status-list-server \
+  -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server \
+  | grep -E 'cache backend selected|Redis status-list cache unavailable'
+kubectl port-forward svc/statuslist-status-list-server-internal-service -n statuslist-production 8002:8002 &
+sleep 2
 curl -s http://localhost:8002/health/ready
+kill %1
 ```
 
-Only `statuslist-external-secret` should exist and report `Ready=True`.
+Only `statuslist-external-secret` should exist and report `Ready=True`. Readiness does not cover Redis, so rely on the log line for the cache.
 
 ## Scaling and Resilience (opt-in)
 
@@ -792,8 +841,10 @@ The release-tag deployment uses `values-aws.yaml` followed by
 `values-production.yaml`, plus `values-aws-fscert.yaml` when `IMAGE_VARIANT` is
 `fscert` (see [Release deployment with the fscert profile](#release-deployment-with-the-fscert-profile)).
 Its management audience is
-`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
-deployment must put this exact value in `aud` (as a string or an array member).
+`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that deployment
+must put this exact value in `aud` (as a string or an array member). With the
+`fscert` profile that deployment is the Datev staging environment and the only
+one using this audience.
 The release workflow selects the `status-list-server-issuers` ConfigMap as its
 registry source; the production values file leaves the source empty so other
 deployments can choose a ConfigMap, Secret, or CSI volume.

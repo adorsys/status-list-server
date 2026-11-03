@@ -24,8 +24,12 @@ env:
   HELM_RELEASE_NAME: statuslist
   HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
-  # Redis endpoint for the fscert profile; no hostname is committed.
+  # Redis endpoint for the fscert profile. Not secret, but environment-specific, so it stays out of the chart.
   APP_CACHE_HOST: ${{ vars.APP_CACHE_HOST }}
+  # Required with APP_CACHE_HOST: the server's TLS default (6380) differs from ElastiCache's (6379).
+  APP_CACHE_PORT: ${{ vars.APP_CACHE_PORT }}
+  # Optional Redis ACL user; empty authenticates as the default user.
+  APP_CACHE_USERNAME: ${{ vars.APP_CACHE_USERNAME }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
   REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
 
@@ -734,9 +738,17 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
-          if [[ "${IMAGE_VARIANT:-aws}" == "fscert" && -z "${APP_CACHE_HOST}" ]]; then
-            echo "::error::APP_CACHE_HOST repository/environment variable is required when IMAGE_VARIANT is fscert"
-            exit 1
+          if [[ "${IMAGE_VARIANT:-aws}" == "fscert" ]]; then
+            for name in APP_CACHE_HOST APP_CACHE_PORT; do
+              if [[ -z "${!name}" ]]; then
+                echo "::error::${name} repository/environment variable is required when IMAGE_VARIANT is fscert"
+                exit 1
+              fi
+            done
+            if [[ ! "${APP_CACHE_PORT}" =~ ^[0-9]+$ ]]; then
+              echo "::error::APP_CACHE_PORT must be a port number"
+              exit 1
+            fi
           fi
 
       - name: Assert the issuer registry ConfigMap exists
@@ -803,20 +815,45 @@ jobs:
           bash scripts/verify-attestation.sh \
             "${IMAGE_BASE}@${IMAGE_DIGEST}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
 
+          # FULL_TAG carries the variant suffix; the bare tag could hold any feature set.
+          VALUE_ARGS=(
+            -f "$CHART_DIR"/values-aws.yaml
+            -f "$CHART_DIR"/values-production.yaml
+          )
           # fscert reads signing material and the Redis password from files and needs no AWS credentials.
-          VARIANT_ARGS=()
-          EXTERNAL_SECRETS="statuslist-external-secret statuslist-external-secret-aws-credentials"
           if [ "$IMAGE_VARIANT" = "fscert" ]; then
-            VARIANT_ARGS=(
+            VALUE_ARGS+=(
               -f "$CHART_DIR"/values-aws-fscert.yaml
               --set-string "statuslist.env.APP_CACHE__HOST=${APP_CACHE_HOST:?APP_CACHE_HOST missing}"
+              --set-string "statuslist.env.APP_CACHE__PORT=${APP_CACHE_PORT:?APP_CACHE_PORT missing}"
             )
-            EXTERNAL_SECRETS="statuslist-external-secret"
+            if [ -n "${APP_CACHE_USERNAME:-}" ]; then
+              VALUE_ARGS+=(--set-string "statuslist.env.APP_CACHE__USERNAME=${APP_CACHE_USERNAME}")
+            fi
+          fi
+          VALUE_ARGS+=(
+            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers"
+            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store"
+            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore"
+            --set "secretStore.enabled=false"
+            --set-string "statuslist.image.repository=${IMAGE_BASE}"
+            --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}"
+            --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}"
+            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"
+          )
+
+          # Take the ExternalSecret names from the same values the upgrade uses, so they follow the chart.
+          EXTERNAL_SECRETS=$(helm template "${{ env.HELM_RELEASE_NAME }}" "$CHART_DIR" \
+            --namespace "${{ env.HELM_NAMESPACE }}" "${VALUE_ARGS[@]}" \
+            --show-only templates/external-secrets.yaml \
+            | yq -N -r 'select(.kind == "ExternalSecret") | .metadata.name')
+          if [ -z "$EXTERNAL_SECRETS" ]; then
+            echo "::error::The release renders no ExternalSecret; the ESO verify step would have nothing to check"
+            exit 1
           fi
 
-          # FULL_TAG carries the variant suffix; the bare tag could hold any feature set.
           # Record each ExternalSecret's refreshTime so the verify step can prove this deploy reconciled.
-          # The verify step reads the names from this file, so list only the ones this release renders.
+          # The verify step reads the names from this file.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
           for es in $EXTERNAL_SECRETS; do
@@ -836,20 +873,10 @@ jobs:
           # A clean-looking rollback can still leave migration records the old release cannot start on.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            -f "$CHART_DIR"/values-aws.yaml \
-            -f "$CHART_DIR"/values-production.yaml \
-            "${VARIANT_ARGS[@]}" \
-            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
-            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
-            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
-            --set "secretStore.enabled=false" \
+            "${VALUE_ARGS[@]}" \
             --wait \
             --rollback-on-failure \
-            --timeout 10m \
-            --set-string "statuslist.image.repository=${IMAGE_BASE}" \
-            --set-string "statuslist.image.tag=${FULL_TAG:?full image tag missing}" \
-            --set-string "statuslist.image.digest=${IMAGE_DIGEST:?image digest missing}" \
-            --set-string "statuslist.env.APP_DATABASE__PORT=${APP_DATABASE_PORT}"; then
+            --timeout 10m; then
             if [ -n "$PREV_REVISION" ]; then
               echo "::error title=Check for migrations the restored release does not know::The upgrade failed and Helm rolled back to revision $PREV_REVISION. If a pod of the new release started, it may have migrated the database, and then every pod of the restored release that starts from now on (restart, scale-up, node drain) crash-loops until the migration records are deleted, even though the rollback looks clean. See docs/deployment-runbook.md, \"Rolling back across migrations\"."
             fi
@@ -940,3 +967,38 @@ jobs:
           done
 
           rollback_done=1
+
+      - name: Verify the Redis cache connected
+        # The server starts without Redis and falls back to a lazily reconnecting cache, and readiness
+        # does not cover Redis, so a wrong host, port, user or password passes every check above.
+        # No rollback: the release serves correctly without the cache, so this only fails the run.
+        if: ${{ env.IMAGE_VARIANT == 'fscert' }}
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          SELECTOR="app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }},app.kubernetes.io/name=status-list-server"
+          if ! pods=$(kubectl get pods -n "$NAMESPACE" -l "$SELECTOR" \
+            --field-selector=status.phase=Running -o name); then
+            echo "::warning::Could not list pods; check the Redis cache connection by hand"
+            exit 0
+          fi
+          if [ -z "$pods" ]; then
+            echo "::error::No running status-list-server pods to check"
+            exit 1
+          fi
+          failed=0
+          for pod in $pods; do
+            if ! logs=$(kubectl logs -n "$NAMESPACE" "$pod" -c status-list-server 2>/dev/null); then
+              echo "::warning::Could not read logs of $pod; check the Redis cache connection by hand"
+              continue
+            fi
+            if grep -q "Redis status-list cache unavailable at startup" <<< "$logs"; then
+              echo "::error::$pod could not reach Redis at startup; check APP_CACHE_HOST, APP_CACHE_PORT, APP_CACHE_USERNAME and REDIS_PASSWORD"
+              failed=1
+            elif ! grep -q "status-list cache backend selected" <<< "$logs"; then
+              echo "::warning::$pod logged no cache backend selection; check the Redis cache connection by hand"
+            else
+              echo "OK: $pod connected to Redis"
+            fi
+          done
+          exit "$failed"
