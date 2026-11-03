@@ -330,6 +330,20 @@ impl Service {
         self.status_list_repo.issuers_with_status_lists().await
     }
 
+    /// Count the status lists currently owned by one issuer.
+    pub async fn issuer_status_list_count(&self, issuer: &str) -> Result<u64, StatusListError> {
+        self.status_list_repo.count_by_issuer(issuer).await
+    }
+
+    /// Count lists for a page of issuer IDs using a grouped repository query
+    /// where the storage adapter supports it.
+    pub async fn issuer_status_list_counts(
+        &self,
+        issuers: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.status_list_repo.count_by_issuers(issuers).await
+    }
+
     /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
     /// `None` when no issuer has it.
     pub async fn list_issuer_uris(

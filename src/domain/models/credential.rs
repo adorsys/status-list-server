@@ -322,6 +322,17 @@ impl PublicJwk {
     }
 }
 
+/// Stable JOSE spelling for a validated signing algorithm.
+pub fn jose_alg_name(algorithm: Algorithm) -> &'static str {
+    match algorithm {
+        Algorithm::ES256 => "ES256",
+        Algorithm::ES384 => "ES384",
+        Algorithm::EdDSA => "EdDSA",
+        Algorithm::PS256 => "PS256",
+        other => unreachable!("validated management keys cannot use `{other:?}`"),
+    }
+}
+
 /// Verify EC point membership and coordinate/OKP length so malformed or
 /// off-curve keys cannot enter any trust source.
 fn validate_curve_point(jwk: &Jwk) -> Result<(), CredentialError> {

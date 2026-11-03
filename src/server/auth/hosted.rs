@@ -318,6 +318,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for InMemoryHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             kid: &str,
@@ -726,6 +742,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for GatedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             kid: &str,
@@ -966,6 +998,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for FailingHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,
@@ -1035,6 +1083,22 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for CorruptHostedStore {
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
         async fn find_key_by_kid(
             &self,
             _kid: &str,
