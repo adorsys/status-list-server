@@ -32,6 +32,9 @@ pub enum RepositoryError {
     /// another hosted issuer; the owner is logged server-side, never returned.
     #[error("key material was already registered")]
     KeyMaterialReused,
+    /// An optimistic issuer-version guard did not match. No write committed.
+    #[error("issuer version changed")]
+    VersionMismatch,
     /// The statement lost a lock race and was rolled back. Distinct from
     /// [`DuplicateEntry`] and from the optimistic-guard miss: nothing was
     /// written, nobody won, and the request is safe to retry verbatim.

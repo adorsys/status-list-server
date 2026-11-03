@@ -103,6 +103,7 @@ const fs = require('fs');
 const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, adminAudience, registryFile] = process.argv.slice(2);
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
+collection.item = collection.item.filter(item => item.name !== 'Issuer Lifecycle (destructive, hosted profile)');
 
 function siblingUrl(baseUrl, port) {
   const url = new URL(baseUrl);

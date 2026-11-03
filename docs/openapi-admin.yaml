@@ -39,13 +39,14 @@ info:
     - Every success response carries `Cache-Control: no-store`; errors carry
       `Cache-Control: no-store, max-age=0`.
     - Instants are Unix timestamps in seconds (UTC).
-    - Detail responses have an `ETag` for the complete JSON representation
-      (RFC 9110 §8.8.3) and an `Issuer-Version` for writable issuer metadata,
-      lifecycle, and key state. Mutations require `If-Issuer-Version`; a stale
-      value returns `412 precondition_failed`, a missing one
-      `428 precondition_required`. Usage and derived expiry representation
-      changes do not invalidate this write precondition. `createIssuer` is
-      exempt because a new issuer has no version yet.
+    - Hosted issuer detail responses have an `ETag` and `Issuer-Version`
+      derived from the persisted issuer version. Static issuer detail ETags
+      cover the complete representation.
+      Mutations accept `If-Issuer-Version` or `If-Match` with the detail ETag;
+      a stale value returns `412 precondition_failed`, and a missing one
+      returns `428 precondition_required`. Live usage counts and derived
+      expiry state do not invalidate hosted issuer validators. `createIssuer`
+      is exempt because a new issuer has no version yet.
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
@@ -257,17 +258,17 @@ paths:
     patch:
       operationId: updateIssuer
       tags: [issuers]
-      summary: Suspend, resume or renew a portal issuer
+      summary: Suspend or resume a portal issuer
       description: |
-        Changes exactly one thing: `state` (`suspended` or `active`) or
-        `expires_at`. Requires `issuers:write` and `If-Issuer-Version`.
+        Changes `state` to `suspended` or `active`. Requires `issuers:write`
+        and `If-Issuer-Version` or `If-Match`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
-        stays `expired` until it is renewed with a later `expires_at`, which
-        may not exceed now plus the tier's maximum lifetime. Suspension takes
-        effect on the next management request on every replica.
+        stays `expired`; renewal is not supported. Suspension takes effect
+        on the next management request on every replica.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -330,9 +331,10 @@ paths:
         Adds an `active` key, for example to start a rotation overlap. The
         server assigns `kid` (RFC 7638 thumbprint). The number of non-revoked
         keys may not exceed the tier's `max_keys`. Requires `issuers:write`
-        and `If-Issuer-Version` (the issuer's writable-state version).
+        and `If-Issuer-Version` or `If-Match`.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -413,9 +415,10 @@ paths:
         request on every replica. Revoking an already revoked key returns
         `200` unchanged. Revoking the last active key is allowed: the issuer
         then cannot write until a new key is added. Requires `issuers:write`
-        and `If-Issuer-Version` (the issuer's writable-state version).
+        and `If-Issuer-Version` or `If-Match`.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
       requestBody:
         required: true
         content:
@@ -498,11 +501,19 @@ components:
     IfIssuerVersion:
       name: If-Issuer-Version
       in: header
-      required: true
-      description: The current `Issuer-Version` returned by the issuer detail endpoint.
+      required: false
+      description: The current `Issuer-Version` returned by the issuer detail endpoint. Required unless `If-Match` is sent.
       schema:
         type: string
         example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: The quoted detail `ETag`. Required unless `If-Issuer-Version` is sent.
+      schema:
+        type: string
+        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
 
   headers:
     CacheControl:
@@ -512,9 +523,10 @@ components:
         enum: [no-store, "no-store, max-age=0"]
     ETag:
       description: |
-        Opaque strong validator of the complete issuer JSON representation
-        (RFC 9110 §8.8.3), including keys, usage, and derived expiry state.
-        It is not the database version or a mutation precondition.
+        For hosted issuers, an opaque validator derived from the persisted
+        issuer version; usage and derived expiry do not change it. For static
+        issuers, a digest of the complete representation. Send a hosted issuer
+        ETag in `If-Match` for lifecycle mutations.
       schema:
         type: string
         example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
@@ -718,20 +730,13 @@ components:
           $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
 
     UpdateIssuerRequest:
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required: [state]
-          properties:
-            state:
-              type: string
-              enum: [active, suspended]
-        - type: object
-          additionalProperties: false
-          required: [expires_at]
-          properties:
-            expires_at:
-              $ref: "#/components/schemas/UnixTime"
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [active, suspended]
 
     UpdateIssuerKeyRequest:
       type: object
@@ -870,8 +875,10 @@ components:
             error: "issuer_managed_by_configuration"
             error_description: "static issuers are changed through the registry file"
     PreconditionFailed:
-      description: "`precondition_failed` — `If-Issuer-Version` does not match the issuer's current writable-state version."
+      description: "`precondition_failed` — the supplied issuer validator is stale."
       headers:
+        ETag:
+          $ref: "#/components/headers/ETag"
         Issuer-Version:
           $ref: "#/components/headers/IssuerVersion"
         Cache-Control:
@@ -884,7 +891,7 @@ components:
             error: "precondition_failed"
             error_description: "the issuer changed; re-read it and retry"
     PreconditionRequired:
-      description: "`precondition_required` — `If-Issuer-Version` is missing."
+      description: "`precondition_required` — both `If-Issuer-Version` and `If-Match` are missing."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -894,7 +901,7 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "precondition_required"
-            error_description: "send If-Issuer-Version with the issuer's current writable-state version"
+            error_description: "send If-Issuer-Version or If-Match from the issuer detail response"
     PayloadTooLarge:
       description: "`payload_too_large` — the body exceeds `limits.max_body_size_bytes`."
       headers:

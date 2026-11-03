@@ -54,6 +54,11 @@ pub struct IssuerRegistry {
     pub issuers: Vec<IssuerEntry>,
     #[serde(default)]
     pub admins: Vec<AdminEntry>,
+    /// Public key records retained after a static key is removed. They are
+    /// never trusted for authentication, but reserve the key id and material
+    /// so a revoked static key cannot be admitted again on a later reload.
+    #[serde(default)]
+    pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -97,15 +102,7 @@ pub struct ValidatedRegistry {
     issuer_aggregations: HashMap<String, AggregationId>,
     aggregation_issuers: HashMap<AggregationId, String>,
     materials: HashSet<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ResolvedAdminKey {
-    pub admin_id: String,
-    pub public_key: Arc<PublicJwk>,
-    pub enabled: bool,
-    pub not_before: Option<time::OffsetDateTime>,
-    pub not_after: Option<time::OffsetDateTime>,
+    revoked_kids: HashSet<String>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -383,6 +380,7 @@ impl IssuerRegistry {
                     Arc::new(ResolvedKey {
                         principal: Principal::Admin {
                             id: admin.id.clone(),
+                            scopes: admin.scopes.clone(),
                         },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !admin.disabled,
@@ -393,6 +391,11 @@ impl IssuerRegistry {
             }
         }
 
+        let revoked_kids = registry
+            .revoked_keys
+            .iter()
+            .map(|key| key.kid.clone())
+            .collect();
         let validated = ValidatedRegistry {
             registry,
             fingerprint: hex::encode(Sha256::digest(content.as_bytes())),
@@ -400,12 +403,17 @@ impl IssuerRegistry {
             issuer_aggregations,
             aggregation_issuers,
             materials: HashSet::new(),
+            revoked_kids,
         };
         Ok(ValidatedRegistry {
             materials: validated
                 .all_principal_keys()
                 .into_iter()
                 .map(|(_, _, material)| material)
+                .chain(validated.registry.revoked_keys.iter().map(|key| {
+                    canonical_public_material(&key.jwk)
+                        .expect("registry validation accepted tombstone key material")
+                }))
                 .collect(),
             ..validated
         })
@@ -421,18 +429,11 @@ impl ValidatedRegistry {
     }
 
     /// Resolve a key only when its registry principal is an admin.
-    pub fn resolve_admin_key(&self, kid: &str) -> Option<ResolvedAdminKey> {
-        let key = self.keys.get(kid)?;
-        let Principal::Admin { id } = &key.principal else {
-            return None;
-        };
-        Some(ResolvedAdminKey {
-            admin_id: id.clone(),
-            public_key: key.public_key.clone(),
-            enabled: key.enabled,
-            not_before: key.not_before,
-            not_after: key.not_after,
-        })
+    pub fn resolve_admin_key(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
+        self.keys
+            .get(kid)
+            .filter(|key| matches!(&key.principal, Principal::Admin { .. }))
+            .cloned()
     }
 
     /// Resolve a key that is active at the supplied Unix timestamp.
@@ -532,6 +533,11 @@ impl ValidatedRegistry {
     pub fn has_key_material(&self, material: &str) -> bool {
         self.materials.contains(material)
     }
+
+    /// Whether a static registry tombstone permanently reserves this key id.
+    pub fn has_revoked_kid(&self, kid: &str) -> bool {
+        self.revoked_kids.contains(kid)
+    }
 }
 
 fn parsed_window(value: Option<&str>) -> Option<time::OffsetDateTime> {
@@ -592,6 +598,12 @@ fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
             &mut materials,
         )?;
     }
+    validate_keys(
+        "revoked_keys",
+        registry.revoked_keys.iter().map(Arc::as_ref),
+        &mut keys,
+        &mut materials,
+    )?;
     Ok(())
 }
 
@@ -796,6 +808,37 @@ mod tests {
         );
         let error = IssuerRegistry::from_yaml(&yaml).unwrap_err();
         assert!(error.to_string().contains("duplicate kid"));
+    }
+
+    #[test]
+    fn static_key_tombstone_reserves_its_kid_and_material() {
+        let mut document: Value = serde_saphyr::from_str(VALID).unwrap();
+        let revoked = document["issuers"][0]["keys"][0].take();
+        document["issuers"][0]["keys"] =
+            serde_json::json!([document["issuers"][0]["keys"][1].take()]);
+        document["revoked_keys"] = serde_json::json!([revoked.clone()]);
+
+        let yaml = serde_saphyr::to_string(&document).unwrap();
+        let registry = IssuerRegistry::from_yaml(&yaml).unwrap();
+        let kid = revoked["kid"].as_str().unwrap();
+        let material = canonical_public_material(&revoked["jwk"]).unwrap();
+        assert!(registry.resolve(kid).is_none());
+        assert!(registry.has_revoked_kid(kid));
+        assert!(registry.has_key_material(&material));
+
+        let mut reuses_kid = document.clone();
+        reuses_kid["issuers"][0]["keys"] = serde_json::json!([revoked.clone()]);
+        let error =
+            IssuerRegistry::from_yaml(&serde_saphyr::to_string(&reuses_kid).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("duplicate kid"));
+
+        let mut reuses_material = document;
+        let mut other_key = revoked;
+        other_key["kid"] = Value::String("different-kid".into());
+        reuses_material["issuers"][0]["keys"] = serde_json::json!([other_key]);
+        let error = IssuerRegistry::from_yaml(&serde_saphyr::to_string(&reuses_material).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("key material is reused"));
     }
 
     #[test]

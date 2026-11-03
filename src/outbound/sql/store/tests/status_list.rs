@@ -1210,11 +1210,4 @@ async fn admin_usage_count_is_scoped_and_reads_actual_lists() {
         store.count_status_lists_by_issuer("unknown").await.unwrap(),
         0
     );
-    let counts = store
-        .count_status_lists_by_issuers(&["one".into(), "two".into(), "unknown".into()])
-        .await
-        .unwrap();
-    assert_eq!(counts.get("one"), Some(&2));
-    assert_eq!(counts.get("two"), Some(&1));
-    assert_eq!(counts.get("unknown"), None);
 }

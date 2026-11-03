@@ -73,7 +73,8 @@ fn fixture_config() -> Config {
         "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
         "admin_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": ["status-list-server-admin"]},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
-            "permissive_burst_size": 100, "permissive_period_secs": 60},
+            "permissive_burst_size": 100, "permissive_period_secs": 60,
+            "admin_burst_size": 30, "admin_period_secs": 60},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
             "max_statuses_per_request": 5000, "max_serialized_list_size": 1048576,
             "max_lists_per_issuer": 1000, "list_quota_transition": false},
@@ -136,6 +137,7 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,

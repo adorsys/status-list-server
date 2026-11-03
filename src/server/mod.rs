@@ -103,6 +103,8 @@ pub struct AppState {
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
     pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
+    /// Hosted-profile lifecycle commands, absent in the private profile.
+    pub hosted_lifecycle_service: Option<Arc<auth::hosted_service::HostedIssuerLifecycleService>>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
     /// Per-replica cache of signed status-list token bytes.
@@ -113,22 +115,7 @@ pub struct AppState {
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppState")
-            .field("public_base_url", &self.public_base_url)
-            .field(
-                "hosted_issuer_store_configured",
-                &self.hosted_issuer_store.is_some(),
-            )
-            .field("admin_audience_count", &self.admin_auth.audiences.len())
-            .field(
-                "management_audience_count",
-                &self.management_auth.audiences.len(),
-            )
-            .field(
-                "issuer_registry_fingerprint",
-                &self.admin_registry.snapshot().fingerprint(),
-            )
-            .finish_non_exhaustive()
+        f.debug_struct("AppState").finish_non_exhaustive()
     }
 }
 
