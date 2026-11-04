@@ -691,14 +691,37 @@ helm template status-list-server "$CHART_DIR" \
   --set statuslist.fallbackSecret.enabled=true \
   --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
   --set prometheusRule.enabled=true \
+  --set serviceMonitor.enabled=true \
   --output-dir "${RENDER_TEMP}/rendered/scoped-rules"
 RULES="${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates/prometheusrule.yaml"
 if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
   echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
 fi
-if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
-  echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
-fi
+python3 - "${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+templates = Path(sys.argv[1])
+monitor = yaml.safe_load((templates / 'servicemonitor.yaml').read_text())
+services = [doc for doc in yaml.safe_load_all((templates / 'service.yaml').read_text()) if doc]
+selector = monitor['spec']['selector']['matchLabels']
+endpoint_port = monitor['spec']['endpoints'][0]['port']
+matches = [service for service in services
+           if all(service['metadata']['labels'].get(key) == value
+                  for key, value in selector.items())
+           and any(port.get('name') == endpoint_port
+                   for port in service['spec']['ports'])]
+if len(matches) != 1:
+    raise SystemExit(f'ERROR: expected one Service selected by ServiceMonitor, found {len(matches)}')
+service_name = matches[0]['metadata']['name']
+rules = yaml.safe_load((templates / 'prometheusrule.yaml').read_text())
+alerts = [rule for group in rules['spec']['groups'] for rule in group['rules']
+          if rule.get('alert') == 'StatusListMetricsAbsent']
+expected = f'up{{namespace="statuslist-prod",service="{service_name}"}}'
+if len(alerts) != 1 or f'absent({expected})' not in alerts[0]['expr'] or expected not in alerts[0]['expr'].split(' or ', 1)[-1]:
+    raise SystemExit('ERROR: StatusListMetricsAbsent must select the Service scraped by ServiceMonitor in the rendered namespace')
+PY
 if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
   echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
 fi
