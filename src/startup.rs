@@ -431,7 +431,7 @@ fn hosted_admin_routes(
             patch(crate::server::handlers::hosted_lifecycle::revoke_issuer_key),
         )
         .route_layer(from_fn_with_state(state, admin_auth))
-        .layer(GovernorLayer::new(admin_governor))
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response))
 }
 
 /// Axum middleware recording HTTP latency + request-count SLIs.
@@ -2055,6 +2055,7 @@ mod tests {
             audiences: vec!["status-list-server-admin".into()],
         };
 
+        let hosted_for_limit = hosted.clone();
         let admin = admin_routes(
             hosted.clone(),
             &config,
@@ -2147,6 +2148,30 @@ mod tests {
                 "hosted admin listener"
             );
         }
+
+        let limited_config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let (_, _, governor) = build_governor_configs(&limited_config.rate_limit).unwrap();
+        let limited =
+            hosted_admin_routes(hosted_for_limit.clone(), governor).with_state(hosted_for_limit);
+        let uri = "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into();
+        let body = r#"{"state":"suspended"}"#;
+        let first = send(limited.clone(), uri, Some(&token), body)
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::PRECONDITION_REQUIRED);
+        let second = send(
+            limited,
+            "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into(),
+            Some(&token),
+            body,
+        )
+        .await
+        .unwrap();
+        assert_contract_429(second).await;
     }
 
     #[tokio::test]
@@ -2217,7 +2242,7 @@ mod tests {
             let first = router.clone().oneshot(request()).await.unwrap();
             assert_eq!(first.status(), expected_first);
             let second = router.clone().oneshot(request()).await.unwrap();
-            assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_contract_429(second).await;
         }
     }
 }

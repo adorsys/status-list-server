@@ -151,6 +151,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/InsufficientScope"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -215,6 +217,8 @@ paths:
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/UnprocessableKey"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -250,6 +254,8 @@ paths:
           $ref: "#/components/responses/InsufficientScope"
         "404":
           $ref: "#/components/responses/IssuerNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -315,6 +321,8 @@ paths:
                 error_description: "expires_at exceeds the sandbox tier's 30-day maximum"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -391,6 +399,8 @@ paths:
           $ref: "#/components/responses/UnprocessableKey"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -463,6 +473,8 @@ paths:
           $ref: "#/components/responses/PreconditionFailed"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -781,6 +793,8 @@ components:
             - invalid_expiry
             # 428
             - precondition_required
+            # 429
+            - too_many_requests
             # 500 / 503
             - internal_error
             - service_unavailable
@@ -929,6 +943,22 @@ components:
           example:
             error: "invalid_public_jwk"
             error_description: "private key members are not accepted"
+    TooManyRequests:
+      description: "`too_many_requests` — the admin peer-IP budget is exhausted. Retry after the indicated number of seconds."
+      headers:
+        Retry-After:
+          description: Minimum number of seconds before retrying.
+          schema:
+            type: integer
+            minimum: 1
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "too_many_requests"
     InternalServerError:
       description: "`internal_error`."
       headers:

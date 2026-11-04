@@ -156,7 +156,7 @@ re-read and retry. `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with
 `If-Match` and `{"state":"revoked"}` permanently revokes one key; repeating it
 returns the key unchanged. The committed state and actor audit event are
 written in one database transaction. The admin routes have their own
-rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults 30 per 60s),
+rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults to a burst of 100 and one replenished request per second per peer IP),
 and a write that already authenticated before the change can still commit.
 Send the old issuer token to each pod's management listener
 (`GET /api/v1/credentials` must answer `401`); public status-list reads remain

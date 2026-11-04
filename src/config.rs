@@ -180,7 +180,7 @@ pub struct WatcherConfig {
 /// Per-client-IP rate limits. `strict_*` is the management authentication
 /// gate, which counts rejected authentications only; `admission_*` bounds every
 /// management request before `auth` does any work; `permissive_*` covers
-/// public reads.
+/// public reads; `admin_*` covers the admin issuer API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
@@ -2198,8 +2198,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.admission_per_second", 100)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
-        .set_default("rate_limit.admin_burst_size", 30)?
-        .set_default("rate_limit.admin_period_secs", 60)?
+        .set_default("rate_limit.admin_burst_size", 100)?
+        .set_default("rate_limit.admin_period_secs", 1)?
         .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
@@ -2322,8 +2322,8 @@ mod tests {
         assert_eq!(config.rate_limit.strict_period_secs, 60);
         assert_eq!(config.rate_limit.permissive_burst_size, 100);
         assert_eq!(config.rate_limit.permissive_period_secs, 60);
-        assert_eq!(config.rate_limit.admin_burst_size, 30);
-        assert_eq!(config.rate_limit.admin_period_secs, 60);
+        assert_eq!(config.rate_limit.admin_burst_size, 100);
+        assert_eq!(config.rate_limit.admin_period_secs, 1);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
