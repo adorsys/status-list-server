@@ -680,7 +680,7 @@ RULES="${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates/prometh
 if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
   echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
 fi
-if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
+if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-internal-service"})' "$RULES"; then
   echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
 fi
 if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then

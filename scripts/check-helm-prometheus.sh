@@ -51,7 +51,7 @@ if deployed != expected:
 # no Watchdog, a namespace: ns1 label, and up selected by service instead of job/instance.
 test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
 test['rule_files'] = ['helm-rules.yml']
-deployed_up = 'up{namespace="ns1",service="status-list-server-service"}'
+deployed_up = 'up{namespace="ns1",service="status-list-server-internal-service"}'
 standalone_up = 'up{job="status_list_server",instance="app:8000"}'
 for block in test['tests']:
     for series in block.get('input_series', []):
@@ -75,7 +75,7 @@ for block in test['tests']:
                 alert['exp_annotations']['description'] = 'namespace ns1: ' + d
 
 # Feed only ns2 data: ns1 alerts must stay silent, and ns1's own absence must still page.
-ns2_up = 'up{namespace="ns2",service="status-list-server-service"}'
+ns2_up = 'up{namespace="ns2",service="status-list-server-internal-service"}'
 test['tests'].append({
     'interval': '1m',
     'input_series': [
