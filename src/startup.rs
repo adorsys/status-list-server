@@ -42,16 +42,12 @@ use crate::server::rate_limit::{
 use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
 
-/// A typed request extension carrying the name of the TCP listener that
-/// accepted the connection.
 #[derive(Clone)]
 struct ListenerName(&'static str);
 
-/// A bound TCP listener paired with the router that owns its routes.
 struct ListenerServer {
     listener: TcpListener,
-    /// The address the listener is bound to, captured at bind time to avoid
-    /// `expect`-ing on `local_addr()` after the listener may have been moved.
+    /// Captured at bind time so reading it later can't fail.
     local_addr: SocketAddr,
     router: Router,
 }
@@ -75,9 +71,8 @@ impl HttpServer {
         let public_router = with_listener_name(
             with_common_layers(
                 public_routes(permissive_governor)
-                    // CORS is applied only to the public router: admin and management
-                    // have no browser clients, and a dev machine should not let any
-                    // web page read localhost:8002/metrics.
+                    // Public only: admin and management have no browser clients,
+                    // and no web page should be able to read /metrics on a dev machine.
                     .layer(
                         CorsLayer::new()
                             .allow_methods([Method::GET, Method::OPTIONS])
@@ -145,14 +140,8 @@ impl HttpServer {
         })
     }
 
-    /// Serve all three listeners concurrently until `shutdown` is signalled.
-    ///
-    /// Each `serve` future resolves after the graceful-shutdown signal fires
-    /// and its in-flight requests have drained. `try_join!` awaits ALL three to
-    /// finish before returning, so a graceful shutdown covers every listener
-    /// (an idle admin listener no longer returns early and interrupts management
-    /// writes that are still in flight). Any listener error propagates so the
-    /// process exits non-zero and the orchestrator can restart it.
+    /// Serves all three listeners until `shutdown`, returning only once every one has drained.
+    /// A listener error is returned, so the process exits non-zero.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> color_eyre::Result<()> {
         tokio::try_join!(
             serve(
@@ -177,11 +166,8 @@ impl HttpServer {
         Ok(())
     }
 
-    /// Install SIGINT/SIGTERM handlers that broadcast the shutdown signal.
-    ///
-    /// Kept separate from [`Self::run`] so tests can drive shutdown directly
-    /// through the [`watch`] channel instead of the process-level signal
-    /// handlers (which can only be installed once per process).
+    /// Broadcasts SIGINT/SIGTERM as the shutdown signal.
+    /// Kept apart from `run` so tests can drive shutdown through the channel.
     pub fn install_shutdown_handler(shutdown: &watch::Sender<bool>) {
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
@@ -190,17 +176,14 @@ impl HttpServer {
         });
     }
 
-    /// The bound address of the public listener (the status-list read surface).
     pub fn public_addr(&self) -> SocketAddr {
         self.public.local_addr
     }
 
-    /// The bound address of the admin listener (readiness and metrics).
     pub fn admin_addr(&self) -> SocketAddr {
         self.admin.local_addr
     }
 
-    /// The bound address of the management listener (authenticated issuer writes).
     pub fn management_addr(&self) -> SocketAddr {
         self.management.local_addr
     }
@@ -226,11 +209,7 @@ async fn serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    // `wait_for` checks the current value first and resolves immediately if
-    // shutdown already fired, so a listener whose graceful-shutdown future is
-    // only polled after the signal still sees it. Unlike `Notify::notify_waiters`,
-    // the signal is retained in the channel rather than lost when nobody is
-    // waiting yet.
+    // `wait_for` sees a signal sent before it was polled; `Notify::notify_waiters` would lose it.
     .with_graceful_shutdown(async move {
         let _ = shutdown.wait_for(|shutdown| *shutdown).await;
     })
@@ -238,10 +217,7 @@ async fn serve(
     .map_err(|e| eyre!("HTTP server ({name}) failed: {e}"))
 }
 
-/// Applies the shared HTTP middleware stack (tracing, panic catch, SLI metrics,
-/// body limits) to every listener's router. CORS is intentionally NOT included
-/// here: it is applied only to the public router (see `HttpServer::new`), since
-/// admin and management listeners have no browser clients.
+/// Shared by every listener; CORS is added to the public router only.
 fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppState> {
     router
         .layer(
@@ -322,9 +298,7 @@ fn build_governor_configs(
     Ok((auth_gate, permissive, admin))
 }
 
-/// Routes owned by the public listener: status-list reads, aggregation reads,
-/// liveness, and the root service document. No management or admin route is
-/// registered here, so any such request gets a structural 404.
+/// Internet-facing: never register management or admin routes here.
 fn public_routes(
     permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
 ) -> Router<AppState> {
@@ -396,28 +370,14 @@ fn admin_routes(
     attach_metrics(router, config, registry)
 }
 
-/// Axum middleware recording HTTP latency + request-count SLIs.
-///
-/// Keyed by the bounded route pattern (via [`MatchedPath`]), the HTTP method,
-/// and the response status class. Runs after routing so `MatchedPath` is
-/// populated, giving bounded cardinality regardless of path parameters.
-///
-/// This middleware is layered OUTSIDE `CatchPanicLayer`, so a handler panic is
-/// first converted to a 500 by `CatchPanicLayer` and then observed here as a
-/// normal `Response` — panic-induced 500s are recorded as 5xx and contribute to
-/// the error-rate SLI instead of silently disappearing.
-///
-/// Health/liveness/readiness and the metrics endpoint are excluded from the SLI
-/// so their traffic neither inflates the error-rate denominator (2xx probes)
-/// nor trips ErrorRateFastBurn on a transient readiness-probe 5xx.
+/// Must stay outside CatchPanicLayer so panics still count as 5xx.
+/// Health and metrics routes are skipped so probes don't skew the error-rate SLI.
 async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
-    // Read the listener name injected by `with_listener_name`; fall back to
-    // "unknown" so the metric is never silently dropped if the extension is
-    // missing (e.g. in unit tests that build routers directly).
+    // Falls back to "unknown" (routers built in tests) instead of dropping the metric.
     let listener_name: &'static str = request
         .extensions()
         .get::<ListenerName>()
@@ -452,14 +412,8 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-/// Wraps a `Router<S>` with an [`Extension`] layer that injects a
-/// [`ListenerName`] into every request. The name is consumed by
-/// [`track_http_metrics`] to record which listener accepted the connection.
-///
-/// This must be applied OUTSIDE the shared middleware layers (i.e. wrap
-/// [`with_common_layers`]) so the extension is present when
-/// [`track_http_metrics`] reads it. Applied inside, the metrics middleware
-/// would run before the extension is inserted and report `"unknown"`.
+/// Must wrap `with_common_layers`, not sit inside it,
+/// or the metrics middleware runs first and labels everything "unknown".
 fn with_listener_name<S: Clone + Send + Sync + 'static>(
     router: Router<S>,
     name: &'static str,
@@ -551,15 +505,6 @@ mod tests {
         assert_eq!(aggregation.status(), StatusCode::OK);
     }
 
-    /// The network boundary is structural: a route belongs to exactly one
-    /// listener, so requesting it on any other listener returns 404. This test
-    /// uses a complete table of (method, path, owning listener) and asserts:
-    ///   - the owner returns a non-404 status (route is present)
-    ///   - every other listener returns 404 (route is absent)
-    ///
-    /// Metrics are explicitly enabled so /metrics checks pass because the route
-    /// actually exists on the admin listener, not because the path is simply
-    /// unknown.
     #[tokio::test]
     async fn test_routes_404_on_the_wrong_listener() {
         use crate::test_utils::{publish_list, register_issuer};
@@ -573,8 +518,6 @@ mod tests {
         let (auth_gate, permissive, admin_governor) =
             build_governor_configs(&config.rate_limit).unwrap();
 
-        // Seed a registered issuer and a published list so the public read
-        // routes return a real (non-404) response on their owner.
         let state = crate::test_utils::test_app_state(None).await;
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
         let list_id = uuid::Uuid::new_v4().to_string();
@@ -607,14 +550,7 @@ mod tests {
         const MANAGEMENT: &str = "management";
         const ADMIN: &str = "admin";
 
-        // Table: (method, path, owning_listener).
-        // Every route must be reachable (non-404) on exactly its owner, and
-        // must return 404 on the other two listeners. The public read routes
-        // are included and seeded above so their owner check is a real response
-        // (the scoped aggregation and status-list reads resolve to data, and
-        // the deprecated /aggregation returns a page).
         let routes: &[(Method, &str, &str)] = &[
-            // Public read routes (seeded so the owner check is not a 404)
             (
                 Method::GET,
                 &format!("{API_V1_PREFIX}/status-lists/{list_id}"),
@@ -625,13 +561,10 @@ mod tests {
                 &format!("{API_V1_PREFIX}/aggregation/{aggregation_id}"),
                 PUBLIC,
             ),
-            // Deprecated, unscoped aggregation
             (Method::GET, &format!("{API_V1_PREFIX}/aggregation"), PUBLIC),
-            // Public service/liveness routes (no data needed)
             (Method::GET, "/", PUBLIC),
             (Method::GET, "/health", PUBLIC),
             (Method::GET, "/health/live", PUBLIC),
-            // Management routes (return 4xx auth error on owner, not 404)
             (
                 Method::PUT,
                 &format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"),
@@ -652,7 +585,6 @@ mod tests {
                 &format!("{API_V1_PREFIX}/credentials"),
                 MANAGEMENT,
             ),
-            // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
             (Method::GET, "/admin/v1/issuers", ADMIN),
@@ -685,10 +617,6 @@ mod tests {
         }
     }
 
-    /// `GET /` returns the JSON service document with its links.
-    /// The Content-Type must be `application/json` (the change that affected
-    /// clients), and an empty portal env var must be absent from the document
-    /// rather than emitted as `"portal": ""`.
     #[tokio::test]
     async fn test_root_returns_json_service_document() {
         use axum::body::to_bytes;
@@ -703,7 +631,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // The Content-Type is what changed for clients; assert it explicitly.
         let content_type = resp
             .headers()
             .get("content-type")
@@ -717,15 +644,10 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(doc["service"], "Status List Server");
         assert_eq!(doc["links"]["documentation"], crate::config::REPOSITORY_URL);
-        // An unset portal must be absent, never emitted as `"portal": ""`.
         assert!(doc["links"]["portal"].as_str().is_none());
         assert!(doc.get("version").is_none());
     }
 
-    /// A pod that started with the quota enforced keeps advertising the
-    /// aggregation after `list-quota disable`, and its cached tokens keep the
-    /// claim, so an issuer can outgrow one page on a running server. A client
-    /// that does not page must then get an error, not part of the aggregation.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_aggregation_never_answers_in_part_when_the_quota_is_disabled_live() {
@@ -822,16 +744,6 @@ mod tests {
         );
     }
 
-    /// Graceful shutdown must cover all three listeners. A request is held in
-    /// flight on the management listener (headers + half the body sent) while
-    /// the public and admin listeners sit idle. After shutdown is signalled,
-    /// `run` must stay pending until that request completes, and the request
-    /// must still get its response. With the old `select!`, an idle listener
-    /// would finish first and `run` would return with the request in flight.
-    ///
-    /// Also exercises the real `HttpServer::new` wiring: the root service
-    /// document answers on public and 404s on management, readiness answers on
-    /// admin.
     #[tokio::test]
     async fn test_graceful_shutdown_covers_all_three_listeners() {
         use std::time::Duration;
@@ -869,7 +781,6 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut run_handle = tokio::spawn(server.run(shutdown_rx));
 
-        // Wait for the public listener to accept connections.
         let client = reqwest::Client::new();
         let mut up = false;
         for _ in 0..50 {
@@ -887,7 +798,6 @@ mod tests {
         }
         assert!(up, "public listener never became ready");
 
-        // Routers are wired to the right surfaces.
         let public_resp = client
             .get(format!("http://{public_addr}/"))
             .send()
@@ -914,13 +824,8 @@ mod tests {
             .await
             .unwrap();
         slow.flush().await.unwrap();
-        // Give the server time to read the head and start the handler, so the
-        // request is genuinely in flight when shutdown is signalled.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Signal shutdown. The public and admin listeners are idle and drain
-        // immediately; management still has the request in flight, so `run`
-        // must NOT return yet. With the old `select!` it would.
         shutdown_tx.send(true).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(500), &mut run_handle)
@@ -944,7 +849,6 @@ mod tests {
             "in-flight request must complete normally, got: {response}"
         );
 
-        // Only now may `run` finish, and it must do so cleanly.
         tokio::time::timeout(Duration::from_secs(10), run_handle)
             .await
             .expect("run did not finish after the in-flight request completed")
@@ -1667,13 +1571,10 @@ mod tests {
         assert!(parsed.is_loopback());
     }
 
-    /// The HTTP metrics layer must record the bounded route pattern (not the
-    /// raw URI) and the status class for every request that passes through it.
-    // The test serialization lock (metrics_test_lock) guards against the global
-    // meter provider being swapped by a concurrent metrics test while this
-    // test's middleware binds its cached instrument handles, so it must be held
-    // across the router `.await`s below. Deliberate for a test-only std Mutex.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_middleware_records_route_and_status() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1760,13 +1661,10 @@ mod tests {
         );
     }
 
-    /// The HTTP metrics listener label must reflect the owning listener, not
-    /// "unknown". This goes through the SAME layer order as the production
-    /// router (`with_listener_name` wrapping `with_common_layers`), regressing
-    /// the bug where the Extension was applied INSIDE the metrics middleware so
-    /// the label always read "unknown".
-    // Same test-only serialization lock rationale as the middleware test above.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_listener_label_is_not_unknown() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1797,8 +1695,6 @@ mod tests {
             "ok"
         }
 
-        // Mirror production: with_listener_name wraps with_common_layers so the
-        // Extension (and thus the label) is present when track_http_metrics runs.
         let router = with_listener_name(
             with_common_layers(
                 Router::<AppState>::new().route("/ok", get(ok_handler)),
@@ -1832,15 +1728,10 @@ mod tests {
         );
     }
 
-    /// A handler panic must be observable as a 5xx metric. This only holds when
-    /// `track_http_metrics` is layered OUTSIDE `CatchPanicLayer` (as in the real
-    /// router): the panic is converted to a 500 by CatchPanicLayer first and then
-    /// recorded by the metrics middleware. Regresses the bug where panic-induced
-    /// 500s silently disappeared from the error-rate SLI.
-    // Same test-only serialization lock rationale as the middleware test above:
-    // the guard must stay held across the `oneshot(...).await` so the panic's
-    // 5xx counter binds to this test's meter provider, not a concurrent one.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn panicking_handler_records_5xx_metric() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1869,8 +1760,6 @@ mod tests {
             panic!("boom");
         }
 
-        // Layer order must mirror the production router: CatchPanicLayer inside,
-        // track_http_metrics outside.
         let router = Router::new()
             .route("/boom", get(boom_handler))
             .layer(CatchPanicLayer::new())

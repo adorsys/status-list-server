@@ -1,5 +1,3 @@
-//! Authentication middleware validating bearer JWTs against registered issuer credentials.
-
 pub mod errors;
 pub mod hosted;
 pub mod hosted_service;
@@ -239,8 +237,6 @@ fn validate_lifetime_claims(
     Ok(())
 }
 
-/// Required management claims are non-optional (`iss`, `iat`, `exp`).
-/// Optional claims are deserialized as `Option` and validated when present.
 #[derive(Debug, Serialize, Deserialize)]
 struct ManagementClaims {
     iss: String,
@@ -277,10 +273,7 @@ struct TestClaims {
     exp: u64,
 }
 
-/// Authenticated management principal derived from a validated issuer JWT.
-///
-/// Handlers should depend on this typed principal instead of extracting a raw
-/// issuer string from request extensions.
+/// Take this in handlers rather than reading a raw issuer from request extensions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticatedIssuer {
     issuer: Issuer,
@@ -330,12 +323,10 @@ impl AuthenticatedIssuer {
         self.aggregation_id
     }
 
-    /// Borrow the verified issuer identity associated with this principal.
     pub fn issuer(&self) -> &Issuer {
         &self.issuer
     }
 
-    /// Consume the principal and return the verified issuer identity.
     pub fn into_issuer(self) -> Issuer {
         self.issuer
     }
@@ -382,15 +373,12 @@ where
     }
 }
 
-/// Formats the underlying issuer identifier, preserving the canonical string
-/// representation used by tracing fields.
 impl std::fmt::Display for AuthenticatedIssuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.issuer.0.fmt(f)
     }
 }
 
-/// Authentication middleware acting as a safeguard for unauthorized issuers
 pub async fn auth(
     State(state): State<AppState>,
     mut request: Request<Body>,
@@ -1855,7 +1843,6 @@ pub(crate) mod tests {
             StatusCode::OK
         );
 
-        // An attacker cannot substitute the embedded key for the registered one.
         let attack = sign_claims_with_header(
             serde_json::json!({"iss":"test-issuer", "iat":now, "exp":now + 300}),
             &attacker_key,

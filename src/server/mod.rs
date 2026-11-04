@@ -1,5 +1,3 @@
-//! Inbound HTTP web server module containing handlers, auth middleware, and shared application state.
-
 pub mod auth;
 pub mod cache;
 pub mod error;
@@ -15,7 +13,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use url::Url;
 
-/// JWT policy for protected management endpoints.
 #[derive(Debug, Clone)]
 pub struct ManagementAuthConfig {
     pub leeway_secs: u64,
@@ -68,7 +65,6 @@ pub struct ServiceLinks {
     pub portal: Option<String>,
 }
 
-/// The minimal `application/json` service document returned by `GET /`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceDocument {
     pub service: &'static str,
@@ -78,14 +74,10 @@ pub struct ServiceDocument {
 /// Shared application state injected into web handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
-    /// Resolved public base URL (e.g. `https://statuslist.example.com/api/v1`).
-    /// Used to build the `sub` URI signed into issued tokens and returned to
-    /// issuers as the publish `Location`.
+    /// Base of every sub URI; changing it doesn't rewrite lists already published.
     pub public_base_url: String,
-    /// The aggregation endpoint's URL. Tokens and registrations advertise it
-    /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
+    /// Unscoped; use aggregation_uri_for to get an issuer's URI.
     pub aggregation_uri: Option<Url>,
     /// Issuers that were over one aggregation page at startup.
     pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
@@ -107,9 +99,7 @@ pub struct AppState {
     pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
-    /// Per-replica cache of signed status-list token bytes.
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
-    /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
 }
 
@@ -181,10 +171,7 @@ impl AppState {
     }
 }
 
-/// `GET /` service document: a minimal `application/json` body naming the
-/// service and its documentation (and portal when configured). No version and
-/// no HTML, so a proxy/ingress health-checking the root sees a stable JSON
-/// contract.
+/// No version and no HTML, so proxies probing `/` see a stable JSON contract.
 pub async fn service_document(State(state): State<AppState>) -> Json<ServiceDocument> {
     Json(ServiceDocument {
         service: "Status List Server",

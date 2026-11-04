@@ -21,13 +21,7 @@ const PROVIDER: &str = "azure";
 const DEFAULT_API_BASE: &str = "https://management.azure.com";
 const API_VERSION: &str = "2018-05-01";
 
-/// A DNS provider for Azure DNS, authenticated with DefaultAzureCredential.
-///
-/// The resolved identity needs the `DNS Zone Contributor` role on the resource
-/// group holding the zones. Azure documents that record changes
-/// reach its authoritative name servers typically within 60 seconds and
-/// offers no change-status API to poll, so `create_txt_record` waits a
-/// fixed settle delay after a successful change.
+/// Needs DNS Zone Contributor on the zones' resource group.
 pub struct AzureDnsProvider {
     client: Client,
     credential: Arc<dyn TokenCredential>,
@@ -59,13 +53,9 @@ struct RecordSet {
     properties: RecordSetProperties,
 }
 
-/// Concurrency guard for record set writes
 enum Precondition<'a> {
-    /// Apply only if the record set still has this etag
     IfMatch(&'a str),
-    /// Apply only if the record set does not exist yet
     IfNoneMatch,
-    /// Apply unconditionally (no etag available)
     None,
 }
 
@@ -131,13 +121,13 @@ impl AzureDnsProvider {
         }
     }
 
-    /// Override the API base URL (used in tests)
+    /// For tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
     }
 
-    /// Override the propagation settle delay (used in tests)
+    /// For tests.
     pub fn with_propagation_delay(mut self, delay: Duration) -> Self {
         self.propagation_delay = delay;
         self
@@ -183,7 +173,6 @@ impl AzureDnsProvider {
         )
     }
 
-    // Find the zone for the given domain and the record name relative to it
     async fn find_zone_and_relative_name(
         &self,
         domain: &str,
@@ -208,7 +197,6 @@ impl AzureDnsProvider {
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
-        // Check if zones are already cached
         let read_guard = self.zones.read().await;
         if read_guard.is_some() {
             return Ok(());
@@ -219,7 +207,6 @@ impl AzureDnsProvider {
         let mut all_zones = Vec::new();
         let mut next_url = Some(format!("{}?api-version={API_VERSION}", self.zones_url()));
 
-        // try to get all zones
         while let Some(url) = next_url {
             let response = self
                 .client
@@ -257,7 +244,6 @@ impl AzureDnsProvider {
             .map_err(|e| dns_err(eyre!("Invalid API response (status {status}): {e}")))
     }
 
-    // Fetch the existing TXT record set, if any
     async fn get_record_set(
         &self,
         zone: &str,
@@ -277,8 +263,7 @@ impl AzureDnsProvider {
         Ok(Some(Self::parse_response(response).await?))
     }
 
-    // Write the record set under the given precondition.
-    // Returns false when the precondition failed (concurrent modification).
+    // false means the precondition failed: someone else changed it.
     async fn put_record_set(
         &self,
         zone: &str,
@@ -312,8 +297,7 @@ impl AzureDnsProvider {
         Ok(true)
     }
 
-    // Delete the whole record set under the given precondition.
-    // Returns false when the precondition failed (concurrent modification).
+    // false means the precondition failed.
     async fn delete_record_set(
         &self,
         zone: &str,
@@ -404,7 +388,6 @@ impl DnsProvider for AzureDnsProvider {
         let mut attempts = 0;
         loop {
             let Some(existing) = self.get_record_set(&zone, &relative_name, &token).await? else {
-                // Nothing to delete
                 break;
             };
             let etag = existing.etag.clone();
@@ -420,7 +403,6 @@ impl DnsProvider for AzureDnsProvider {
                 .collect();
 
             let applied = if records.is_empty() {
-                // Delete the whole record set when no values remain
                 self.delete_record_set(&zone, &relative_name, precondition, &token)
                     .await?
             } else {
@@ -702,7 +684,6 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        // No PUT/DELETE mocks: any write request would fail the test
 
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
@@ -724,7 +705,6 @@ mod tests {
             .expect(2)
             .mount(&server)
             .await;
-        // First write loses the etag race, the retry succeeds
         Mock::given(method("PUT"))
             .and(path(&record_path))
             .and(header("if-match", "e1"))
@@ -779,7 +759,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // The zone from the second page must be found
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
             .await
