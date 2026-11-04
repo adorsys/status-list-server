@@ -69,6 +69,8 @@ spec:
       rules:
         # No Watchdog here: kube-prometheus-stack already ships one, and a copy would page as a normal alert.
         - alert: StatusListMetricsAbsent
+          # Use scrape-generated up, since an idle deployment produces no request histogram.
+          # absent catches missing targets; max(up) == 0 catches failing scrapes.
           # Match the internal Service selected by the ServiceMonitor for /metrics.
           expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) == 0
           for: 5m

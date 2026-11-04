@@ -99,9 +99,9 @@ environments running `kube-prometheus-stack`, the Helm chart includes optional
 routing is documented in `deploy/observability/alertmanager/alertmanager.example.yml`.
 
 The Helm `StatusListMetricsAbsent` rule watches the internal Service that
-ServiceMonitor scrapes. If an older release was silenced because that rule
-fired while scraping was healthy, remove the silence after upgrading so a
-real scrape outage can page.
+ServiceMonitor scrapes. If a deployment built from `develop` after #689 was
+silenced because that rule fired while scraping was healthy, remove the
+silence after upgrading so a real scrape outage can page.
 
 ## Webhook alert notifications
 

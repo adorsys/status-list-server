@@ -17,7 +17,8 @@ CHECK_TEMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/helm-prometheus.XXXXXX")
 trap 'rm -rf "$CHECK_TEMP"' EXIT
 helm template status-list-server "$CHART_DIR" \
   --namespace ns1 \
-  --set prometheusRule.enabled=true > "$CHECK_TEMP/helm-render.yaml"
+  --set prometheusRule.enabled=true \
+  --set serviceMonitor.enabled=true > "$CHECK_TEMP/helm-render.yaml"
 python3 - <<'EOF'
 import os, subprocess, yaml
 from pathlib import Path
@@ -25,6 +26,17 @@ work = Path(os.environ['CHECK_TEMP'])
 
 docs = [d for d in yaml.safe_load_all(open(str(work / 'helm-render.yaml'))) if d]
 cr = next(d for d in docs if d.get('kind') == 'PrometheusRule')
+monitor = next(d for d in docs if d.get('kind') == 'ServiceMonitor')
+selector = monitor['spec']['selector']['matchLabels']
+endpoint_port = monitor['spec']['endpoints'][0]['port']
+services = [d for d in docs if d.get('kind') == 'Service'
+            and all(d['metadata']['labels'].get(key) == value
+                    for key, value in selector.items())
+            and any(port.get('name') == endpoint_port
+                    for port in d['spec']['ports'])]
+if len(services) != 1:
+    raise SystemExit(f'Expected one Service selected by ServiceMonitor, found {len(services)}')
+service_name = services[0]['metadata']['name']
 with open(str(work / 'helm-rules.yml'), 'w') as f:
     yaml.safe_dump({'groups': cr['spec']['groups']}, f, sort_keys=False)
 
@@ -51,7 +63,7 @@ if deployed != expected:
 # no Watchdog, a namespace: ns1 label, and up selected by service instead of job/instance.
 test = yaml.safe_load(open('deploy/observability/prometheus/tests/alerting.test.yml'))
 test['rule_files'] = ['helm-rules.yml']
-deployed_up = 'up{namespace="ns1",service="status-list-server-internal-service"}'
+deployed_up = f'up{{namespace="ns1",service="{service_name}"}}'
 standalone_up = 'up{job="status_list_server",instance="app:8000"}'
 for block in test['tests']:
     for series in block.get('input_series', []):
@@ -75,7 +87,7 @@ for block in test['tests']:
                 alert['exp_annotations']['description'] = 'namespace ns1: ' + d
 
 # Feed only ns2 data: ns1 alerts must stay silent, and ns1's own absence must still page.
-ns2_up = 'up{namespace="ns2",service="status-list-server-internal-service"}'
+ns2_up = f'up{{namespace="ns2",service="{service_name}"}}'
 test['tests'].append({
     'interval': '1m',
     'input_series': [
