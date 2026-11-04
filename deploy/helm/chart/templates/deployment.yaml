@@ -13,6 +13,16 @@
 {{- if and (has $telemetryEnv (list "production" "prod")) (empty $audiences) }}
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
 {{- end }}
+{{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
+{{- $adminAudience := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_ADMIN_AUTH__AUDIENCES | default "")) "" }}
+{{- if empty $adminAudience }}
+{{- fail "hosted deployment requires statuslist.env.APP_ADMIN_AUTH__AUDIENCES; use a distinct admin audience" }}
+{{- end }}
+{{- $trustedProxies := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES | default "")) "" }}
+{{- if and .Values.statuslist.ingress.enabled .Values.statuslist.ingress.management.enabled (empty $trustedProxies) }}
+{{- fail "hosted management ingress requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES for the dedicated controller pods" }}
+{{- end }}
+{{- end }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}
 {{- fail "statuslist.issuerRegistry.volume is required in production" }}
 {{- end }}

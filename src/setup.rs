@@ -1051,6 +1051,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
                     .await;
                     match result {
                         Ok(()) => {
+                            crate::utils::metrics::record_issuer_registry_reload_success();
                             crate::utils::metrics::record_rotation("issuer_registry", true);
                             crate::utils::metrics::set_issuer_registry_keys(
                                 registry_handle.snapshot().key_count(),
