@@ -233,6 +233,12 @@
               "type": "boolean",
               "title": "Render the Ingress"
             },
+            "className": {
+              "type": "string",
+              "title": "IngressClass name",
+              "description": "Both public and management Ingresses use this class. Match it to the intended controller.",
+              "minLength": 1
+            },
             "path": {
               "type": "string",
               "title": "Ingress path",
@@ -294,6 +300,17 @@
                   "type": "object",
                   "title": "Management Ingress annotations",
                   "additionalProperties": { "type": "string" }
+                },
+                "tls": {
+                  "type": "object",
+                  "title": "Management Ingress TLS",
+                  "properties": {
+                    "secretName": {
+                      "type": "string",
+                      "title": "Management TLS secret name",
+                      "description": "Required in hosted mode when management uses a separate hostname. May name the public Secret if its certificate covers both hosts."
+                    }
+                  }
                 }
               }
             }
@@ -506,7 +523,12 @@
             "adminIngress": {
               "type": "array",
               "title": "Admin port from selectors",
-              "description": "Source selectors for the ADMIN port. An EMPTY list DENIES ALL admin traffic (including /metrics and /health/ready)."
+              "description": "Source selectors for the ADMIN port. An EMPTY list DENIES ALL admin traffic unless serviceMonitor.enabled admits prometheusIngress sources."
+            },
+            "prometheusIngress": {
+              "type": "array",
+              "title": "Prometheus admin port sources",
+              "description": "Additional admin sources admitted only when serviceMonitor.enabled is true. Each peer can combine namespaceSelector and podSelector."
             },
             "egressInternal": {
               "type": "array",
@@ -906,6 +928,16 @@
         "certRenewalFailureMax": { "type": ["number", "string"], "title": "Cert renewal failure max", "description": "Retained for reference / parity: NOT used by any template or rule." },
         "errorBudgetCriticalThreshold": { "type": ["number", "string"], "title": "Error-budget critical threshold", "description": "Remaining-error-budget gate for the ErrorBudget*Critical page alerts (0.1 = 10%)." },
         "certExpiryWarnSeconds": { "type": ["number", "string"], "title": "Certificate expiry warn seconds", "description": "Warn when certificate time-to-expiry is below this many seconds (1209600 = 14 days)." },
+        "listQuotaRejections": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "List-quota rejections per five minutes before warning."
+        },
+        "managementAuthFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Management authentication failures per five minutes before warning."
+        },
         "certExpiryCriticalSeconds": { "type": ["number", "string"], "title": "Certificate expiry critical seconds", "description": "Page when certificate time-to-expiry is below this many seconds (604800 = 7 days)." }
       }
     },

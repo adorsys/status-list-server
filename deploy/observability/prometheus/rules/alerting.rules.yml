@@ -261,3 +261,39 @@ groups:
           description: "time to expiry is {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
+
+  - name: hosted-trust-alerts
+    rules:
+      - alert: IssuerRegistryReloadFailures
+        expr: max by (namespace)(issuer_registry_reload_failed{otel_scope_name="status-list-server"}) == 1
+        for: 1m
+        labels:
+          severity: warn
+          team: statuslist
+          service: status-list-server
+        annotations:
+          summary: "Issuer registry reload failed"
+          description: "The last valid registry remains active; repair the mounted registry."
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
+      - alert: ListQuotaRejectionsSpike
+        expr: sum by (namespace)(increase(list_quota_rejections_total{otel_scope_name="status-list-server"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: warn
+          team: statuslist
+          service: status-list-server
+        annotations:
+          summary: "Issuer list quota rejections are elevated"
+          description: "Inspect issuer usage before changing sandbox quotas."
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
+      - alert: ManagementAuthFailuresSpike
+        expr: sum by (namespace)(increase(management_auth_requests_total_total{otel_scope_name="status-list-server",outcome=~"missing_token|rejected"}[5m])) > 50
+        for: 5m
+        labels:
+          severity: warn
+          team: statuslist
+          service: status-list-server
+        annotations:
+          summary: "Management authentication failures are elevated"
+          description: "Check issuer configuration and investigate abusive clients."
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts"
