@@ -240,6 +240,7 @@ mod tests {
 
     #[test]
     fn test_init_telemetry_dev_mode() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let config = TelemetryConfig {
             environment: TelemetryEnvironment::Development,
             otlp_endpoint: "http://localhost:4317".to_string(),
