@@ -152,6 +152,8 @@ For production deployments:
 
 ### Architecture and Specification
 
+- [Hosted sandbox](docs/hosted-sandbox.md): Isolated test deployment and acceptance checks.
+- [Trust model](docs/trust-model.md): Status-token signing authority and sandbox trust separation.
 - [Architecture Guide](docs/architecture.md): Project organization and modularity, service container composition, and token signing workflows.
 - [Compliance Matrix](docs/compliance_matrix.md): Implementation status against OAuth Token Status List draft-21 requirements.
 - [OpenAPI Specification](docs/openapi.yaml): Complete REST API contract, request schemas, and error codes.

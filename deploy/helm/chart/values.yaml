@@ -68,6 +68,7 @@ statuslist:
     nodePort: null
   ingress:
     enabled: true
+    className: nginx
     path: /
     pathType: Prefix
     annotations:
@@ -251,8 +252,8 @@ statuslist:
     ingress: []
     # Empty denies the management port; allow your Ingress controller here if management is exposed.
     managementIngress: []
-    # Empty denies the admin port, which silently breaks scraping when serviceMonitor is on.
-    # Allow your Prometheus pods, for example:
+    # Empty denies the admin port; with ServiceMonitor enabled, allow Prometheus
+    # through adminIngress or prometheusIngress. Example selector:
     #   adminIngress:
     #     - namespaceSelector:
     #         matchLabels:
@@ -261,6 +262,8 @@ statuslist:
     #         matchLabels:
     #           app.kubernetes.io/name: prometheus
     adminIngress: []
+    # Additional admin sources used only when ServiceMonitor discovery is enabled.
+    prometheusIngress: []
     # Appended to the database rule, so these only reach the database port.
     # 443 and 53 are always open to 0.0.0.0/0; this policy doesn't stop exfiltration.
     egressInternal: []
@@ -374,6 +377,9 @@ slo:
   # Seconds left: warn at 14 days, page at 7.
   certExpiryWarnSeconds: 1209600
   certExpiryCriticalSeconds: 604800
+  # Rejections/failures in a rolling 5-minute window, sustained for 5 minutes.
+  listQuotaRejections: 10
+  managementAuthFailures: 50
 
 postgres:
   # Bundled Postgres. Disabling it doesn't switch the backend: also set APP_DATABASE__BACKEND

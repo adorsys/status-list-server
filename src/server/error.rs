@@ -123,6 +123,9 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.error == "list_quota_exceeded" {
+            crate::utils::metrics::record_list_quota_rejection();
+        }
         match self.status {
             // Info, so write contention doesn't trip alerts.
             StatusCode::CONFLICT => {
