@@ -86,8 +86,7 @@ async fn name_unknown_migrations<M: MigratorTrait>(
     ))
 }
 
-/// Recomputes every issuer's ownership-record list count and is quoted verbatim
-/// in `docs/troubleshooting.md` as the operator repair.
+/// Quoted verbatim in docs/troubleshooting.md as the operator repair; keep them in sync.
 pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer)";
 const BACKFILL_CREDENTIAL_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \

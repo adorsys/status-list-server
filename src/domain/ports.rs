@@ -190,8 +190,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Issuers without a list are absent.
     async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
 
-    /// Reserve `count` unused indices for `list_id`, returning the newly
-    /// allocated indices in ascending order.
+    /// Returns the new indices in ascending order.
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,

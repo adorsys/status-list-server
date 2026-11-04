@@ -89,36 +89,9 @@ impl<T> SeaOrmStore<T> {
         self.db.current()
     }
 
-    /// Begins a transaction pinned to READ COMMITTED, so PostgreSQL and MySQL
-    /// run at the same level rather than at their differing defaults (READ
-    /// COMMITTED and REPEATABLE READ).
-    ///
-    /// Used by every client-facing write: both publish paths, both update paths,
-    /// and credential registration. Deliberately *not* used by
-    /// `delete_older_than`, which is a batched background sweep and inherits the
-    /// server default.
-    ///
-    /// The guard does not need it — `UPDATE ... WHERE` is a current read on both
-    /// engines, and the only `SELECT`s are on `reserve_list_slot`'s rejection
-    /// path, which relies on seeing rows committed while it waited. Pinning buys:
-    ///
-    /// - A raised server default (`default_transaction_isolation`,
-    ///   `transaction_isolation`) can no longer turn a guard miss into a
-    ///   serialization failure.
-    /// - On InnoDB, READ COMMITTED drops next-key locks. Snapshot inserts all
-    ///   land in the same gap of `idx_status_list_history_exp`, which the
-    ///   retention sweep also scans, so this removes a real source of `1213`.
-    ///   This applies to every stock MySQL deployment, since REPEATABLE READ is
-    ///   the InnoDB default.
-    ///
-    /// Cost is three extra round trips per write (`SET TRANSACTION`, `BEGIN`,
-    /// `COMMIT`); sea-orm issues the isolation level as its own statement.
-    ///
-    /// MySQL requires `binlog_format` ROW or MIXED at this level; STATEMENT
-    /// fails these writes with error 1665. `verify_binlog_format` checks at boot.
-    ///
-    /// SQLite and the mock backend are excluded: SQLite has no per-transaction
-    /// isolation and sea-orm warns on every transaction if a level is supplied.
+    /// Pins READ COMMITTED so Postgres and MySQL match, and InnoDB skips next-key locks (1213).
+    /// MySQL needs binlog_format ROW or MIXED for this (1665); checked at boot.
+    /// Skipped on SQLite, which has no per-transaction isolation.
     async fn begin_read_committed(&self) -> Result<DatabaseTransaction, DbErr> {
         begin_read_committed(&self.db.current()).await
     }
@@ -136,18 +109,9 @@ pub(super) async fn begin_read_committed(
     }
 }
 
-/// Takes one of the issuer's quota slots with a guarded
-/// `UPDATE … SET list_count = list_count + 1 WHERE list_count < max`. The row
-/// lock makes concurrent publishes re-check the guard, so the quota is exact.
-/// While the quota is off, the guard is lifted but the count still kept.
-///
-/// Must run before the `status_lists` `INSERT`: that insert's FK check takes a
-/// shared lock on this ownership row, and two publishes upgrading it would
-/// deadlock on InnoDB (`1213`). Being in the publish transaction, the slot is
-/// rolled back with any later failure. The caller must roll back on `Err`.
-///
-/// An existing `list_id` is reported as `DuplicateEntry` even at a full quota,
-/// so a retried publish still gets its 409.
+/// Run before the status_lists INSERT, whose FK lock deadlocks racing publishes on InnoDB (1213).
+/// An existing list_id is still a DuplicateEntry at full quota, so retries get their 409.
+/// The caller must roll back on Err.
 async fn reserve_list_slot(
     txn: &DatabaseTransaction,
     issuer: &str,
@@ -591,8 +555,7 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    /// Test-only: does not decrement `issuers.list_count`. A production
-    /// caller must decrement it in the same transaction as the `DELETE`.
+    /// Test only: leaves `issuers.list_count` alone.
     #[cfg(test)]
     pub async fn delete_by(&self, value: &str) -> Result<bool, RepositoryError> {
         time_query("delete", "status_list", async {
@@ -1011,8 +974,7 @@ impl SeaOrmStore<StatusListHistoryRecord> {
 }
 
 impl SeaOrmStore<Credentials> {
-    /// Pinned so registration cannot inherit a raised server default and turn a
-    /// duplicate issuer into a serialization failure.
+    /// Pinned so a duplicate issuer stays a 409, not a serialization failure.
     pub async fn insert_one(&self, entity: Credentials) -> Result<String, RepositoryError> {
         time_query("insert", "credential", async {
             let issuer = entity.issuer.clone();
@@ -1302,22 +1264,9 @@ impl SeaOrmStore<Credentials> {
     }
 }
 
-/// Classifies an insert failure, distinguishing the one case that is a client
-/// conflict rather than a server fault.
-///
-/// Only unique-constraint violations are singled out, because only they are
-/// caused by something the client can see and act on — a `list_id` or `issuer`
-/// that is already taken — and they must reach the client as 409, not 500
-/// (#143, #244).
-///
-/// Foreign-key violations deliberately fall through to `InsertError`/500.
-/// Credentials and status lists both reference `issuers`; registration creates
-/// the ownership row in the same transaction, so a missing owner is inconsistent data.
-/// If that ever stops holding, add a `ForeignKeyConstraintViolation` arm rather
-/// than widening the unique-violation one.
-///
-/// Order matters in the body: the duplicate-key check runs first, so a unique
-/// violation is never reclassified as retryable contention.
+/// Only unique violations become 409. An FK miss is a missing `issuers` owner row, which
+/// registration creates in the same transaction, so it's inconsistent data and a 500.
+/// Check duplicates first so they're never reported as contention.
 fn map_insert_err(e: sea_orm::DbErr) -> RepositoryError {
     match e.sql_err() {
         Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => RepositoryError::DuplicateEntry,
@@ -1352,9 +1301,8 @@ fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::DeleteError(e.to_string()))
 }
 
-/// Connection acquisition and transport failures map to `Unavailable` (503).
-/// Other read failures remain backend errors; contention is deliberately not
-/// mapped to 409 because a read did not propose conflicting state.
+/// Pool and transport failures are `Unavailable` (503). No contention mapping: a 409 on a read
+/// would make no sense.
 fn find_err(e: sea_orm::DbErr) -> RepositoryError {
     use sea_orm::{ConnAcquireErr, DbErr, RuntimeErr, SqlxError};
 

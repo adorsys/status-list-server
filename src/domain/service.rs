@@ -166,24 +166,8 @@ impl Service {
         Ok(record)
     }
 
-    /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
-    ///
-    /// Request-shape validation (count bound, index bound, duplicate indices)
-    /// runs before the update is applied, in that order, so a malformed
-    /// request is rejected with `400` consistently and without a write. The
-    /// duplicate-index invariant is re-enforced in the domain model as defense
-    /// in depth in case this service boundary is bypassed.
-    ///
-    /// `policy.max_status_index` bounds growth only: an index the list already
-    /// covers can always be updated, so an issuer moved to a tier with a lower
-    /// bound can still revoke the statuses it issued. Telling the two apart
-    /// needs the stored list, so a request with an index above the bound
-    /// reports a missing or foreign list before the index bound.
-    ///
-    /// An update that leaves the list unchanged — including a literal empty
-    /// `statuses` payload and a non-empty payload that re-sets every affected
-    /// index to its current value — is a successful no-op: the list version and
-    /// history are untouched and no redundant snapshot is written.
+    /// A request that changes nothing is a no-op: no version bump and no new snapshot.
+    /// `max_status_index` bounds growth only, so an issuer moved to a lower tier can still revoke.
     pub async fn update_statuses(
         &self,
         issuer: &Issuer,
@@ -533,14 +517,7 @@ fn validate_update_indices(
     }
 }
 
-/// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
-///
-/// Used by every expiry-construction site (`build_snapshot` and the default token
-/// validity window) so the two stay in sync. Configuration validation normally
-/// keeps `token_exp_secs` within `MAX_TOKEN_LIFETIME_SECS`, but a directly
-/// constructed `AppState`/`Service` can bypass it, so this converts through
-/// `i64::try_from` before `checked_add` (a raw `as i64` would turn `u64::MAX`
-/// into `-1` and let the addition "succeed" with a bogus exp).
+/// Use this for every exp: a raw `as i64` would turn u64::MAX into -1 and "succeed".
 pub(crate) fn token_expiry(iat: i64, token_exp_secs: u64) -> Result<i64, StatusListError> {
     let token_exp =
         i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {

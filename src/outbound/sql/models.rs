@@ -30,9 +30,9 @@ pub(crate) mod credentials {
         pub public_key: PublicKey,
         /// Indexed copy of `public_key.kid` used for management authentication.
         pub key_id: Option<String>,
-        /// Maintained by store::reserve_list_slot.
+        /// Legacy and no longer updated; the quota counts `issuers.list_count`.
         pub list_count: i64,
-        /// NULL on rows from older releases until the first lookup assigns one.
+        /// Legacy; lookups and assignment use `issuers.aggregation_id`.
         pub aggregation_id: Option<String>,
     }
 

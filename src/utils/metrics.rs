@@ -254,9 +254,7 @@ fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
     }
 }
 
-/// Initialize the OpenTelemetry metrics pipeline before any instruments are
-/// created. Metrics are always exposed through the in-process Prometheus
-/// registry. In production, they are also pushed to the Collector over OTLP.
+/// Run before any instrument is created; production also pushes over OTLP.
 pub(crate) fn setup_metrics(
     registry: &Registry,
     config: &TelemetryConfig,

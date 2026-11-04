@@ -429,9 +429,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     ) {
         color_eyre::eyre::bail!("{message}");
     }
-    // Hoisted DB handle captured from the backend branches below so the
-    // readiness probe can reach the real adapter (the domain ports only expose
-    // the higher-level repositories).
+    // Kept so the readiness probe can reach the real DB, which the ports hide.
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
     // Some feature profiles have only the in-memory backend; in those profiles
@@ -1412,9 +1410,7 @@ async fn missing_registry_issuers(
         .collect())
 }
 
-/// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
-/// page of an issuer's aggregation as complete, so tokens leave the claim out,
-/// for the reason in `withheld`, while one might not fit in it.
+/// Omitted while an issuer's lists might not fit one page: §9.3 clients treat page one as complete.
 fn advertised_aggregation_uri(
     config: &AppConfig,
     withheld: Option<&str>,

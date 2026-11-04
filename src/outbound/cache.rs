@@ -193,7 +193,7 @@ pub struct CachingCredentialRepo {
 }
 
 const AGGREGATION_ID_CACHE_CAPACITY: u64 = 10_000;
-// IDs never change; the TTL only covers credentials re-created by hand in the DB.
+// IDs never change; the TTL only covers issuer rows re-created by hand in the DB.
 const AGGREGATION_ID_CACHE_TTL: Duration = Duration::from_secs(3600);
 
 impl CachingCredentialRepo {

@@ -35,20 +35,10 @@ pub enum RepositoryError {
     /// The hosted issuer already holds its tier's `max_keys` keys.
     #[error("hosted issuer key quota exceeded: at most {max_keys} keys")]
     KeyQuotaExceeded { max_keys: usize },
-    /// The statement lost a lock race and was rolled back. Distinct from
-    /// [`DuplicateEntry`] and from the optimistic-guard miss: nothing was
-    /// written, nobody won, and the request is safe to retry verbatim.
-    ///
-    /// `code` is the driver's discriminator, always one of `"40001"`, `"40P01"`,
-    /// `"1205"` or `"1213"` — a closed set, produced only by the private
-    /// `classify_postgres` / `classify_mysql` tables in this module. Carried so
-    /// the metric can separate lock-wait timeouts from deadlocks, which have
-    /// different remediations. Opaque otherwise; nothing branches on it.
-    ///
-    /// [`DuplicateEntry`]: RepositoryError::DuplicateEntry
+    /// Nothing was written, so the request can be retried as-is.
+    /// `code` separates lock-wait timeouts from deadlocks in the metric.
     #[error("Write contention ({code}): the transaction lost a lock race and may be retried")]
     Contention { code: &'static str },
-    /// The issuer's list count has reached the quota.
     #[error("Status list quota exceeded: issuer holds {count} of {max}")]
     QuotaExceeded { count: u64, max: u64 },
     #[error("Status list not found")]

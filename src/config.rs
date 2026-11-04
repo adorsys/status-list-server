@@ -480,7 +480,7 @@ pub struct ManagementAuthConfig {
     pub leeway_secs: u64,
     /// Checked as `exp - iat`.
     pub max_token_lifetime_secs: u64,
-    /// Accepted management-token audiences. Empty means the `aud` claim is not required.
+    /// Empty means the `aud` claim is not required.
     #[serde(deserialize_with = "deserialize_trimmed_list")]
     pub audiences: Vec<String>,
 }
