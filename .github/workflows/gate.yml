@@ -9,14 +9,21 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   gate:
+    # Branch protection requires this check by name; renaming it detaches the requirement.
     name: gate
     permissions:
       contents: read
       actions: read
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      # Full history: the gate reads tags, the head's Cargo.toml and main's ancestry locally.
       - name: Check out trusted policy and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

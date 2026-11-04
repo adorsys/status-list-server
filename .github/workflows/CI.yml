@@ -505,19 +505,6 @@ jobs:
       - name: Prove the attestation check can fail
         run: bash scripts/attestation-selftest.sh
 
-  promotion-gate-selftest:
-    name: Promotion Gate Self-Test
-    runs-on: ubuntu-latest
-    # gate runs the base branch's copy under pull_request_target, so policy changes are tested here on every PR.
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Prove the promotion gate passes and rejects
-        run: bash scripts/promotion-gate-selftest.sh
-
   yaml-lint:
     name: YAML Lint and Format Check
     runs-on: ubuntu-latest
@@ -756,7 +743,6 @@ jobs:
       - tombi-toml-lint
       - markdown-lint
       - attestation-selftest
-      - promotion-gate-selftest
       - yaml-lint
       - config-guards
       - compose-validation

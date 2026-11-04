@@ -110,6 +110,30 @@ can be created before the branch exists; create the branch only after the
 protections are active. Until then, a write-access push or hotfix workflow
 dispatch could deploy unreviewed code to production.
 
+The `gate` workflow enforces the promotion path on pull requests into `stage`
+and `main`. Make its `gate` check required on both branches, together with
+"Require branches to be up to date before merging", so a pull request that
+passed before a newer release cannot merge unchecked. The check runs on
+`pull_request_target` from the base branch's copy of the workflow and
+`scripts/promotion-gate.sh`. Both files must therefore be on `stage` and
+`main` before the check is required, or pull requests wait for it
+indefinitely, and a change to the gate takes effect only once it is promoted.
+If a broken gate blocks its own fix, an administrator bypasses the rule for
+that pull request. The gate accepts:
+
+- Into `stage`: pull requests from `develop` only.
+- Into `main`: pull requests from `stage` or `hotfix/*`, in this repository,
+  whose head already contains `main`, is the commit of the highest
+  `v<version>-rc.<N>` for its `Cargo.toml` version, and has a successful
+  **Build and Deploy to EKS** push run. A `hotfix/*` version must also be
+  newer than the latest final release.
+
+These cover the conditions the final release checks after the merge, so
+the gate refuses a promotion before `main` is tagged instead of after. The
+gate does not re-run when a candidate's run finishes. If it failed because the
+candidate was still being tagged or deployed, re-run the check once that run
+passes.
+
 The normal promotion path is:
 
 1. Before preparing a release, ensure the latest final release from `main` has

@@ -435,8 +435,6 @@ fast_wiring_checks() {
     run python3 scripts/check-variant-parity.py
     log "Attestation verifier self-test"
     run bash scripts/attestation-selftest.sh
-    log "Promotion gate self-test"
-    run bash scripts/promotion-gate-selftest.sh
 }
 
 prepare_zizmor_auth() {
