@@ -37,7 +37,7 @@ pub async fn update_status(
         .map(Into::into)
         .collect::<Vec<_>>();
 
-    let policy = appstate.status_list_policy();
+    let policy = appstate.status_list_policy(principal.tier());
     appstate
         .service
         .update_statuses(principal.as_ref(), &list_id, statuses, &policy)
@@ -59,6 +59,7 @@ pub async fn update_status_route(
 mod tests {
     use super::*;
     use crate::domain::models::status_list::StatusList;
+    use crate::domain::models::tier::IssuerTier;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
@@ -172,7 +173,9 @@ mod tests {
         .await
         .unwrap();
 
-        app_state.max_statuses_per_request = 1;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_statuses_per_request = 1;
 
         let update_res = update_status(
             State(app_state.clone()),
@@ -210,7 +213,9 @@ mod tests {
         .await
         .unwrap();
 
-        app_state.max_status_index = 10;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 10;
 
         let update_res = update_status(
             State(app_state.clone()),
@@ -226,6 +231,84 @@ mod tests {
         .await;
 
         assert!(update_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_beyond_the_index_bound_reports_a_missing_list_first() {
+        let mut app_state = test_app_state(None).await;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 10;
+
+        // Whether index 5000 is growth depends on the stored list, so a list
+        // that does not exist is reported before the index bound.
+        let err = match update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 5_000,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("an update of a missing list must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "status_list_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_issuer_moved_to_a_lower_tier_can_still_update_its_existing_entries() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        let entry = |index| RequestStatusEntry {
+            index,
+            status: RequestStatus::INVALID,
+        };
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 50,
+                    status: RequestStatus::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // The registry moves the issuer to sandbox, whose bound is below 50.
+        app_state
+            .tier_limits_mut(IssuerTier::Sandbox)
+            .max_status_index = 10;
+        let update = |index| {
+            update_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1").with_tier(IssuerTier::Sandbox),
+                Path(token_id.clone()),
+                Json(StatusesRequest {
+                    statuses: vec![entry(index)],
+                }),
+            )
+        };
+
+        let revoked = update(50).await.unwrap().into_response();
+        assert_eq!(revoked.status(), StatusCode::OK);
+
+        let err = match update(5_000).await {
+            Ok(_) => panic!("growing the list past the tier bound must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "index_too_large");
     }
 
     #[tokio::test]

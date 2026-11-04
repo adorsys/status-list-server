@@ -74,6 +74,14 @@ branch may have an open release-plz PR at a time. The workflow refuses to run
 when another target branch already has one; close that PR before dispatching
 for `develop` or a `hotfix/*` branch. A later dispatch recreates it if needed.
 
+Before the first promotion, repository administrators must protect `stage` and
+`hotfix/*` from direct pushes with review and required checks. Configure the
+production environment to require deployment approval for RC and final tags,
+and restrict creation of `v*` tags to the release-bot App. The `stage` ruleset
+can be created before the branch exists; create the branch only after the
+protections are active. Until then, a write-access push or hotfix workflow
+dispatch could deploy unreviewed code to production.
+
 The normal promotion path is:
 
 1. Before preparing a release, ensure the latest final release from `main` has
@@ -87,7 +95,11 @@ The normal promotion path is:
 5. Merge `develop` into `stage`. The RC automation creates
    `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
    Release-plz ignores RC tags because its `git_only` final-tag match is
-   `^v(\d+\.\d+\.\d+)$`.
+   `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
+   than the latest final tag, the stage workflow fails before it creates an RC
+   tag; prepare the next release-plz version instead. A tag whose deployment
+   fails is not a validated candidate until its run passes. If only the
+   deployment job failed, re-run that job after fixing the cause.
 6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
@@ -108,20 +120,13 @@ The final `v<version>` tag is created only from `main`.
 
 For a hotfix, branch `hotfix/*` from the released `main` state, then manually
 dispatch **Release-plz PR** with that branch selected. Review and merge the
-resulting patch-version and changelog PR into the hotfix branch. Validate the
-hotfix as a release candidate before the `hotfix/*` to `main` promotion: the
-final tag promotes that candidate's image and fails without one. The RC
-automation runs only for `stage`, so tag the hotfix candidate by hand:
-
-1. Tag only after the patch-version PR is merged, on the hotfix branch head.
-   Its tree must match what `main` will hold after the promotion, so any later
-   change to the hotfix branch needs a new candidate.
-2. Take `<version>` from `Cargo.toml` on that commit. Do not tag when
-   `v<version>` already exists.
-3. Use the next unused `<N>` for that version, starting at 1. List the existing
-   candidates with `git ls-remote --tags origin "v<version>-rc.*"`.
-4. Push `v<version>-rc.<N>` and wait for its `deploy.yml` run to pass before
-   promoting the hotfix branch to `main`.
+resulting patch-version and changelog PR into the hotfix branch, then manually
+dispatch **Tag Release Candidate** with that branch selected. Validate the RC
+deployment before the `hotfix/*` to `main` promotion: the final tag promotes
+that candidate's image and fails without one. Dispatch only after the
+patch-version PR is merged, and wait for the candidate's `deploy.yml` run to
+pass. The candidate's tree must match what `main` will hold after the
+promotion, so any later change to the hotfix branch needs a new candidate.
 
 After the hotfix release, merge `main` back into `develop` with a merge commit
 before the next `develop` to `stage` promotion. If `develop` already contains a

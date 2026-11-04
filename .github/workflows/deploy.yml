@@ -766,6 +766,9 @@ jobs:
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.deploy-chart.outputs.image-digest }}
+      image-ref: ${{ steps.deploy-chart.outputs.image-ref }}
     # Never deploy an untagged release; recover from a promotion failure by re-running it.
     # promote-tags succeeds only for a scanned, verified digest, so it gates both paths.
     needs:
@@ -868,6 +871,7 @@ jobs:
           helm dependency build "$CHART_DIR"
 
       - name: Deploy chart
+        id: deploy-chart
         # :? on the digest: empty would silently deploy the mutable tag, and helm's error points elsewhere.
         env:
           GH_TOKEN: ${{ github.token }}
@@ -900,6 +904,8 @@ jobs:
           fi
 
           echo "Deploying ${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}"
+          echo "image-digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image-ref=${IMAGE_BASE}:${FULL_TAG}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
 
           # Verify the digest this job resolved: the tag may have moved since promote-tags checked it.
           bash scripts/verify-attestation.sh \
@@ -1025,3 +1031,44 @@ jobs:
           await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
 
           rollback_done=1
+
+  record-release-candidate:
+    name: Record Validated Release Candidate
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: ${{ github.event_name == 'push' && contains(github.ref_name, '-rc.') }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Create or update the validated candidate record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.deploy.outputs.image-digest }}
+          IMAGE_REF: ${{ needs.deploy.outputs.image-ref }}
+          HELM_NAMESPACE: ${{ env.HELM_NAMESPACE }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::deployment completed without a valid image digest"
+            exit 1
+          }
+          commit=$(git rev-parse HEAD)
+          [[ "$IMAGE_REF" == *@"$IMAGE_DIGEST" ]] || {
+            echo "::error::deployment image reference does not match its digest"
+            exit 1
+          }
+          printf 'Validated in the production environment (EKS namespace `%s`) by [workflow run](%s/%s/actions/runs/%s).\n\n- Commit: `%s`\n- Image: `%s`\n' \
+            "$HELM_NAMESPACE" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$commit" "$IMAGE_REF" > candidate-notes.md
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "Release candidate $TAG" --notes-file candidate-notes.md
+          fi
