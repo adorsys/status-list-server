@@ -376,7 +376,7 @@ The `APP_SERVER__CERT__*` ACME settings from `values-aws.yaml` stay in the pod e
 
 The workflow itself authenticates to AWS only through the OIDC deploy role; no long-lived credential is stored in the repository or the workflow.
 
-`statuslist-secret` now holds the token-signing key. A `ClusterSecretStore` serves every namespace unless its `spec.conditions` restrict it, so any namespace allowed to create an ExternalSecret could read the key. Confirm that `datev-secret-store` is limited to `statuslist-production`, or that the IAM role behind it is scoped to this entry and the namespaces that need it. The deploy role cannot read the `ClusterSecretStore`, so check this with cluster-admin access.
+With this profile, `statuslist-secret` holds the token-signing key. A `ClusterSecretStore` serves every namespace unless its `spec.conditions` restrict it, so any namespace allowed to create an ExternalSecret could read the key. Confirm that `datev-secret-store` is limited to `statuslist-production`, or that the IAM role behind it is scoped to this entry and the namespaces that need it. The deploy role cannot read the `ClusterSecretStore`, so check this with cluster-admin access.
 
 #### Signing certificate
 
@@ -426,7 +426,7 @@ Nothing renews this certificate or alerts before it expires: the ACME renewal jo
    The deploy job fails before `helm upgrade` when `APP_CACHE_HOST` or `APP_CACHE_PORT` is empty.
 4. Keep the `status-list-server-issuers` ConfigMap in place, as for any release.
 
-Both release candidates (`v<version>-rc.<n>`) and final releases (`v<version>`) deploy through the same job into the same namespace. Each promotes `<version>-fscert`; only a final release also moves `latest-fscert`. To move from the `aws` profile back to the `fscert` profile, or the other way, change `IMAGE_VARIANT` and push the next tag. A `helm rollback` across that change restores the previous profile's values, including its ExternalSecrets, and the signing certificate verifiers see.
+Both release candidates (`v<version>-rc.<n>`) and final releases (`v<version>`) deploy through the same job into the same namespace. Each promotes `<version>-fscert`; only a final release also moves `latest-fscert`. To move from the `aws` profile back to the `fscert` profile, or the other way, change `IMAGE_VARIANT` and push the next release candidate. Do not switch between a release candidate and its final tag: the final tag deploys the digest that candidate gated, and the candidate ran with the previous profile. A `helm rollback` across that change restores the previous profile's values, including its ExternalSecrets, and the signing certificate verifiers see.
 
 #### Rotation
 
