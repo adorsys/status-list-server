@@ -2137,7 +2137,7 @@ mod tests {
                 "private profile must not mount lifecycle routes"
             );
 
-            // Hosted profile: the lifecycle handlers answer — without the
+            // Hosted profile: the lifecycle handlers answer. Without the
             // precondition the request stops at 428, never at the store.
             let response = send(admin.clone(), uri.into(), Some(&token), body)
                 .await

@@ -1313,7 +1313,7 @@ pub(crate) mod tests {
 
     /// Each replica owns its registry handle and trusts only its own
     /// reloads, so this proves that a disabled registry entry blocks the
-    /// next write on every replica after that replica reloaded — not that
+    /// next write on every replica after that replica reloaded, not that
     /// the file change propagates by itself. Public reads of the shared
     /// store remain available on both.
     #[tokio::test]

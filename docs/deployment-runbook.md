@@ -144,7 +144,7 @@ Static registry tombstones travel with the operator-managed registry file. A can
 Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
 
 For a hosted issuer, use the admin listener with a registry admin JWT carrying
-`issuers:write` — see [the admin API guide](admin-api.md) for how to mint it
+`issuers:write`. See [the admin API guide](admin-api.md) for how to mint it
 (header `typ: statuslist-admin+jwt`, the admin's `kid`, `iss` equal to the
 admin id, `aud` from `APP_ADMIN_AUTH__AUDIENCES`, `exp - iat` within
 `APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS`, default 300s). Read the issuer and
