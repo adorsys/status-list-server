@@ -66,12 +66,22 @@ fi
 if [[ "$head_branch" == hotfix/* ]]; then
   cargo_content=$(gh api "repos/$base_repository/contents/Cargo.toml?ref=$head_sha" --jq .content | base64 --decode)
   version=$(printf '%s' "$cargo_content" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
-  release_tag="v${version}"
-  if git -C "$repository" show-ref --verify --quiet "refs/tags/$release_tag"; then
-    echo "::error::Hotfix version $version is already tagged as $release_tag; bump Cargo.toml to an untagged version before promoting."
+  semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+  if [[ ! "$version" =~ $semver ]]; then
+    echo "::error::Hotfix version '$version' is not a release semver version."
     exit 1
   fi
-  echo "Hotfix version $version has not been released yet."
+  # Untagged is not enough: release-plz tags whatever main carries, so an older version would be released below the current one.
+  latest_final=$(git -C "$repository" tag --list 'v*' \
+    | sed 's/^v//' \
+    | grep -E "$semver" \
+    | sort -V \
+    | tail -n 1 || true)
+  if [[ -n "$latest_final" && "$(printf '%s\n%s\n' "$version" "$latest_final" | sort -V | tail -n 1)" == "$latest_final" ]]; then
+    echo "::error::Hotfix version $version must be newer than the latest release v$latest_final; bump Cargo.toml before promoting."
+    exit 1
+  fi
+  echo "Hotfix version $version is newer than the latest release ${latest_final:+v}${latest_final:-(none)}."
   exit 0
 fi
 

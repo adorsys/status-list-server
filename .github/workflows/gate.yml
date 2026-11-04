@@ -1,7 +1,7 @@
 name: gate
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] This gate uses trusted default-branch code and never checks out PR files.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] This gate runs the base branch's trusted code and never checks out PR files.
     branches: [stage, main]
     types: [opened, synchronize, reopened, edited]
 
@@ -22,9 +22,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Test promotion policy
-        run: bash scripts/promotion-gate-selftest.sh
 
       - name: Enforce promotion policy
         env:

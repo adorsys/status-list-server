@@ -93,11 +93,24 @@ GATE_TEST_RUNS=$(validation_run completed success)
 export GATE_TEST_RUNS
 expect_pass main hotfix/security "$latest_sha"
 
+hotfix_version() {
+  GATE_TEST_CARGO_CONTENT=$(printf '[package]\nname = "gate-fixture"\nversion = "%s"\n' "$1" | base64 | tr -d '\n')
+  export GATE_TEST_CARGO_CONTENT
+}
+
 git -C "$repo" tag v1.0.0
-expect_fail "already tagged as v1.0.0" main hotfix/security "$latest_sha"
-sed -i 's/1.0.0/1.0.1/' "$repo/Cargo.toml"
-GATE_TEST_CARGO_CONTENT="$(base64 < "$repo/Cargo.toml" | tr -d '\n')"
-export GATE_TEST_CARGO_CONTENT
+expect_fail "must be newer than the latest release v1.0.0" main hotfix/security "$latest_sha"
+hotfix_version 1.0.1
+expect_pass main hotfix/security "$latest_sha"
+hotfix_version 1.0.1-rc.1
+expect_fail "not a release semver version" main hotfix/security "$latest_sha"
+
+git -C "$repo" tag v1.2.0
+hotfix_version 1.1.3
+expect_fail "must be newer than the latest release v1.2.0" main hotfix/security "$latest_sha"
+hotfix_version 1.2.0
+expect_fail "must be newer than the latest release v1.2.0" main hotfix/security "$latest_sha"
+hotfix_version 1.10.0
 expect_pass main hotfix/security "$latest_sha"
 expect_fail "must come from stage or hotfix" main develop "$latest_sha"
 
