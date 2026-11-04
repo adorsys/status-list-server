@@ -229,6 +229,11 @@ fn add_key_error(hosted_error: HostedIssuerError) -> ApiError {
         HostedIssuerError::InvalidPublicJwk(_) => {
             ApiError::unprocessable("invalid_public_jwk", "the requested public JWK is invalid")
         }
+        HostedIssuerError::KeyQuotaExceeded { .. } => error(
+            StatusCode::CONFLICT,
+            "key_limit_reached",
+            "the issuer has reached its tier's non-revoked key limit",
+        ),
         other => lifecycle_error(other),
     }
 }
@@ -573,6 +578,7 @@ mod tests {
     struct FakeLifecycleStore {
         issuers: Mutex<Vec<HostedIssuer>>,
         keys: Mutex<Vec<HostedIssuerKey>>,
+        key_limit: Mutex<Option<usize>>,
     }
 
     impl FakeLifecycleStore {
@@ -680,6 +686,22 @@ mod tests {
                 .ok_or(HostedIssuerError::NotFound)?;
             if issuer.version != expected_version {
                 return Err(HostedIssuerError::VersionMismatch);
+            }
+            if let Some(max_keys) = *self.key_limit.lock().unwrap() {
+                if self
+                    .keys
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|stored| {
+                        stored.issuer_id == key.issuer_id
+                            && stored.state != HostedIssuerKeyState::Revoked
+                    })
+                    .count()
+                    >= max_keys
+                {
+                    return Err(HostedIssuerError::KeyQuotaExceeded { max_keys });
+                }
             }
             self.keys.lock().unwrap().push(key);
             issuer.version += 1;
@@ -1085,6 +1107,29 @@ mod tests {
             )
             .await;
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn key_limit_returns_documented_conflict() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer(
+            "portal-issuer",
+            Some(service_now() + time::Duration::days(30)),
+        ));
+        *app.store.key_limit.lock().unwrap() = Some(2);
+        app.store.insert_key(key("portal-issuer"));
+        app.store.insert_key(key("portal-issuer"));
+        let etag = app.current_etag("portal-issuer").await;
+        let response = app
+            .post(
+                "/admin/v1/issuers/portal-issuer/keys",
+                &write_token(),
+                Some(&etag),
+                r#"{"public_key":{"kty":"EC","crv":"P-256","x":"qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY","y":"BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"},"alg":"ES256"}"#,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(response).await["error"], "key_limit_reached");
     }
 
     #[tokio::test]
