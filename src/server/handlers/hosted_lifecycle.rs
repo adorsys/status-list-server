@@ -1315,9 +1315,13 @@ mod tests {
         let app = LifecycleApp::new(&["issuers:write"]).await;
         let expired = issuer(
             "portal-issuer",
-            Some(service_now() - time::Duration::days(1)),
+            Some(OffsetDateTime::now_utc() - time::Duration::days(1)),
         );
         app.store.insert_issuer(expired);
+        let before = hosted_dto(&app.state, app.store.issuer("portal-issuer").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(before).unwrap()["state"], "expired");
         let token = write_token();
         let expiry = (service_now() + time::Duration::days(1)).unix_timestamp();
         let body = format!(r#"{{"expires_at":{expiry}}}"#);

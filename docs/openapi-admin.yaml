@@ -757,9 +757,7 @@ components:
           required: [expires_at]
           properties:
             expires_at:
-              type: integer
-              format: int64
-              description: Unix timestamp in seconds, after now and within 30 days.
+              $ref: "#/components/schemas/UnixTime"
 
     UpdateIssuerKeyRequest:
       type: object

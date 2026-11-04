@@ -990,13 +990,29 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
     ) -> Result<HostedIssuer, HostedIssuerError> {
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-        let row = issuers::Entity::find_by_id(issuer_id)
+        let row = match issuers::Entity::find_by_id(issuer_id)
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
-            .map_err(err_txn)?
-            .ok_or(HostedIssuerError::NotFound)?;
-        let previous = parse_issuer(row.clone())?;
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                rollback_quietly(txn).await;
+                return Err(HostedIssuerError::NotFound);
+            }
+            Err(error) => {
+                let classified = err_txn(error);
+                rollback_quietly(txn).await;
+                return Err(classified.into());
+            }
+        };
+        let previous = match parse_issuer(row.clone()) {
+            Ok(previous) => previous,
+            Err(error) => {
+                rollback_quietly(txn).await;
+                return Err(error.into());
+            }
+        };
         if previous.version != expected_version {
             rollback_quietly(txn).await;
             return Err(HostedIssuerError::VersionMismatch);
