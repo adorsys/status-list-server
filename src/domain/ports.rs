@@ -93,6 +93,9 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
 
+    /// Every hosted issuer, for the per-issuer usage gauges.
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+
     /// The hosted key that already holds the given normalized key material
     /// (RFC 7638 §7 parameters), if any. Returns `None` when the material is
     /// free. The `issuer_id` and `state` of the returned key let callers
@@ -230,6 +233,10 @@ pub trait StatusListRepo: Send + Sync + 'static {
 
     /// Issuer identifiers that currently own at least one status list.
     async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
+
+    /// Number of status lists each issuer holds against its list quota.
+    /// Issuers without a list are absent.
+    async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
 
     /// Reserve `count` unused indices for `list_id`, returning the newly
     /// allocated indices in ascending order.

@@ -594,6 +594,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for FakeLifecycleStore {
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Ok(self.issuers.lock().unwrap().clone())
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,

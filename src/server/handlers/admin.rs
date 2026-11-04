@@ -3,8 +3,9 @@ use crate::{
         credential::{AggregationId, Issuer, jose_alg_name},
         hosted_issuer::{
             HostedIssuer, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyState,
-            HostedIssuerLifecycleState, HostedIssuerReadState,
+            HostedIssuerReadState,
         },
+        tier::IssuerUsage,
     },
     server::{
         AppState,
@@ -125,7 +126,17 @@ struct UsageDto {
     lists: u64,
     lists_limit: u64,
     keys: u64,
-    keys_limit: Option<u64>,
+    keys_limit: u64,
+}
+impl From<IssuerUsage> for UsageDto {
+    fn from(usage: IssuerUsage) -> Self {
+        Self {
+            lists: usage.lists,
+            lists_limit: usage.lists_limit,
+            keys: usage.keys as u64,
+            keys_limit: usage.keys_limit as u64,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -297,6 +308,7 @@ fn static_dto(
     entry: &IssuerEntry,
     snapshot: &crate::server::auth::issuer_registry::ValidatedRegistry,
     count: u64,
+    now: time::OffsetDateTime,
 ) -> IssuerDto {
     IssuerDto {
         id: entry.id.clone(),
@@ -307,7 +319,7 @@ fn static_dto(
         ),
         display_name: entry.display_name.clone(),
         source: "static".into(),
-        tier: entry.tier.clone(),
+        tier: entry.tier.as_str().to_owned(),
         state: static_state(entry).as_str().to_owned(),
         owner: None,
         created_at: None,
@@ -323,12 +335,12 @@ fn static_dto(
                 key_from_registry(key, &resolved)
             })
             .collect(),
-        usage: UsageDto {
-            lists: count,
-            lists_limit: state.max_lists_per_issuer,
-            keys: entry.keys.len() as u64,
-            keys_limit: None,
-        },
+        usage: IssuerUsage::new(
+            count,
+            entry.active_key_count(now),
+            state.tiers.get(entry.tier),
+        )
+        .into(),
     }
 }
 fn hosted_dto_from_parts(
@@ -338,11 +350,16 @@ fn hosted_dto_from_parts(
     keys: Vec<HostedIssuerKey>,
     now: time::OffsetDateTime,
 ) -> IssuerDto {
+    let held_keys = keys
+        .iter()
+        .filter(|key| key.counts_against_quota(now))
+        .count();
     let keys: Vec<_> = keys.into_iter().map(key_from_hosted).collect();
-    let state_name = match issuer.lifecycle_state(now) {
-        HostedIssuerLifecycleState::Active => "active",
-        HostedIssuerLifecycleState::Suspended => "suspended",
-        HostedIssuerLifecycleState::Expired => "expired",
+    let issuer_tier = issuer.tier.clone();
+    let state_name = match issuer.read_state(now) {
+        HostedIssuerReadState::Active => "active",
+        HostedIssuerReadState::Suspended => "suspended",
+        HostedIssuerReadState::Expired => "expired",
     };
     IssuerDto {
         aggregation_uri: state
@@ -357,13 +374,15 @@ fn hosted_dto_from_parts(
         created_at: Some(issuer.created_at.unix_timestamp()),
         expires_at: issuer.expires_at.map(|v| v.unix_timestamp()),
         persisted_version: Some(issuer.version),
-        keys: keys.clone(),
-        usage: UsageDto {
-            lists: count,
-            lists_limit: state.max_lists_per_issuer,
-            keys: keys.iter().filter(|k| k.state == "active").count() as u64,
-            keys_limit: None,
-        },
+        keys,
+        usage: IssuerUsage::new(
+            count,
+            held_keys,
+            state
+                .tiers
+                .get(crate::domain::models::tier::IssuerTier::from_name_or_strictest(&issuer_tier)),
+        )
+        .into(),
     }
 }
 /// Hosted lifecycle preconditions use the persisted version, not live usage.
@@ -577,6 +596,7 @@ pub async fn list_issuers(
                     entry,
                     &snapshot,
                     counts.get(&id).copied().unwrap_or(0),
+                    now,
                 )
             }
             Row::Hosted(hosted) => {
@@ -648,9 +668,10 @@ pub async fn get_issuer(
         ));
     }
     let snapshot = state.admin_registry.snapshot();
+    let now = time::OffsetDateTime::now_utc();
     let dto = if let Some(entry) = snapshot.issuer(&id) {
         let count = list_count(&state, &id).await?;
-        static_dto(&state, entry, &snapshot, count)
+        static_dto(&state, entry, &snapshot, count, now)
     } else if let Some(store) = &state.hosted_issuer_store {
         let issuer = store
             .find_issuer(&id)
@@ -765,6 +786,13 @@ mod tests {
             crate::domain::models::hosted_issuer::HostedIssuerError,
         > {
             unreachable!()
+        }
+
+        async fn all_issuers(
+            &self,
+        ) -> Result<Vec<HostedIssuer>, crate::domain::models::hosted_issuer::HostedIssuerError>
+        {
+            Ok(self.issuers.lock().unwrap().clone())
         }
 
         async fn find_issuer(
@@ -989,7 +1017,7 @@ mod tests {
                 lists: 1,
                 lists_limit: 10,
                 keys: 1,
-                keys_limit: Some(2),
+                keys_limit: 2,
             },
             persisted_version: Some(1),
         };
@@ -1197,6 +1225,11 @@ mod tests {
         assert_eq!(page.issuers[0].aggregation_id, aggregation_id.to_string());
         assert_eq!(page.issuers[0].keys[0].kid, "key-a");
         assert_eq!(page.issuers[0].usage.lists, 0);
+        assert_eq!(page.issuers[0].usage.keys, 1);
+        assert_eq!(
+            page.issuers[0].usage.keys_limit,
+            state.tiers.standard.max_keys as u64
+        );
         assert!(page.next_cursor.is_none());
 
         let (headers, Json(detail)) =
@@ -1297,6 +1330,20 @@ mod tests {
         assert_eq!(body["state"], "expired");
         assert_eq!(body["usage"]["lists"], 1);
         assert_eq!(body["usage"]["keys"], 1);
-        assert!(body["usage"]["keys_limit"].is_null());
+        assert_eq!(body["usage"]["keys_limit"], state.tiers.sandbox.max_keys);
+
+        // A key past `not_after` frees its slot, as in the store's quota check.
+        let ended = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+        let mut expired_key = keys.lock().unwrap()[0].clone();
+        expired_key.kid = "ended-key".into();
+        expired_key.not_after = Some(ended);
+        keys.lock().unwrap().push(expired_key);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(detail_response(app, uri).await.into_body(), 16384)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["usage"]["keys"], 1);
     }
 }

@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use crate::domain::models::credential::{
     AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
 };
+use crate::domain::models::tier::IssuerTier;
 
 /// Lifecycle of a hosted issuer row. Stored as a string in `issuers.state`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +161,13 @@ impl HostedIssuerKeyState {
 }
 
 impl HostedIssuerKey {
+    /// Whether the key holds one of its issuer's `max_keys` slots at `now`.
+    /// Like a registry key, it counts until `not_after` passes; a reserved or
+    /// revoked key never authenticates, so it counts against nothing.
+    pub fn counts_against_quota(&self, now: OffsetDateTime) -> bool {
+        self.state == HostedIssuerKeyState::Active && self.not_after.is_none_or(|end| now < end)
+    }
+
     /// Whether the key is inside its validity window at `now`.
     pub fn is_currently_valid(&self, now: OffsetDateTime) -> bool {
         self.state == HostedIssuerKeyState::Active
@@ -187,6 +195,9 @@ pub enum HostedIssuerError {
     /// the owner is logged server-side, never returned to the caller.
     #[error("key material was already registered by another issuer")]
     KeyMaterialReused,
+    /// The issuer already holds its tier's `max_keys` keys.
+    #[error("the issuer already holds its tier's maximum of {max_keys} keys")]
+    KeyQuotaExceeded { max_keys: usize },
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
     #[error("invalid expiry: {0}")]
@@ -236,6 +247,7 @@ impl HostedIssuerKeyEntry {
             principal: Principal::Issuer {
                 id: self.issuer.id.clone(),
                 aggregation_id: self.issuer.aggregation_id,
+                tier: IssuerTier::from_name_or_strictest(&self.issuer.tier),
             },
             public_key: Arc::new(self.key.jwk.clone()),
             enabled: true,
@@ -378,6 +390,28 @@ mod tests {
     }
 
     #[test]
+    fn resolved_principal_carries_the_stored_tier_or_the_strictest() {
+        for (stored, expected) in [
+            ("standard", IssuerTier::Standard),
+            ("sandbox", IssuerTier::Sandbox),
+            ("premium", IssuerTier::Sandbox),
+            ("", IssuerTier::Sandbox),
+        ] {
+            let mut entry = entry_with(
+                HostedIssuerState::Active,
+                None,
+                HostedIssuerKeyState::Active,
+                (None, None),
+            );
+            entry.issuer.tier = stored.into();
+            match entry.resolved_key(now()).unwrap().principal {
+                Principal::Issuer { tier, .. } => assert_eq!(tier, expected, "{stored:?}"),
+                Principal::Admin { .. } => panic!("hosted issuer must resolve as an issuer"),
+            }
+        }
+    }
+
+    #[test]
     fn active_entry_resolves_an_issuer_principal() {
         let aggregation_id = AggregationId::generate();
         let mut entry = entry_with(
@@ -392,6 +426,7 @@ mod tests {
             Principal::Issuer {
                 id,
                 aggregation_id: agg,
+                ..
             } => {
                 assert_eq!(id, &entry.issuer.id);
                 assert_eq!(*agg, aggregation_id);

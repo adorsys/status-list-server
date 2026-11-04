@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    sea_query::Expr,
+    ColumnTrait, Condition, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, sea_query::Expr,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
     HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
 };
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
 use crate::utils::metrics_db::time_query;
 
@@ -41,19 +42,29 @@ pub(crate) enum HostedIssuerRow {}
 #[derive(Clone)]
 pub struct SqlHostedIssuerStore {
     store: SeaOrmStore<HostedIssuerRow>,
+    key_limits: Option<Arc<Tiers>>,
 }
 
 impl SqlHostedIssuerStore {
     pub fn new(db: Arc<sea_orm::DatabaseConnection>) -> Self {
         Self {
             store: SeaOrmStore::new(db),
+            key_limits: None,
         }
     }
 
     pub fn from_handle(db: Arc<SwappableDatabaseConnection>) -> Self {
         Self {
             store: SeaOrmStore::from_handle(db),
+            key_limits: None,
         }
+    }
+
+    /// Refuse a key that would take an issuer past its stored tier's
+    /// `max_keys`, as the registry does for its own issuers.
+    pub fn with_key_limits(mut self, tiers: Arc<Tiers>) -> Self {
+        self.key_limits = Some(tiers);
+        self
     }
 }
 
@@ -114,6 +125,7 @@ fn parse_issuer(row: issuers::Model) -> Result<HostedIssuer, RepositoryError> {
     let state = match row.state.as_str() {
         value if value == HostedIssuerState::Active.as_str() => HostedIssuerState::Active,
         value if value == HostedIssuerState::Suspended.as_str() => HostedIssuerState::Suspended,
+        "disabled" => HostedIssuerState::Suspended,
         other => {
             return Err(RepositoryError::DataError(format!(
                 "hosted issuer `{}` has unknown state `{other}`",
@@ -358,14 +370,11 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
-    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), RepositoryError> {
-        self.add_key_if_version(key, None, actor).await
-    }
-
     async fn add_key_if_version(
         &self,
         key: HostedIssuerKey,
         expected_version: Option<u64>,
+        key_limits: Option<&Tiers>,
         actor: &str,
     ) -> Result<(), RepositoryError> {
         // The `kid` column is authoritative (the registry keeps the same
@@ -409,6 +418,34 @@ impl SeaOrmStore<HostedIssuerRow> {
                 txn.rollback().await.ok();
                 return Err(RepositoryError::VersionMismatch);
             }
+            let locked = issuers::Entity::update_many()
+                .col_expr(
+                    issuers::Column::Version,
+                    sea_orm::sea_query::ExprTrait::add(Expr::col(issuers::Column::Version), 1),
+                )
+                .filter(issuers::Column::Issuer.eq(&key.issuer_id))
+                .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+                .filter(issuers::Column::Version.eq(issuer.version))
+                .exec(&txn)
+                .await;
+            match locked {
+                Ok(result) if result.rows_affected > 0 => {}
+                Ok(_) => {
+                    txn.rollback().await.ok();
+                    return Err(RepositoryError::VersionMismatch);
+                }
+                Err(err) => {
+                    return Err(classify_after_rollback(txn, err, "issuer key lock").await);
+                }
+            }
+            let now = OffsetDateTime::now_utc();
+            if let Some(tiers) = key_limits
+                && key.counts_against_quota(now)
+                && let Err(err) = check_key_quota(&txn, &key.issuer_id, tiers, now).await
+            {
+                txn.rollback().await.ok();
+                return Err(err);
+            }
             let insert = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
                 kid: Set(key.kid.clone()),
                 issuer_id: Set(key.issuer_id.clone()),
@@ -434,23 +471,6 @@ impl SeaOrmStore<HostedIssuerRow> {
                     )
                     .await
                     .map_err(err_txn)?;
-                    if let Some(expected) = expected_version {
-                        let next_version = issuer.version.checked_add(1).ok_or_else(|| {
-                            RepositoryError::UpdateError("issuer version overflow".into())
-                        })?;
-                        let changed = issuers::Entity::update_many()
-                            .col_expr(issuers::Column::Version, Expr::value(next_version))
-                            .filter(issuers::Column::Issuer.eq(&key.issuer_id))
-                            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-                            .filter(issuers::Column::Version.eq(expected as i64))
-                            .exec(&txn)
-                            .await
-                            .map_err(err_txn)?;
-                        if changed.rows_affected != 1 {
-                            txn.rollback().await.ok();
-                            return Err(RepositoryError::VersionMismatch);
-                        }
-                    }
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
                 }
@@ -513,6 +533,32 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, RepositoryError> {
+        time_query("find_all", "hosted_issuer", async {
+            let rows = issuers::Entity::find()
+                .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+                .all(self.current().as_ref())
+                .await
+                .map_err(find_err)?;
+            // Quarantined like `all_keys`: one malformed row must not hide
+            // every other issuer from the scan.
+            let mut hosted = Vec::with_capacity(rows.len());
+            for row in rows {
+                match parse_issuer(row) {
+                    Ok(issuer) => hosted.push(issuer),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "skipping a hosted issuer row that no longer parses"
+                        );
+                    }
+                }
+            }
+            Ok(hosted)
+        })
+        .await
+    }
+
     async fn find_entry_by_kid(
         &self,
         kid: &str,
@@ -554,12 +600,52 @@ impl SeaOrmStore<HostedIssuerRow> {
     }
 }
 
-/// Only the typed material-reuse and invalid-key variants from `add_key` are
-/// recoverable here; everything else keeps the shared mapping.
+/// Fails with `KeyQuotaExceeded` when `issuer_id` already holds its stored
+/// tier's `max_keys` keys that count against the quota at `now`. An unknown
+/// tier name gets the strictest tier, as when the issuer authenticates.
+async fn check_key_quota(
+    txn: &sea_orm::DatabaseTransaction,
+    issuer_id: &str,
+    tiers: &Tiers,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let tier = issuers::Entity::find_by_id(issuer_id)
+        .select_only()
+        .column(issuers::Column::Tier)
+        .into_tuple::<String>()
+        .one(txn)
+        .await
+        .map_err(find_err)?
+        .ok_or(RepositoryError::NotFound)?;
+    let max_keys = tiers
+        .get(IssuerTier::from_name_or_strictest(&tier))
+        .max_keys;
+    let held = hosted_issuer_keys::Entity::find()
+        .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+        .filter(hosted_issuer_keys::Column::State.eq(HostedIssuerKeyState::Active.as_str()))
+        .filter(
+            Condition::any()
+                .add(hosted_issuer_keys::Column::NotAfter.is_null())
+                .add(hosted_issuer_keys::Column::NotAfter.gt(now.unix_timestamp())),
+        )
+        .count(txn)
+        .await
+        .map_err(find_err)?;
+    if usize::try_from(held).unwrap_or(usize::MAX) >= max_keys {
+        return Err(RepositoryError::KeyQuotaExceeded { max_keys });
+    }
+    Ok(())
+}
+
+/// Only the typed material-reuse, key-quota and invalid-key variants from
+/// `add_key` are recoverable here; everything else keeps the shared mapping.
 fn hosted_error(err: RepositoryError) -> HostedIssuerError {
     match &err {
         RepositoryError::KeyMaterialReused => HostedIssuerError::KeyMaterialReused,
         RepositoryError::VersionMismatch => HostedIssuerError::VersionMismatch,
+        RepositoryError::KeyQuotaExceeded { max_keys } => HostedIssuerError::KeyQuotaExceeded {
+            max_keys: *max_keys,
+        },
         RepositoryError::InvalidKey(message) => {
             HostedIssuerError::InvalidPublicJwk(message.clone())
         }
@@ -633,9 +719,11 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .add(issuers::Column::ExpiresAt.is_null())
             .add(issuers::Column::ExpiresAt.gt(now.unix_timestamp()));
         query = match filters.state {
-            Some(HostedIssuerReadState::Suspended) => {
-                query.filter(issuers::Column::State.eq(HostedIssuerState::Suspended.as_str()))
-            }
+            Some(HostedIssuerReadState::Suspended) => query.filter(
+                Condition::any()
+                    .add(issuers::Column::State.eq(HostedIssuerState::Suspended.as_str()))
+                    .add(issuers::Column::State.eq("disabled")),
+            ),
             Some(HostedIssuerReadState::Expired) => query
                 .filter(issuers::Column::State.eq(HostedIssuerState::Active.as_str()))
                 .filter(issuers::Column::ExpiresAt.lte(now.unix_timestamp())),
@@ -719,7 +807,10 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
     }
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {
-        self.store.add_key(key, actor).await.map_err(hosted_error)
+        self.store
+            .add_key_if_version(key, None, self.key_limits.as_deref(), actor)
+            .await
+            .map_err(hosted_error)
     }
 
     async fn add_key_if_version(
@@ -729,13 +820,22 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         actor: &str,
     ) -> Result<(), HostedIssuerError> {
         self.store
-            .add_key_if_version(key, Some(expected_version), actor)
+            .add_key_if_version(
+                key,
+                Some(expected_version),
+                self.key_limits.as_deref(),
+                actor,
+            )
             .await
             .map_err(hosted_error)
     }
 
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
         self.store.all_keys().await.map_err(Into::into)
+    }
+
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        self.store.all_issuers().await.map_err(Into::into)
     }
 
     async fn find_key_by_material(

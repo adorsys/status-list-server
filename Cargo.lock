@@ -6070,6 +6070,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "instant-acme",
+ "ipnet",
  "jsonschema",
  "jsonwebtoken 11.1.0",
  "metrics-process",

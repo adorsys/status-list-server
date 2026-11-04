@@ -74,7 +74,8 @@ fn fixture_config() -> Config {
         "admin_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": ["status-list-server-admin"]},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
             "permissive_burst_size": 100, "permissive_period_secs": 60,
-            "admin_burst_size": 30, "admin_period_secs": 60},
+            "admin_burst_size": 30, "admin_period_secs": 60,
+            "admission_burst_size": 1000, "admission_per_second": 100},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
             "max_statuses_per_request": 5000, "max_serialized_list_size": 1048576,
             "max_lists_per_issuer": 1000, "list_quota_transition": false},
@@ -107,6 +108,7 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(registry_yaml)
             .unwrap(),
     );
+    let tiers = Arc::new(config.tier_limits().unwrap());
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -126,10 +128,11 @@ fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
         aggregation_withheld_from: Default::default(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter: Arc::new(
+            status_list_server::server::rate_limit::IssuerRateLimiter::new(&tiers),
+        ),
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
         admin_auth: (&config.admin_auth).into(),

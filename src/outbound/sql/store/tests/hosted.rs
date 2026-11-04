@@ -12,7 +12,7 @@ use crate::domain::models::hosted_issuer::{
 };
 #[cfg(feature = "sqlite")]
 use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
-use crate::domain::ports::HostedIssuerStore;
+use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
 
@@ -248,6 +248,63 @@ async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
     assert_eq!(
         keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
         ["newer-key", "older-key", "same-time-key"]
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_legacy_disabled_issuer_can_be_read_and_resumed() {
+    use crate::outbound::sql::models::issuers;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000015");
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    issuers::Entity::update_many()
+        .col_expr(
+            issuers::Column::State,
+            sea_orm::sea_query::Expr::value("disabled"),
+        )
+        .filter(issuers::Column::Issuer.eq(&hosted.id))
+        .exec(&*db)
+        .await
+        .unwrap();
+
+    let found = store.get_issuer(&hosted.id).await.unwrap();
+    assert_eq!(found.state, HostedIssuerState::Suspended);
+    let listed = store
+        .list_issuers_after(
+            None,
+            10,
+            &HostedIssuerFilter {
+                state: Some(HostedIssuerReadState::Suspended),
+                ..Default::default()
+            },
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, hosted.id);
+
+    let resumed = store
+        .set_issuer_state(
+            &hosted.id,
+            HostedIssuerState::Active,
+            found.version,
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.state, HostedIssuerState::Active);
+    assert_eq!(resumed.version, found.version + 1);
+    assert_eq!(
+        store.get_issuer(&hosted.id).await.unwrap().state,
+        HostedIssuerState::Active
     );
 }
 
@@ -542,6 +599,82 @@ async fn test_sqlite_stored_alg_is_the_jose_name() {
     );
 }
 
+/// A key with freshly generated material, for tests that need more distinct
+/// keys than the fixtures provide.
+#[cfg(feature = "sqlite")]
+fn fresh_key(issuer_id: &str, kid: &str) -> HostedIssuerKey {
+    let signing =
+        crate::crypto::SigningKey::generate(crate::crypto::SigningAlgorithm::Es256).unwrap();
+    let secret =
+        jsonwebtoken::EncodingKey::from_ec_pem(signing.to_pkcs8_pem().unwrap().as_bytes()).unwrap();
+    let jwk =
+        jsonwebtoken::jwk::Jwk::from_encoding_key(&secret, jsonwebtoken::Algorithm::ES256).unwrap();
+    key_with_material(issuer_id, kid, &serde_json::to_string(&jwk).unwrap())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_add_key_enforces_the_stored_tiers_key_limit() {
+    let mut tiers = crate::test_utils::test_tiers();
+    tiers.sandbox.max_keys = 2;
+    tiers.standard.max_keys = 3;
+    let store = sqlite_store()
+        .await
+        .with_key_limits(std::sync::Arc::new(tiers));
+    let mut sandbox = issuer("00000000-0000-4000-8000-000000000101");
+    sandbox.tier = "sandbox".into();
+    let standard = issuer("00000000-0000-4000-8000-000000000102");
+    for hosted in [&sandbox, &standard] {
+        store
+            .create_issuer(hosted.clone(), "test-admin")
+            .await
+            .unwrap();
+    }
+
+    // Keys that can no longer authenticate do not hold a slot.
+    let mut revoked = fresh_key(&sandbox.id, "sandbox-revoked");
+    revoked.state = HostedIssuerKeyState::Revoked;
+    store.add_key(revoked, "test-admin").await.unwrap();
+    let mut ended = fresh_key(&sandbox.id, "sandbox-ended");
+    ended.not_after = Some(OffsetDateTime::now_utc() - time::Duration::days(1));
+    store.add_key(ended, "test-admin").await.unwrap();
+    for kid in ["sandbox-1", "sandbox-2"] {
+        store
+            .add_key(fresh_key(&sandbox.id, kid), "test-admin")
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        matches!(
+            store
+                .add_key(fresh_key(&sandbox.id, "sandbox-3"), "test-admin")
+                .await,
+            Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 2 })
+        ),
+        "a sandbox issuer at its key limit must be refused"
+    );
+    assert!(store.find_key_by_kid("sandbox-3").await.unwrap().is_none());
+    // A key that would not hold a slot is still accepted at the limit.
+    let mut reserved = fresh_key(&sandbox.id, "sandbox-reserved");
+    reserved.state = HostedIssuerKeyState::Reserved;
+    store.add_key(reserved, "test-admin").await.unwrap();
+
+    // The standard issuer is unaffected and gets its own tier's limit.
+    for kid in ["standard-1", "standard-2", "standard-3"] {
+        store
+            .add_key(fresh_key(&standard.id, kid), "test-admin")
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        store
+            .add_key(fresh_key(&standard.id, "standard-4"), "test-admin")
+            .await,
+        Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 3 })
+    ));
+}
+
 #[cfg(feature = "sqlite")]
 async fn sqlite_store() -> SqlHostedIssuerStore {
     // One store per helper: each helper seeds its own namespace rather than
@@ -612,6 +745,7 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
         .unwrap();
     let signing_key = key(&issuer.id, "lifecycle-key");
     first.add_key(signing_key, "portal-operator").await.unwrap();
+    let observed_version = first.get_issuer(&issuer.id).await.unwrap().version;
     let first_resolver =
         CompositeIssuerKeyResolver::new(Arc::new(RegistryHandle::empty()), Some(first.clone()));
     let second_resolver =
@@ -623,7 +757,7 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
         .set_issuer_state(
             &issuer.id,
             HostedIssuerState::Suspended,
-            issuer.version,
+            observed_version,
             "portal-admin",
         )
         .await
@@ -633,7 +767,7 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
             .set_issuer_state(
                 &issuer.id,
                 HostedIssuerState::Active,
-                issuer.version,
+                observed_version,
                 "portal-admin",
             )
             .await,
@@ -647,7 +781,7 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
             .set_issuer_state(
                 &issuer.id,
                 HostedIssuerState::Suspended,
-                issuer.version,
+                observed_version,
                 "portal-admin",
             )
             .await,
@@ -738,19 +872,22 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
                     Some("active") => {
                         assert_eq!(
                             before,
-                            &serde_json::json!({"state": "active", "version": 1})
+                            &serde_json::json!({"state": "active", "version": observed_version})
                         );
                         assert_eq!(
                             after,
-                            &serde_json::json!({"state": "suspended", "version": 2})
+                            &serde_json::json!({"state": "suspended", "version": observed_version + 1})
                         );
                     }
                     Some("suspended") => {
                         assert_eq!(
                             before,
-                            &serde_json::json!({"state": "suspended", "version": 2})
+                            &serde_json::json!({"state": "suspended", "version": observed_version + 1})
                         );
-                        assert_eq!(after, &serde_json::json!({"state": "active", "version": 3}));
+                        assert_eq!(
+                            after,
+                            &serde_json::json!({"state": "active", "version": observed_version + 2})
+                        );
                     }
                     other => panic!("unexpected state change from `{other:?}`"),
                 }
