@@ -73,12 +73,13 @@ Override the `nginx.ingress.kubernetes.io/limit-rps` and
 `nginx.ingress.kubernetes.io/limit-burst-multiplier` annotations on each ingress.
 Ingress limits are per controller replica and multiply when controllers scale;
 they are not a distributed cluster-wide quota. A shared global budget requires
-an upstream gateway with shared state. The app's public-read limiter still keys
-on the controller pod's TCP address. This overlay raises its shared bucket to a
+an upstream gateway with shared state. The app's public-read limiter keys on
+the controller pod's TCP address. This overlay raises its shared bucket to a
 100,000,000-request burst with one token refilled per second, so the edge's
-per-client 100 requests/second limit applies under normal sandbox load. That
-bucket is still shared by all clients reaching one controller pod and can
-eventually drain; #540 tracks per-client keying and budget semantics in the app.
+per-client 100 requests/second limit is the one clients hit. All clients reaching
+one controller pod share that bucket, so sustained traffic can eventually drain
+it. The admin API limiter reads the same settings, so its per-peer limit is
+lifted too; the NetworkPolicy and admin authentication bound that listener.
 The management authentication and admission gates use the client address from
 the controller's overwritten `X-Forwarded-For` only when
 `APP_RATE_LIMIT__TRUSTED_PROXIES` lists the controller pods' addresses or CIDR.
