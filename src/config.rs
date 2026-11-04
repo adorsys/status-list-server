@@ -3226,6 +3226,10 @@ mod tests {
                 "management_auth.issuers_file",
                 "/etc/status-list-server/issuers.yaml",
             ));
+            overrides.push((
+                "management_auth.revocation_history_file",
+                "/var/lib/status-list-server/revocations.json",
+            ));
         }
         Config::load_from_overrides(&overrides).map(|config| {
             config
