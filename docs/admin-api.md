@@ -70,6 +70,8 @@ passed, including keys staged for rotation. `keys_limit` is the tier's
 
 The detail ETag identifies the complete JSON representation for either source.
 It changes when returned keys, usage, metadata, or derived expiry state change.
+
+`PATCH /admin/v1/issuers/{issuer_id}` accepts either `{"state":"suspended"}` or `{"state":"active"}`, or `{"expires_at":<unix-seconds>}` to renew a hosted issuer. The renewed expiry must be later than now and no more than 30 days ahead; otherwise the API returns `422 invalid_expiry`. Renewal makes an expired active issuer usable again. A suspended issuer remains suspended until separately resumed. A body containing both fields returns `400 invalid_input`. Each successful renewal increments the issuer version and records an audit event in the same database transaction.
 `Issuer-Version` separately covers writable issuer metadata, lifecycle, and
 key ID/state/validity windows. Future mutation endpoints use it through
 `If-Issuer-Version`, so ordinary list publishes do not invalidate writes. The

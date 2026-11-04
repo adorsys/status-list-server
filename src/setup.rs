@@ -412,7 +412,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let issuer_registry = Arc::new(
         match config.management_auth.issuers_file.as_deref() {
             Some(path) if !path.is_empty() => {
-                crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+                let registry = crate::server::auth::issuer_registry::RegistryHandle::load(path)?;
+                match config.management_auth.revocation_history_file.as_deref() {
+                    Some(history_path) if !history_path.is_empty() => {
+                        registry.with_revocation_history(std::path::PathBuf::from(history_path))?
+                    }
+                    _ => registry,
+                }
             }
             _ => {
                 tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");

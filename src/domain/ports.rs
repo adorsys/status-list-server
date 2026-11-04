@@ -126,6 +126,14 @@ pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;
 
+    async fn renew_issuer(
+        &self,
+        issuer_id: &str,
+        expires_at: time::OffsetDateTime,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
     async fn revoke_key(
         &self,
         issuer_id: &str,

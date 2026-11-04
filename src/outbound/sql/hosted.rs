@@ -981,6 +981,75 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         })
     }
 
+    async fn renew_issuer(
+        &self,
+        issuer_id: &str,
+        expires_at: OffsetDateTime,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        let row = issuers::Entity::find_by_id(issuer_id)
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .one(&txn)
+            .await
+            .map_err(err_txn)?
+            .ok_or(HostedIssuerError::NotFound)?;
+        let previous = parse_issuer(row.clone())?;
+        if previous.version != expected_version {
+            rollback_quietly(txn).await;
+            return Err(HostedIssuerError::VersionMismatch);
+        }
+        let Some(next_version) = row.version.checked_add(1) else {
+            rollback_quietly(txn).await;
+            return Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                "issuer version overflow",
+            ))));
+        };
+        let changed = issuers::Entity::update_many()
+            .col_expr(
+                issuers::Column::ExpiresAt,
+                Expr::value(expires_at.unix_timestamp()),
+            )
+            .col_expr(issuers::Column::Version, Expr::value(next_version))
+            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .filter(issuers::Column::Version.eq(expected_version as i64))
+            .exec(&txn)
+            .await;
+        match changed {
+            Ok(changed) if changed.rows_affected == 1 => {}
+            Ok(_) => {
+                rollback_quietly(txn).await;
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            Err(e) => {
+                rollback_quietly(txn).await;
+                return Err(err_txn(e).into());
+            }
+        }
+        if let Err(e) = append_lifecycle_audit(
+            &txn,
+            issuer_id,
+            actor,
+            "issuer.renewed",
+            Some(serde_json::json!({"expires_at": row.expires_at, "version": row.version})),
+            Some(serde_json::json!({"expires_at": expires_at.unix_timestamp(), "version": next_version})),
+        )
+        .await
+        {
+            rollback_quietly(txn).await;
+            return Err(err_txn(e).into());
+        }
+        txn.commit().await.map_err(err_txn)?;
+        Ok(HostedIssuer {
+            expires_at: Some(expires_at),
+            version: next_version as u64,
+            ..previous
+        })
+    }
+
     async fn revoke_key(
         &self,
         issuer_id: &str,

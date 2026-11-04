@@ -1862,6 +1862,15 @@ mod tests {
             ) -> Result<HostedIssuer, HostedIssuerError> {
                 unreachable!("mounting tests never invoke the store")
             }
+            async fn renew_issuer(
+                &self,
+                _issuer_id: &str,
+                _expires_at: time::OffsetDateTime,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
             async fn revoke_key(
                 &self,
                 _issuer_id: &str,

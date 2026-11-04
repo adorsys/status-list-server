@@ -804,11 +804,69 @@
                   "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
                   "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
                   "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
+                  "pm.collectionVariables.set(\"issuerEtag\", pm.response.headers.get(\"ETag\"));",
                   "pm.test(\"Key usage reports the tier's key limit\", () => { const usage = pm.response.json().usage; pm.expect(Number.isInteger(usage.keys_limit), \"keys_limit is an integer\").to.be.true; pm.expect(usage.keys_limit).to.be.at.least(1); pm.expect(Number.isInteger(usage.keys), \"keys is an integer\").to.be.true; pm.expect(usage.keys).to.be.at.least(0); });"
                 ]
               }
             }
           ]
+        },
+        {
+          "name": "Manual: renew hosted issuer",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get(\"runRenewal\") !== \"true\") pm.execution.skipRequest();"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Renewal succeeds\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuerEtag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"expires_at\": {{renewalExpiry}}}"
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": ["{{adminUrl}}"],
+              "path": ["admin", "v1", "issuers", "{{issuer_id}}"]
+            },
+            "description": "Manual hosted-profile write. Run Get issuer first, set renewalExpiry to a Unix timestamp after now and within 30 days, then set runRenewal=true."
+          },
+          "response": []
         }
       ]
     }
@@ -845,6 +903,18 @@
     {
       "key": "adminToken",
       "value": ""
+    },
+    {
+      "key": "issuerEtag",
+      "value": ""
+    },
+    {
+      "key": "renewalExpiry",
+      "value": ""
+    },
+    {
+      "key": "runRenewal",
+      "value": "false"
     }
   ]
 }

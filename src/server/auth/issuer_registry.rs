@@ -57,7 +57,7 @@ pub struct IssuerRegistry {
     pub admins: Vec<AdminEntry>,
     /// Public key records retained after a static key is removed. They are
     /// never trusted for authentication, but reserve the key id and material
-    /// while the tombstone remains in the operator-managed file.
+    /// in the durable history when that history is configured.
     #[serde(default)]
     pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
@@ -112,6 +112,7 @@ pub struct RegistryHandle {
     path: PathBuf,
     active: ArcSwap<ValidatedRegistry>,
     aggregation_history: Mutex<AggregationHistory>,
+    revocation_history: Mutex<Option<RevocationHistory>>,
     reload_failures: AtomicU64,
     write_lock: tokio::sync::Mutex<()>,
     /// Tier key limits every candidate must respect before it is activated.
@@ -122,6 +123,94 @@ pub struct RegistryHandle {
 struct AggregationHistory {
     by_issuer: HashMap<String, AggregationId>,
     by_id: HashMap<AggregationId, String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RevocationHistory {
+    kids: HashSet<String>,
+    materials: HashSet<String>,
+    #[serde(skip)]
+    path: Option<PathBuf>,
+}
+
+impl RevocationHistory {
+    fn locked_load(path: &Path) -> Result<(std::fs::File, Self), RegistryError> {
+        let lock_path = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .and_then(|file| {
+                file.lock()?;
+                Ok(file)
+            })
+            .map_err(|source| RegistryError::Read {
+                path: lock_path,
+                source,
+            })?;
+        let mut history: Self = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| RegistryError::Schema(error.to_string()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(source) => {
+                return Err(RegistryError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        history.path = Some(path.to_path_buf());
+        Ok((lock, history))
+    }
+
+    fn record(&mut self, registry: &ValidatedRegistry) -> Result<(), RegistryError> {
+        for key in &registry.registry.revoked_keys {
+            self.kids.insert(key.kid.clone());
+            self.materials.insert(canonical_public_material(&key.jwk)?);
+        }
+        Ok(())
+    }
+
+    fn validate(&self, registry: &ValidatedRegistry) -> Result<(), RegistryError> {
+        for (_, kid, material) in registry.all_principal_keys() {
+            if self.kids.contains(kid) || self.materials.contains(&material) {
+                return Err(RegistryError::Semantic(format!(
+                    "key `{kid}` was previously revoked"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn persist(&self) -> Result<(), RegistryError> {
+        let path = self.path.as_ref().expect("configured history path");
+        let bytes = serde_json::to_vec(self).map_err(|e| RegistryError::Schema(e.to_string()))?;
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&temporary, bytes).map_err(|source| RegistryError::Read {
+            path: temporary.clone(),
+            source,
+        })?;
+        std::fs::File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| RegistryError::Read {
+                path: temporary.clone(),
+                source,
+            })?;
+        std::fs::rename(&temporary, path).map_err(|source| RegistryError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| RegistryError::Read {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
 }
 
 /// File-backed implementation name used in the issue and operational docs.
@@ -156,6 +245,7 @@ impl RegistryHandle {
                 by_issuer: registry.issuer_aggregations.clone(),
                 by_id: registry.aggregation_issuers.clone(),
             }),
+            revocation_history: Mutex::new(None),
             reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
             write_lock: tokio::sync::Mutex::new(()),
@@ -172,6 +262,15 @@ impl RegistryHandle {
     pub fn with_key_limits(mut self, tiers: Arc<Tiers>) -> Self {
         self.key_limits = Some(tiers);
         self
+    }
+
+    pub fn with_revocation_history(self, path: PathBuf) -> Result<Self, RegistryError> {
+        let (_lock, mut history) = RevocationHistory::locked_load(&path)?;
+        history.validate(&self.snapshot())?;
+        history.record(&self.snapshot())?;
+        history.persist()?;
+        *self.revocation_history.lock().unwrap() = Some(history);
+        Ok(self)
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
@@ -204,6 +303,14 @@ impl RegistryHandle {
     pub fn replace(&self, registry: ValidatedRegistry) -> Result<(), RegistryError> {
         let registry = Arc::new(registry);
         self.validate_candidate(&registry)?;
+        if let Some(history) = self.revocation_history.lock().unwrap().as_mut() {
+            let path = history.path.as_ref().expect("configured history path");
+            let (_lock, mut latest) = RevocationHistory::locked_load(path)?;
+            latest.validate(&registry)?;
+            latest.record(&registry)?;
+            latest.persist()?;
+            *history = latest;
+        }
         let mut history = self
             .aggregation_history
             .lock()
@@ -218,6 +325,11 @@ impl RegistryHandle {
 
     /// Check immutable aggregation history before making external adoption writes.
     pub fn validate_candidate(&self, registry: &ValidatedRegistry) -> Result<(), RegistryError> {
+        if let Some(history) = self.revocation_history.lock().unwrap().as_ref() {
+            let path = history.path.as_ref().expect("configured history path");
+            let (_lock, latest) = RevocationHistory::locked_load(path)?;
+            latest.validate(registry)?;
+        }
         let history = self
             .aggregation_history
             .lock()
@@ -958,6 +1070,56 @@ mod tests {
         let error = IssuerRegistry::from_yaml(&serde_saphyr::to_string(&reuses_material).unwrap())
             .unwrap_err();
         assert!(error.to_string().contains("key material is reused"));
+    }
+
+    #[test]
+    fn durable_revocation_rejects_rollback_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry_path = directory.path().join("issuers.yaml");
+        let history_path = directory.path().join("revocations.json");
+        std::fs::write(&registry_path, VALID).unwrap();
+        let handle = RegistryHandle::load(&registry_path)
+            .unwrap()
+            .with_revocation_history(history_path.clone())
+            .unwrap();
+        let other_replica = RegistryHandle::load(&registry_path)
+            .unwrap()
+            .with_revocation_history(history_path.clone())
+            .unwrap();
+        let mut document: Value = serde_saphyr::from_str(VALID).unwrap();
+        let revoked = document["issuers"][0]["keys"][0].take();
+        document["issuers"][0]["keys"] =
+            serde_json::json!([document["issuers"][0]["keys"][1].take()]);
+        document["revoked_keys"] = serde_json::json!([revoked]);
+        std::fs::write(&registry_path, serde_saphyr::to_string(&document).unwrap()).unwrap();
+        handle.reload().unwrap();
+        std::fs::write(&registry_path, VALID).unwrap();
+        assert!(handle.reload().is_err());
+        assert!(other_replica.reload().is_err());
+        assert!(
+            RegistryHandle::load(&registry_path)
+                .unwrap()
+                .with_revocation_history(history_path.clone())
+                .is_err()
+        );
+
+        let mut renamed: Value = serde_saphyr::from_str(VALID).unwrap();
+        renamed["issuers"][0]["keys"][0]["kid"] = Value::String("renamed-revoked-key".into());
+        std::fs::write(&registry_path, serde_saphyr::to_string(&renamed).unwrap()).unwrap();
+        assert!(
+            RegistryHandle::load(&registry_path)
+                .unwrap()
+                .with_revocation_history(history_path.clone())
+                .is_err()
+        );
+
+        std::fs::write(&history_path, b"invalid json").unwrap();
+        assert!(
+            RegistryHandle::load(&registry_path)
+                .unwrap()
+                .with_revocation_history(history_path)
+                .is_err()
+        );
     }
 
     #[test]

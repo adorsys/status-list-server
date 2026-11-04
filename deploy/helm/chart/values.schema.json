@@ -491,6 +491,15 @@
           },
           "additionalProperties": false
         },
+        "revocationHistory": {
+          "type": "object",
+          "title": "Durable static key revocation history",
+          "properties": {
+            "path": { "type": "string", "pattern": "^/var/lib/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$" },
+            "volume": { "type": "object", "description": "Persistent writable volume source, such as a persistentVolumeClaim. Required in production." }
+          },
+          "additionalProperties": false
+        },
         "livenessProbe": {
           "type": "object",
           "title": "Liveness probe",

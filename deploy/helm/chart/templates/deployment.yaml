@@ -7,6 +7,11 @@
 {{- end }}
 {{- $registryVolume := .Values.statuslist.issuerRegistry.volume | default dict }}
 {{- $registryMounted := gt (len $registryVolume) 0 }}
+{{- $historyVolume := .Values.statuslist.revocationHistory.volume | default dict }}
+{{- $historyMounted := gt (len $historyVolume) 0 }}
+{{- if not (regexMatch "^/var/lib/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$" .Values.statuslist.revocationHistory.path) }}
+{{- fail "statuslist.revocationHistory.path must be a file inside /var/lib/status-list-server" }}
+{{- end }}
 {{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
 {{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
 {{- $audiences := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES | default "")) "" }}
@@ -25,6 +30,9 @@
 {{- end }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}
 {{- fail "statuslist.issuerRegistry.volume is required in production" }}
+{{- end }}
+{{- if and (has $telemetryEnv (list "production" "prod")) (not $historyMounted) }}
+{{- fail "statuslist.revocationHistory.volume is required in production" }}
 {{- end }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
@@ -263,6 +271,12 @@ spec:
               {{- end }}
               {{- $_ := set $env "APP_MANAGEMENT_AUTH__ISSUERS_FILE" .Values.statuslist.issuerRegistry.path }}
             {{- end }}
+            {{- if $historyMounted }}
+              {{- if hasKey $env "APP_MANAGEMENT_AUTH__REVOCATION_HISTORY_FILE" }}
+                {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__REVOCATION_HISTORY_FILE must not override statuslist.revocationHistory.path" }}
+              {{- end }}
+              {{- $_ := set $env "APP_MANAGEMENT_AUTH__REVOCATION_HISTORY_FILE" .Values.statuslist.revocationHistory.path }}
+            {{- end }}
             {{- range $name, $_ := $secretFileEnv }}
               {{- if hasKey $env $name }}
                 {{- fail (printf "statuslist.secretMounts fileEnv defines %s, which duplicates a rendered statuslist environment variable; define each environment variable only once" $name) }}
@@ -342,6 +356,10 @@ spec:
               mountPath: {{ dir .Values.statuslist.issuerRegistry.path | quote }}
               readOnly: true
           {{- end }}
+          {{- if $historyMounted }}
+            - name: revocation-history
+              mountPath: {{ dir .Values.statuslist.revocationHistory.path | quote }}
+          {{- end }}
           {{- if .Values.statuslist.aws.mountCredentials }}
             - name: aws-credentials-volume
               mountPath: /home/nobody/.aws
@@ -358,6 +376,10 @@ spec:
         {{- if $registryMounted }}
         - name: issuer-registry
 {{- toYaml $registryVolume | nindent 10 }}
+        {{- end }}
+        {{- if $historyMounted }}
+        - name: revocation-history
+{{- toYaml $historyVolume | nindent 10 }}
         {{- end }}
       {{- if .Values.statuslist.aws.mountCredentials }}
         - name: aws-credentials-volume

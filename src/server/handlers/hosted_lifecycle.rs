@@ -9,6 +9,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
 };
 use serde::Deserialize;
+use time::OffsetDateTime;
 
 use crate::domain::models::hosted_issuer::NewHostedIssuerKey;
 use crate::domain::models::hosted_issuer::{
@@ -38,15 +39,8 @@ pub enum IssuerStateInput {
 #[derive(Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum UpdateIssuerRequest {
-    State {
-        state: IssuerStateInput,
-    },
-    Renewal {
-        /// Read only to distinguish the oneOf branch; renewal itself is
-        /// rejected below, so the value is never used.
-        #[allow(dead_code)]
-        expires_at: i64,
-    },
+    State { state: IssuerStateInput },
+    Renewal { expires_at: i64 },
 }
 
 /// `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` body: the contract
@@ -203,8 +197,8 @@ fn lifecycle_error(error: HostedIssuerError) -> ApiError {
         HostedIssuerError::NotFound => {
             ApiError::not_found("issuer_not_found", "Hosted issuer or key was not found")
         }
-        HostedIssuerError::InvalidExpiry(_) => {
-            ApiError::unprocessable("invalid_expiry", "An expired issuer cannot be reactivated")
+        HostedIssuerError::InvalidExpiry(message) => {
+            ApiError::unprocessable("invalid_expiry", message)
         }
         HostedIssuerError::Contention { .. } => ApiError::write_contention(),
         HostedIssuerError::Unavailable => service_unavailable(),
@@ -308,23 +302,26 @@ pub async fn update_issuer(
     let (current, current_etag, current_version) =
         load_issuer_for_update(&state, &issuer_id).await?;
     check_if_match(if_match, &current_etag, &current_version)?;
-    let requested = match input {
-        UpdateIssuerRequest::State { state } => match state {
-            IssuerStateInput::Active => HostedIssuerState::Active,
-            IssuerStateInput::Suspended => HostedIssuerState::Suspended,
-        },
-        UpdateIssuerRequest::Renewal { .. } => {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "invalid_input",
-                "expires_at renewal is not supported",
-            ));
+    let result = match input {
+        UpdateIssuerRequest::State { state } => {
+            let requested = match state {
+                IssuerStateInput::Active => HostedIssuerState::Active,
+                IssuerStateInput::Suspended => HostedIssuerState::Suspended,
+            };
+            service
+                .set_issuer_state(&issuer_id, requested, current.version, &admin.id)
+                .await
+        }
+        UpdateIssuerRequest::Renewal { expires_at } => {
+            let expires_at = OffsetDateTime::from_unix_timestamp(expires_at).map_err(|_| {
+                ApiError::unprocessable("invalid_expiry", "invalid expires_at timestamp")
+            })?;
+            service
+                .renew_issuer(&issuer_id, expires_at, current.version, &admin.id)
+                .await
         }
     };
-    match service
-        .set_issuer_state(&issuer_id, requested, current.version, &admin.id)
-        .await
-    {
+    match result {
         Ok(updated) => {
             let dto = hosted_dto(&state, updated).await?;
             let etag = issuer_etag(&dto);
@@ -751,6 +748,26 @@ mod tests {
                 issuer.state = state;
                 issuer.version += 1;
             }
+            Ok(issuer.clone())
+        }
+
+        async fn renew_issuer(
+            &self,
+            id: &str,
+            expires_at: OffsetDateTime,
+            expected_version: u64,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            let mut issuers = self.issuers.lock().unwrap();
+            let issuer = issuers
+                .iter_mut()
+                .find(|issuer| issuer.id == id)
+                .ok_or(HostedIssuerError::NotFound)?;
+            if issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            issuer.expires_at = Some(expires_at);
+            issuer.version += 1;
             Ok(issuer.clone())
         }
 
@@ -1294,6 +1311,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renewal_restores_expired_issuer_but_preserves_suspension() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        let expired = issuer(
+            "portal-issuer",
+            Some(service_now() - time::Duration::days(1)),
+        );
+        app.store.insert_issuer(expired);
+        let token = write_token();
+        let expiry = (service_now() + time::Duration::days(1)).unix_timestamp();
+        let body = format!(r#"{{"expires_at":{expiry}}}"#);
+        let response = app
+            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data = body_json(response).await;
+        assert_eq!(data["state"], "active");
+        assert_eq!(app.store.issuer("portal-issuer").unwrap().version, 2);
+
+        app.store.issuers.lock().unwrap()[0].state = HostedIssuerState::Suspended;
+        let response = app
+            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["state"], "suspended");
+
+        let too_late = (service_now() + time::Duration::days(31)).unix_timestamp();
+        let response = app
+            .patch(
+                "/admin/v1/issuers/portal-issuer",
+                &token,
+                Some("*"),
+                &format!(r#"{{"expires_at":{too_late}}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(response).await["error"], "invalid_expiry");
+    }
+
+    #[tokio::test]
     async fn malformed_and_unknown_bodies_are_rejected() {
         let app = LifecycleApp::new(&["issuers:write"]).await;
         app.store.insert_issuer(issuer(
@@ -1305,7 +1361,7 @@ mod tests {
 
         for body in [
             r#"{"state":"suspended","expires_at":123}"#,
-            r#"{"expires_at":123}"#,
+            r#"{"expires_at":"tomorrow"}"#,
             r#"{"state":"suspended","extra":true}"#,
             r#"{"state":"terminated"}"#,
             r#"{"}"#,

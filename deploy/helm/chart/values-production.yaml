@@ -5,6 +5,10 @@ serviceAccount:
 
 statuslist:
   replicaCount: 2
+  revocationHistory:
+    volume:
+      persistentVolumeClaim:
+        claimName: status-list-revocations
   ingress:
     management:
       # Without this, issuer writes reach the public listener and get 404.

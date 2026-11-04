@@ -264,14 +264,16 @@ paths:
     patch:
       operationId: updateIssuer
       tags: [issuers]
-      summary: Suspend or resume a portal issuer
+      summary: Suspend, resume or renew a portal issuer
       description: |
-        Changes `state` to `suspended` or `active`. Requires `issuers:write`
-        and `If-Issuer-Version` or `If-Match`.
+        Changes `state` to `suspended` or `active`, or renews `expires_at`.
+        Requires `issuers:write` and `If-Issuer-Version` or `If-Match`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
-        stays `expired`; renewal is not supported. Suspension takes effect
-        on the next management request on every replica.
+        stays `expired` until renewed. Renewal requires an expiry after now and
+        within the sandbox tier's 30-day maximum. Renewal of an expired issuer
+        makes it active unless suspended; suspension takes precedence.
+        Suspension takes effect on the next management request on every replica.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
         - $ref: "#/components/parameters/IfMatch"
@@ -308,7 +310,7 @@ paths:
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry` — `expires_at` is in the past or beyond the tier's maximum lifetime."
+          description: "`invalid_expiry` — `expires_at` is not later than now or exceeds the tier's maximum lifetime."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -742,13 +744,22 @@ components:
           $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
 
     UpdateIssuerRequest:
-      type: object
-      additionalProperties: false
-      required: [state]
-      properties:
-        state:
-          type: string
-          enum: [active, suspended]
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [active, suspended]
+        - type: object
+          additionalProperties: false
+          required: [expires_at]
+          properties:
+            expires_at:
+              type: integer
+              format: int64
+              description: Unix timestamp in seconds, after now and within 30 days.
 
     UpdateIssuerKeyRequest:
       type: object
