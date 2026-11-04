@@ -20,10 +20,7 @@ use crate::domain::models::tier::{IssuerTier, IssuerUsage};
 
 #[cfg(test)]
 static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
-/// Bumped each time the global meter provider is (re)installed by
-/// [`setup_metrics`]. Recorders that cache instrument handles key their cache
-/// on this so a fresh provider (e.g. every metric test) doesn't keep writing to
-/// a stale, previously-dropped provider.
+/// Lets cached instrument handles notice a newly installed meter provider.
 static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceLock::new();
 static ISSUER_REGISTRY_METRICS: OnceLock<Mutex<Option<(u64, IssuerRegistryMetrics)>>> =
@@ -96,9 +93,6 @@ pub(crate) fn provider_generation() -> u64 {
     METER_PROVIDER_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Return `T` from a per-provider-generation cache, rebuilding it with `build`
-/// whenever the global meter provider has changed (e.g. after a re-run of
-/// `setup_metrics` in tests).
 pub(crate) fn cached_instruments<T: Clone>(
     slot: &'static OnceLock<Mutex<Option<(u64, T)>>>,
     build: impl FnOnce() -> T,
@@ -260,9 +254,7 @@ fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
     }
 }
 
-/// Initialize the OpenTelemetry metrics pipeline before any instruments are
-/// created. Metrics are always exposed through the in-process Prometheus
-/// registry. In production, they are also pushed to the Collector over OTLP.
+/// Run before any instrument is created; production also pushes over OTLP.
 pub(crate) fn setup_metrics(
     registry: &Registry,
     config: &TelemetryConfig,
@@ -290,7 +282,6 @@ pub(crate) fn setup_metrics(
     register_process_observers(&provider);
     register_issuer_usage_observers(&provider);
 
-    // Install as global so `opentelemetry::global::meter()` works everywhere
     opentelemetry::global::set_meter_provider(provider.clone());
     METER_PROVIDER_GENERATION.fetch_add(1, Ordering::Relaxed);
     Ok(provider)
@@ -433,7 +424,6 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .build();
 }
 
-/// Render all collected metrics in the Prometheus text exposition format.
 pub(crate) async fn metrics_handler(registry: Registry) -> String {
     let encoder = TextEncoder::new();
     let metric_families = registry.gather();
@@ -477,10 +467,6 @@ mod tests {
             .map(|family| family.name().to_string())
             .collect::<std::collections::HashSet<_>>();
 
-        // Observers only report when the collector yields a value, and
-        // `metrics_process` does not expose every field on every platform.
-        // Asserting the full set would test the host OS rather than the
-        // registration wiring, so derive it from what the collector reports.
         let snapshot = get_process_snapshot();
         let expected = [
             (
@@ -508,10 +494,6 @@ mod tests {
             ("process_threads", snapshot.threads.is_some()),
         ];
 
-        // Without a floor, a `setup_metrics` that registered no observers at all
-        // would filter every field out and pass the loop below vacuously. Six is
-        // what `metrics-process` reports on the thinnest supported platform
-        // (Windows, missing `virtual_memory_max_bytes` and `threads`).
         const ALWAYS_AVAILABLE: usize = 6;
         let available = expected.iter().filter(|(_, available)| *available).count();
         assert!(
@@ -591,8 +573,6 @@ mod tests {
         let rendered = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
             .block_on(metrics_handler(registry));
-        // Only its presence: SQL tests running in parallel record it on every
-        // publish, so its value here is whatever the last one wrote.
         assert!(
             rendered
                 .lines()

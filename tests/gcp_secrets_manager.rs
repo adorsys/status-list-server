@@ -55,27 +55,23 @@ async fn test_gcp_secret_manager_storage_lifecycle() {
     let secret_key = "keys-status.example.com";
     let secret_value = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC...\n-----END PRIVATE KEY-----";
 
-    // Secret should not exist initially
     let initial_load = client
         .load(secret_key)
         .await
         .expect("Failed to check secret existence");
     assert!(initial_load.is_none(), "Secret should not exist initially");
 
-    // Store secret
     client
         .store(secret_key, secret_value)
         .await
         .expect("Failed to store secret");
 
-    // Load secret and verify payload
     let loaded = client
         .load(secret_key)
         .await
         .expect("Failed to load secret");
     assert_eq!(loaded.as_deref(), Some(secret_value));
 
-    // Overwrite secret with new version
     let updated_value =
         "-----BEGIN PRIVATE KEY-----\nUPDATED_KEY_MATERIAL...\n-----END PRIVATE KEY-----";
     client
@@ -89,7 +85,6 @@ async fn test_gcp_secret_manager_storage_lifecycle() {
         .expect("Failed to load updated secret");
     assert_eq!(loaded_updated.as_deref(), Some(updated_value));
 
-    // Delete secret
     client
         .delete(secret_key)
         .await
@@ -117,7 +112,6 @@ async fn test_gcp_secret_manager_cache_behavior() {
     let first_load = client.load(secret_key).await.expect("Failed first load");
     assert_eq!(first_load.as_deref(), Some(secret_value));
 
-    // Second fetch should be served from cache
     let second_load = client.load(secret_key).await.expect("Failed second load");
     assert_eq!(second_load.as_deref(), Some(secret_value));
 }

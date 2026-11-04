@@ -9,7 +9,6 @@ use tracing::{info, warn};
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
-/// AWS Secrets Manager.
 pub struct AwsSecretsManager {
     client: SecretsClient,
     cache: Option<Cache<String, String>>,
@@ -44,7 +43,6 @@ impl Storage for AwsSecretsManager {
         use aws_sdk_secretsmanager::error::SdkError;
         let secret_name = normalize_key(name);
 
-        // Store a secret only if it does not already exist
         match self
             .client
             .describe_secret()
@@ -57,7 +55,6 @@ impl Storage for AwsSecretsManager {
                 Ok(())
             }
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
-                // Secret does not exist, try to create it
                 self.client
                     .create_secret()
                     .name(&secret_name)
@@ -138,10 +135,7 @@ impl Storage for AwsSecretsManager {
         Ok(())
     }
 
-    /// Verify the Secrets Manager API is reachable without touching any real
-    /// secret, by issuing a `DescribeSecret` call for a name that is expected
-    /// not to exist. This only requires the narrow `secretsmanager:DescribeSecret`
-    /// permission.
+    /// Describes a secret that shouldn't exist; needs only secretsmanager:DescribeSecret.
     async fn reachable(&self) -> Result<(), StorageError> {
         use aws_sdk_secretsmanager::error::SdkError;
 
@@ -152,7 +146,6 @@ impl Storage for AwsSecretsManager {
             .send()
             .await
         {
-            // Secret intentionally does not exist, but the API is reachable.
             Err(SdkError::ServiceError(err)) if err.err().is_resource_not_found_exception() => {
                 Ok(())
             }

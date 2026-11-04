@@ -12,7 +12,6 @@ use crate::cert_manager::challenge::ChallengeError;
 
 const PROVIDER: &str = "acmedns";
 
-/// Credentials of a single registered ACME-DNS account
 #[derive(Clone)]
 pub struct AcmeDnsCredentials {
     pub username: String,
@@ -20,19 +19,12 @@ pub struct AcmeDnsCredentials {
     pub subdomain: String,
 }
 
-/// A DNS provider for a self-hosted ACME-DNS server (<https://github.com/joohoi/acme-dns>).
-///
-/// Requires pre-registered accounts and a CNAME from `_acme-challenge.<domain>`
-/// to each registered ACME-DNS subdomain. ACME-DNS serves updates immediately
-/// and keeps the two most recent TXT values per subdomain, so deletion is a
-/// no-op. Accounts are selected per domain from `accounts`, falling back to
-/// `default_account`; a dedicated account per identifier keeps orders with
-/// three or more identifiers from rotating digests out before validation.
+/// Needs pre-registered accounts and a CNAME from `_acme-challenge.<domain>` to each subdomain.
+/// An account holds only two TXT values, so 3+ domains need an account each.
 pub struct AcmeDnsProvider {
     client: Client,
     server_url: String,
     default_account: Option<AcmeDnsCredentials>,
-    /// Per-domain accounts keyed by normalized identifier
     accounts: HashMap<String, AcmeDnsCredentials>,
 }
 
@@ -43,11 +35,7 @@ fn dns_err(source: impl Into<Report>) -> ChallengeError {
     }
 }
 
-/// Normalize a domain for account lookup (lowercase, no trailing dot, no
-/// wildcard label) so config keys and ACME identifiers compare equal.
-/// No IDNA mapping is done: ACME identifiers arrive as punycode A-labels,
-/// so a config key written as a U-label (e.g. `münchen.example.com`) never
-/// matches and the domain falls back to the default account or "no account".
+/// No IDNA mapping: a config key written as a Unicode label (münchen) never matches.
 fn normalize_domain(domain: &str) -> String {
     let domain = domain.trim().trim_end_matches('.');
     domain
@@ -56,7 +44,6 @@ fn normalize_domain(domain: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Whether two entries hold the same registered account
 fn same_account(a: &AcmeDnsCredentials, b: &AcmeDnsCredentials) -> bool {
     a.username == b.username
         && a.subdomain == b.subdomain
@@ -64,8 +51,7 @@ fn same_account(a: &AcmeDnsCredentials, b: &AcmeDnsCredentials) -> bool {
 }
 
 impl AcmeDnsProvider {
-    /// Fails when two account entries normalize to the same domain but hold
-    /// different credentials, since only one of them could ever be used
+    /// Rejects two entries that normalize to one domain with different credentials.
     pub fn new(
         server_url: impl Into<String>,
         default_account: Option<AcmeDnsCredentials>,
@@ -77,8 +63,7 @@ impl AcmeDnsProvider {
             match normalized.entry(normalize_domain(&domain)) {
                 Entry::Occupied(entry) => {
                     let (other, existing) = entry.get();
-                    // Identical duplicates are fine (e.g. an apex and its
-                    // wildcard listed separately with the same account)
+                    // Same account twice is fine, e.g. an apex and its wildcard.
                     if !same_account(existing, &account) {
                         return Err(dns_err(eyre!(
                             "Conflicting ACME-DNS accounts: entries {other} and {domain} \
@@ -104,19 +89,12 @@ impl AcmeDnsProvider {
         })
     }
 
-    /// Whether an account is configured for the given domain
     pub fn has_credentials_for(&self, domain: &str) -> bool {
         self.credentials_for(domain).is_ok()
     }
 
-    /// Validate that a certificate order for `domains` can succeed: every
-    /// domain must resolve to an account, and no account may serve more than
-    /// two of them, since a third digest would rotate the first out of the
-    /// account's two-value TXT window before the CA validates it.
-    ///
-    /// A startup sanity check over the configured domains only: it is not
-    /// invoked on the order path, so it cannot protect orders whose
-    /// identifiers diverge from the domains checked here.
+    /// A third domain on one account would rotate the first digest out before the CA checks it.
+    /// Startup-only; it doesn't guard orders whose identifiers differ from config.
     pub fn check_order_domains(&self, domains: &[&str]) -> Result<(), ChallengeError> {
         let mut by_account: HashMap<&str, Vec<&str>> = HashMap::new();
         for domain in domains {
@@ -138,7 +116,6 @@ impl AcmeDnsProvider {
         Ok(())
     }
 
-    /// Select the account for a domain: per-domain entry first, then the default
     fn credentials_for(&self, domain: &str) -> Result<&AcmeDnsCredentials, ChallengeError> {
         self.accounts
             .get(&normalize_domain(domain))
@@ -176,8 +153,7 @@ impl DnsProvider for AcmeDnsProvider {
             )));
         }
 
-        // Naming the subdomain makes a wrong account selection (e.g. a typoed
-        // map key silently falling back to the default) visible in the logs
+        // Log the subdomain so a typoed key falling back to the default shows up.
         info!(
             "ACME-DNS TXT record updated for {domain} via subdomain {}",
             account.subdomain
@@ -218,7 +194,6 @@ mod tests {
         .expect("no account entries to conflict")
     }
 
-    /// Mount a mock expecting one `/update` authenticated as the given account
     async fn expect_update(server: &MockServer, account: &AcmeDnsCredentials, txt: &str) {
         Mock::given(method("POST"))
             .and(path("/update"))
@@ -285,7 +260,6 @@ mod tests {
     #[tokio::test]
     async fn delete_is_a_no_op() {
         let server = MockServer::start().await;
-        // No mocks mounted: any request would fail the test
 
         single_account_provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
@@ -327,8 +301,6 @@ mod tests {
         let mut accounts = HashMap::new();
         for domain in domains {
             let acct = account(domain);
-            // Each digest must land exactly once on its own subdomain, so no
-            // account's two-value TXT window ever holds more than one digest
             expect_update(&server, &acct, &format!("digest-{domain}")).await;
             accounts.insert(domain.to_string(), acct);
         }
@@ -365,8 +337,6 @@ mod tests {
     async fn mapped_account_wins_over_the_default() {
         let server = MockServer::start().await;
         let (default, mapped) = (account("default"), account("mapped"));
-        // Only the mapped account may be used; a request authenticated as the
-        // default account would not match this mock and fail the test
         expect_update(&server, &mapped, "digest-value").await;
 
         let provider = AcmeDnsProvider::new(
@@ -384,18 +354,14 @@ mod tests {
 
     #[tokio::test]
     async fn check_order_domains_rejects_three_identifiers_on_one_account() {
-        // No mocks mounted: the check must reject the overloaded account
-        // before any request is sent
         let server = MockServer::start().await;
         let provider =
             AcmeDnsProvider::new(server.uri(), Some(account("default")), HashMap::new()).unwrap();
 
-        // An apex + wildcard pair fits the account's two-value TXT window
         provider
             .check_order_domains(&["example.com", "*.example.com"])
             .unwrap();
 
-        // A third identifier on the same account would rotate a digest out
         let err = provider
             .check_order_domains(&["a.example.com", "b.example.com", "c.example.com"])
             .unwrap_err();
@@ -412,8 +378,6 @@ mod tests {
 
     #[test]
     fn check_order_domains_passes_when_identifiers_spread_across_accounts() {
-        // Two identifiers on the default plus one mapped: every two-value
-        // window holds at most two digests
         let provider = AcmeDnsProvider::new(
             "https://auth.example.org",
             Some(account("default")),
@@ -449,7 +413,6 @@ mod tests {
     #[tokio::test]
     async fn errors_when_domain_has_no_account_and_no_default() {
         let server = MockServer::start().await;
-        // No mocks mounted: the lookup must fail before any request is sent
 
         let provider = AcmeDnsProvider::new(
             server.uri(),
@@ -483,8 +446,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Config key differs cosmetically; wildcard identifiers share the
-        // base domain's account (apex + wildcard fit one two-value window)
         let provider = AcmeDnsProvider::new(
             server.uri(),
             None,
@@ -518,7 +479,6 @@ mod tests {
         match err {
             ChallengeError::Dns { provider, source } => {
                 assert_eq!(provider, "acmedns");
-                // Both offending config keys are named in the error
                 let message = source.to_string();
                 assert!(message.contains("A.Example.com"));
                 assert!(message.contains("a.example.com."));
@@ -529,8 +489,6 @@ mod tests {
 
     #[test]
     fn allows_duplicate_entries_with_identical_accounts() {
-        // An apex and its wildcard listed separately are the legitimate
-        // duplicate: they share one CNAME target, hence one account
         let acct = account("shared");
         let provider = AcmeDnsProvider::new(
             "https://auth.example.org",

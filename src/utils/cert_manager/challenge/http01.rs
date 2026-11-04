@@ -28,7 +28,6 @@ use crate::cert_manager::{
 
 type ServerHandler = Arc<RwLock<Option<(JoinHandle<()>, Sender<()>)>>>;
 
-/// Struct representing the HTTP01 challenge handler
 pub struct Http01Handler {
     challenge_storage: Arc<dyn Storage>,
     host: String,
@@ -37,7 +36,6 @@ pub struct Http01Handler {
 }
 
 impl Http01Handler {
-    /// Create a new instance of the HTTP-01 challenge handler
     pub fn new(challenge_storage: impl Storage + 'static, host: &str, port: u16) -> Self {
         Self {
             challenge_storage: Arc::new(challenge_storage),
@@ -47,11 +45,9 @@ impl Http01Handler {
         }
     }
 
-    /// Start the server and return a receiver to confirm readiness
     async fn start_server(&self) -> Result<Receiver<()>, ChallengeError> {
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        // Check if server is already running
         if self.server_handle.read().await.is_some() {
             warn!("HTTP-01 challenge server already running");
             ready_tx.send(()).unwrap();
@@ -124,16 +120,13 @@ impl ChallengeHandler for Http01Handler {
         let token = challenge.token.clone();
         let proof = challenge.key_authorization().as_str().to_string();
 
-        // Start the server and wait for it to be ready
         self.start_server()
             .await?
             .await
             .map_err(|_| ChallengeError::Other(eyre!("HTTP-01 server failed to start")))?;
 
-        // Store the key authorization
         self.challenge_storage.store(&token, &proof).await?;
 
-        // Signal the server we are ready to respond to the challenge
         challenge.set_ready().await?;
 
         let cleanup = {
@@ -144,7 +137,6 @@ impl ChallengeHandler for Http01Handler {
                     async { storage.delete(&token).await.map_err(Into::into) },
                     async {
                         if let Some((_, shutdown_tx)) = handle.write().await.take() {
-                            // Signal the server to shutdown
                             let _ = shutdown_tx.send(());
                         }
                     }
