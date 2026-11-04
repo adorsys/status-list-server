@@ -22,10 +22,10 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
-  HELM_NAMESPACE: statuslist-production
+  HELM_NAMESPACE: statuslist
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
-  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
 
 jobs:
   # No if: a skip here would cascade to every dependent job.
@@ -789,7 +789,7 @@ jobs:
       attestations: read
     env:
       # Pushed-ref values go through env, never ${{ }} in run:, since the pusher controls them.
-      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
       SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
       SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
     steps:
@@ -829,6 +829,10 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
+          if [[ "${IMAGE_VARIANT}" != "fscert" ]]; then
+            echo "IMAGE_VARIANT must be fscert for the existing EKS release profile" >&2
+            exit 1
+          fi
 
       - name: Assert the issuer registry ConfigMap exists
         # The chart mounts the registry from status-list-server-issuers and nothing
@@ -851,19 +855,19 @@ jobs:
         # the nightly would verify a variant nobody runs, so fail the deploy instead.
         run: |
           set -eu
-          if [ "${IMAGE_VARIANT:-aws}" != "$REPO_IMAGE_VARIANT" ]; then
+          if [ "${IMAGE_VARIANT:-fscert}" != "$REPO_IMAGE_VARIANT" ]; then
             echo "::error::IMAGE_VARIANT differs between scopes: this environment resolves"
-            echo "'${IMAGE_VARIANT:-aws}', the repository resolves '${REPO_IMAGE_VARIANT}'."
+            echo "'${IMAGE_VARIANT:-fscert}', the repository resolves '${REPO_IMAGE_VARIANT}'."
             echo
             echo "An environment-scoped IMAGE_VARIANT on 'production' is invisible to"
             echo "scheduled-image-scan.yml, which would keep re-scanning '${REPO_IMAGE_VARIANT}'"
-            echo "and reporting success while production serves '${IMAGE_VARIANT:-aws}'."
+            echo "and reporting success while production serves '${IMAGE_VARIANT:-fscert}'."
             echo
             echo "Set IMAGE_VARIANT at the repository level and remove the environment"
             echo "override, or teach the nightly to read the same scope before deploying."
             exit 1
           fi
-          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-aws}' is visible to the scheduled re-scan."
+          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-fscert}' is visible to the scheduled re-scan."
 
       - name: Build Helm dependencies
         run: |
@@ -878,7 +882,7 @@ jobs:
         run: |
           set -euo pipefail
           DEPLOY_TAG="${GITHUB_REF_NAME#v}"
-          IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
+          IMAGE_VARIANT="${IMAGE_VARIANT:-fscert}"
           FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
           # Kubernetes needs the index digest, not a per-arch manifest.
@@ -915,7 +919,7 @@ jobs:
           # Record each ExternalSecret's refreshTime so the verify step can prove this deploy reconciled.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
-          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+          for es in statuslist-external-secret statuslist-signing; do
             rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
               -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
@@ -934,10 +938,11 @@ jobs:
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
+            -f "$CHART_DIR"/values-datev-staging.yaml \
             --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
-            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
-            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
-            --set "secretStore.enabled=false" \
+            --set-string "externalSecret.spec.secretStoreRef.name=statuslist-secret-store" \
+            --set-string "externalSecret.spec.secretStoreRef.kind=SecretStore" \
+            --set "secretStore.enabled=true" \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
@@ -963,7 +968,7 @@ jobs:
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
         env:
           PRIMARY_ES: statuslist-external-secret
-          CREDS_ES: statuslist-external-secret-aws-credentials
+          SIGNING_ES: statuslist-signing
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
@@ -997,7 +1002,7 @@ jobs:
           trap cleanup_on_failure EXIT
 
           # Force a sync: the 30m refreshInterval could outlast the wait.
-          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+          for es in "$PRIMARY_ES" "$SIGNING_ES"; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
               echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
@@ -1028,7 +1033,7 @@ jobs:
 
           await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
 
-          await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
+          await_synced "$SIGNING_ES" "ExternalSecret $SIGNING_ES ($NAMESPACE)"
 
           rollback_done=1
 

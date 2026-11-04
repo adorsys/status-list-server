@@ -34,6 +34,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values.yaml`](chart/values.yaml): provider-neutral defaults.
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
+* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): existing EKS release profile using the `fscert` image, ESO signing files, and the in-memory cache. Apply after the AWS and production overlays; see the [EKS staging prerequisites](../../docs/deployment-runbook.md#existing-eks-staging-profile).
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.

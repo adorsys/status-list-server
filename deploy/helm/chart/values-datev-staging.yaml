@@ -1,0 +1,49 @@
+# Existing EKS release, applied after the AWS and production overlays.
+statuslist:
+  strategy:
+    type: Recreate
+  image:
+    variant: fscert
+  aws:
+    mountCredentials: false
+  env:
+    APP_CACHE__BACKEND: memory
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: signing-material
+      secretName: statuslist-signing
+      mountPath: /var/run/status-list-server/signing
+      items:
+        - key: tls.crt
+          path: tls.crt
+        - key: tls.key
+          path: tls.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: tls.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: tls.key
+
+externalSecret:
+  spec:
+    extraExternalSecrets:
+      - metadata:
+          name: statuslist-signing
+        spec:
+          target:
+            name: statuslist-signing
+            creationPolicy: Owner
+          data:
+            - secretKey: tls.crt
+              remoteRef:
+                key: statuslist-fscert-signing
+                property: CERTIFICATE
+            - secretKey: tls.key
+              remoteRef:
+                key: statuslist-fscert-signing
+                property: SIGNING_KEY
