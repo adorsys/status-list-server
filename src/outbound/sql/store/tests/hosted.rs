@@ -278,6 +278,17 @@ async fn test_sqlite_legacy_disabled_issuer_can_be_read_and_resumed() {
 
     let found = store.get_issuer(&hosted.id).await.unwrap();
     assert_eq!(found.state, HostedIssuerState::Suspended);
+    let unfiltered = store
+        .list_issuers_after(
+            None,
+            10,
+            &HostedIssuerFilter::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unfiltered.len(), 1);
+    assert_eq!(unfiltered[0].id, hosted.id);
     let listed = store
         .list_issuers_after(
             None,
