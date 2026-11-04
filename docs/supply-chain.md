@@ -24,9 +24,13 @@ Provenance and SBOM are also attached to the image itself: `docker buildx imaget
 
 ## What Runs
 
-`deploy.yml` triggers on **release tags (`v*.*.*`) and manual dispatch only** — not on pushes to `main`, and not on pull requests. A two-architecture build plus scan costs roughly 40 minutes and publishes to GHCR, which is not worth spending on every merge. The consequence is that `deploy.yml` scans each image **once**, at the moment it is built. What covers the image after that is [`scheduled-image-scan.yml`](#the-scheduled-re-scan), which re-scans the released images nightly.
+`deploy.yml` triggers on **release tags (`v*.*.*`) and manual dispatch only** — not on pushes to `main`, and not on pull requests. A two-architecture build plus scan costs roughly 40 minutes and publishes to GHCR, which is not worth spending on every merge. The consequence is that `deploy.yml` scans each image when it is built and, if a final tag promotes it, once more at promotion, but never after it ships. What covers the image after that is [`scheduled-image-scan.yml`](#the-scheduled-re-scan), which re-scans the released images nightly.
 
-`build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags with OCI description annotations (which re-serializes the multi-arch index into a promoted index digest). `deploy` runs last and resolves the promoted variant tag to its index digest before deploying to Helm.
+`build-and-push` builds the multi-architecture image variants, pushes them to GHCR under immutable `sha-<short>-<variant>` tags only, records each produced index digest, and attaches SBOM and SLSA provenance metadata. `scan-image` then inspects those images by digest. `promote-tags` applies the semver and `latest` variant tags to that same index digest. The OCI description annotation it sets is already on the built index, so promotion leaves the digest unchanged, and `promote-tags` fails if a release tag resolves to any other digest. `deploy` runs last and resolves the promoted variant tag to its index digest before deploying to Helm.
+
+A final tag (`v1.2.3`, no prerelease suffix) is not rebuilt. `image-source` names the run whose image a run scans and promotes, and the ref that signed it. For a prerelease tag or a dispatch, that is the run itself. For a final tag, `image-source` runs `scripts/resolve-rc.sh` as soon as the tag is validated, without waiting for CI, so a release with nothing to promote fails within seconds. The script picks the highest-numbered `v<version>-rc.<N>` tag, requires the final commit to have the same file tree as the candidate's commit, and requires the latest push run of `deploy.yml` for that tag to have completed with `success` on the tagged commit. A run still in progress is refused, not awaited. `build-and-push` and `verify-provenance` are skipped. `scan-image` scans the candidate's digest again with the current vulnerability database and the release commit's `.trivyignore.yaml`, so an advisory published or a ledger entry expired since the candidate's run blocks the release. `promote-tags` waits for `ci` and `helm-checks` on the final commit, reads the digest from the candidate run's `image-digest-<variant>` artifact, runs `scripts/verify-rc-digest.sh` to check that the candidate's `<version>-rc.<N>-<variant>` tag still resolves to it, verifies its signed provenance against the candidate's ref, and applies the final tags to that same digest. The release fails if no candidate exists, if the latest one did not pass, if its tree differs from the release's, if its run's digest artifacts have expired, if the rescan finds a blocking advisory, or if any of these digests disagree. It never falls back to an older candidate or to a fresh build. The job summaries record the candidate, its run and the promoted digest of each variant.
+
+The candidate's run built the image, so the image describes the candidate, not the final tag: its `org.opencontainers.image.revision` label and its SLSA provenance name the candidate's commit and `refs/tags/v<version>-rc.<N>`. The trees are identical, so the source is the same. The digest artifacts expire with the repository's artifact retention setting, which bounds how long a candidate can wait before its final release.
 
 A dispatch run exercises the build, the scan and every assertion without releasing: `promote-tags` and `deploy` both require `github.event_name == 'push'`, so a dispatch promotes nothing and deploys nothing even when aimed at a tag ref. It does still push `sha-<short>-<variant>` images to GHCR — it publishes images, it just never advertises or ships them.
 
@@ -136,7 +140,9 @@ When findings clear, the issue is updated to say so and **left open** — closin
 
 ### The Scanned Artifact Is the Deployed Artifact
 
-The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags with OCI description annotations, which re-serializes the multi-arch index descriptors. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its promoted index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `deploy/helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+The scan binds to the built index digest `...@sha256:<digest>` and scans each architecture child manifest under it. `promote-tags` applies release tags to that index digest. The OCI description annotation they carry is already on the built index, so the tags resolve to the scanned digest, and `promote-tags` fails if they do not. The `deploy` job resolves the promoted variant tag (`<tag>-<variant>`) to its index digest via structured inspection (`docker buildx imagetools inspect <ref> --format '{{ .Manifest.Digest }}'`) before passing it to the chart via `statuslist.image.digest`, which `deploy/helm/chart/templates/deployment.yaml` prefers over `statuslist.image.tag`. Tags stay in place for readability but no longer determine what runs.
+
+A final release extends the same binding across runs: it promotes the digest its release candidate's run scanned and its own run rescanned, so production runs exactly the image the candidate run validated.
 
 This matters because tags are mutable. Binding the scan to a digest and then deploying by tag would leave a window in which a re-run or a manual push could replace the image in between.
 
@@ -200,6 +206,8 @@ Disagreement here means one specific thing: the registry content and the signed 
 - The signed attestation names a workflow, repository or ref that is not the release you expect. This one is enforced rather than left to your eye: the wrapper pins the certificate identity to `deploy.yml` at a specific ref, so a signature from another workflow, another repository or another ref of `deploy.yml` fails the command rather than passing it with a surprising line in the output.
 
 On the release path the same disagreement surfaces at whichever of three points reaches it first — `verify-provenance` before any release tag is applied, `promote-tags` against the digest the tag resolves to, or `deploy` against the digest about to reach the cluster. Which one failed narrows the cause: the first is a signing or build fault, the second and third mean the tag moved after it was gated.
+
+A final tag skips `verify-provenance`. `promote-tags` verifies the release candidate's digest against the candidate's ref before applying any tag, so the first point moves there. On that path the signing identity is `deploy.yml` at `refs/tags/v<version>-rc.<N>`, not at the final tag, because the final run signs nothing.
 
 **Do this, in order:**
 
@@ -287,19 +295,29 @@ bash scripts/verify-attestation.sh \
   adorsys/status-list-server
 ```
 
-Pass the release's ref as an optional third argument when you know it, and the signing identity is pinned exactly rather than by shape:
+Pass the signing ref as an optional third argument when you know it, and the signing identity is pinned exactly rather than by shape. The signing ref is the tag whose run built the image. For a prerelease that is its own tag. A final release builds nothing, so for `v1.2.3` it is the release candidate it promoted, such as `refs/tags/v1.2.3-rc.2`, and passing `refs/tags/v1.2.3` fails:
 
 ```bash
 bash scripts/verify-attestation.sh \
   "ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
-  adorsys/status-list-server refs/tags/v1.2.3
+  adorsys/status-list-server refs/tags/v1.2.3-rc.2
 ```
+
+To find which candidate a final release promoted, read the `Resolve Image Source` job summary of its `deploy.yml` run, or read the ref from the attestation itself. The two-argument form above accepts any release-tag ref, so it needs neither:
+
+```bash
+gh attestation verify "oci://ghcr.io/adorsys/status-list-server@sha256:<index-digest>" \
+  --repo adorsys/status-list-server --format json \
+  | jq -r '.[].verificationResult.signature.certificate.sourceRepositoryRef'
+```
+
+That lookup checks only the repository, so use its output as the third argument to the wrapper rather than as a verdict.
 
 **The identity checked.** With a ref, the wrapper runs `gh attestation verify` with
 
 ```text
---cert-identity https://github.com/adorsys/status-list-server/.github/workflows/deploy.yml@refs/tags/v1.2.3
---source-ref    refs/tags/v1.2.3
+--cert-identity https://github.com/adorsys/status-list-server/.github/workflows/deploy.yml@refs/tags/v1.2.3-rc.2
+--source-ref    refs/tags/v1.2.3-rc.2
 --deny-self-hosted-runners
 ```
 
@@ -466,7 +484,7 @@ What it adds today is narrower than that overlap suggests:
 - It detects drift if the image was built from a lockfile that source-level CI never audited.
 - It binds a scan result to an image digest, so what was checked and what runs are the same artifact.
 
-The capability that makes image scanning worth having on its own — **catching advisories published _after_ merge, with no source change** — is delivered by the scheduled re-scan rather than by `deploy.yml`. Source-level CI cannot cover a time axis at all: `cargo-audit`, `cargo-deny`, and `cargo-vet` query RustSec on every pull request, which means only when someone is pushing code. `deploy.yml` cannot cover it either, because it triggers only on release tags and manual dispatch, so it scans each image **once** and never again.
+The capability that makes image scanning worth having on its own — **catching advisories published _after_ merge, with no source change** — is delivered by the scheduled re-scan rather than by `deploy.yml`. Source-level CI cannot cover a time axis at all: `cargo-audit`, `cargo-deny`, and `cargo-vet` query RustSec on every pull request, which means only when someone is pushing code. `deploy.yml` cannot cover it either, because it triggers only on release tags and manual dispatch, so it scans each image when it is built and when a final tag promotes it, and never after that.
 
 [`scheduled-image-scan.yml`](#the-scheduled-re-scan) closes exactly that. It runs nightly against the released images, so an advisory published the day after a release is found that night rather than by blocking whichever release is cut next — which may be weeks later, is not tied to the advisory, and may itself be the urgent fix for something else.
 
