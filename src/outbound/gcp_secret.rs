@@ -1,5 +1,3 @@
-//! GCP Secret Manager storage adapter implementing [`Storage`].
-
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,10 +13,6 @@ use tracing::info;
 
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 
-/// GCP Secret Manager storage adapter.
-///
-/// Implements the [`Storage`] trait so it can be used as a secrets backend
-/// by the certificate manager.
 pub struct GcpSecretManagerClient {
     client: SecretManagerService,
     project_id: String,
@@ -37,24 +31,18 @@ impl std::fmt::Debug for GcpSecretManagerClient {
 impl GcpSecretManagerClient {
     const CACHE_MAX_CAPACITY: u64 = 100;
 
-    /// Return a [`GcpSecretManagerClientBuilder`] for constructing an adapter
-    /// for the given GCP project ID.
     pub fn builder(project_id: impl Into<String>) -> GcpSecretManagerClientBuilder {
         GcpSecretManagerClientBuilder::new(project_id)
     }
 
-    /// Sanitize secret ID to satisfy GCP Secret Manager naming rules:
-    /// 1-255 characters, containing only [a-zA-Z0-9_-].
     pub(crate) fn qualify_key(key: &str) -> String {
         normalize_key(key)
     }
 
-    /// Formats the parent resource name for secret creation (`projects/{project_id}`).
     fn project_parent(&self) -> String {
         format!("projects/{}", self.project_id)
     }
 
-    /// Formats the resource name for a secret (`projects/{project_id}/secrets/{key}`).
     fn secret_name(&self, key: &str) -> String {
         format!(
             "projects/{}/secrets/{}",
@@ -63,7 +51,6 @@ impl GcpSecretManagerClient {
         )
     }
 
-    /// Formats the resource name for accessing a secret version (`projects/{project_id}/secrets/{key}/versions/{version}`).
     fn secret_version_name(&self, key: &str, version: &str) -> String {
         format!(
             "projects/{}/secrets/{}/versions/{}",
@@ -97,8 +84,6 @@ impl GcpSecretManagerClient {
         false
     }
 
-    /// Ensure the secret container exists and add a new version with payload.
-    /// Handles concurrent container creation races (TOCTOU).
     async fn ensure_secret_and_add_version(
         &self,
         key: &str,
@@ -108,7 +93,6 @@ impl GcpSecretManagerClient {
         let secret_name = self.secret_name(key);
         let payload = SecretPayload::new().set_data(value.as_bytes().to_vec());
 
-        // Fast path: try adding secret version directly
         match self
             .client
             .add_secret_version()
@@ -124,7 +108,6 @@ impl GcpSecretManagerClient {
                 Ok(())
             }
             Err(e) if Self::is_not_found(&e) => {
-                // Container does not exist; create it
                 let secret = Secret::new().set_replication(
                     Replication::new()
                         .set_replication(RepEnum::Automatic(Box::new(Automatic::new()))),
@@ -140,12 +123,11 @@ impl GcpSecretManagerClient {
                     .await
                 {
                     Ok(_) => {}
-                    // If created concurrently by another process, ignore AlreadyExists (409)
+                    // Another replica may have created it first.
                     Err(err) if Self::is_already_exists(&err) => {}
                     Err(err) => return Err(StorageError::Backend(err.into())),
                 }
 
-                // Add the secret version to the newly created container
                 self.client
                     .add_secret_version()
                     .set_parent(secret_name)
@@ -164,7 +146,6 @@ impl GcpSecretManagerClient {
     }
 }
 
-/// Builder for constructing a [`GcpSecretManagerClient`] adapter.
 #[derive(Debug, Clone)]
 pub struct GcpSecretManagerClientBuilder {
     project_id: String,
@@ -176,7 +157,6 @@ pub struct GcpSecretManagerClientBuilder {
 }
 
 impl GcpSecretManagerClientBuilder {
-    /// Create a new [`GcpSecretManagerClientBuilder`] with the GCP project ID.
     pub fn new(project_id: impl Into<String>) -> Self {
         Self {
             project_id: project_id.into(),
@@ -188,39 +168,32 @@ impl GcpSecretManagerClientBuilder {
         }
     }
 
-    /// Set an inline service account key JSON.
     pub fn service_account_key(mut self, key: Option<SecretString>) -> Self {
         self.service_account_key = key;
         self
     }
 
-    /// Set a path to a service account key JSON file.
     pub fn service_account_key_path(mut self, path: Option<impl Into<String>>) -> Self {
         self.service_account_key_path = path.map(Into::into);
         self
     }
 
-    /// Set a custom endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
     pub fn endpoint(mut self, endpoint: Option<impl Into<String>>) -> Self {
         self.endpoint = endpoint.map(Into::into);
         self
     }
 
-    /// Set whether to allow anonymous credentials (for local emulator testing only).
     pub fn allow_anonymous_credentials(mut self, allow: bool) -> Self {
         self.allow_anonymous_credentials = allow;
         self
     }
 
-    /// Set the in-memory cache TTL for secret values.
-    ///
-    /// Setting `secrets_cache_ttl` to `Duration::ZERO` disables caching completely.
+    /// `Duration::ZERO` disables caching.
     pub fn secrets_cache_ttl(mut self, secrets_cache_ttl: Duration) -> Self {
         self.secrets_cache_ttl = secrets_cache_ttl;
         self
     }
 
-    /// Build the [`GcpSecretManagerClient`] adapter instance.
     pub async fn build(self) -> Result<GcpSecretManagerClient, StorageError> {
         if self.project_id.trim().is_empty() {
             return Err(StorageError::Backend(eyre!(
@@ -351,9 +324,7 @@ impl Storage for GcpSecretManagerClient {
         }
     }
 
-    /// Verify the GCP Secret Manager API is reachable without touching any real
-    /// secret, by requesting metadata for a secret name that is expected
-    /// not to exist.
+    /// Probes a secret name that shouldn't exist, so no real secret is touched.
     async fn reachable(&self) -> Result<(), StorageError> {
         let secret_name = self.secret_name("health-probe-do-not-create");
 
