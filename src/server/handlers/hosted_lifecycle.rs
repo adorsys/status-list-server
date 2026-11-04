@@ -687,8 +687,8 @@ mod tests {
             if issuer.version != expected_version {
                 return Err(HostedIssuerError::VersionMismatch);
             }
-            if let Some(max_keys) = *self.key_limit.lock().unwrap() {
-                if self
+            if let Some(max_keys) = *self.key_limit.lock().unwrap()
+                && self
                     .keys
                     .lock()
                     .unwrap()
@@ -699,9 +699,8 @@ mod tests {
                     })
                     .count()
                     >= max_keys
-                {
-                    return Err(HostedIssuerError::KeyQuotaExceeded { max_keys });
-                }
+            {
+                return Err(HostedIssuerError::KeyQuotaExceeded { max_keys });
             }
             self.keys.lock().unwrap().push(key);
             issuer.version += 1;
