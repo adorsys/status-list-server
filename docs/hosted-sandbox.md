@@ -77,9 +77,12 @@ an upstream gateway with shared state. The app's public-read limiter keys on
 the controller pod's TCP address. This overlay raises its shared bucket to a
 100,000,000-request burst with one token refilled per second, so the edge's
 per-client 100 requests/second limit is the one clients hit. All clients reaching
-one controller pod share that bucket, so sustained traffic can eventually drain
-it. The admin API limiter reads the same settings, so its per-peer limit is
-lifted too; the NetworkPolicy and admin authentication bound that listener.
+one controller pod share that bucket. Sustained aggregate traffic above one
+request per second drains its burst over time. Once drained, clients sharing
+that pod can collectively pass at most one request per second and may see HTTP
+429 responses; lower traffic lets tokens accumulate again. The admin API limiter
+reads the same settings, so its per-peer limit is lifted too; the NetworkPolicy
+and admin authentication bound that listener.
 The management authentication and admission gates use the client address from
 the controller's overwritten `X-Forwarded-For` only when
 `APP_RATE_LIMIT__TRUSTED_PROXIES` lists the controller pods' addresses or CIDR.
@@ -185,13 +188,11 @@ With `prometheusRule.enabled`, the existing rule resource also includes:
   registry changes, and abusive clients. Successful requests and trust-backend
   outages do not count toward this alert.
 
-The existing registry and authentication instruments already end in `_total`;
-the in-process Prometheus exporter appends its own suffix. These rules therefore
-use the existing scrape names `issuer_registry_reload_failures_total_total` and
-`management_auth_requests_total_total`, preserving their names for current
-consumers. The persistent registry state gauge is
-`issuer_registry_reload_failed`; the new quota instrument exports
-`list_quota_rejections_total`.
+The management authentication instrument already ends in `_total`, and the
+in-process Prometheus exporter appends another suffix. Its alert reads
+`management_auth_requests_total_total`. The registry reload alert reads the
+persistent `issuer_registry_reload_failed` gauge; the new quota instrument
+exports `list_quota_rejections_total`.
 
 Tune the latter two thresholds with `slo.listQuotaRejections` and
 `slo.managementAuthFailures`. Alerts aggregate replicas within the release
