@@ -103,6 +103,17 @@ The normal promotion path is:
 6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
    GitHub Release when that version is not tagged. If `v<version>` already
    exists, release-plz makes no duplicate release.
+   The final tag does not rebuild the image. It promotes the image digest of
+   the highest-numbered `v<version>-rc.<N>`, and the release fails unless that
+   candidate's `deploy.yml` run passed and the tagged `main` commit has the
+   same file tree as the candidate's commit. Cut a new candidate whenever
+   `stage` changes after the last one, including documentation or workflow
+   changes, since any difference in the tree fails the release. A candidate is
+   promotable only when its whole run passed, so a **Deploy to Production**
+   failure that recurs blocks the release until its cause is fixed. If the
+   candidate's run failed there for a one-off reason, re-run that job; once
+   the run concludes `success`, the candidate can be promoted without cutting
+   a new one.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.
@@ -111,7 +122,11 @@ For a hotfix, branch `hotfix/*` from the released `main` state, then manually
 dispatch **Release-plz PR** with that branch selected. Review and merge the
 resulting patch-version and changelog PR into the hotfix branch, then manually
 dispatch **Tag Release Candidate** with that branch selected. Validate the RC
-deployment before the `hotfix/*` to `main` promotion.
+deployment before the `hotfix/*` to `main` promotion: the final tag promotes
+that candidate's image and fails without one. Dispatch only after the
+patch-version PR is merged, and wait for the candidate's `deploy.yml` run to
+pass. The candidate's tree must match what `main` will hold after the
+promotion, so any later change to the hotfix branch needs a new candidate.
 
 After the hotfix release, merge `main` back into `develop` with a merge commit
 before the next `develop` to `stage` promotion. If `develop` already contains a
