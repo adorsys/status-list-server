@@ -56,8 +56,8 @@ pub struct IssuerRegistry {
     #[serde(default)]
     pub admins: Vec<AdminEntry>,
     /// Public key records retained after a static key is removed. They are
-    /// never trusted for authentication, but reserve the key id and material
-    /// in the durable history when that history is configured.
+    /// never trusted for authentication, but permanently reserve the key id
+    /// and material in the durable revocation history.
     #[serde(default)]
     pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
