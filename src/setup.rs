@@ -19,7 +19,12 @@ use sea_orm::{ConnectOptions, DbErr};
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
-use std::{collections::HashSet, num::NonZeroU64, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU64,
+    sync::Arc,
+    time::Duration,
+};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -55,7 +60,10 @@ use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
-    models::credential::Issuer,
+    models::{
+        credential::Issuer,
+        tier::{IssuerTier, IssuerUsage, Tiers},
+    },
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
@@ -400,19 +408,23 @@ type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // Validate operator input before connecting to the database or running migrations.
+    let tiers = Arc::new(config.tier_limits()?);
     #[cfg_attr(
         not(any(feature = "memory", feature = "history")),
         allow(unused_variables)
     )]
-    let issuer_registry = Arc::new(match config.management_auth.issuers_file.as_deref() {
-        Some(path) if !path.is_empty() => {
-            crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+    let issuer_registry = Arc::new(
+        match config.management_auth.issuers_file.as_deref() {
+            Some(path) if !path.is_empty() => {
+                crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+            }
+            _ => {
+                tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
+                crate::server::auth::issuer_registry::RegistryHandle::empty()
+            }
         }
-        _ => {
-            tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
-            crate::server::auth::issuer_registry::RegistryHandle::empty()
-        }
-    });
+        .with_key_limits(tiers.clone()),
+    );
     if let Err(message) = validate_admin_auth_settings(
         config.telemetry.environment,
         &config.admin_auth.audiences,
@@ -549,7 +561,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
             dynamic_issuer_store = config.server.profile.is_hosted().then(|| {
-                let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone());
+                let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone())
+                    .with_key_limits(tiers.clone());
                 Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
             });
             (
@@ -890,6 +903,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             &issuer_registry.snapshot(),
         )
         .await?;
+        warn_hosted_issuers_over_key_limit(dynamic_store.as_ref(), &tiers).await;
     }
     validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
         .await?;
@@ -900,6 +914,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     );
     warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
         .await;
+    let issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(&tiers));
+    crate::server::rate_limit::IssuerRateLimiter::spawn_pruner(&issuer_rate_limiter);
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -907,10 +923,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         aggregation_withheld_from: Arc::new(aggregation_withheld_from),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
         admin_auth: crate::server::AdminAuthConfig::from(&config.admin_auth),
@@ -930,6 +945,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ),
         readiness,
     };
+    spawn_issuer_usage_refresh(
+        issuer_registry.clone(),
+        dynamic_issuer_store.clone(),
+        &state.service,
+        tiers,
+    );
 
     if let Some(path) = config
         .management_auth
@@ -1200,6 +1221,165 @@ async fn validate_registry_aggregation_ids(
         }
     }
     Ok(())
+}
+
+/// How often each pod refreshes the issuer usage gauges. A reload, a list
+/// another pod creates and a key whose `not_after` passes all show within one
+/// interval.
+const ISSUER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Refreshes the usage gauges at once, then on every interval, until the
+/// service is dropped.
+fn spawn_issuer_usage_refresh(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    hosted: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+    service: &Arc<Service>,
+    tiers: Arc<Tiers>,
+) {
+    let service = Arc::downgrade(service);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ISSUER_USAGE_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(service) = service.upgrade() else {
+                break;
+            };
+            refresh_issuer_usage(&service, &registry.snapshot(), hosted.as_deref(), &tiers).await;
+        }
+    });
+}
+
+/// Hosted issuers and their keys, read together for the usage gauges.
+type HostedSnapshot = (
+    Vec<crate::domain::models::hosted_issuer::HostedIssuer>,
+    Vec<crate::domain::models::hosted_issuer::HostedIssuerKey>,
+);
+
+async fn read_hosted(
+    store: &dyn crate::domain::ports::HostedIssuerStore,
+) -> Result<HostedSnapshot, crate::domain::models::hosted_issuer::HostedIssuerError> {
+    Ok((store.all_issuers().await?, store.all_keys().await?))
+}
+
+/// Publishes every registry and hosted issuer's list and key usage against its
+/// tier.
+async fn refresh_issuer_usage(
+    service: &Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    hosted: Option<&dyn crate::domain::ports::HostedIssuerStore>,
+    tiers: &Tiers,
+) {
+    let counts = match service.status_list_repo().list_counts_by_issuer().await {
+        Ok(counts) => counts,
+        Err(error) => {
+            tracing::warn!(%error, "could not count status lists per issuer; usage metrics keep their previous values");
+            return;
+        }
+    };
+    let hosted = match hosted {
+        Some(store) => match read_hosted(store).await {
+            Ok(hosted) => hosted,
+            Err(error) => {
+                tracing::warn!(%error, "could not read hosted issuers; usage metrics keep their previous values");
+                return;
+            }
+        },
+        None => Default::default(),
+    };
+    crate::utils::metrics::set_issuer_usage(issuer_usage_samples(
+        registry,
+        &hosted,
+        &counts,
+        tiers,
+        time::OffsetDateTime::now_utc(),
+    ));
+}
+
+/// One sample per registry issuer, then per active hosted issuer the registry
+/// does not own (the registry wins, as when keys resolve).
+fn issuer_usage_samples(
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    (hosted_issuers, hosted_keys): &HostedSnapshot,
+    counts: &HashMap<String, u64>,
+    tiers: &Tiers,
+    now: time::OffsetDateTime,
+) -> Vec<(String, IssuerTier, IssuerUsage)> {
+    let lists = |id: &str| counts.get(id).copied().unwrap_or(0);
+    let mut samples: Vec<_> = registry
+        .issuers()
+        .iter()
+        .map(|issuer| {
+            let usage = IssuerUsage::new(
+                lists(&issuer.id),
+                issuer.active_key_count(now),
+                tiers.get(issuer.tier),
+            );
+            (issuer.id.clone(), issuer.tier, usage)
+        })
+        .collect();
+    let keys = hosted_key_counts(hosted_keys, now);
+    samples.extend(
+        hosted_issuers
+            .iter()
+            .filter(|issuer| {
+                issuer.state == crate::domain::models::hosted_issuer::HostedIssuerState::Active
+                    && !registry.issuers().iter().any(|owned| owned.id == issuer.id)
+            })
+            .map(|issuer| {
+                let tier = IssuerTier::from_name_or_strictest(&issuer.tier);
+                let usage = IssuerUsage::new(
+                    lists(&issuer.id),
+                    keys.get(issuer.id.as_str()).copied().unwrap_or(0),
+                    tiers.get(tier),
+                );
+                (issuer.id.clone(), tier, usage)
+            }),
+    );
+    samples
+}
+
+/// Keys per hosted issuer that count against its tier's `max_keys` at `now`.
+fn hosted_key_counts(
+    keys: &[crate::domain::models::hosted_issuer::HostedIssuerKey],
+    now: time::OffsetDateTime,
+) -> HashMap<&str, usize> {
+    let mut counts = HashMap::new();
+    for key in keys.iter().filter(|key| key.counts_against_quota(now)) {
+        *counts.entry(key.issuer_id.as_str()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Hosted keys are capped when added, but rows written before the cap, or
+/// before a tier was lowered, can exceed it. They keep authenticating, so the
+/// operator is told rather than the server refusing to start.
+async fn warn_hosted_issuers_over_key_limit(
+    store: &dyn crate::domain::ports::HostedIssuerStore,
+    tiers: &Tiers,
+) {
+    let (issuers, keys) = match read_hosted(store).await {
+        Ok(hosted) => hosted,
+        Err(error) => {
+            tracing::warn!(%error, "could not check hosted issuers against their key limits");
+            return;
+        }
+    };
+    let counts = hosted_key_counts(&keys, time::OffsetDateTime::now_utc());
+    for issuer in &issuers {
+        let tier = IssuerTier::from_name_or_strictest(&issuer.tier);
+        let held = counts.get(issuer.id.as_str()).copied().unwrap_or(0);
+        let max_keys = tiers.get(tier).max_keys;
+        if held > max_keys {
+            tracing::warn!(
+                issuer = %issuer.id,
+                tier = tier.as_str(),
+                keys = held,
+                max_keys,
+                "hosted issuer holds more keys than its tier allows; revoke the extra keys"
+            );
+        }
+    }
 }
 
 async fn warn_missing_registry_issuers(
@@ -2857,6 +3037,9 @@ mod general_tests {
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())
         }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
         async fn find_key_by_material(
             &self,
             _material: &str,
@@ -2915,6 +3098,64 @@ mod general_tests {
         assert_eq!(
             to_warn, missing,
             "no dynamic store means every missing owner is warned"
+        );
+    }
+
+    #[test]
+    fn test_usage_samples_include_hosted_only_issuers_under_their_stored_tier() {
+        use crate::domain::models::hosted_issuer::{HostedIssuerKeyState, HostedIssuerState};
+
+        let now = time::OffsetDateTime::now_utc();
+        let hosted = |id: &str, tier: &str, state| HostedIssuer {
+            id: id.into(),
+            display_name: None,
+            tier: tier.into(),
+            state,
+            owner: None,
+            created_at: now,
+            expires_at: None,
+            version: 1,
+            aggregation_id: AggregationId::generate(),
+        };
+        let key = |issuer_id: &str, state, not_after| HostedIssuerKey {
+            kid: uuid::Uuid::new_v4().to_string(),
+            issuer_id: issuer_id.into(),
+            jwk: crate::server::auth::tests::test_public_jwk(),
+            created_at: now,
+            not_before: None,
+            not_after,
+            state,
+        };
+        let snapshot = (
+            vec![
+                hosted("hosted-sandbox", "sandbox", HostedIssuerState::Active),
+                hosted("hosted-disabled", "standard", HostedIssuerState::Disabled),
+            ],
+            vec![
+                key("hosted-sandbox", HostedIssuerKeyState::Active, None),
+                key("hosted-sandbox", HostedIssuerKeyState::Revoked, None),
+                key(
+                    "hosted-sandbox",
+                    HostedIssuerKeyState::Active,
+                    Some(now - time::Duration::days(1)),
+                ),
+                key("hosted-disabled", HostedIssuerKeyState::Active, None),
+            ],
+        );
+        let tiers = crate::test_utils::test_tiers();
+        let counts = HashMap::from([("hosted-sandbox".to_owned(), 4)]);
+        let registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
+
+        let samples = issuer_usage_samples(&registry, &snapshot, &counts, &tiers, now);
+
+        assert_eq!(
+            samples,
+            vec![(
+                "hosted-sandbox".to_owned(),
+                IssuerTier::Sandbox,
+                IssuerUsage::new(4, 1, &tiers.sandbox),
+            )],
+            "a hosted-only issuer is exported under its stored tier; a disabled one is not"
         );
     }
 }

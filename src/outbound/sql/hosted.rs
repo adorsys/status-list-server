@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use sea_orm::sea_query::{Expr, Order};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
     HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
 };
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::ports::HostedIssuerStore;
 use crate::utils::metrics_db::time_query;
 
@@ -42,19 +43,29 @@ pub(crate) enum HostedIssuerRow {}
 #[derive(Clone)]
 pub struct SqlHostedIssuerStore {
     store: SeaOrmStore<HostedIssuerRow>,
+    key_limits: Option<Arc<Tiers>>,
 }
 
 impl SqlHostedIssuerStore {
     pub fn new(db: Arc<sea_orm::DatabaseConnection>) -> Self {
         Self {
             store: SeaOrmStore::new(db),
+            key_limits: None,
         }
     }
 
     pub fn from_handle(db: Arc<SwappableDatabaseConnection>) -> Self {
         Self {
             store: SeaOrmStore::from_handle(db),
+            key_limits: None,
         }
+    }
+
+    /// Refuse a key that would take an issuer past its stored tier's
+    /// `max_keys`, as the registry does for its own issuers.
+    pub fn with_key_limits(mut self, tiers: Arc<Tiers>) -> Self {
+        self.key_limits = Some(tiers);
+        self
     }
 }
 
@@ -395,7 +406,11 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), RepositoryError> {
+    async fn add_key(
+        &self,
+        key: HostedIssuerKey,
+        key_limits: Option<&Tiers>,
+    ) -> Result<(), RepositoryError> {
         // The `kid` column is authoritative (the registry keeps the same
         // rule): a key whose embedded `kid` disagrees with its row never
         // enters storage.
@@ -424,18 +439,37 @@ impl SeaOrmStore<HostedIssuerRow> {
             let hash = material_hash(&material);
             let db = self.current();
             let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
-            let issuer_exists = issuers::Entity::find_by_id(&key.issuer_id)
+            // Writing the issuer row first locks it, so concurrent adds for one
+            // issuer count its keys one after another and the cap is exact. It
+            // must precede the key insert, whose FK check takes a shared lock on
+            // the same row that two adds would otherwise both upgrade (InnoDB
+            // `1213`).
+            let locked = issuers::Entity::update_many()
+                .col_expr(
+                    issuers::Column::Version,
+                    sea_orm::sea_query::ExprTrait::add(Expr::col(issuers::Column::Version), 1),
+                )
+                .filter(issuers::Column::Issuer.eq(&key.issuer_id))
                 .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-                .select_only()
-                .column(issuers::Column::Issuer)
-                .into_tuple::<String>()
-                .one(&txn)
-                .await
-                .map_err(err_txn)?
-                .is_some();
-            if !issuer_exists {
+                .exec(&txn)
+                .await;
+            match locked {
+                Ok(result) if result.rows_affected > 0 => {}
+                Ok(_) => {
+                    txn.rollback().await.ok();
+                    return Err(RepositoryError::NotFound);
+                }
+                Err(err) => {
+                    return Err(classify_after_rollback(txn, err, "issuer key lock").await);
+                }
+            }
+            let now = OffsetDateTime::now_utc();
+            if let Some(tiers) = key_limits
+                && key.counts_against_quota(now)
+                && let Err(err) = check_key_quota(&txn, &key.issuer_id, tiers, now).await
+            {
                 txn.rollback().await.ok();
-                return Err(RepositoryError::NotFound);
+                return Err(err);
             }
             let insert = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
                 kid: Set(key.kid.clone()),
@@ -514,6 +548,32 @@ impl SeaOrmStore<HostedIssuerRow> {
         .await
     }
 
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, RepositoryError> {
+        time_query("find_all", "hosted_issuer", async {
+            let rows = issuers::Entity::find()
+                .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+                .all(self.current().as_ref())
+                .await
+                .map_err(find_err)?;
+            // Quarantined like `all_keys`: one malformed row must not hide
+            // every other issuer from the scan.
+            let mut hosted = Vec::with_capacity(rows.len());
+            for row in rows {
+                match parse_issuer(row) {
+                    Ok(issuer) => hosted.push(issuer),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "skipping a hosted issuer row that no longer parses"
+                        );
+                    }
+                }
+            }
+            Ok(hosted)
+        })
+        .await
+    }
+
     async fn find_entry_by_kid(
         &self,
         kid: &str,
@@ -555,20 +615,56 @@ impl SeaOrmStore<HostedIssuerRow> {
     }
 }
 
-/// Only the typed material-reuse and invalid-key variants from `add_key` are
-/// recoverable here; everything else keeps the shared mapping.
+/// Fails with `KeyQuotaExceeded` when `issuer_id` already holds its stored
+/// tier's `max_keys` keys that count against the quota at `now`. An unknown
+/// tier name gets the strictest tier, as when the issuer authenticates.
+async fn check_key_quota(
+    txn: &sea_orm::DatabaseTransaction,
+    issuer_id: &str,
+    tiers: &Tiers,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let tier = issuers::Entity::find_by_id(issuer_id)
+        .select_only()
+        .column(issuers::Column::Tier)
+        .into_tuple::<String>()
+        .one(txn)
+        .await
+        .map_err(find_err)?
+        .ok_or(RepositoryError::NotFound)?;
+    let max_keys = tiers
+        .get(IssuerTier::from_name_or_strictest(&tier))
+        .max_keys;
+    let held = hosted_issuer_keys::Entity::find()
+        .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+        .filter(hosted_issuer_keys::Column::State.eq(HostedIssuerKeyState::Active.as_str()))
+        .filter(
+            Condition::any()
+                .add(hosted_issuer_keys::Column::NotAfter.is_null())
+                .add(hosted_issuer_keys::Column::NotAfter.gt(now.unix_timestamp())),
+        )
+        .count(txn)
+        .await
+        .map_err(find_err)?;
+    if usize::try_from(held).unwrap_or(usize::MAX) >= max_keys {
+        return Err(RepositoryError::KeyQuotaExceeded { max_keys });
+    }
+    Ok(())
+}
+
+/// Only the typed material-reuse, key-quota and invalid-key variants from
+/// `add_key` are recoverable here; everything else keeps the shared mapping.
 fn hosted_error(err: RepositoryError) -> HostedIssuerError {
     match &err {
         RepositoryError::KeyMaterialReused => HostedIssuerError::KeyMaterialReused,
+        RepositoryError::KeyQuotaExceeded { max_keys } => HostedIssuerError::KeyQuotaExceeded {
+            max_keys: *max_keys,
+        },
         RepositoryError::InvalidKey(message) => {
             HostedIssuerError::InvalidPublicJwk(message.clone())
         }
         _ => err.into(),
     }
-}
-
-fn err_txn(e: DbErr) -> RepositoryError {
-    RepositoryError::InsertError(e.to_string())
 }
 
 fn err_jwk(message: String) -> RepositoryError {
@@ -699,11 +795,18 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
     }
 
     async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
-        self.store.add_key(key).await.map_err(hosted_error)
+        self.store
+            .add_key(key, self.key_limits.as_deref())
+            .await
+            .map_err(hosted_error)
     }
 
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
         self.store.all_keys().await.map_err(Into::into)
+    }
+
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        self.store.all_issuers().await.map_err(Into::into)
     }
 
     async fn find_key_by_material(
