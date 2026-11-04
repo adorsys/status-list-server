@@ -2,7 +2,6 @@ use axum::http::{HeaderMap, header};
 
 use super::constants::{ACCEPT_STATUS_LISTS_HEADER_CWT, ACCEPT_STATUS_LISTS_HEADER_JWT};
 
-/// The status-list token formats this endpoint can serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AcceptType {
     Jwt,
@@ -20,8 +19,7 @@ impl AcceptType {
         }
     }
 
-    /// RFC 9110 §12.5.1 precedence of `range` for this type: exact >
-    /// `application/*` > `*/*`.
+    /// Exact beats `application/*`, which beats `*/*` (RFC 9110 §12.5.1).
     fn precedence(self, range: &str) -> Option<u8> {
         if range.eq_ignore_ascii_case(self.media_type()) {
             Some(2)
@@ -35,30 +33,8 @@ impl AcceptType {
     }
 }
 
-/// Negotiate the `Accept` header per RFC 9110 §12.5.1 and pick a supported
-/// status-list media type.
-///
-/// `fields` is every `Accept` field line: RFC 9110 §5.3 folds multiple field
-/// lines into one comma-separated list, so each line is a separate element and
-/// the whole set is evaluated together.
-///
-/// Deliberately parameter-agnostic (a non-RFC policy): media parameters other
-/// than `q` (for example `profile=v2`) are ignored for matching, so
-/// `application/statuslist+jwt;profile=v2` is treated the same as the
-/// parameter-free `application/statuslist+jwt`. This is a documented deviation
-/// from RFC 9110 §12.5.1, which would match a range only against a
-/// representation carrying the identical parameters. The server serves exactly
-/// two un-parameterized representations today, so parameter equality would
-/// always fail to match and every parameterized range would be ignored — that
-/// is more surprising, and more likely to produce spurious `406`s, than the
-/// parameter-agnostic reading. Revisit this if a parameterized status-list
-/// variant is ever introduced.
-///
-/// Returns the supported type with the highest effective `q`. On a tie — or a
-/// wildcard range, or no field lines at all, which the spec treats as `*/*` —
-/// JWT wins. No supported type is acceptable only when every matching range has
-/// `q=0` (or no range matches), which the caller turns into `406 Not
-/// Acceptable`.
+/// Ignores parameters other than q, a deliberate RFC 9110 deviation; no served type has any.
+/// JWT wins ties and wildcards; None means 406.
 pub(crate) fn negotiate_accept<'a>(
     fields: impl IntoIterator<Item = &'a str>,
 ) -> Option<AcceptType> {
@@ -69,20 +45,13 @@ pub(crate) fn negotiate_accept<'a>(
         .filter(|r| !r.is_empty())
         .peekable();
     if ranges.peek().is_none() {
-        // Absent, empty, or only empty list elements: no preference.
         return Some(AcceptType::Jwt);
     }
 
-    // Per type: (precedence, q) of the most specific matching range. A more
-    // specific range (`application/*` or an exact type) shadows a wildcard, so
-    // an explicit `q=0` exclusion is never overridden by `*/*` (RFC 9110
-    // §12.5.1 specificity).
+    // Most specific range wins, so `*/*` can't override an explicit q=0.
     let mut best: [Option<(u8, f32)>; 2] = [None; 2];
     for range in ranges {
-        // Media parameters (e.g. `profile`) may carry quoted strings, and a
-        // quoted value can itself contain `;` or `,` that are data, not
-        // delimiters. Split the range off its parameters at the first *top
-        // level* `;` only, so those embedded characters survive.
+        // Quoted parameter values may contain ';', so split at the top level only.
         let (media, params) = match find_top_level(range, ';') {
             Some(i) => (range[..i].trim(), &range[i + 1..]),
             None => (range.trim(), ""),
@@ -108,11 +77,6 @@ pub(crate) fn negotiate_accept<'a>(
     }
 }
 
-/// Whether the client will accept a `gzip` content-coding, per `Accept-Encoding`
-/// (RFC 9110 §12.5.3). An explicit `gzip` entry with `q > 0` (or no `q`)
-/// accepts it; `q=0` excludes it. If `gzip` is not listed, a matching `*`
-/// wildcard accepts it. Uses the same weight parser as `Accept`, so `Q=`/OWS
-/// around `=` and `.2`-style shorthands behave identically (see [`weight`]).
 pub(crate) fn client_accepts_gzip(headers: &HeaderMap) -> bool {
     let mut entries: Vec<(&str, f32)> = Vec::new();
     for val in headers.get_all(header::ACCEPT_ENCODING) {
@@ -151,28 +115,22 @@ fn weight(params: &str) -> f32 {
         .map_or(1.0, |(_, v)| qvalue(v.trim()).unwrap_or(0.0))
 }
 
-/// Parse an RFC 9110 `qvalue`, allowing the common leading-dot shorthand
-/// (`.2` == 0.2). Rejects anything malformed *or outside `[0, 1]`* rather than
-/// clamping, so an invalid range such as `q=2` or `q=1.5` is excluded instead
-/// of winning at full preference (RFC 9110 §12.4.2; issue #576).
+/// Out-of-range values are rejected, not clamped, so q=2 can't win at full weight.
 fn qvalue(s: &str) -> Option<f32> {
     if s.is_empty() {
         return None;
     }
-    // A value beginning with `1` may only carry trailing zeros (`1`, `1.000`).
     let (int_part, frac) = match s.split_once('.') {
         Some((i, f)) => (i, Some(f)),
         None => (s, None),
     };
     let int = match int_part {
-        // The `.2` shorthand and plain `0`/`1`.
         "" | "0" => 0,
         "1" => 1,
         _ => return None,
     };
     if let Some(frac) = frac {
-        // Up to three digits, digits only; after `1` only zeros are allowed.
-        // `0.` and `1.` are valid (`0*3DIGIT`); only a bare `.` has no digits.
+        // RFC grammar: up to three digits, only zeros after 1, and "0." or "1." are valid.
         if (int_part.is_empty() && frac.is_empty())
             || frac.len() > 3
             || !frac.bytes().all(|b| b.is_ascii_digit())
@@ -189,9 +147,7 @@ fn qvalue(s: &str) -> Option<f32> {
     normalized.parse::<f32>().ok()
 }
 
-/// Index of the first `delim` at the top level — outside any RFC 9110 quoted
-/// string. A backslash escape inside a quote is honoured so `\"` does not close
-/// the string.
+/// Skips delimiters inside quoted strings, honoring backslash escapes.
 fn find_top_level(s: &str, delim: char) -> Option<usize> {
     let mut in_quotes = false;
     let mut escaped = false;
@@ -218,8 +174,6 @@ fn find_top_level(s: &str, delim: char) -> Option<usize> {
     None
 }
 
-/// Split `s` on `delim` at the top level (outside quoted strings), so a `,` or
-/// `;` inside a quoted media-parameter value is data, not a list separator.
 fn split_top_level(s: &str, delim: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -237,15 +191,11 @@ mod tests {
 
     #[test]
     fn test_negotiate_accept_table() {
-        // (Accept field lines, expected outcome)
         let cases: Vec<(&[&str], Option<AcceptType>)> = vec![
-            // Current exact-match cases still resolve.
             (&[ACCEPT_STATUS_LISTS_HEADER_JWT], Some(AcceptType::Jwt)),
             (&[ACCEPT_STATUS_LISTS_HEADER_CWT], Some(AcceptType::Cwt)),
-            // Wildcards: */* and application/* serve JWT.
             (&["*/*"], Some(AcceptType::Jwt)),
             (&["application/*"], Some(AcceptType::Jwt)),
-            // Comma-separated lists with q values.
             (
                 &["application/statuslist+jwt, application/statuslist+cwt;q=0.5"],
                 Some(AcceptType::Jwt),
@@ -258,7 +208,6 @@ mod tests {
                 &["application/statuslist+cwt;q=0.9, application/statuslist+jwt;q=0.8"],
                 Some(AcceptType::Cwt),
             ),
-            // q=0 excludes a type.
             (
                 &["application/statuslist+cwt;q=0, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
@@ -267,8 +216,6 @@ mod tests {
                 &["application/statuslist+jwt;q=0, application/statuslist+cwt;q=0"],
                 None,
             ),
-            // A wildcard must NOT override an explicit q=0 exclusion (RFC 9110
-            // §12.5.1 specificity).
             (
                 &["application/statuslist+jwt;q=0, */*"],
                 Some(AcceptType::Cwt),
@@ -281,8 +228,6 @@ mod tests {
                 &["application/statuslist+cwt;q=0, */*;q=0.9"],
                 Some(AcceptType::Jwt),
             ),
-            // Parameters other than q are ignored for matching (documented
-            // parameter-agnostic policy).
             (
                 &["application/statuslist+jwt; charset=utf-8"],
                 Some(AcceptType::Jwt),
@@ -291,11 +236,8 @@ mod tests {
                 &["application/statuslist+jwt;profile=v2;q=1"],
                 Some(AcceptType::Jwt),
             ),
-            // Case-insensitive type and subtype.
             (&["Application/StatusList+JWT"], Some(AcceptType::Jwt)),
             (&["APPLICATION/STATUSLIST+CWT"], Some(AcceptType::Cwt)),
-            // The q parameter name is case-insensitive; OWS around `;` is
-            // tolerated (the parser also trims around `=`).
             (
                 &["application/statuslist+cwt;Q=0.5, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
@@ -304,26 +246,17 @@ mod tests {
                 &["application/statuslist+cwt; q = 0.5 , application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
             ),
-            // A malformed or out-of-range weight is handled conservatively: it
-            // excludes its range. `q=banana` is malformed; `q=2` / `q=1.5` are
-            // outside the RFC 9110 `[0,1]` range and must not win at full
-            // preference — including when the invalid range is the *only*
-            // match, which must yield 406 rather than the (previously
-            // clamped-to-1) type.
             (&["application/statuslist+cwt;q=banana"], None),
             (
                 &["application/statuslist+cwt;q=2, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
             ),
-            // An invalid weight as the only matching range -> nothing acceptable.
             (&["application/statuslist+cwt;q=2"], None),
             (&["application/statuslist+cwt;q=1.5"], None),
             (
                 &["application/statuslist+cwt;q=1.000"],
                 Some(AcceptType::Cwt),
             ),
-            // Plain decimals only: no NaN, inf, sign or exponent ever slips
-            // through, but the common `.2` shorthand still parses.
             (
                 &["application/statuslist+cwt;q=.2, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
@@ -332,12 +265,8 @@ mod tests {
             (&["application/statuslist+cwt;q=inf"], None),
             (&["application/statuslist+cwt;q=-0.5"], None),
             (&["application/statuslist+cwt;q=1e2"], None),
-            // A trailing dot with no digits is malformed, but `0.` / `1.` are
-            // valid per the RFC 9110 grammar (`0*3DIGIT` after the dot).
             (&["application/statuslist+cwt;q=1."], Some(AcceptType::Cwt)),
             (&["application/statuslist+cwt;q=."], None),
-            // Quoted media parameters: a `,` or `;q=` inside a quoted value is
-            // data, not a list separator / weight (RFC 9110 §5.6.4).
             (
                 &["application/statuslist+jwt;profile=\"a,b\";q=0, \
                      application/statuslist+cwt;q=0.5"],
@@ -348,31 +277,23 @@ mod tests {
                      application/statuslist+cwt;profile=\"a;q=1\";q=0"],
                 Some(AcceptType::Jwt),
             ),
-            // A stray quote (not a parameter value) must not swallow the rest
-            // of the range: the `,` after it stays a top-level separator.
             (
                 &["text/\"html, application/statuslist+jwt"],
                 Some(AcceptType::Jwt),
             ),
-            // Unsupported types.
             (&["text/html"], None),
             (&["application/json"], None),
-            // Empty field lines are treated as an absent header -> JWT.
             (&[""], Some(AcceptType::Jwt)),
             (&["", ","], Some(AcceptType::Jwt)),
-            // A wildcard excluded by q=0 -> nothing acceptable.
             (&["*/*;q=0"], None),
-            // A tie with CWT listed first still resolves to JWT (tie-break order).
             (
                 &["application/statuslist+cwt;q=1, application/statuslist+jwt;q=1"],
                 Some(AcceptType::Jwt),
             ),
-            // The legacy JDK default Accept header.
             (
                 &["text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2"],
                 Some(AcceptType::Jwt),
             ),
-            // Multiple field lines form one list (RFC 9110 §5.3).
             (
                 &["text/html", "application/statuslist+cwt;q=0.9"],
                 Some(AcceptType::Cwt),
@@ -387,7 +308,6 @@ mod tests {
             );
         }
 
-        // No field lines at all -> JWT.
         assert_eq!(negotiate_accept([]), Some(AcceptType::Jwt));
     }
 
@@ -414,8 +334,6 @@ mod tests {
 
     #[test]
     fn test_rejects_gzip_uppercase_q0() {
-        // Regression: the old `q=`-only parser ignored `Q=0` and served gzip
-        // anyway, because it treated the entry as having no q at all.
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "gzip;Q=0".parse().unwrap());
         assert!(!client_accepts_gzip(&h));
@@ -423,8 +341,6 @@ mod tests {
 
     #[test]
     fn test_rejects_gzip_malformed_q() {
-        // A malformed `q` excludes the coding: the response goes out
-        // uncompressed rather than assuming the client accepts gzip.
         let mut h = HeaderMap::new();
         h.insert(header::ACCEPT_ENCODING, "gzip;q=banana".parse().unwrap());
         assert!(!client_accepts_gzip(&h));

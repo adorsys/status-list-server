@@ -10,7 +10,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{OptionExt, Result, WrapErr, bail, ensure};
 use sha2::{Digest, Sha256};
 
-/// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let workspace = workspace_root()?;
@@ -689,8 +688,7 @@ fn lint_specs() -> [(&'static str, CommandSpec); 4] {
             ),
         ),
         ("audit", CommandSpec::new("cargo", ["audit"])),
-        // Invoke the plugin binary directly. Older cargo-machete releases parse
-        // nested `cargo machete` arguments as paths when xtask itself is run by Cargo.
+        // Call cargo-machete directly: older releases misparse args when nested under Cargo.
         (
             "machete",
             CommandSpec::new("cargo-machete", ["--with-metadata"]),

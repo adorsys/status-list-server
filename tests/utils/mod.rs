@@ -24,8 +24,6 @@ use status_list_server::{
 use tokio::net::TcpListener;
 
 pub(super) const KEY: &str = include_str!("../../test_data/ec-private.pem");
-// Generate once per test process from the existing fixture key. Both the server
-// and the independent signature assertions use this exact certificate.
 pub(super) fn certificate() -> &'static str {
     static CERT: OnceLock<String> = OnceLock::new();
     CERT.get_or_init(|| {
@@ -47,8 +45,6 @@ impl CertificateProvider for FixtureCertificate {
     }
 }
 
-// Deserialize an explicit fixture through Config's existing public surface.
-// No ambient APP_* values are read and no process-wide environment is mutated.
 fn fixture_config() -> Config {
     serde_json::from_value(json!({
         "server": {"host": "127.0.0.1", "port": 0, "domain": "localhost",
@@ -173,15 +169,12 @@ impl TestServer {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut config = fixture_config();
         config.server.aggregation_uri = aggregation_uri;
-        // HttpServer::new owns binding. Retry if another parallel test/process
-        // acquires the OS-selected port between releasing it and server startup.
         let (base_url, management_url, server) = {
             let mut started = None;
             for attempt in 0..10 {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 config.server.port = listener.local_addr().unwrap().port();
                 let base_url = format!("http://127.0.0.1:{}", config.server.port);
-                // Connect directly to HTTP rather than a production TLS terminator.
                 config.server.public_base_url = Some(format!("{base_url}/api/v1"));
                 drop(listener);
                 let state = fixture_state(&config, registry_override.as_deref());
@@ -229,12 +222,9 @@ impl TestServer {
             }
             started.expect("server bound within retry limit")
         };
-        // Each #[tokio::test] owns its runtime; shutdown drops its server tasks.
-        // Hold the sender alive for the server task's lifetime so the graceful
-        // shutdown future never resolves mid-test; teardown happens on runtime drop.
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            let _shutdown_tx = shutdown_tx;
+            let _keep_server_running = shutdown_tx;
             server.run(shutdown_rx).await
         });
         let client = reqwest::Client::builder()

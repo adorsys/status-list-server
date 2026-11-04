@@ -1,5 +1,3 @@
-//! Shared Azure identity helpers for Azure-backed adapters.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,16 +11,13 @@ use azure_identity::{
 };
 use tracing::{debug, info, warn};
 
-/// Chained token credential that evaluates supported ambient Azure identity
-/// sources in order: Environment client secret -> Workload Identity ->
-/// Managed Identity -> Developer Tools.
+/// Tries env client secret, then workload identity, managed identity, and dev tools.
 #[derive(Debug)]
 pub(crate) struct DefaultAzureCredential {
     sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
 }
 
 impl DefaultAzureCredential {
-    /// Create a new [`DefaultAzureCredential`] chain with available credential sources.
     pub(crate) fn new() -> azure_core::Result<Arc<Self>> {
         Self::new_from_env(
             std::env::var("AZURE_TENANT_ID").ok(),
@@ -32,10 +27,7 @@ impl DefaultAzureCredential {
         )
     }
 
-    /// Build the credential chain from explicit environment values.
-    ///
-    /// Split out from [`Self::new`] so the selection logic is testable without
-    /// mutating process-global environment variables.
+    /// Takes the env values as arguments so tests don't touch process env.
     fn new_from_env(
         tenant_id: Option<String>,
         client_id: Option<String>,
