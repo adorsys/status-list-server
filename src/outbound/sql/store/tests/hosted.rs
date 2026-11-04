@@ -12,7 +12,9 @@ use crate::domain::models::hosted_issuer::{
 };
 #[cfg(feature = "sqlite")]
 use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
-use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
+#[cfg(feature = "sqlite")]
+use crate::domain::ports::HostedIssuerLifecycleStore;
+use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
 
