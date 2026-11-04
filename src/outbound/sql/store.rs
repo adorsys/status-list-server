@@ -410,6 +410,7 @@ impl SeaOrmStore<StatusListRecord> {
     }
 
     /// Ok(false) means the version guard missed: someone else wrote first, or the row is gone.
+    /// Pinned like the snapshot path, so a racing update fails the same way with or without history.
     /// `entity.version` must be greater than `expected_version`, or two writers could both match.
     #[tracing::instrument(skip(self, entity), fields(db.system = "sea-orm"))]
     pub async fn update_one(

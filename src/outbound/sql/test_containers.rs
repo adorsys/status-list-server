@@ -1,3 +1,5 @@
+//! Never keep a container in a static: statics aren't dropped, so each nextest process would leak one.
+//! Lives outside store's test module because the HTTP publish tests use these fixtures too.
 //! Hold one fixture per test: waiting on a second can deadlock the four-container limit.
 //! Pools are pinned to one connection so contention tests really get two.
 //! Cleanup steps for containers left by a killed run: see CONTRIBUTING.md.
