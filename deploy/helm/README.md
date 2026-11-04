@@ -44,7 +44,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 
 ## Configure Your Secrets
 
-Production deployments also need a persistent writable history volume for static key revocations, separate from the read-only issuer registry. Pre-provision a claim writable by UID/GID 65534 and configure:
+Production deployments also need a persistent writable history volume for static key revocations, separate from the read-only issuer registry. The chart uses a claim named `status-list-revocations` by default in production. Pre-provision that claim writable by UID/GID 65534, or configure a different volume:
 
 ```yaml
 statuslist:

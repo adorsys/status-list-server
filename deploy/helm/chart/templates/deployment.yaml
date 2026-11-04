@@ -8,12 +8,15 @@
 {{- $registryVolume := .Values.statuslist.issuerRegistry.volume | default dict }}
 {{- $registryMounted := gt (len $registryVolume) 0 }}
 {{- $historyVolume := .Values.statuslist.revocationHistory.volume | default dict }}
-{{- $historyMounted := gt (len $historyVolume) 0 }}
 {{- if not (regexMatch "^/var/lib/status-list-server/[A-Za-z0-9][A-Za-z0-9._-]*$" .Values.statuslist.revocationHistory.path) }}
 {{- fail "statuslist.revocationHistory.path must be a file inside /var/lib/status-list-server" }}
 {{- end }}
 {{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
 {{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
+{{- if and (has $telemetryEnv (list "production" "prod")) (eq (len $historyVolume) 0) }}
+{{- $historyVolume = dict "persistentVolumeClaim" (dict "claimName" "status-list-revocations") }}
+{{- end }}
+{{- $historyMounted := gt (len $historyVolume) 0 }}
 {{- $audiences := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES | default "")) "" }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (empty $audiences) }}
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
@@ -30,9 +33,6 @@
 {{- end }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}
 {{- fail "statuslist.issuerRegistry.volume is required in production" }}
-{{- end }}
-{{- if and (has $telemetryEnv (list "production" "prod")) (not $historyMounted) }}
-{{- fail "statuslist.revocationHistory.volume is required in production" }}
 {{- end }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
