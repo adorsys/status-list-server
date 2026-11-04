@@ -57,7 +57,7 @@ pub struct IssuerRegistry {
     pub admins: Vec<AdminEntry>,
     /// Public key records retained after a static key is removed. They are
     /// never trusted for authentication, but reserve the key id and material
-    /// so a revoked static key cannot be admitted again on a later reload.
+    /// while the tombstone remains in the operator-managed file.
     #[serde(default)]
     pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
@@ -561,7 +561,7 @@ impl ValidatedRegistry {
         self.materials.contains(material)
     }
 
-    /// Whether a static registry tombstone permanently reserves this key id.
+    /// Whether the current static registry reserves this revoked key id.
     pub fn has_revoked_kid(&self, kid: &str) -> bool {
         self.revoked_kids.contains(kid)
     }

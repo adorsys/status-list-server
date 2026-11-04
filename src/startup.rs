@@ -2148,4 +2148,76 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn admin_issuer_reads_are_rate_limited() {
+        use axum::http::header;
+
+        let config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let jwk: serde_json::Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{
+                "id": "read-admin",
+                "scopes": ["issuers:read"],
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": jwk}],
+            }],
+        }))
+        .unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        );
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+
+        let mut token_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        token_header.typ = Some("statuslist-admin+jwt".into());
+        token_header.kid = Some("test-key".into());
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+            crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+        )
+        .unwrap();
+        let token = jsonwebtoken::encode(
+            &token_header,
+            &serde_json::json!({
+                "iss": "read-admin",
+                "iat": now,
+                "exp": now + 300,
+                "aud": ["status-list-server-admin"],
+            }),
+            &secret,
+        )
+        .unwrap();
+
+        for (uri, expected_first) in [
+            ("/admin/v1/issuers", StatusCode::OK),
+            ("/admin/v1/issuers/missing", StatusCode::NOT_FOUND),
+        ] {
+            let (_, _, governor) = build_governor_configs(&config.rate_limit).unwrap();
+            let router = admin_routes(state.clone(), &config, Registry::new(), governor)
+                .with_state(state.clone());
+            let request = || {
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        12345,
+                    )))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let first = router.clone().oneshot(request()).await.unwrap();
+            assert_eq!(first.status(), expected_first);
+            let second = router.clone().oneshot(request()).await.unwrap();
+            assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
 }
