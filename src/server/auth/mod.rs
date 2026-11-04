@@ -1619,6 +1619,11 @@ pub(crate) mod tests {
             .parse()
             .unwrap();
         assert!(total >= 4, "{reload_failures}");
+        let failed_state = metrics
+            .lines()
+            .find(|line| line.starts_with("issuer_registry_reload_failed{"))
+            .expect("issuer registry reload state metric is exported");
+        assert!(failed_state.ends_with(" 1"), "{failed_state}");
     }
 
     #[tokio::test]

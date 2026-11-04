@@ -7,8 +7,7 @@ as production status assertions. See the [trust model](trust-model.md).
 
 `deploy/helm/chart/values-hosted.yaml` configures the existing three listeners,
 PostgreSQL, ingress, network policies, and alerts. It does not deploy the portal,
-an ingress controller, a VPN, or a mutual-TLS gateway. The portal's admin API
-integration and issuer tiers ship with the rest of the onboarding EPIC.
+an ingress controller, a VPN, or a mutual-TLS gateway.
 
 Use a dedicated namespace and PostgreSQL storage, an independent issuer registry,
 and independent signing keys. Do not layer `values-production.yaml` or
@@ -21,8 +20,9 @@ Before installation, provide:
 - Prometheus Operator CRDs, with discovery labels matching `serviceMonitor.labels`
   and `prometheusRule.labels` in your monitoring installation.
 - A sandbox-only issuer registry ConfigMap, default name `sandbox-issuers`, with
-  the registry file `issuers.yaml`. Configure admin public keys for the portal
-  when its admin API is available. Registry loading remains mandatory in hosted mode.
+  the registry file `issuers.yaml`. Add the portal backend under `admins` with
+  public keys and `issuers:read` and `issuers:write` scopes. Registry loading
+  remains mandatory in hosted mode.
 - A sandbox-only signing Secret, default name `sandbox-signing`, with `tls.crt`
   (the PEM signing chain) and `tls.key` (the matching private key). Override the
   signing entry in `statuslist.secretMounts` to change its name or paths; lists
@@ -30,14 +30,20 @@ Before installation, provide:
 - A separate ingress TLS Secret covering the chosen hostname(s). Transport TLS
   and status-token signing have different trust roles.
 
-Hostnames, TLS Secret names, management audience, release namespace, and network
-selectors are site-specific values. No deployed ADORSYS hostname is supplied.
+Hostnames, TLS Secret names, management and admin audiences, trusted proxy
+addresses, release namespace, and network selectors are site-specific values.
+No deployed ADORSYS hostname is supplied.
 
 ## Edge configuration
 
 Apply `deploy/helm/ingress-nginx-hosted.yaml` to a **dedicated ingress-nginx
-controller**, using that controller's normal Helm deployment. It is not an
-application chart values file. For the supported direct-edge topology it disables
+controller**. It is not an application chart values file. The profile uses
+IngressClass `hosted-sandbox`; install the controller as release
+`hosted-sandbox-ingress` in namespace `ingress-nginx-hosted` to match the
+application NetworkPolicy selectors, or override those selectors for your
+deployment. The controller values set a distinct controller class and leader
+election ID so the shared nginx controller does not claim these Ingresses.
+For the supported direct-edge topology, the profile disables
 incoming forwarded-header trust and full-chain appending, so nginx overwrites
 `X-Forwarded-For` with its connection-derived client address. It also configures
 rate-limit rejections as HTTP 429 and preserves source addresses with
@@ -48,19 +54,35 @@ A CDN or HTTP proxy in front of nginx needs a separately reviewed trusted-proxy
 configuration; do not enable forwarded-header trust for arbitrary peers. See the
 [ingress-nginx configuration reference](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/).
 
+For a chart-based controller installation, use the matching release and namespace:
+
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm upgrade --install hosted-sandbox-ingress ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx-hosted --create-namespace \
+  -f deploy/helm/ingress-nginx-hosted.yaml
+```
+
 The overlay supplies initial, operator-tunable per-IP edge budgets:
 
 - Public ingress: 100 requests/second, burst multiplier 5.
 - Management ingress: 10 requests/second, burst multiplier 5.
 
-These are starting deployment defaults, not budgets agreed in the ticket thread.
+These are starting values to tune for the deployment.
 Override the `nginx.ingress.kubernetes.io/limit-rps` and
 `nginx.ingress.kubernetes.io/limit-burst-multiplier` annotations on each ingress.
 Ingress limits are per controller replica and multiply when controllers scale;
 they are not a distributed cluster-wide quota. A shared global budget requires
-an upstream gateway with shared state. The application's client-IP derivation,
-verified-issuer fairness, and JSON 429 contract remain the responsibility of #540;
-this overlay does not replace that work. See the
+an upstream gateway with shared state. The app's public-read limiter still keys
+on the controller pod's TCP address. This overlay raises its shared bucket to a
+100,000,000-request burst with one token refilled per second, so the edge's
+per-client 100 requests/second limit applies under normal sandbox load. That
+bucket is still shared by all clients reaching one controller pod and can
+eventually drain; #540 tracks per-client keying and budget semantics in the app.
+The management authentication and admission gates use the client address from
+the controller's overwritten `X-Forwarded-For` only when
+`APP_RATE_LIMIT__TRUSTED_PROXIES` lists the controller pods' addresses or CIDR.
+See the
 [ingress-nginx rate-limit semantics](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#rate-limiting).
 
 ## Installation
@@ -75,7 +97,15 @@ statuslist:
       secretName: sandbox-edge-tls
   env:
     APP_MANAGEMENT_AUTH__AUDIENCES: https://sandbox.example.org/api/v1
+    APP_ADMIN_AUTH__AUDIENCES: https://sandbox.example.org/admin
+    APP_RATE_LIMIT__TRUSTED_PROXIES: 10.244.0.0/16
 ```
+
+Replace the trusted-proxy example with the addresses or CIDR of the dedicated
+controller pods in your cluster. Keep it narrow and ensure other pods cannot
+reach the management listener under another NetworkPolicy. The admin audience
+must differ from the management audience; production startup rejects an empty
+admin audience when the registry lists admins.
 
 Then install into the chosen isolated namespace:
 
@@ -91,7 +121,8 @@ Keep the runtime environment `production`: the sandbox still needs production
 security validation, including a nonempty management audience. `server.profile`
 selects `hosted`; the environment does not select the trust domain.
 
-By default both ingress resources use one hostname. Management paths for
+By default both ingress resources use one hostname and IngressClass
+`hosted-sandbox`. Management paths for
 `statuses`, `allocations`, and `credentials` route to the management Service port;
 public reads route to the public Service. To use a separate management origin,
 set `statuslist.ingress.management.hostname` and its `tls.secretName` to a Secret
@@ -112,7 +143,8 @@ The overlay allows admin connections only from these peers:
 
 Override both selectors for the actual deployments. Keep the portal frontend out
 of the permitted backend selector. Public and management ports admit only the
-selected ingress-controller pods. NetworkPolicy permissions are additive: audit
+selected `hosted-sandbox-ingress` controller pods in `ingress-nginx-hosted`.
+NetworkPolicy permissions are additive: audit
 other policies selecting these pods for broader grants. Enabling policy without
 a CNI that enforces it does not establish isolation.
 
@@ -140,9 +172,9 @@ wiring; only a deployment on the actual CNI verifies its enforcement.
 
 With `prometheusRule.enabled`, the existing rule resource also includes:
 
-- `IssuerRegistryReloadFailures`: a reload failure in the last 10 minutes,
-  sustained for 1 minute. The last valid registry remains active; fix the mounted
-  document and verify reload on every replica.
+- `IssuerRegistryReloadFailures`: a failed reload state lasting 1 minute. The
+  alert stays active until a reload succeeds on every affected replica. The
+  last valid registry remains active; fix the mounted document and verify reload.
 - `ListQuotaRejectionsSpike`: more than 10 quota rejections in 5 minutes,
   sustained for 5 minutes. Inspect issuer usage and abuse before raising limits.
   `list_quota_rejections_total` counts HTTP `list_quota_exceeded` responses;
@@ -156,7 +188,9 @@ The existing registry and authentication instruments already end in `_total`;
 the in-process Prometheus exporter appends its own suffix. These rules therefore
 use the existing scrape names `issuer_registry_reload_failures_total_total` and
 `management_auth_requests_total_total`, preserving their names for current
-consumers. The new quota instrument exports `list_quota_rejections_total`.
+consumers. The persistent registry state gauge is
+`issuer_registry_reload_failed`; the new quota instrument exports
+`list_quota_rejections_total`.
 
 Tune the latter two thresholds with `slo.listQuotaRejections` and
 `slo.managementAuthFailures`. Alerts aggregate replicas within the release
@@ -165,7 +199,7 @@ installation; rule creation alone does not deliver notifications.
 
 ## External acceptance check
 
-After the EPIC's first deployment, run the Python 3 check against every published
+After the first deployment, run the Python 3 check against every published
 origin using HTTPS:
 
 ```bash

@@ -44,6 +44,7 @@ struct RotationMetrics {
 struct IssuerRegistryMetrics {
     keys: Gauge<u64>,
     reload_failures: Counter<u64>,
+    reload_failed: Gauge<u64>,
     auth_requests: Counter<u64>,
     admin_auth_requests: Counter<u64>,
 }
@@ -56,6 +57,7 @@ fn issuer_registry_metrics() -> IssuerRegistryMetrics {
             reload_failures: meter
                 .u64_counter("issuer_registry_reload_failures_total")
                 .build(),
+            reload_failed: meter.u64_gauge("issuer_registry_reload_failed").build(),
             auth_requests: meter.u64_counter("management_auth_requests_total").build(),
             admin_auth_requests: meter.u64_counter("admin_auth_requests_total").build(),
         }
@@ -71,12 +73,19 @@ pub(crate) fn record_admin_auth_request(outcome: &'static str) {
 pub(crate) fn set_issuer_registry_keys(count: usize) {
     let instruments = issuer_registry_metrics();
     instruments.keys.record(count as u64, &[]);
+    instruments.reload_failed.record(0, &[]);
     // Seed a baseline so increase() observes the first failed reload.
     instruments.reload_failures.add(0, &[]);
 }
 
 pub(crate) fn record_issuer_registry_reload_failure() {
-    issuer_registry_metrics().reload_failures.add(1, &[]);
+    let instruments = issuer_registry_metrics();
+    instruments.reload_failures.add(1, &[]);
+    instruments.reload_failed.record(1, &[]);
+}
+
+pub(crate) fn record_issuer_registry_reload_success() {
+    issuer_registry_metrics().reload_failed.record(0, &[]);
 }
 
 pub(crate) fn record_management_auth_request(
@@ -585,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_alert_counters_are_exported() {
+    fn hosted_alert_metrics_track_registry_reload_state() {
         use crate::server::error::IntoApiError;
         use axum::response::IntoResponse;
 
@@ -625,11 +634,12 @@ mod tests {
         );
         let rendered = tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(metrics_handler(registry));
+            .block_on(metrics_handler(registry.clone()));
         for name in [
             "list_quota_rejections_total{",
             "issuer_registry_reload_failures_total_total{",
             "management_auth_requests_total_total{",
+            "issuer_registry_reload_failed{",
         ] {
             assert!(
                 rendered
@@ -638,6 +648,17 @@ mod tests {
                 "{rendered}"
             );
         }
+        record_issuer_registry_reload_success();
+        let recovered = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(metrics_handler(registry));
+        assert!(
+            recovered
+                .lines()
+                .any(|line| line.starts_with("issuer_registry_reload_failed{")
+                    && line.ends_with(" 0")),
+            "{recovered}"
+        );
     }
 
     #[cfg(feature = "history")]

@@ -265,7 +265,7 @@ groups:
   - name: hosted-trust-alerts
     rules:
       - alert: IssuerRegistryReloadFailures
-        expr: sum by (namespace)(increase(issuer_registry_reload_failures_total_total{otel_scope_name="status-list-server"}[10m])) > 0
+        expr: max by (namespace)(issuer_registry_reload_failed{otel_scope_name="status-list-server"}) == 1
         for: 1m
         labels:
           severity: warn

@@ -233,6 +233,12 @@
               "type": "boolean",
               "title": "Render the Ingress"
             },
+            "className": {
+              "type": "string",
+              "title": "IngressClass name",
+              "description": "Both public and management Ingresses use this class. Match it to the intended controller.",
+              "minLength": 1
+            },
             "path": {
               "type": "string",
               "title": "Ingress path",
@@ -294,6 +300,17 @@
                   "type": "object",
                   "title": "Management Ingress annotations",
                   "additionalProperties": { "type": "string" }
+                },
+                "tls": {
+                  "type": "object",
+                  "title": "Management Ingress TLS",
+                  "properties": {
+                    "secretName": {
+                      "type": "string",
+                      "title": "Management TLS secret name",
+                      "description": "Required in hosted mode when management uses a separate hostname. May name the public Secret if its certificate covers both hosts."
+                    }
+                  }
                 }
               }
             }

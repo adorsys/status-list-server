@@ -36,7 +36,7 @@ metadata:
     {{- end }}
 
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ .Values.statuslist.ingress.className | quote }}
   rules:
   - host: {{ $ingressHost }}
     http:
@@ -61,6 +61,9 @@ spec:
 {{- if eq $mgmtHost "" }}
 {{- $mgmtHost = $ingressHost }}
 {{- end }}
+{{- if and (eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted") (ne $mgmtHost $ingressHost) }}
+{{- $_ := required "hosted ingress with a separate management hostname requires statuslist.ingress.management.tls.secretName" .Values.statuslist.ingress.management.tls.secretName }}
+{{- end }}
 {{- $mgmtTlsHosts := $tlsHosts }}
 {{- if ne (.Values.statuslist.ingress.management.hostname | default "") "" }}
 {{- /* A separate management hostname gets its own TLS hosts and DNS record. */}}
@@ -84,7 +87,7 @@ metadata:
     {{- toYaml .Values.statuslist.ingress.management.annotations | nindent 4 }}
     {{- end }}
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ .Values.statuslist.ingress.className | quote }}
   rules:
   - host: {{ $mgmtHost }}
     http:

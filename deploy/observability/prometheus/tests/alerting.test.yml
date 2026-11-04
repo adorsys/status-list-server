@@ -438,10 +438,10 @@ tests:
         exp_alerts: []
   - interval: 1m
     input_series:
-      - series: issuer_registry_reload_failures_total_total{otel_scope_name="status-list-server",namespace="ns1"}
-        values: 0+1x20
+      - series: issuer_registry_reload_failed{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0 1x40
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 30m
         alertname: IssuerRegistryReloadFailures
         exp_alerts:
           - exp_labels:
@@ -455,10 +455,10 @@ tests:
               runbook_url: https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts
   - interval: 1m
     input_series:
-      - series: issuer_registry_reload_failures_total_total{otel_scope_name="status-list-server",namespace="ns1"}
-        values: 0+0x20
+      - series: issuer_registry_reload_failed{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0x40
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 30m
         alertname: IssuerRegistryReloadFailures
         exp_alerts: []
   - interval: 1m

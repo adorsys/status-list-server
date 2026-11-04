@@ -27,6 +27,8 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml
   --namespace hosted-ci \
   --set statuslist.ingress.externalDnsHostname=sandbox.helm-ci.invalid \
   --set statuslist.ingress.tls.secretName=sandbox-edge-tls \
+  --set statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://sandbox.helm-ci.invalid/admin \
+  --set statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
   --output-dir "${RENDER_TEMP}/rendered/hosted"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
   --namespace hosted-ci \
@@ -34,6 +36,8 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml
   --set statuslist.ingress.tls.secretName=sandbox-edge-tls \
   --set statuslist.ingress.management.hostname=management.helm-ci.invalid \
   --set statuslist.ingress.management.tls.secretName=sandbox-management-tls \
+  --set statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://sandbox.helm-ci.invalid/admin \
+  --set statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
   --output-dir "${RENDER_TEMP}/rendered/hosted-separate"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir "${RENDER_TEMP}/rendered/rotation"
@@ -692,7 +696,7 @@ RULES="${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates/prometh
 if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
   echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
 fi
-if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-internal-service"})' "$RULES"; then
+if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
   echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
 fi
 if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then

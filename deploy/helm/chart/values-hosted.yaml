@@ -8,6 +8,7 @@ statuslist:
   service:
     type: ClusterIP
   ingress:
+    className: hosted-sandbox
     externalDnsHostname: ""
     annotations:
       nginx.ingress.kubernetes.io/ssl-redirect: "true"
@@ -30,6 +31,13 @@ statuslist:
     APP_SERVER__PROFILE: "hosted"
     APP_DATABASE__BACKEND: "postgres"
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
+    # Set a site-specific value distinct from the management audience.
+    APP_ADMIN_AUTH__AUDIENCES: ""
+    # Set the dedicated controller pods' addresses or CIDR in the site overlay.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: ""
+    # Public reads still share a pod-level bucket until client IP keying lands.
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100000000"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "1"
   issuerRegistry:
     volume:
       configMap:
@@ -59,17 +67,19 @@ statuslist:
     ingress:
       - namespaceSelector:
           matchLabels:
-            kubernetes.io/metadata.name: ingress-nginx
+            kubernetes.io/metadata.name: ingress-nginx-hosted
         podSelector:
           matchLabels:
             app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: hosted-sandbox-ingress
     managementIngress:
       - namespaceSelector:
           matchLabels:
-            kubernetes.io/metadata.name: ingress-nginx
+            kubernetes.io/metadata.name: ingress-nginx-hosted
         podSelector:
           matchLabels:
             app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: hosted-sandbox-ingress
     adminIngress:
       - namespaceSelector:
           matchLabels:

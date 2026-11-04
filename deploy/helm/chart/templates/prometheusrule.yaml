@@ -69,16 +69,9 @@ spec:
       rules:
         # No Watchdog here: kube-prometheus-stack already ships one, and a copy would page as a normal alert.
         - alert: StatusListMetricsAbsent
-          # Alert on the scrape-generated `up` series, not the request histogram:
-          # /metrics and health routes are excluded from the HTTP metrics
-          # middleware, so a healthy but idle deployment never produces the
-          # histogram and a histogram-based absence check pages falsely. The `up`
-          # series is created by the ServiceMonitor scrape itself, so
-          # `max(up) == 0` catches a target that is present but failing scrapes
-          # while `absent(up)` catches a target that is gone entirely. The
-          # `service` label matches the rendered Service the ServiceMonitor
-          # selects (the chart fullname followed by `-internal-service`).
-          expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-internal-service"}) == 0
+          # Use up, not the request histogram, which an idle deployment never produces.
+          # absent catches a missing target, max(up) == 0 a failing one.
+          expr: absent(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) or max by (namespace, service)(up{namespace="{{ .Release.Namespace }}",service="{{ include "status-list-server-chart.fullname" . }}-service"}) == 0
           for: 5m
           labels:
             severity: page
@@ -290,7 +283,7 @@ spec:
     - name: hosted-trust-alerts
       rules:
         - alert: IssuerRegistryReloadFailures
-          expr: sum by (namespace)(increase(issuer_registry_reload_failures_total_total{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}[10m])) > 0
+          expr: max by (namespace)(issuer_registry_reload_failed{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"}) == 1
           for: 1m
           labels:
             severity: warn

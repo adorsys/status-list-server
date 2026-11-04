@@ -68,6 +68,7 @@ statuslist:
     nodePort: null
   ingress:
     enabled: true
+    className: nginx
     path: /
     pathType: Prefix
     annotations:
