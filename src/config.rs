@@ -158,10 +158,17 @@ pub struct WatcherConfig {
     pub poll_interval_secs: u64,
 }
 
-/// Per-client-IP rate limits. `strict_*` is the management authentication
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientIpSource {
+    ConnectInfo,
+    RightmostXForwardedFor,
+}
+
+/// Per-client rate limits. `strict_*` is the management authentication
 /// gate, which counts rejected authentications only; `admission_*` bounds every
 /// management request before `auth` does any work; `permissive_*` covers
-/// public reads.
+/// public reads and the admin API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
@@ -169,15 +176,57 @@ pub struct RateLimitConfig {
     pub admission_burst_size: u32,
     pub admission_per_second: u32,
     pub permissive_burst_size: u32,
-    pub permissive_period_secs: u64,
+    /// May be a fraction of a second.
+    #[serde(deserialize_with = "deserialize_permissive_period_secs")]
+    pub permissive_period_secs: f64,
     /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
-    /// management authentication gate believes. Empty keys every request on
-    /// its peer address.
+    /// rate limits believe with `rightmost_x_forwarded_for`.
     #[serde(default, deserialize_with = "deserialize_trimmed_list")]
     pub trusted_proxies: Vec<String>,
+    /// Required in production; unset elsewhere, it follows `trusted_proxies`.
+    #[serde(default)]
+    pub client_ip_source: Option<ClientIpSource>,
 }
 
 impl RateLimitConfig {
+    pub(crate) fn resolved_client_ip_source(&self) -> ClientIpSource {
+        self.client_ip_source
+            .unwrap_or(if self.trusted_proxies.is_empty() {
+                ClientIpSource::ConnectInfo
+            } else {
+                ClientIpSource::RightmostXForwardedFor
+            })
+    }
+
+    fn validate_client_ip_source(
+        &self,
+        environment: TelemetryEnvironment,
+    ) -> Result<(), ConfigError> {
+        let message = match self.client_ip_source {
+            None if environment.is_production() => {
+                "rate_limit.client_ip_source is required in production: set \
+                 APP_RATE_LIMIT__CLIENT_IP_SOURCE to connect_info when clients connect to this \
+                 server directly, or to rightmost_x_forwarded_for and list the proxies in front \
+                 of it in APP_RATE_LIMIT__TRUSTED_PROXIES"
+            }
+            Some(ClientIpSource::RightmostXForwardedFor)
+                if environment.is_production() && self.trusted_proxies.is_empty() =>
+            {
+                "rate_limit.client_ip_source=rightmost_x_forwarded_for needs \
+                 rate_limit.trusted_proxies in production: list the proxies in front of this \
+                 server in APP_RATE_LIMIT__TRUSTED_PROXIES, or set \
+                 APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info when clients connect directly"
+            }
+            Some(ClientIpSource::ConnectInfo) if !self.trusted_proxies.is_empty() => {
+                "rate_limit.trusted_proxies has no effect with \
+                 rate_limit.client_ip_source=connect_info, which never reads X-Forwarded-For: \
+                 set it to rightmost_x_forwarded_for, or clear APP_RATE_LIMIT__TRUSTED_PROXIES"
+            }
+            _ => return Ok(()),
+        };
+        Err(ConfigError::Message(message.to_string()))
+    }
+
     /// `trusted_proxies`, parsed. Loading fails when any entry is malformed.
     pub(crate) fn trusted_proxy_networks(&self) -> Result<Vec<ipnet::IpNet>, ConfigError> {
         self.trusted_proxies
@@ -219,6 +268,24 @@ impl RateLimitConfig {
             )));
         }
         Ok(())
+    }
+}
+
+fn deserialize_permissive_period_secs<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite()
+        && value > 0.0
+        && Duration::try_from_secs_f64(value).is_ok_and(|period| !period.is_zero())
+    {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "rate_limit.permissive_period_secs must be a finite number of seconds above 0 \
+             that does not round to zero nanoseconds",
+        ))
     }
 }
 
@@ -1839,6 +1906,9 @@ impl Config {
         config.rate_limit.trusted_proxy_networks()?;
         config
             .rate_limit
+            .validate_client_ip_source(config.telemetry.environment)?;
+        config
+            .rate_limit
             .validate_admission(&config.tier_limits()?.standard)?;
         config
             .server
@@ -1959,9 +2029,10 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.strict_period_secs", 60)?
         .set_default("rate_limit.admission_burst_size", 1000)?
         .set_default("rate_limit.admission_per_second", 100)?
-        .set_default("rate_limit.permissive_burst_size", 100)?
-        .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.permissive_burst_size", 1000)?
+        .set_default("rate_limit.permissive_period_secs", 0.005)?
         .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
+        .set_default("rate_limit.client_ip_source", Option::<String>::None)?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
@@ -2079,8 +2150,9 @@ mod tests {
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
-        assert_eq!(config.rate_limit.permissive_burst_size, 100);
-        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.permissive_burst_size, 1000);
+        assert_eq!(config.rate_limit.permissive_period_secs, 0.005);
+        assert_eq!(config.rate_limit.client_ip_source, None);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -2291,7 +2363,7 @@ mod tests {
         assert_eq!(overridden.rate_limit.strict_burst_size, 3);
         assert_eq!(overridden.rate_limit.strict_period_secs, 120);
         assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
-        assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(overridden.rate_limit.permissive_period_secs, 10.0);
         assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
@@ -2968,6 +3040,107 @@ mod tests {
         }
     }
 
+    fn production_rate_limits(overrides: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let mut all = vec![
+            ("telemetry.environment", "production"),
+            ("management_auth.audiences", "status-list-server-management"),
+            (
+                "management_auth.issuers_file",
+                "/etc/status-list-server/issuers.yaml",
+            ),
+        ];
+        all.extend(overrides.iter().copied());
+        Config::load_from_overrides(&all)
+    }
+
+    #[test]
+    fn test_client_ip_source_is_required_in_production() {
+        let err = production_rate_limits(&[]).unwrap_err().to_string();
+        assert!(
+            err.contains("rate_limit.client_ip_source is required in production"),
+            "{err}"
+        );
+        let config =
+            production_rate_limits(&[("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info")])
+                .unwrap();
+        assert_eq!(
+            config.rate_limit.resolved_client_ip_source(),
+            ClientIpSource::ConnectInfo
+        );
+    }
+
+    #[test]
+    fn test_forwarded_client_addresses_need_trusted_proxies_in_production() {
+        let source = ("rate_limit.client_ip_source", "rightmost_x_forwarded_for");
+        let err = production_rate_limits(&[source]).unwrap_err().to_string();
+        assert!(
+            err.contains("needs rate_limit.trusted_proxies in production"),
+            "{err}"
+        );
+        assert!(
+            production_rate_limits(&[source, ("rate_limit.trusted_proxies", "10.0.0.0/8")]).is_ok()
+        );
+        assert!(Config::load_from_overrides(&[source]).is_ok());
+    }
+
+    #[test]
+    fn test_connect_info_with_trusted_proxies_fails_loading() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "connect_info"),
+            ("rate_limit.trusted_proxies", "10.0.0.0/8"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("rate_limit.trusted_proxies has no effect"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_an_unset_client_ip_source_follows_trusted_proxies_outside_production() {
+        let source = |overrides: &[(&str, &str)]| {
+            Config::load_from_overrides(overrides)
+                .unwrap()
+                .rate_limit
+                .resolved_client_ip_source()
+        };
+        assert_eq!(source(&[]), ClientIpSource::ConnectInfo);
+        assert_eq!(
+            source(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]),
+            ClientIpSource::RightmostXForwardedFor
+        );
+    }
+
+    #[test]
+    fn test_unknown_client_ip_source_fails_loading() {
+        for value in ["x_real_ip", "Connect_Info", ""] {
+            assert!(
+                Config::load_from_overrides(&[("rate_limit.client_ip_source", value)]).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_permissive_period_takes_fractions_of_a_second() {
+        let period = |value: &str| {
+            Config::load_from_overrides(&[("APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS", value)])
+                .map(|config| config.rate_limit.permissive_period_secs)
+        };
+        assert_eq!(period("0.005").unwrap(), 0.005);
+        assert_eq!(period("60").unwrap(), 60.0);
+        assert_eq!(period("1e-9").unwrap(), 1e-9);
+        for invalid in ["0", "-0.5", "NaN", "inf", "1e-10"] {
+            let err = period(invalid).unwrap_err().to_string();
+            assert!(
+                err.contains("rate_limit.permissive_period_secs"),
+                "{invalid}: {err}"
+            );
+        }
+        assert!(period("soon").is_err());
+    }
+
     #[test]
     fn test_admission_below_the_standard_budget_fails_loading() {
         let err = Config::load_from_overrides(&[
@@ -3195,6 +3368,7 @@ mod tests {
                 "management_auth.issuers_file",
                 "/etc/status-list-server/issuers.yaml",
             ));
+            overrides.push(("rate_limit.client_ip_source", "connect_info"));
         }
         Config::load_from_overrides(&overrides).map(|config| {
             config

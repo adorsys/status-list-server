@@ -21,7 +21,6 @@ use tokio::sync::watch;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
-    key_extractor::PeerIpKeyExtractor,
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -37,7 +36,8 @@ use crate::server::handlers::{
     get_status_list, publish_status_route, update_status_route,
 };
 use crate::server::rate_limit::{
-    AuthFailureGate, auth_failure_gate, governor_error_response, issuer_rate_limit,
+    AuthFailureGate, ClientAddress, ClientKeyExtractor, auth_failure_gate, governor_error_response,
+    issuer_rate_limit, spawn_governor_pruner,
 };
 use crate::server::{AppState, auth::auth, health, service_document};
 use crate::utils::metrics::metrics_handler;
@@ -67,6 +67,8 @@ impl HttpServer {
         let (auth_gate, permissive_governor, admin_governor) =
             build_governor_configs(&config.rate_limit)?;
         AuthFailureGate::spawn_pruner(&auth_gate);
+        spawn_governor_pruner(permissive_governor.limiter(), "public");
+        spawn_governor_pruner(admin_governor.limiter(), "admin");
 
         let public_router = with_listener_name(
             with_common_layers(
@@ -256,11 +258,9 @@ async fn shutdown_signal() {
     }
 }
 
-type GovernorPolicies = (
-    Arc<AuthFailureGate>,
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-);
+type ClientGovernor = Arc<GovernorConfig<ClientKeyExtractor, NoOpMiddleware>>;
+
+type GovernorPolicies = (Arc<AuthFailureGate>, ClientGovernor, ClientGovernor);
 
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
@@ -275,23 +275,26 @@ fn build_governor_configs(
         .ok_or_else(|| {
             eyre!("management authentication gate requires non-zero burst_size and period")
         })?;
-    let auth_gate = Arc::new(AuthFailureGate::new(
-        admission,
-        failures,
+    let client = Arc::new(ClientAddress::new(
+        config.resolved_client_ip_source(),
         config.trusted_proxy_networks()?,
     ));
+    let auth_gate = Arc::new(AuthFailureGate::new(admission, failures, client.clone()));
+    let permissive_period = Duration::try_from_secs_f64(config.permissive_period_secs)
+        .wrap_err("rate_limit.permissive_period_secs is not a valid duration")?;
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
-            .period(Duration::from_secs(config.permissive_period_secs))
+            .period(permissive_period)
+            .key_extractor(ClientKeyExtractor(client.clone()))
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
     let admin = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
-            .period(Duration::from_secs(config.permissive_period_secs))
-            .key_extractor(PeerIpKeyExtractor)
+            .period(permissive_period)
+            .key_extractor(ClientKeyExtractor(client))
             .finish()
             .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
     );
@@ -299,9 +302,7 @@ fn build_governor_configs(
 }
 
 /// Internet-facing: never register management or admin routes here.
-fn public_routes(
-    permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+fn public_routes(permissive_governor: ClientGovernor) -> Router<AppState> {
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
@@ -349,7 +350,7 @@ fn admin_routes(
     state: AppState,
     config: &Config,
     registry: Registry,
-    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    admin_governor: ClientGovernor,
 ) -> Router<AppState> {
     let admin_api = Router::new()
         .route(
@@ -360,7 +361,7 @@ fn admin_routes(
             "/issuers/{issuer_id}",
             get(crate::server::handlers::admin::get_issuer),
         )
-        .layer(GovernorLayer::new(admin_governor));
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response));
     let router = Router::new()
         .route("/health/ready", get(health::ready))
         .nest(
@@ -1489,48 +1490,210 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[tokio::test]
-    async fn test_smart_ip_governor_independent_buckets_per_ip() {
-        use tower_governor::key_extractor::SmartIpKeyExtractor;
+    fn one_request_budget(overrides: &[(&str, &str)]) -> Config {
+        let mut overrides = overrides.to_vec();
+        overrides.extend([
+            ("rate_limit.permissive_burst_size", "1"),
+            ("rate_limit.permissive_period_secs", "600"),
+        ]);
+        Config::load_from_overrides(&overrides).unwrap()
+    }
 
-        async fn handler() -> impl IntoResponse {
-            "ok"
-        }
+    async fn public_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        let config = one_request_budget(overrides);
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        public_routes(permissive).with_state(state)
+    }
 
-        let governor = Arc::new(
-            GovernorConfigBuilder::default()
-                .burst_size(1)
-                .period(Duration::from_secs(600))
-                .key_extractor(SmartIpKeyExtractor)
-                .finish()
-                .expect("non-zero burst/period"),
+    async fn admin_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        use crate::server::auth::tests::test_public_jwk;
+
+        let config = one_request_budget(overrides);
+        let (_, _, admin_governor) = build_governor_configs(&config.rate_limit).unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        let key = test_public_jwk();
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{
+                "id": "admin-1",
+                "scopes": ["issuers:read"],
+                "keys": [{
+                    "kid": key.key_id(),
+                    "alg": format!("{:?}", key.algorithm()),
+                    "jwk": key.jwk(),
+                }],
+            }],
+        }))
+        .unwrap();
+        state.admin_registry = Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
         );
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+        admin_routes(
+            state.clone(),
+            &config,
+            prometheus::Registry::new(),
+            admin_governor,
+        )
+        .with_state(state)
+    }
 
-        let router = Router::new()
-            .route("/write", axum::routing::put(handler))
-            .layer(GovernorLayer::new(governor))
-            .with_state(());
+    fn admin_token() -> String {
+        use crate::server::auth::tests::test_ec_private_pem;
 
-        fn make_request(ip: IpAddr) -> Request<Body> {
-            Request::builder()
-                .method(Method::PUT)
-                .uri("/write")
-                .extension(axum::extract::ConnectInfo(SocketAddr::new(ip, 12345)))
-                .body(Body::empty())
-                .unwrap()
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("statuslist-admin+jwt".to_string());
+        header.kid = Some("test-key".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "iss": "admin-1",
+                "iat": now,
+                "exp": now + 300,
+                "aud": "status-list-server-admin",
+            }),
+            &jsonwebtoken::EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn get_via(
+        router: &Router,
+        uri: &str,
+        bearer: Option<&str>,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(SocketAddr::new(peer, 12345)));
+        if let Some(token) = bearer {
+            request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
         }
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
 
-        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    async fn public_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let uri = format!("{API_V1_PREFIX}/aggregation");
+        get_via(router, &uri, None, peer, forwarded_for).await
+    }
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    async fn admin_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let token = admin_token();
+        get_via(
+            router,
+            "/admin/v1/issuers",
+            Some(&token),
+            peer,
+            forwarded_for,
+        )
+        .await
+    }
 
-        let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    #[tokio::test]
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_public_limiter() {
+        let public = public_with_one_request(&[]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_ne!(
+            public_read(&public, attacker, None).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, attacker, Some("203.0.113.1")).await).await;
+    }
+
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_public_bucket() {
+        let public = public_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, proxy, Some("192.0.2.99, 203.0.113.1")).await)
+            .await;
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_clients_in_one_slash_64_share_a_public_bucket() {
+        let public = public_with_one_request(&[]).await;
+        let ip = |value: &str| value.parse::<IpAddr>().unwrap();
+
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:2::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, ip("2001:db8:1:2::ffff"), None).await).await;
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:3::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_admin_limiter() {
+        let admin = admin_with_one_request(&[]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
+
+        assert_eq!(
+            admin_read(&admin, attacker, None).await.status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, attacker, Some("203.0.113.1")).await).await;
+    }
+
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_admin_bucket() {
+        let admin = admin_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, proxy, Some("192.0.2.99, 203.0.113.1")).await).await;
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]

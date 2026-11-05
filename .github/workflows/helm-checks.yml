@@ -268,6 +268,7 @@ jobs:
           helm template statuslist "$CHART_DIR" \
             --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 \
             --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers \
+            --set-string statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
             --namespace statuslist \
             --set-string statuslist.env.APP_DATABASE__PORT="${APP_DATABASE_PORT}" \
             > /tmp/statuslist-rendered.yaml

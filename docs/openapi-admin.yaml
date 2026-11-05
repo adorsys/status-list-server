@@ -49,6 +49,10 @@ info:
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
+    - Authenticated requests from one client address share a budget per
+      replica (`APP_RATE_LIMIT__PERMISSIVE_*`): a burst, then one request
+      per period. Past it, the server answers `429 too_many_requests` with
+      `Retry-After`.
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -150,6 +154,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/InsufficientScope"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -214,6 +220,8 @@ paths:
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/UnprocessableKey"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -249,6 +257,8 @@ paths:
           $ref: "#/components/responses/InsufficientScope"
         "404":
           $ref: "#/components/responses/IssuerNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -314,6 +324,8 @@ paths:
                 error_description: "expires_at exceeds the sandbox tier's 30-day maximum"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -389,6 +401,8 @@ paths:
           $ref: "#/components/responses/UnprocessableKey"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -460,6 +474,8 @@ paths:
           $ref: "#/components/responses/PreconditionFailed"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
         "503":
@@ -776,6 +792,8 @@ components:
             - invalid_expiry
             # 428
             - precondition_required
+            # 429
+            - too_many_requests
             # 500 / 503
             - internal_error
             - service_unavailable
@@ -922,6 +940,24 @@ components:
           example:
             error: "invalid_public_jwk"
             error_description: "private key members are not accepted"
+    TooManyRequests:
+      description: "`too_many_requests`: this client address has spent its request budget."
+      headers:
+        Retry-After:
+          description: Seconds until the budget admits another request.
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "too_many_requests"
+            error_description: "Too many requests from this address"
     InternalServerError:
       description: "`internal_error`."
       headers:

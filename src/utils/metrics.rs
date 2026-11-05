@@ -228,6 +228,18 @@ pub(crate) fn record_issuer_rate_limited(issuer: &str, tier: IssuerTier) {
     counter.add(1, &issuer_tier_attrs(issuer, tier));
 }
 
+static RATE_LIMITER_KEYS: InstrumentSlot<Gauge<u64>> = OnceLock::new();
+
+pub(crate) fn record_rate_limiter_keys(limiter: &'static str, keys: usize) {
+    let gauge = cached_instruments(&RATE_LIMITER_KEYS, || {
+        global::meter("status-list-server")
+            .u64_gauge("rate_limiter_keys")
+            .with_description("Keys a rate limiter holds after its last prune.")
+            .build()
+    });
+    gauge.record(keys as u64, &[KeyValue::new("limiter", limiter)]);
+}
+
 fn issuer_usage() -> std::sync::MutexGuard<'static, BTreeMap<String, (IssuerTier, IssuerUsage)>> {
     ISSUER_USAGE
         .lock()
