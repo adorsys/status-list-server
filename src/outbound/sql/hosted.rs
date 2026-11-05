@@ -15,7 +15,9 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use super::error::{RepositoryError, contention_err};
-use super::models::{PublicKey, hosted_issuer_keys, issuer_audit_events, issuers};
+use super::models::{
+    PublicKey, hosted_issuer_keys, issuer_audit_events, issuers, static_key_revocations,
+};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed, find_err};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
@@ -267,6 +269,11 @@ fn is_unique_violation(err: &DbErr) -> bool {
 /// column is unique-indexed on this so material reuse is rejected by the
 /// database rather than a race-prone application scan.
 fn material_hash(material: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(material.as_bytes()))
+}
+
+fn static_revocation_hash(material: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(material.as_bytes()))
 }
@@ -695,6 +702,65 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 
 #[async_trait]
 impl HostedIssuerStore for SqlHostedIssuerStore {
+    async fn record_static_key_revocations(
+        &self,
+        revocations: &[(String, String)],
+    ) -> Result<(), HostedIssuerError> {
+        let db = self.store.current();
+        for (kid, material) in revocations {
+            let material_hash = static_revocation_hash(material);
+            let existing = static_key_revocations::Entity::find_by_id(kid)
+                .one(db.as_ref())
+                .await
+                .map_err(find_err)?;
+            if let Some(existing) = existing {
+                if existing.material != material_hash {
+                    return Err(HostedIssuerError::AlreadyExists);
+                }
+                continue;
+            }
+            let inserted =
+                static_key_revocations::Entity::insert(static_key_revocations::ActiveModel {
+                    kid: Set(kid.clone()),
+                    material: Set(material_hash.clone()),
+                })
+                .exec_without_returning(db.as_ref())
+                .await;
+            if let Err(error) = inserted {
+                if is_unique_violation(&error)
+                    && static_key_revocations::Entity::find_by_id(kid)
+                        .one(db.as_ref())
+                        .await
+                        .map_err(find_err)?
+                        .is_some_and(|row| row.material == material_hash)
+                {
+                    continue;
+                }
+                return Err(hosted_error(map_insert_err(error)));
+            }
+        }
+        Ok(())
+    }
+
+    async fn static_key_was_revoked(
+        &self,
+        kid: &str,
+        material: &str,
+    ) -> Result<bool, HostedIssuerError> {
+        let material_hash = static_revocation_hash(material);
+        static_key_revocations::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(static_key_revocations::Column::Kid.eq(kid))
+                    .add(static_key_revocations::Column::Material.eq(material_hash)),
+            )
+            .one(self.store.current().as_ref())
+            .await
+            .map(|row| row.is_some())
+            .map_err(find_err)
+            .map_err(Into::into)
+    }
+
     async fn list_issuers_after(
         &self,
         after: Option<&str>,

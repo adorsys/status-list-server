@@ -1313,10 +1313,11 @@ mod tests {
     #[tokio::test]
     async fn renewal_restores_expired_issuer_but_preserves_suspension() {
         let app = LifecycleApp::new(&["issuers:write"]).await;
-        let expired = issuer(
+        let mut expired = issuer(
             "portal-issuer",
             Some(OffsetDateTime::now_utc() - time::Duration::days(1)),
         );
+        expired.tier = "sandbox".into();
         app.store.insert_issuer(expired);
         let before = hosted_dto(&app.state, app.store.issuer("portal-issuer").unwrap())
             .await
@@ -1351,6 +1352,23 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body_json(response).await["error"], "invalid_expiry");
+    }
+
+    #[tokio::test]
+    async fn standard_issuer_cannot_be_renewed() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer("portal-issuer", None));
+        let token = write_token();
+        let expiry = (service_now() + time::Duration::days(1)).unix_timestamp();
+        let body = format!(r#"{{"expires_at":{expiry}}}"#);
+
+        let response = app
+            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(response).await["error"], "invalid_expiry");
+        assert_eq!(app.store.issuer("portal-issuer").unwrap().version, 1);
     }
 
     #[tokio::test]

@@ -44,17 +44,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 
 ## Configure Your Secrets
 
-Production deployments also need a persistent writable history volume for static key revocations, separate from the read-only issuer registry. The chart uses a claim named `status-list-revocations` by default in production. Pre-provision that claim writable by UID/GID 65534, or configure a different volume:
-
-```yaml
-statuslist:
-  revocationHistory:
-    volume:
-      persistentVolumeClaim:
-        claimName: status-list-revocations
-```
-
-The chart writes `APP_MANAGEMENT_AUTH__REVOCATION_HISTORY_FILE` from `statuslist.revocationHistory.path` (default `/var/lib/status-list-server/revocations.json`). Back up this file with the registry; restoring an older registry does not reactivate revoked keys while the history is retained. Replicas need a shared persistent volume.
+Static-key revocations are recorded in the configured SQL database, shared by all replicas and included in the normal database backup and migration process. No additional writable volume is required.
 
 The application Secret is always named `statuslist-secret`. The chart-managed fallback Secret and default ExternalSecret publish the database password under both `database-password` and the legacy `postgres-password` key.
 

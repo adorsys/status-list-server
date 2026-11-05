@@ -24,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(issuer_keys::Migration),
             Box::new(issuer_audit_events::Migration),
             Box::new(issuer_keys_carry_over::Migration),
+            Box::new(static_key_revocations::Migration),
         ]
     }
 
@@ -33,6 +34,63 @@ impl MigratorTrait for Migrator {
         C: IntoSchemaManagerConnection<'c>,
     {
         Err(forward_only("dropping every table is refused"))
+    }
+}
+
+pub(crate) mod static_key_revocations {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261105_000001_static_key_revocations"
+        }
+    }
+
+    #[async_trait::async_trait]
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut table = Table::create();
+            table
+                .table(StaticKeyRevocations::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(StaticKeyRevocations::Kid)
+                        .string()
+                        .not_null()
+                        .primary_key(),
+                )
+                .col(
+                    ColumnDef::new(StaticKeyRevocations::Material)
+                        .string_len(64)
+                        .not_null(),
+                );
+            pin_innodb_on_mysql(manager, &mut table);
+            manager.create_table(table).await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .name("idx_static_key_revocations_material")
+                        .table(StaticKeyRevocations::Table)
+                        .col(StaticKeyRevocations::Material)
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StaticKeyRevocations {
+        Table,
+        Kid,
+        Material,
     }
 }
 
@@ -122,6 +180,7 @@ const INNODB_REQUIRED_TABLES: &[&str] = &[
     "credentials",
     "issuer_audit_events",
     "issuer_keys",
+    "static_key_revocations",
     "issuers",
     "status_lists",
     "status_list_history",

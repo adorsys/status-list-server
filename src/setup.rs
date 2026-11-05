@@ -412,13 +412,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     let issuer_registry = Arc::new(
         match config.management_auth.issuers_file.as_deref() {
             Some(path) if !path.is_empty() => {
-                let registry = crate::server::auth::issuer_registry::RegistryHandle::load(path)?;
-                match config.management_auth.revocation_history_file.as_deref() {
-                    Some(history_path) if !history_path.is_empty() => {
-                        registry.with_revocation_history(std::path::PathBuf::from(history_path))?
-                    }
-                    _ => registry,
-                }
+                crate::server::auth::issuer_registry::RegistryHandle::load(path)?
             }
             _ => {
                 tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
@@ -881,6 +875,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        crate::server::auth::hosted::validate_static_revocation_history(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
     // Cross-source checks are read-only and run before the immutable aggregation
     // rows are written, so a rejected registry leaves no adoption side effects.
@@ -1026,6 +1027,13 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 registry_handle.path(),
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::validate_static_revocation_history(
+                                dynamic_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         // Serializes with hosted writes in this process; see
                         // register_hosted_issuer for the cross-pod case.
                         let _guard = registry_handle.write_lock().await;

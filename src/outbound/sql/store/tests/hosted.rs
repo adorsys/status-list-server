@@ -197,6 +197,38 @@ async fn test_sqlite_hosted_round_trip() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn test_sqlite_static_revocation_history_reserves_kid_and_material() {
+    let store = sqlite_store().await;
+    let revoked = key("static-issuer", "revoked-static-kid");
+    let material = revoked.jwk.normalized_material().unwrap();
+
+    store
+        .record_static_key_revocations(&[(revoked.kid.clone(), material.clone())])
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .static_key_was_revoked("revoked-static-kid", "different-material")
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .static_key_was_revoked("different-kid", &material)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .static_key_was_revoked("different-kid", "different-material")
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
     let store = sqlite_store().await;
     let first = issuer("00000000-0000-4000-8000-000000000001");

@@ -661,6 +661,20 @@ impl ValidatedRegistry {
         out
     }
 
+    /// Revoked key identifiers and normalized public-key materials from this
+    /// registry snapshot, ready to persist in the shared trust store.
+    pub fn revoked_keys(&self) -> Vec<(String, String)> {
+        self.registry
+            .revoked_keys
+            .iter()
+            .filter_map(|key| {
+                crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                    .ok()
+                    .map(|material| (key.kid.clone(), material))
+            })
+            .collect()
+    }
+
     /// Whether any principal (issuer or admin) carries this id.
     pub fn has_principal_id(&self, id: &str) -> bool {
         self.registry.issuers.iter().any(|i| i.id == id)

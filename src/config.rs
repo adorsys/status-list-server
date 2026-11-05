@@ -287,6 +287,7 @@ pub struct TierConfig {
 const STANDARD_MAX_KEYS: usize = 5;
 const STANDARD_WRITE_BURST_SIZE: u32 = 100;
 const STANDARD_WRITE_PERIOD_SECS: u64 = 1;
+pub const SANDBOX_MAX_LIFETIME_DAYS: i64 = 30;
 const SANDBOX_MAX_LISTS: u64 = 10;
 const SANDBOX_MAX_STATUS_INDEX: i32 = 10_000;
 const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
@@ -478,8 +479,6 @@ impl RawTier {
 pub struct ManagementAuthConfig {
     /// Path to the operator-managed YAML issuer registry.
     pub issuers_file: Option<String>,
-    /// Durable writable history of revoked static key IDs and material.
-    pub revocation_history_file: Option<String>,
     /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
     pub leeway_secs: u64,
     /// Checked as `exp - iat`.
@@ -494,16 +493,6 @@ impl ManagementAuthConfig {
         if environment.is_production() && self.issuers_file.as_deref().is_none_or(str::is_empty) {
             return Err(ConfigError::Message(
                 "management_auth.issuers_file is required in production".to_string(),
-            ));
-        }
-        if environment.is_production()
-            && self
-                .revocation_history_file
-                .as_deref()
-                .is_none_or(str::is_empty)
-        {
-            return Err(ConfigError::Message(
-                "management_auth.revocation_history_file is required in production".to_string(),
             ));
         }
         if self.max_token_lifetime_secs == 0 {
@@ -1966,10 +1955,6 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("management_auth.issuers_file", Option::<String>::None)?
-        .set_default(
-            "management_auth.revocation_history_file",
-            Option::<String>::None,
-        )?
         .set_default("admin_auth.leeway_secs", 60)?
         .set_default("admin_auth.max_token_lifetime_secs", 300)?
         .set_default("admin_auth.audiences", Vec::<String>::new())?
@@ -2004,7 +1989,6 @@ mod tests {
     fn issuer_registry_path_is_required_only_in_production() {
         let mut policy = ManagementAuthConfig {
             issuers_file: None,
-            revocation_history_file: None,
             leeway_secs: 60,
             max_token_lifetime_secs: 300,
             audiences: vec!["management".into()],
@@ -2013,7 +1997,6 @@ mod tests {
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
         policy.issuers_file = Some("issuers.yaml".into());
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
-        policy.revocation_history_file = Some("revocations.json".into());
         assert!(policy.validate(TelemetryEnvironment::Production).is_ok());
     }
     use secrecy::ExposeSecret;
@@ -3225,10 +3208,6 @@ mod tests {
             overrides.push((
                 "management_auth.issuers_file",
                 "/etc/status-list-server/issuers.yaml",
-            ));
-            overrides.push((
-                "management_auth.revocation_history_file",
-                "/var/lib/status-list-server/revocations.json",
             ));
         }
         Config::load_from_overrides(&overrides).map(|config| {

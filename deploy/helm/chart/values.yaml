@@ -177,10 +177,6 @@ statuslist:
     path: /etc/status-list-server/issuers.yaml
     # Any volume source (configMap, secret or csi) that holds the file named in path.
     volume: {}
-  # Persistent writable volume, independent of the read-only issuer registry.
-  revocationHistory:
-    path: /var/lib/status-list-server/revocations.json
-    volume: {}
   # Only for the legacy static-credentials path; IRSA needs only serviceAccount annotations.
   aws:
     # Never with IRSA: static credential files win over the web-identity token in the AWS SDK chain.

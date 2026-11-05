@@ -31,6 +31,25 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Persist static-key revocations so registry snapshots cannot restore a
+    /// revoked key after rollback or restart.
+    async fn record_static_key_revocations(
+        &self,
+        _revocations: &[(String, String)],
+    ) -> Result<(), HostedIssuerError> {
+        Ok(())
+    }
+
+    /// Check whether either the key id or normalized key material was revoked
+    /// from the static registry.
+    async fn static_key_was_revoked(
+        &self,
+        _kid: &str,
+        _material: &str,
+    ) -> Result<bool, HostedIssuerError> {
+        Ok(false)
+    }
+
     /// Return a bounded page ordered by issuer id, strictly after `after`.
     async fn list_issuers_after(
         &self,
