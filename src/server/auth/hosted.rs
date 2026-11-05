@@ -271,6 +271,18 @@ pub(crate) async fn register_hosted_issuer(
     store.create_issuer(issuer, actor).await
 }
 
+pub(crate) async fn register_hosted_issuer_with_key(
+    registry: &RegistryHandle,
+    store: &Arc<dyn HostedIssuerStore>,
+    issuer: HostedIssuer,
+    key: HostedIssuerKey,
+    actor: &str,
+) -> Result<HostedIssuer, HostedIssuerError> {
+    let _guard = registry.write_lock().await;
+    validate_dynamic_write(registry, &issuer.id, Some(&key)).await?;
+    store.create_issuer_with_key(issuer, key, actor).await
+}
+
 pub(crate) async fn register_hosted_issuer_key(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,

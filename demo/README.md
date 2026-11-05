@@ -206,6 +206,21 @@ uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --i
 The script prompts for the token without echoing it. The first command walks
 all pages; the second displays one issuer and its ETag. Tokens are never printed.
 
+## Hosted issuer creation and renewal
+
+With the hosted profile and an admin principal granted `issuers:write`, use a
+public JWK file without a `kid` or private fields:
+
+```bash
+uv run python workflows/06-admin-issuer-writes.py create --display-name Sandbox --owner 'github|5821374' --public-key public.jwk --alg ES256
+uv run python workflows/06-admin-issuer-writes.py renew --issuer ISSUER_ID --days 7
+```
+
+Both commands prompt for the admin token without echoing it. Creation assigns
+issuer and key identifiers. Renewal reads the current ETag before sending the
+write and accepts a new expiry within the configured sandbox maximum (30 days
+by default).
+
 ## Hosted issuer emergency actions
 
 In the hosted profile, an operator uses the admin listener with a registry admin

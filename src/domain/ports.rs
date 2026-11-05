@@ -72,6 +72,17 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;
 
+    /// Create an issuer with its first key and audit records in one unit.
+    async fn create_issuer_with_key(
+        &self,
+        issuer: HostedIssuer,
+        key: HostedIssuerKey,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        let _ = (issuer, key, actor);
+        Err(HostedIssuerError::Unavailable)
+    }
+
     /// Register a signing key for an existing hosted issuer.
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
 
@@ -125,6 +136,17 @@ pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
         expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_expiry(
+        &self,
+        issuer_id: &str,
+        expires_at: time::OffsetDateTime,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        let _ = (issuer_id, expires_at, expected_version, actor);
+        Err(HostedIssuerError::Unavailable)
+    }
 
     async fn revoke_key(
         &self,

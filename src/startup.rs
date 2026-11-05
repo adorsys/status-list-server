@@ -364,7 +364,8 @@ fn admin_routes(
     let admin_api = Router::new()
         .route(
             "/issuers",
-            get(crate::server::handlers::admin::list_issuers),
+            get(crate::server::handlers::admin::list_issuers)
+                .post(crate::server::handlers::hosted_lifecycle::create_issuer),
         )
         .route(
             "/issuers/{issuer_id}",

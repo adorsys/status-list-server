@@ -666,25 +666,6 @@ async fn rollback_quietly(txn: sea_orm::DatabaseTransaction) {
     }
 }
 
-async fn revoked_key_after_rollback(
-    db: &sea_orm::DatabaseConnection,
-    issuer_id: &str,
-    kid: &str,
-) -> Result<HostedIssuerKey, HostedIssuerError> {
-    let current = hosted_issuer_keys::Entity::find_by_id(kid)
-        .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
-        .one(db)
-        .await
-        .map_err(err_txn)?
-        .ok_or(HostedIssuerError::NotFound)?;
-    let current = parse_key(current).map_err(HostedIssuerError::from)?;
-    if current.state == HostedIssuerKeyState::Revoked {
-        Ok(current)
-    } else {
-        Err(HostedIssuerError::VersionMismatch)
-    }
-}
-
 fn err_jwk(message: String) -> RepositoryError {
     RepositoryError::InvalidKey(format!("invalid public JWK: {message}"))
 }
@@ -804,6 +785,87 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .create_issuer_unit(issuer, actor)
             .await
             .map_err(Into::into)
+    }
+
+    async fn create_issuer_with_key(
+        &self,
+        mut issuer: HostedIssuer,
+        key: HostedIssuerKey,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        if key.issuer_id != issuer.id || key.jwk.key_id() != key.kid {
+            return Err(HostedIssuerError::InvalidPublicJwk(
+                "key metadata does not match its issuer".into(),
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_slice(key.jwk.as_bytes())
+            .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
+        let material =
+            canonical_jwk_material(&value).map_err(HostedIssuerError::InvalidPublicJwk)?;
+        let db = self.store.current();
+        for attempt in 0..AGGREGATION_ID_RETRIES {
+            if attempt > 0 {
+                issuer.aggregation_id = AggregationId::generate();
+            }
+            let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+            if let Err(e) = insert_issuer_row(&txn, &issuer).await {
+                let classified = classify_after_rollback(txn, e, "hosted issuer insert").await;
+                if matches!(classified, RepositoryError::DuplicateEntry)
+                    && load_issuer(&issuer.id, db.as_ref())
+                        .await
+                        .map_err(HostedIssuerError::from)?
+                        .is_none()
+                {
+                    continue;
+                }
+                return Err(classified.into());
+            }
+            if let Err(e) = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
+                kid: Set(key.kid.clone()),
+                issuer_id: Set(issuer.id.clone()),
+                key_material: Set(material_hash(&material)),
+                alg: Set(jose_alg_name(key.jwk.algorithm()).to_owned()),
+                jwk: Set(PublicKey::from(key.jwk.jwk().clone())),
+                state: Set(key.state.as_str().to_owned()),
+                not_before: Set(key.not_before.map(|v| v.unix_timestamp())),
+                not_after: Set(key.not_after.map(|v| v.unix_timestamp())),
+                created_at: Set(key.created_at.unix_timestamp()),
+            })
+            .exec_without_returning(&txn)
+            .await
+            {
+                return Err(classify_after_rollback(txn, e, "initial key insert")
+                    .await
+                    .into());
+            }
+            for (action, after) in [
+                (
+                    "issuer.created",
+                    serde_json::json!({"state": "active", "version": 1, "aggregation_id": issuer.aggregation_id.0}),
+                ),
+                (
+                    "key.registered",
+                    serde_json::json!({"kid": key.kid, "state": "active"}),
+                ),
+            ] {
+                if let Err(e) =
+                    append_lifecycle_audit(&txn, &issuer.id, actor, action, None, Some(after)).await
+                {
+                    rollback_quietly(txn).await;
+                    return Err(HostedIssuerError::Backend(Box::new(e)));
+                }
+            }
+            txn.commit().await.map_err(err_txn)?;
+            issuer.created_at =
+                OffsetDateTime::from_unix_timestamp(issuer.created_at.unix_timestamp())
+                    .expect("persisted timestamp is valid");
+            issuer.expires_at = issuer.expires_at.map(|v| {
+                OffsetDateTime::from_unix_timestamp(v.unix_timestamp())
+                    .expect("persisted timestamp is valid")
+            });
+            return Ok(issuer);
+        }
+        Err(HostedIssuerError::AlreadyExists)
     }
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {
@@ -981,6 +1043,68 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         })
     }
 
+    async fn set_issuer_expiry(
+        &self,
+        issuer_id: &str,
+        expires_at: OffsetDateTime,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError> {
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        let row = issuers::Entity::find_by_id(issuer_id)
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .one(&txn)
+            .await
+            .map_err(err_txn)?
+            .ok_or(HostedIssuerError::NotFound)?;
+        let previous = parse_issuer(row.clone()).map_err(HostedIssuerError::from)?;
+        if previous.version != expected_version {
+            rollback_quietly(txn).await;
+            return Err(HostedIssuerError::VersionMismatch);
+        }
+        if previous
+            .expires_at
+            .is_some_and(|v| v.unix_timestamp() == expires_at.unix_timestamp())
+        {
+            txn.commit().await.map_err(err_txn)?;
+            return Ok(previous);
+        }
+        let next_version = row.version.checked_add(1).ok_or_else(|| {
+            HostedIssuerError::Backend(Box::new(std::io::Error::other("issuer version overflow")))
+        })?;
+        let changed = issuers::Entity::update_many()
+            .col_expr(
+                issuers::Column::ExpiresAt,
+                Expr::value(expires_at.unix_timestamp()),
+            )
+            .col_expr(issuers::Column::Version, Expr::value(next_version))
+            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
+            .filter(issuers::Column::Version.eq(row.version))
+            .exec(&txn)
+            .await
+            .map_err(err_txn)?;
+        if changed.rows_affected != 1 {
+            rollback_quietly(txn).await;
+            return Err(HostedIssuerError::VersionMismatch);
+        }
+        append_lifecycle_audit(
+            &txn, issuer_id, actor, "issuer.expiry_changed",
+            Some(serde_json::json!({"expires_at": row.expires_at, "version": row.version})),
+            Some(serde_json::json!({"expires_at": expires_at.unix_timestamp(), "version": next_version})),
+        ).await.map_err(err_txn)?;
+        txn.commit().await.map_err(err_txn)?;
+        Ok(HostedIssuer {
+            expires_at: Some(
+                OffsetDateTime::from_unix_timestamp(expires_at.unix_timestamp())
+                    .expect("persisted timestamp is valid"),
+            ),
+            version: next_version as u64,
+            ..previous
+        })
+    }
+
     async fn revoke_key(
         &self,
         issuer_id: &str,
@@ -1033,13 +1157,13 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
                 return Err(e.into());
             }
         };
+        if owner.version != i64::try_from(expected_version).unwrap_or(-1) {
+            rollback_quietly(txn).await;
+            return Err(HostedIssuerError::VersionMismatch);
+        }
         if previous.state == HostedIssuerKeyState::Revoked {
             txn.commit().await.map_err(err_txn)?;
             return Ok(previous);
-        }
-        if owner.version != i64::try_from(expected_version).unwrap_or(-1) {
-            rollback_quietly(txn).await;
-            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
         }
         let Some(next_version) = owner.version.checked_add(1) else {
             rollback_quietly(txn).await;
@@ -1064,7 +1188,7 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         if version_changed.rows_affected != 1 {
             rollback_quietly(txn).await;
-            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
+            return Err(HostedIssuerError::VersionMismatch);
         }
         let changed = match hosted_issuer_keys::Entity::update_many()
             .col_expr(hosted_issuer_keys::Column::State, Expr::value("revoked"))
@@ -1083,7 +1207,7 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         if changed.rows_affected != 1 {
             rollback_quietly(txn).await;
-            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
+            return Err(HostedIssuerError::VersionMismatch);
         }
         if let Err(e) = append_lifecycle_audit(
             &txn,

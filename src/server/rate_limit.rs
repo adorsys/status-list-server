@@ -385,6 +385,7 @@ mod tests {
         Tiers {
             standard: limits(standard_burst),
             sandbox: limits(sandbox_burst),
+            sandbox_max_lifetime: Duration::from_secs(30 * 24 * 60 * 60),
         }
     }
 

@@ -169,7 +169,8 @@ paths:
         the `hosted` profile.
 
         `expires_at` defaults to now plus the sandbox tier's maximum lifetime
-        and may not exceed it.
+        (30 days by default) and must be in
+        (now, now + tiers.sandbox.max_lifetime_secs].
       requestBody:
         required: true
         content:
@@ -216,7 +217,14 @@ paths:
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
-          $ref: "#/components/responses/UnprocessableKey"
+          description: "`invalid_public_jwk` or `invalid_expiry`."
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -266,12 +274,15 @@ paths:
       tags: [issuers]
       summary: Suspend or resume a portal issuer
       description: |
-        Changes `state` to `suspended` or `active`. Requires `issuers:write`
+        Changes `state` to `suspended` or `active`, or renews `expires_at`.
+        Requires `issuers:write`
         and `If-Issuer-Version` or `If-Match`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
-        stays `expired`; renewal is not supported. Suspension takes effect
-        on the next management request on every replica.
+        stays `expired` until renewed. Renewal accepts a Unix timestamp in
+        (now, now + tiers.sandbox.max_lifetime_secs], including for an expired
+        issuer. The default maximum lifetime is 30 days. Suspension takes
+        effect on the next management request on every replica.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
         - $ref: "#/components/parameters/IfMatch"
@@ -308,7 +319,7 @@ paths:
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry` — `expires_at` is in the past or beyond the tier's maximum lifetime."
+          description: "`invalid_expiry` — `expires_at` is not in (now, now + tiers.sandbox.max_lifetime_secs]."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -742,13 +753,20 @@ components:
           $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
 
     UpdateIssuerRequest:
-      type: object
-      additionalProperties: false
-      required: [state]
-      properties:
-        state:
-          type: string
-          enum: [active, suspended]
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [active, suspended]
+        - type: object
+          additionalProperties: false
+          required: [expires_at]
+          properties:
+            expires_at:
+              $ref: "#/components/schemas/UnixTime"
 
     UpdateIssuerKeyRequest:
       type: object

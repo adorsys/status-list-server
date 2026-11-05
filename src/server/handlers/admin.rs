@@ -111,6 +111,11 @@ pub struct IssuerDto {
     #[serde(skip)]
     persisted_version: Option<u64>,
 }
+impl IssuerDto {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
 #[derive(Debug, Serialize, Clone)]
 pub struct KeyDto {
     kid: String,

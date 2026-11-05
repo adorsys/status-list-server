@@ -1,10 +1,9 @@
-# Admin issuer reads
+# Admin issuer API
 
-The admin listener (default `localhost:8002`) serves `GET /admin/v1/issuers`
-and `GET /admin/v1/issuers/{issuer_id}`. The public and management listeners
-return 404 for these routes. Keep the admin listener on a private network.
+The admin listener (default `localhost:8002`) serves issuer reads and writes.
+The public and management listeners return 404 for these routes. Keep the admin
+listener on a private network.
 The [Admin OpenAPI contract](openapi-admin.yaml) describes the response fields.
-The server implements only the read operations in that contract.
 
 ## Authentication and configuration
 
@@ -68,13 +67,27 @@ hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
 passed, including keys staged for rotation. `keys_limit` is the tier's
 `max_keys`.
 
-The detail ETag identifies the complete JSON representation for either source.
-It changes when returned keys, usage, metadata, or derived expiry state change.
-`Issuer-Version` separately covers writable issuer metadata, lifecycle, and
-key ID/state/validity windows. Future mutation endpoints use it through
-`If-Issuer-Version`, so ordinary list publishes do not invalidate writes. The
-reads do not provide a transactional snapshot across issuer metadata, keys,
-and usage.
+For static issuers, the detail ETag identifies the complete JSON representation.
+For hosted issuers, the ETag and `Issuer-Version` derive from the persisted
+issuer version. Mutations use them through `If-Match` or
+`If-Issuer-Version`, so ordinary list publishes and derived expiry state do
+not invalidate writes. The reads do not provide a transactional snapshot
+across issuer metadata, keys, and usage.
+
+## Hosted issuer writes
+
+An admin with `issuers:write` can create a portal issuer with its first public
+key, add a key, suspend or resume an issuer, renew its expiry, and revoke a key.
+Static issuers remain managed through the registry. Creation is available only
+in the hosted profile; it assigns the issuer and aggregation identifiers and
+the key thumbprint. Other writes require the current issuer `ETag` or
+`Issuer-Version`; stale values return 412 and missing values return 428.
+
+`APP_TIERS__SANDBOX__MAX_LIFETIME_SECS` defaults to 2592000 (30 days).
+Creation defaults `expires_at` to that duration from now. Creation and renewal
+accept an expiry strictly after now and no later than now plus the configured
+duration. Renewal may restore an expired issuer; resuming a suspension alone
+does not. Each change is recorded in the SQL audit log with its actor.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

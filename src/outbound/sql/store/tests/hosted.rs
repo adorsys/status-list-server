@@ -695,6 +695,124 @@ async fn sqlite_store() -> SqlHostedIssuerStore {
     SqlHostedIssuerStore::new(fixtures::sqlite_connection().await)
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_key_and_issuer_commit_together() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000626");
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_initial_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        store
+            .create_issuer_with_key(
+                hosted.clone(),
+                key(&hosted.id, "initial-key"),
+                "portal-admin"
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.find_issuer(&hosted.id).await.unwrap().is_none());
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "DROP TRIGGER reject_initial_audit",
+    ))
+    .await
+    .unwrap();
+    let created = store
+        .create_issuer_with_key(
+            hosted.clone(),
+            key(&hosted.id, "initial-key"),
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.version, 1);
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn renewal_updates_expiry_and_version() {
+    use crate::outbound::sql::models::issuer_audit_events;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Statement,
+    };
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000627");
+    let created = store.create_issuer(hosted, "portal-admin").await.unwrap();
+    let renewed = OffsetDateTime::now_utc() + time::Duration::days(7);
+    let updated = store
+        .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+        .await
+        .unwrap();
+    assert_eq!(
+        updated.expires_at.unwrap().unix_timestamp(),
+        renewed.unix_timestamp()
+    );
+    assert_eq!(updated.version, created.version + 1);
+    let events = issuer_audit_events::Entity::find()
+        .filter(issuer_audit_events::Column::IssuerId.eq(&created.id))
+        .all(db.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.action == "issuer.expiry_changed")
+            .count(),
+        1
+    );
+    assert!(matches!(
+        store
+            .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_renewal_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    let later = renewed + time::Duration::days(1);
+    assert!(
+        store
+            .set_issuer_expiry(&created.id, later, updated.version, "portal-admin")
+            .await
+            .is_err()
+    );
+    let unchanged = store.get_issuer(&created.id).await.unwrap();
+    assert_eq!(unchanged.expires_at, updated.expires_at);
+    assert_eq!(unchanged.version, updated.version);
+}
+
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_hosted_round_trip() {
@@ -972,14 +1090,12 @@ async fn stale_revocation_cannot_revoke_a_second_key() {
         second.get_issuer(&issuer.id).await.unwrap().version,
         observed_version + 1
     );
-    assert_eq!(
+    assert!(matches!(
         second
             .revoke_key(&issuer.id, "first-key", observed_version, "admin-b")
-            .await
-            .unwrap()
-            .state,
-        HostedIssuerKeyState::Revoked
-    );
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
     assert_eq!(
         second.get_issuer(&issuer.id).await.unwrap().version,
         observed_version + 1
