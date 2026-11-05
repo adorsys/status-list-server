@@ -2240,7 +2240,15 @@ mod general_tests {
             let mut revoked_registry: serde_json::Value =
                 serde_saphyr::from_str(&active_registry).unwrap();
             let key = revoked_registry["issuers"][0]["keys"][0].take();
-            revoked_registry["issuers"] = serde_json::json!([]);
+            revoked_registry["issuers"][0]["keys"] = serde_json::json!([{
+                "kid": "another-active-key",
+                "alg": "ES256",
+                "jwk": {
+                    "kty": "EC", "crv": "P-256",
+                    "x": "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY",
+                    "y": "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+                }
+            }]);
             revoked_registry["revoked_keys"] = serde_json::json!([key]);
             std::fs::write(
                 &registry_path,
