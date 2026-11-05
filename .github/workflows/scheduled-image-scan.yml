@@ -20,7 +20,7 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   # Must match deploy.yml's variant. This job has no environment, so it only sees repo-level vars;
   # deploy.yml fails if the two scopes diverge. Keep that check.
-  DEPLOYED_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+  DEPLOYED_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
   EXPIRY_WARN_DAYS: "30"
   # The tracking issue is found by this label only.
   ISSUE_LABEL: scheduled-image-scan

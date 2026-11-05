@@ -791,16 +791,46 @@ staging a different value, even if both environments register the same issuer
 key. Production chart rendering fails if the audience is empty. Issuers must
 include that configured value in their management tokens' `aud` claim.
 
-The release-tag deployment uses `values-aws.yaml` followed by
-`values-production.yaml`. Its management audience is
-`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
-deployment must put this exact value in `aud` (as a string or an array member).
-The release workflow selects the `status-list-server-issuers` ConfigMap as its
-registry source; the production values file leaves the source empty so other
-deployments can choose a ConfigMap, Secret, or CSI volume.
-Deployments reusing the production overlay for another environment or hostname
-must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
-the production value.
+The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`, and
+`values-datev-staging.yaml`, in that order, in the existing `statuslist` namespace.
+The last overlay selects the `fscert` image and the in-memory cache. Its
+management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
+Issuers calling this deployment must put this value in their management tokens'
+`aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as
+its registry source.
+
+### Existing EKS staging profile
+
+The `statuslist` Helm release currently owns Redis HA resources. Redis is not
+part of the new chart or the Datev-compatible profile. Upgrading that release
+will remove those Redis resources. Review any other consumers before the first
+upgrade, and do not switch the image until the signing material and the newer
+chart's prerequisites are ready. The overlay uses `Recreate` so old AWS-backed
+and new file-backed signers do not serve at the same time; expect a brief outage
+during that upgrade.
+
+The existing AWS Secrets Manager entry `statuslist-secret` supplies
+`POSTGRES_PASSWORD` to the namespaced `statuslist-secret-store`. The chart's
+ExternalSecret writes it to `statuslist-secret` as both `database-password` and
+`postgres-password`. The existing `REDIS_PASSWORD` property is no longer mapped
+into the application Secret by the new profile.
+
+The `fscert` image also needs a matching issuer certificate and private key.
+Provision an AWS Secrets Manager entry named `statuslist-fscert-signing` with
+`CERTIFICATE` and `SIGNING_KEY` properties through the approved secret-management
+process. The chart's `statuslist-signing` ExternalSecret maps them to `tls.crt`
+and `tls.key` in a Kubernetes Secret mounted as files. Do not put their values in
+Helm values or GitHub Actions. Preserve verification material for tokens issued
+before the switch until they expire.
+
+Before triggering a tagged release, provide the `status-list-server-issuers`
+ConfigMap and a shared writable `status-list-revocations` PVC in `statuslist`.
+Neither was present during the read-only inspection, and the workflow checks
+both before running Helm. The repository-level GitHub Actions variable
+`IMAGE_VARIANT` was `aws` at the time of inspection. Set it to `fscert` when
+the prerequisites are ready; the workflow rejects any other value, and the
+scheduled image scan reads the same repository-level variable. The workflow
+uses short-lived AWS credentials through OIDC.
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
