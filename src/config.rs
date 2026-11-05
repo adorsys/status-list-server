@@ -1996,7 +1996,6 @@ mod tests {
         assert!(policy.validate(TelemetryEnvironment::Development).is_ok());
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
         policy.issuers_file = Some("issuers.yaml".into());
-        assert!(policy.validate(TelemetryEnvironment::Production).is_err());
         assert!(policy.validate(TelemetryEnvironment::Production).is_ok());
     }
     use secrecy::ExposeSecret;
