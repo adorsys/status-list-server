@@ -7,6 +7,8 @@
 {{- end }}
 {{- $registryVolume := .Values.statuslist.issuerRegistry.volume | default dict }}
 {{- $registryMounted := gt (len $registryVolume) 0 }}
+{{- $appEnv := lower (trim (toString (.Values.statuslist.env.APP_ENV | default "development"))) }}
+{{- $telemetryEnv := lower (trim (toString (.Values.statuslist.env.APP_TELEMETRY__ENVIRONMENT | default $appEnv))) }}
 {{- $audiences := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES | default "")) "" }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (empty $audiences) }}
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
