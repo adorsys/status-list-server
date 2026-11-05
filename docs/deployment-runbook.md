@@ -806,6 +806,7 @@ here; a test fails until it does.
 | `m20261023_000002_issuer_keys` | Yes: an older release ignores the table | None; keep the table | Created empty; the next migration fills it with `reserved` rows |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
 | `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
+| `m20261105_000001_static_key_revocations` | Yes: an older release ignores the table | None; keep the revocations | Retains static key revocations across restarts and registry file restores |
 
 ### Preparing existing management credentials
 

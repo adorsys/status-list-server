@@ -2442,9 +2442,12 @@ mod carry_over_tests {
     #[async_trait::async_trait]
     impl MigratorTrait for Before {
         fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-            let mut all = Migrator::migrations();
-            all.pop();
-            all
+            Migrator::migrations()
+                .into_iter()
+                .take_while(|migration| {
+                    migration.name() != issuer_keys_carry_over::Migration.name()
+                })
+                .collect()
         }
     }
 
