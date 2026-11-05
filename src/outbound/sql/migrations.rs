@@ -69,16 +69,24 @@ pub(crate) mod static_key_revocations {
                 );
             pin_innodb_on_mysql(manager, &mut table);
             manager.create_table(table).await?;
-            manager
-                .create_index(
-                    Index::create()
-                        .if_not_exists()
-                        .name("idx_static_key_revocations_material")
-                        .table(StaticKeyRevocations::Table)
-                        .col(StaticKeyRevocations::Material)
-                        .to_owned(),
+            if !manager
+                .has_index(
+                    "static_key_revocations",
+                    "idx_static_key_revocations_material",
                 )
-                .await
+                .await?
+            {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name("idx_static_key_revocations_material")
+                            .table(StaticKeyRevocations::Table)
+                            .col(StaticKeyRevocations::Material)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+            Ok(())
         }
 
         async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
