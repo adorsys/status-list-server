@@ -30,39 +30,44 @@ info:
 
     ## Rate limiting
 
-    The server applies independent token-bucket limits. Two are keyed by
-    client IP and configured through the `APP_RATE_LIMIT__*` environment
-    variables (see `RateLimitConfig`):
+    The server applies independent token-bucket limits. Each allows a burst,
+    then one request per period. Two are keyed by the client address and
+    configured through the `APP_RATE_LIMIT__*` environment variables (see
+    `RateLimitConfig`). `APP_RATE_LIMIT__CLIENT_IP_SOURCE` says where that
+    address comes from: the TCP peer (`connect_info`), or, behind a proxy
+    listed in `APP_RATE_LIMIT__TRUSTED_PROXIES`, the rightmost
+    `X-Forwarded-For` entry that is not a trusted proxy
+    (`rightmost_x_forwarded_for`). `X-Forwarded-For` from any other peer is
+    ignored, so a client cannot choose its own key. IPv6 clients share one
+    bucket per /64.
 
-      * **writes** (per peer IP; behind a proxy listed in
-        `APP_RATE_LIMIT__TRUSTED_PROXIES`, per the rightmost
-        `X-Forwarded-For` entry that is not a trusted proxy): every
-        authenticated management route
+      * **writes**: every authenticated management route
         (`PUT`/`PATCH /api/v1/status-lists/{list_id}/statuses`,
         `POST /api/v1/status-lists/{list_id}/allocations` and
         `GET /api/v1/credentials`). Only requests rejected with `401` spend
         this budget. Once an address has spent it, its further rejected
         requests get `429` instead of `401`, until a token is replenished. A
         request that authenticates is never refused by this budget.
-        `X-Forwarded-For` from any other peer is ignored, so a client cannot
-        choose its own key.
-        Tunables: `strict_burst_size`, `strict_period_secs` (defaults: 10 / 60s).
+        Tunables: `strict_burst_size`, `strict_period_secs` (defaults: a
+        burst of 10, then one every 60 seconds).
         Every management request from the same address, authenticated or
         not, also spends a coarse admission budget before its token is
         checked. Tunables: `admission_burst_size`, `admission_per_second`
-        (defaults: 1000 / 100 per second).
-      * **permissive** (per source IP) — public read routes
+        (defaults: a burst of 1000, then one every 10 milliseconds).
+      * **permissive**: public read routes
         (`GET /api/v1/aggregation/{aggregation_id}`,
         `GET /api/v1/aggregation`,
         `GET /api/v1/status-lists/{list_id}`).
-        Tunables: `permissive_burst_size`, `permissive_period_secs`
-        (defaults: 100 / 60s).
+        Tunables: `permissive_burst_size`, `permissive_period_secs`, which
+        may be a fraction of a second (defaults: a burst of 1000, then one
+        every 5 milliseconds).
 
     Behind authentication, each issuer also has a request budget set by its
-    tier (`APP_TIERS__<TIER>__WRITE_BURST_SIZE` and `..._WRITE_PERIOD_SECS`,
-    defaults 100 / 1s for `standard` and 10 / 6s for `sandbox`). It covers
-    every authenticated management route, which share one bucket, and is
-    keyed on the verified issuer, so issuers sharing an IP do not share a
+    tier (`APP_TIERS__<TIER>__WRITE_BURST_SIZE` and `..._WRITE_PERIOD_SECS`;
+    defaults: a burst of 100, then one every second for `standard`, and a
+    burst of 10, then one every 6 seconds for `sandbox`). It covers every
+    authenticated management route, which share one bucket, and is keyed on
+    the verified issuer, so issuers sharing an address do not share a
     budget.
 
     Limits are held per server replica. When a quota is exhausted the server
@@ -1546,8 +1551,8 @@ components:
 
     TooManyRequests:
       description: |
-        The client has exceeded a configured rate limit: the IP-keyed writes
-        or permissive limit, or the issuer's tier request budget (see the Rate
+        The client has exceeded a configured rate limit: the address-keyed
+        writes or permissive limit, or the issuer's tier request budget (see the Rate
         limiting section in the API description).
       headers:
         Retry-After:

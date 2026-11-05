@@ -77,10 +77,11 @@ which does not execute processor `function:` steps.
 
 ## Rate limits
 
-The server rate-limits by source IP (strict: 10 rejected management
-authentications per 60s, permissive: 100 req/60s reads by default) and
-management requests per issuer (burst 100, one token per second for the
-`standard` tier). The
+The server rate-limits by client address and per issuer. Each limit allows a
+burst, then one request per period. By default: strict, 10 rejected management
+authentications, then one every 60 seconds; permissive, 1000 reads, then one
+every 5 milliseconds; the `standard` tier, 100 management requests per issuer,
+then one per second. The
 `auth` suite sends unauthenticated requests on purpose, which spend the strict
 limit, and every suite writes as one issuer. A single IP and issuer running
 this suite will be throttled with `429 Too Many Requests`, which masks the

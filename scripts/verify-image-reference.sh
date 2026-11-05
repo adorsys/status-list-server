@@ -3,12 +3,12 @@
 # Needs helm and Python 3 with PyYAML. Run from the repo root.
 set -euo pipefail
 
-# Adds test-only audience and issuer-registry values: the chart has no defaults, so deployments must choose their own.
+# Adds test-only audience, issuer-registry and trusted-proxy values: the chart has no defaults, so deployments must choose their own.
 helm() {
   local action="$1"
   shift
   if [[ "$action" == template || "$action" == lint ]]; then
-    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers "$@"
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers --set-string statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 "$@"
   else
     command helm "$action" "$@"
   fi
