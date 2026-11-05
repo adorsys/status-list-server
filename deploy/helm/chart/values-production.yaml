@@ -21,6 +21,10 @@ statuslist:
     APP_SERVER__ENABLE_METRICS: "true"
     APP_TELEMETRY__ENVIRONMENT: "production"
     RUST_LOG: "warn,status_list_server=info"
+    # Keys on the shared ingress pods, so their clients share one lifted bucket until #755.
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "connect_info"
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100000000"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "1"
   resources:
     requests:
       memory: "512Mi"

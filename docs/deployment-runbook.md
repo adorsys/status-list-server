@@ -104,7 +104,7 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
 
 The admin listener serves authenticated issuer reads as well as readiness and
-metrics. It is not exposed through an Ingress and has a per-peer rate limit.
+metrics. It is not exposed through an Ingress and has a per-client rate limit.
 The chart's NetworkPolicy is disabled by default; enable it and configure
 `statuslist.networkPolicy.adminIngress` to restrict which pods can reach the
 admin service when cluster-wide pod access is not acceptable. Set a distinct
@@ -181,15 +181,21 @@ it short.
 replica, so an issuer's cluster-wide budget is the tier budget times the
 replica count; set a global cap at the ingress or API gateway.
 
-The management authentication gate keys on the TCP peer address. Behind an
-ingress, set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress controller's
-addresses or CIDRs, so the gate keys on the client address the ingress appends
-to `X-Forwarded-For`; without it, every client behind the ingress shares one
-budget for rejected authentications and one admission budget
-(`APP_RATE_LIMIT__ADMISSION_*`), which every management request spends before
-its token is checked. The failure budget never refuses a request that
-authenticates. Make sure the ingress appends the peer address it saw rather
-than passing a client's `X-Forwarded-For` through unchanged.
+Every limit keyed on an address uses `APP_RATE_LIMIT__CLIENT_IP_SOURCE`, which
+production must set. Behind an ingress, set it to `rightmost_x_forwarded_for`
+(the chart default) and set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress
+controller's addresses or CIDRs, so the limits key on the client address the
+ingress appends to `X-Forwarded-For`. Production refuses to start with
+`rightmost_x_forwarded_for` and no trusted proxies, and the chart refuses to
+render it. Use `connect_info` only when the pods see client addresses
+directly: behind a proxy, every client shares the proxy's public, admin,
+failure and admission budgets. Every management request spends admission
+(`APP_RATE_LIMIT__ADMISSION_*`) before its token is checked. The failure
+budget never refuses a request that authenticates. Make sure the ingress
+appends the peer address it saw rather than passing a client's
+`X-Forwarded-For` through unchanged. Each pod exports `rate_limiter_keys`,
+labelled by `limiter`: the keys each limiter still holds after its last prune,
+every 60 seconds.
 
 ## Redis Status-List Cache
 
