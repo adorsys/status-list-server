@@ -761,6 +761,7 @@ pub(crate) mod tests {
             handle.clone(),
             state.service,
             None,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -1623,6 +1624,7 @@ pub(crate) mod tests {
             crate::setup::spawn_issuer_registry_watcher(
                 registry.clone(),
                 state.service,
+                None,
                 None,
                 file.clone(),
                 Duration::from_secs(1),

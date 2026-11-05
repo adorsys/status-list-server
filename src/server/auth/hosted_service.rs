@@ -267,6 +267,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for RecordingStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[(String, String)],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,

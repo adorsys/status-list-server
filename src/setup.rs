@@ -448,9 +448,18 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // The dynamic trust source behind the composite resolver: `Some` only in
     // the hosted profile, where registrations live in durable SQL storage.
     let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
+    let revocation_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
     let hosted_lifecycle_service: Option<
         Arc<crate::server::auth::hosted_service::HostedIssuerLifecycleService>,
     >;
+
+    if config.database.backend == DatabaseBackend::Memory
+        && crate::config::classify_app_env(crate::config::normalize_app_env()).is_production()
+    {
+        color_eyre::eyre::bail!(
+            "the memory database backend cannot persist static key revocations in production"
+        );
+    }
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -466,6 +475,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
             dynamic_issuer_store = None;
+            revocation_store = None;
             hosted_lifecycle_service = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
@@ -558,6 +568,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
+            revocation_store = Some(Arc::new(SqlHostedIssuerStore::from_handle(
+                db_handle.clone(),
+            )));
             let hosted_store = config.server.profile.is_hosted().then(|| {
                 Arc::new(
                     SqlHostedIssuerStore::from_handle(db_handle.clone())
@@ -875,7 +888,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
-    if let Some(dynamic_store) = &dynamic_issuer_store {
+    if let Some(dynamic_store) = &revocation_store {
         crate::server::auth::hosted::validate_static_revocation_history(
             dynamic_store,
             &issuer_registry.snapshot(),
@@ -956,6 +969,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             issuer_registry.clone(),
             state.service.clone(),
             dynamic_issuer_store.clone(),
+            revocation_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
         );
@@ -1010,6 +1024,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
     dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+    revocation_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
 ) {
@@ -1018,6 +1033,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
             let registry_handle = registry_handle.clone();
             let service = service.clone();
             let dynamic_issuer_store = dynamic_issuer_store.clone();
+            let revocation_store = revocation_store.clone();
             let retry_interval = poll_interval;
             async move {
                 loop {
@@ -1027,7 +1043,7 @@ pub(crate) fn spawn_issuer_registry_watcher(
                                 registry_handle.path(),
                             )?;
                         registry_handle.validate_candidate(&candidate)?;
-                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                        if let Some(dynamic_store) = &revocation_store {
                             crate::server::auth::hosted::validate_static_revocation_history(
                                 dynamic_store,
                                 &candidate,
@@ -2011,6 +2027,7 @@ mod general_tests {
             registry.clone(),
             state.service,
             None,
+            None,
             file.clone(),
             Duration::from_secs(1),
         );
@@ -2193,6 +2210,53 @@ mod general_tests {
                 .expect_err("restart must reject a changed aggregation ID");
             assert!(
                 error.to_string().contains("persisted issuer mapping"),
+                "unexpected restart error: {error:?}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[tokio::test]
+        async fn private_profile_rejects_a_static_key_revoked_before_registry_restore() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let active_registry = registry_yaml(uuid::Uuid::new_v4());
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                (
+                    "APP_MANAGEMENT_AUTH__ISSUERS_FILE",
+                    registry_path.to_str().unwrap(),
+                ),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+
+            build_state(&startable.config(&overrides))
+                .await
+                .expect("private profile accepts the initial active registry");
+
+            let mut revoked_registry: serde_json::Value =
+                serde_saphyr::from_str(&active_registry).unwrap();
+            let key = revoked_registry["issuers"][0]["keys"][0].take();
+            revoked_registry["issuers"] = serde_json::json!([]);
+            revoked_registry["revoked_keys"] = serde_json::json!([key]);
+            std::fs::write(
+                &registry_path,
+                serde_saphyr::to_string(&revoked_registry).unwrap(),
+            )
+            .unwrap();
+            build_state(&startable.config(&overrides))
+                .await
+                .expect("revocation is persisted by the private profile");
+
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let error = build_state(&startable.config(&overrides))
+                .await
+                .expect_err("restarting with the old active registry must reject the revoked key");
+            assert!(
+                error.to_string().contains("previously revoked"),
                 "unexpected restart error: {error:?}"
             );
             let _ = std::fs::remove_dir_all(dir);
@@ -2891,6 +2955,21 @@ mod general_tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for ProbeStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[(String, String)],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,

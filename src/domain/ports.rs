@@ -36,9 +36,7 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     async fn record_static_key_revocations(
         &self,
         _revocations: &[(String, String)],
-    ) -> Result<(), HostedIssuerError> {
-        Ok(())
-    }
+    ) -> Result<(), HostedIssuerError>;
 
     /// Check whether either the key id or normalized key material was revoked
     /// from the static registry.
@@ -46,9 +44,7 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
         &self,
         _kid: &str,
         _material: &str,
-    ) -> Result<bool, HostedIssuerError> {
-        Ok(false)
-    }
+    ) -> Result<bool, HostedIssuerError>;
 
     /// Return a bounded page ordered by issuer id, strictly after `after`.
     async fn list_issuers_after(
