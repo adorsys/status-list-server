@@ -205,3 +205,32 @@ uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --i
 
 The script prompts for the token without echoing it. The first command walks
 all pages; the second displays one issuer and its ETag. Tokens are never printed.
+
+## Hosted issuer creation and renewal
+
+With the hosted profile and an admin principal granted `issuers:write`, use a
+public JWK file without a `kid` or private fields:
+
+```bash
+uv run python workflows/06-admin-issuer-writes.py create --display-name Sandbox --owner 'github|5821374' --public-key public.jwk --alg ES256
+uv run python workflows/06-admin-issuer-writes.py renew --issuer ISSUER_ID --days 7
+```
+
+Both commands prompt for the admin token without echoing it. Creation assigns
+issuer and key identifiers. Renewal reads the current ETag before sending the
+write and accepts a new expiry within the configured sandbox maximum (30 days
+by default).
+
+## Hosted issuer emergency actions
+
+In the hosted profile, an operator uses the admin listener with a registry admin
+JWT carrying `issuers:write`. Read the issuer and its `ETag` with
+`GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`; the issuer's next management request is blocked. A
+missing `If-Match` returns `428 precondition_required`; a stale `ETag` returns
+`412 precondition_failed`, so re-read the issuer and retry.
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with `If-Match` and
+`{"state":"revoked"}` permanently revokes one key; revoking an already revoked
+key returns `200` unchanged. The public status-list endpoint remains readable
+after either action.

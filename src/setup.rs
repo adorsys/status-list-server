@@ -448,6 +448,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // The dynamic trust source behind the composite resolver: `Some` only in
     // the hosted profile, where registrations live in durable SQL storage.
     let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
+    let hosted_lifecycle_service: Option<
+        Arc<crate::server::auth::hosted_service::HostedIssuerLifecycleService>,
+    >;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -463,6 +466,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
             dynamic_issuer_store = None;
+            hosted_lifecycle_service = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -554,10 +558,19 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
-            dynamic_issuer_store = config.server.profile.is_hosted().then(|| {
-                let hosted_store = SqlHostedIssuerStore::from_handle(db_handle.clone())
-                    .with_key_limits(tiers.clone());
-                Arc::new(hosted_store) as Arc<dyn crate::domain::ports::HostedIssuerStore>
+            let hosted_store = config.server.profile.is_hosted().then(|| {
+                Arc::new(
+                    SqlHostedIssuerStore::from_handle(db_handle.clone())
+                        .with_key_limits(tiers.clone()),
+                )
+            });
+            dynamic_issuer_store = hosted_store
+                .clone()
+                .map(|store| store as Arc<dyn crate::domain::ports::HostedIssuerStore>);
+            hosted_lifecycle_service = hosted_store.map(|store| {
+                Arc::new(
+                    crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(store),
+                )
             });
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
@@ -909,6 +922,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             dynamic_issuer_store.clone(),
         ),
         issuer_registry: issuer_registry.clone(),
+        hosted_lifecycle_service,
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
             portal: config.server.links.portal.clone(),
@@ -937,11 +951,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             dynamic_issuer_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
-            RegistryWatcherAuthValidation {
-                environment: config.telemetry.environment,
-                admin_audiences: config.admin_auth.audiences.clone(),
-                management_audiences: config.management_auth.audiences.clone(),
-            },
         );
     }
 
@@ -990,20 +999,12 @@ pub(crate) fn build_issuer_key_resolver(
     registry
 }
 
-#[derive(Clone)]
-pub(crate) struct RegistryWatcherAuthValidation {
-    pub(crate) environment: crate::config::TelemetryEnvironment,
-    pub(crate) admin_audiences: Vec<String>,
-    pub(crate) management_audiences: Vec<String>,
-}
-
 pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
     dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
-    auth_validation: RegistryWatcherAuthValidation,
 ) {
     crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval)
         .spawn_with_initial_reconcile("issuer_registry", move || {
@@ -1011,7 +1012,6 @@ pub(crate) fn spawn_issuer_registry_watcher(
             let service = service.clone();
             let dynamic_issuer_store = dynamic_issuer_store.clone();
             let retry_interval = poll_interval;
-            let auth_validation = auth_validation.clone();
             async move {
                 loop {
                     let result = async {
@@ -1019,17 +1019,6 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             crate::server::auth::issuer_registry::IssuerRegistry::from_file(
                                 registry_handle.path(),
                             )?;
-                        validate_admin_auth_settings(
-                            auth_validation.environment,
-                            &auth_validation.admin_audiences,
-                            &auth_validation.management_audiences,
-                            !candidate.admins().is_empty(),
-                        )
-                        .map_err(|message| {
-                            crate::server::auth::issuer_registry::RegistryError::Semantic(
-                                message.into(),
-                            )
-                        })?;
                         registry_handle.validate_candidate(&candidate)?;
                         // Serializes with hosted writes in this process; see
                         // register_hosted_issuer for the cross-pod case.
@@ -2010,11 +1999,6 @@ mod general_tests {
             None,
             file.clone(),
             Duration::from_secs(1),
-            RegistryWatcherAuthValidation {
-                environment: crate::config::TelemetryEnvironment::Development,
-                admin_audiences: Vec::new(),
-                management_audiences: Vec::new(),
-            },
         );
         std::fs::write(&file, registry_yaml(uuid::Uuid::new_v4())).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2933,10 +2917,15 @@ mod general_tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
@@ -3034,7 +3023,7 @@ mod general_tests {
         let snapshot = (
             vec![
                 hosted("hosted-sandbox", "sandbox", HostedIssuerState::Active),
-                hosted("hosted-disabled", "standard", HostedIssuerState::Disabled),
+                hosted("hosted-disabled", "standard", HostedIssuerState::Suspended),
             ],
             vec![
                 key("hosted-sandbox", HostedIssuerKeyState::Active, None),

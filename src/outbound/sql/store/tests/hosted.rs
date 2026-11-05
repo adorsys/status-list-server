@@ -6,14 +6,14 @@
 #[cfg(feature = "sqlite")]
 use super::fixtures;
 use crate::domain::models::credential::{AggregationId, PublicJwk};
-#[cfg(any(feature = "sqlite", feature = "mysql"))]
-use crate::domain::models::hosted_issuer::HostedIssuerFilter;
-#[cfg(feature = "sqlite")]
-use crate::domain::models::hosted_issuer::HostedIssuerReadState;
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
+#[cfg(feature = "sqlite")]
+use crate::domain::ports::HostedIssuerLifecycleStore;
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
 use time::OffsetDateTime;
@@ -62,13 +62,13 @@ fn key_with_material(issuer_id: &str, kid: &str, jwk_json: &str) -> HostedIssuer
 async fn round_trip(store: &SqlHostedIssuerStore, backend: &str) {
     let hosted = issuer("00000000-0000-4000-8000-000000000001");
     let stored = store
-        .create_issuer(hosted.clone())
+        .create_issuer(hosted.clone(), "portal-operator")
         .await
         .unwrap_or_else(|e| panic!("creating a hosted issuer on {backend}: {e:?}"));
     assert_eq!(stored.id, hosted.id, "on {backend}");
     let kid = "hosted-kid";
     store
-        .add_key(key(&hosted.id, kid))
+        .add_key(key(&hosted.id, kid), "portal-operator")
         .await
         .unwrap_or_else(|e| panic!("adding a hosted key on {backend}: {e}"));
 
@@ -114,19 +114,25 @@ async fn round_trip(store: &SqlHostedIssuerStore, backend: &str) {
 async fn rejects_duplicates(store: &SqlHostedIssuerStore, backend: &str) {
     let first = key("00000000-0000-4000-8000-000000000003", "kid-1");
     let hosted = issuer("00000000-0000-4000-8000-000000000003");
-    store.create_issuer(hosted.clone()).await.unwrap();
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
     assert!(
         matches!(
-            store.create_issuer(hosted.clone()).await,
+            store.create_issuer(hosted.clone(), "portal-operator").await,
             Err(HostedIssuerError::AlreadyExists)
         ),
         "a duplicate hosted issuer id is a conflict on {backend}"
     );
     store
-        .add_key(first)
+        .add_key(first, "portal-operator")
         .await
         .unwrap_or_else(|e| panic!("adding the first key on {backend}: {e}"));
-    match store.add_key(key(&hosted.id, "kid-1")).await {
+    match store
+        .add_key(key(&hosted.id, "kid-1"), "portal-operator")
+        .await
+    {
         Err(HostedIssuerError::AlreadyExists) => {}
         other => panic!("a duplicate kid is a conflict on {backend}: {other:?}"),
     }
@@ -139,10 +145,13 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
     let second = issuer("00000000-0000-4000-8000-000000000006");
 
     for hosted in [&first, &second] {
-        store.create_issuer(hosted.clone()).await.unwrap();
+        store
+            .create_issuer(hosted.clone(), "portal-operator")
+            .await
+            .unwrap();
     }
     store
-        .add_key(key(&first.id, "first-key"))
+        .add_key(key(&first.id, "first-key"), "portal-operator")
         .await
         .unwrap_or_else(|e| panic!("adding the first key on {backend}: {e}"));
 
@@ -150,14 +159,18 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
     // within one issuer under a different kid.
     assert!(
         matches!(
-            store.add_key(key(&second.id, "second-key")).await,
+            store
+                .add_key(key(&second.id, "second-key"), "portal-operator")
+                .await,
             Err(HostedIssuerError::KeyMaterialReused)
         ),
         "reused material across issuers must fail closed on {backend}"
     );
     assert!(
         matches!(
-            store.add_key(key(&first.id, "first-key-duplicate")).await,
+            store
+                .add_key(key(&first.id, "first-key-duplicate"), "portal-operator")
+                .await,
             Err(HostedIssuerError::KeyMaterialReused)
         ),
         "reused material within one issuer must fail closed on {backend}"
@@ -188,17 +201,23 @@ async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
     let store = sqlite_store().await;
     let first = issuer("00000000-0000-4000-8000-000000000001");
     let second = issuer("00000000-0000-4000-8000-000000000002");
-    store.create_issuer(first.clone()).await.unwrap();
-    store.create_issuer(second.clone()).await.unwrap();
+    store
+        .create_issuer(first.clone(), "portal-operator")
+        .await
+        .unwrap();
+    store
+        .create_issuer(second.clone(), "portal-operator")
+        .await
+        .unwrap();
     let mut older = key(&first.id, "older-key");
     older.created_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
     let mut newer = key_with_material(&first.id, "newer-key", ROTATED_EC_JWK);
     newer.created_at = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
     let mut same_time = key_with_material(&first.id, "same-time-key", THIRD_EC_JWK);
     same_time.created_at = older.created_at;
-    store.add_key(older).await.unwrap();
-    store.add_key(newer).await.unwrap();
-    store.add_key(same_time).await.unwrap();
+    store.add_key(older, "portal-operator").await.unwrap();
+    store.add_key(newer, "portal-operator").await.unwrap();
+    store.add_key(same_time, "portal-operator").await.unwrap();
 
     let page = store
         .list_issuers_after(
@@ -232,18 +251,74 @@ async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
         keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
         ["newer-key", "older-key", "same-time-key"]
     );
-    let grouped_keys = store
-        .issuer_keys_for(&[first.id.clone(), second.id.clone()])
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_legacy_disabled_issuer_can_be_read_and_resumed() {
+    use crate::outbound::sql::models::issuers;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000015");
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
         .await
         .unwrap();
+    issuers::Entity::update_many()
+        .col_expr(
+            issuers::Column::State,
+            sea_orm::sea_query::Expr::value("disabled"),
+        )
+        .filter(issuers::Column::Issuer.eq(&hosted.id))
+        .exec(&*db)
+        .await
+        .unwrap();
+
+    let found = store.get_issuer(&hosted.id).await.unwrap();
+    assert_eq!(found.state, HostedIssuerState::Suspended);
+    let unfiltered = store
+        .list_issuers_after(
+            None,
+            10,
+            &HostedIssuerFilter::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unfiltered.len(), 1);
+    assert_eq!(unfiltered[0].id, hosted.id);
+    let listed = store
+        .list_issuers_after(
+            None,
+            10,
+            &HostedIssuerFilter {
+                state: Some(HostedIssuerReadState::Suspended),
+                ..Default::default()
+            },
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, hosted.id);
+
+    let resumed = store
+        .set_issuer_state(
+            &hosted.id,
+            HostedIssuerState::Active,
+            found.version,
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.state, HostedIssuerState::Active);
+    assert_eq!(resumed.version, found.version + 1);
     assert_eq!(
-        grouped_keys[&first.id]
-            .iter()
-            .map(|key| key.kid.as_str())
-            .collect::<Vec<_>>(),
-        ["newer-key", "older-key", "same-time-key"]
+        store.get_issuer(&hosted.id).await.unwrap().state,
+        HostedIssuerState::Active
     );
-    assert!(grouped_keys.get(&second.id).is_none_or(Vec::is_empty));
 }
 
 #[cfg(feature = "sqlite")]
@@ -259,11 +334,11 @@ async fn test_sqlite_admin_issuer_filters_combine_tier_owner_and_state() {
     different_owner.tier = "sandbox".into();
     different_owner.owner = Some("portal|bob".into());
     let mut suspended = issuer("00000000-0000-4000-8000-000000000013");
-    suspended.state = HostedIssuerState::Disabled;
+    suspended.state = HostedIssuerState::Suspended;
     let mut expired = issuer("00000000-0000-4000-8000-000000000014");
     expired.expires_at = Some(now - time::Duration::seconds(1));
     for value in [active.clone(), different_owner, suspended, expired] {
-        store.create_issuer(value).await.unwrap();
+        store.create_issuer(value, "portal-operator").await.unwrap();
     }
 
     let active_filter = HostedIssuerFilter {
@@ -324,7 +399,10 @@ async fn test_sqlite_hosted_rejects_conflicts() {
 #[tokio::test]
 async fn test_sqlite_add_key_to_missing_issuer_is_not_found() {
     let store = sqlite_store().await;
-    match store.add_key(key("nobody", "orphan-key")).await {
+    match store
+        .add_key(key("nobody", "orphan-key"), "portal-operator")
+        .await
+    {
         Err(HostedIssuerError::NotFound) => {}
         other => panic!("a missing issuer must be NotFound, got {other:?}"),
     }
@@ -335,10 +413,16 @@ async fn test_sqlite_add_key_to_missing_issuer_is_not_found() {
 async fn test_sqlite_add_key_stores_the_requested_state() {
     let store = sqlite_store().await;
     let hosted = issuer("00000000-0000-4000-8000-00000000000a");
-    store.create_issuer(hosted.clone()).await.unwrap();
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
     let mut revoked = key(&hosted.id, "revoked-key");
     revoked.state = HostedIssuerKeyState::Revoked;
-    store.add_key(revoked.clone()).await.unwrap();
+    store
+        .add_key(revoked.clone(), "portal-operator")
+        .await
+        .unwrap();
 
     let found = store
         .find_key_by_kid("revoked-key")
@@ -386,7 +470,10 @@ async fn test_sqlite_non_portal_issuer_is_invisible() {
         None,
         "a non-portal issuer must not resolve as hosted"
     );
-    match store.add_key(key("credential-issuer", "stray-key")).await {
+    match store
+        .add_key(key("credential-issuer", "stray-key"), "portal-operator")
+        .await
+    {
         Err(HostedIssuerError::NotFound) => {}
         other => panic!("a key for a non-portal issuer must be NotFound, got {other:?}"),
     }
@@ -397,8 +484,11 @@ async fn test_sqlite_non_portal_issuer_is_invisible() {
 async fn test_sqlite_issuer_id_collision_is_a_conflict() {
     let store = sqlite_store().await;
     let hosted = issuer("00000000-0000-4000-8000-00000000000b");
-    store.create_issuer(hosted.clone()).await.unwrap();
-    match store.create_issuer(hosted.clone()).await {
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    match store.create_issuer(hosted.clone(), "portal-operator").await {
         Err(HostedIssuerError::AlreadyExists) => {}
         other => panic!("a duplicate issuer id must be AlreadyExists, got {other:?}"),
     }
@@ -410,15 +500,21 @@ async fn test_sqlite_concurrent_same_material_adds_allow_exactly_one() {
     let store = sqlite_store().await;
     let first = issuer("00000000-0000-4000-8000-00000000000c");
     let second = issuer("00000000-0000-4000-8000-00000000000d");
-    store.create_issuer(first.clone()).await.unwrap();
-    store.create_issuer(second.clone()).await.unwrap();
+    store
+        .create_issuer(first.clone(), "portal-operator")
+        .await
+        .unwrap();
+    store
+        .create_issuer(second.clone(), "portal-operator")
+        .await
+        .unwrap();
 
     // Same material under different kids, registered concurrently. The
     // `key_material` unique index guarantees exactly one wins; the other gets
     // a typed KeyMaterialReused, never a silent duplicate.
     let (a, b) = tokio::join!(
-        store.add_key(key(&first.id, "concurrent-a")),
-        store.add_key(key(&second.id, "concurrent-b")),
+        store.add_key(key(&first.id, "concurrent-a"), "portal-operator"),
+        store.add_key(key(&second.id, "concurrent-b"), "portal-operator"),
     );
     let outcomes = [a, b];
     assert_eq!(
@@ -446,8 +542,14 @@ async fn test_sqlite_malformed_row_is_quarantined_not_fatal() {
     let db = fixtures::sqlite_connection().await;
     let store = SqlHostedIssuerStore::new(db.clone());
     let hosted = issuer("00000000-0000-4000-8000-00000000000e");
-    store.create_issuer(hosted.clone()).await.unwrap();
-    store.add_key(key(&hosted.id, "good-key")).await.unwrap();
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    store
+        .add_key(key(&hosted.id, "good-key"), "portal-operator")
+        .await
+        .unwrap();
 
     // A structurally-valid Jwk that PublicJwk::try_new rejects (kty=oct),
     // inserted directly as an old pod or manual edit could.
@@ -490,8 +592,14 @@ async fn test_sqlite_stored_alg_is_the_jose_name() {
     let db = fixtures::sqlite_connection().await;
     let store = SqlHostedIssuerStore::new(db.clone());
     let hosted = issuer("00000000-0000-4000-8000-00000000000f");
-    store.create_issuer(hosted.clone()).await.unwrap();
-    store.add_key(key(&hosted.id, "alg-key")).await.unwrap();
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    store
+        .add_key(key(&hosted.id, "alg-key"), "portal-operator")
+        .await
+        .unwrap();
 
     let row = hosted_issuer_keys::Entity::find_by_id("alg-key")
         .one(&*db)
@@ -530,23 +638,31 @@ async fn test_sqlite_add_key_enforces_the_stored_tiers_key_limit() {
     sandbox.tier = "sandbox".into();
     let standard = issuer("00000000-0000-4000-8000-000000000102");
     for hosted in [&sandbox, &standard] {
-        store.create_issuer(hosted.clone()).await.unwrap();
+        store
+            .create_issuer(hosted.clone(), "test-admin")
+            .await
+            .unwrap();
     }
 
     // Keys that can no longer authenticate do not hold a slot.
     let mut revoked = fresh_key(&sandbox.id, "sandbox-revoked");
     revoked.state = HostedIssuerKeyState::Revoked;
-    store.add_key(revoked).await.unwrap();
+    store.add_key(revoked, "test-admin").await.unwrap();
     let mut ended = fresh_key(&sandbox.id, "sandbox-ended");
     ended.not_after = Some(OffsetDateTime::now_utc() - time::Duration::days(1));
-    store.add_key(ended).await.unwrap();
+    store.add_key(ended, "test-admin").await.unwrap();
     for kid in ["sandbox-1", "sandbox-2"] {
-        store.add_key(fresh_key(&sandbox.id, kid)).await.unwrap();
+        store
+            .add_key(fresh_key(&sandbox.id, kid), "test-admin")
+            .await
+            .unwrap();
     }
 
     assert!(
         matches!(
-            store.add_key(fresh_key(&sandbox.id, "sandbox-3")).await,
+            store
+                .add_key(fresh_key(&sandbox.id, "sandbox-3"), "test-admin")
+                .await,
             Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 2 })
         ),
         "a sandbox issuer at its key limit must be refused"
@@ -555,14 +671,19 @@ async fn test_sqlite_add_key_enforces_the_stored_tiers_key_limit() {
     // A key that would not hold a slot is still accepted at the limit.
     let mut reserved = fresh_key(&sandbox.id, "sandbox-reserved");
     reserved.state = HostedIssuerKeyState::Reserved;
-    store.add_key(reserved).await.unwrap();
+    store.add_key(reserved, "test-admin").await.unwrap();
 
     // The standard issuer is unaffected and gets its own tier's limit.
     for kid in ["standard-1", "standard-2", "standard-3"] {
-        store.add_key(fresh_key(&standard.id, kid)).await.unwrap();
+        store
+            .add_key(fresh_key(&standard.id, kid), "test-admin")
+            .await
+            .unwrap();
     }
     assert!(matches!(
-        store.add_key(fresh_key(&standard.id, "standard-4")).await,
+        store
+            .add_key(fresh_key(&standard.id, "standard-4"), "test-admin")
+            .await,
         Err(HostedIssuerError::KeyQuotaExceeded { max_keys: 3 })
     ));
 }
@@ -572,6 +693,124 @@ async fn sqlite_store() -> SqlHostedIssuerStore {
     // One store per helper: each helper seeds its own namespace rather than
     // having to reason about which materials earlier helpers left behind.
     SqlHostedIssuerStore::new(fixtures::sqlite_connection().await)
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_key_and_issuer_commit_together() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000626");
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_initial_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        store
+            .create_issuer_with_key(
+                hosted.clone(),
+                key(&hosted.id, "initial-key"),
+                "portal-admin"
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.find_issuer(&hosted.id).await.unwrap().is_none());
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "DROP TRIGGER reject_initial_audit",
+    ))
+    .await
+    .unwrap();
+    let created = store
+        .create_issuer_with_key(
+            hosted.clone(),
+            key(&hosted.id, "initial-key"),
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.version, 1);
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn renewal_updates_expiry_and_version() {
+    use crate::outbound::sql::models::issuer_audit_events;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Statement,
+    };
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000627");
+    let created = store.create_issuer(hosted, "portal-admin").await.unwrap();
+    let renewed = OffsetDateTime::now_utc() + time::Duration::days(7);
+    let updated = store
+        .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+        .await
+        .unwrap();
+    assert_eq!(
+        updated.expires_at.unwrap().unix_timestamp(),
+        renewed.unix_timestamp()
+    );
+    assert_eq!(updated.version, created.version + 1);
+    let events = issuer_audit_events::Entity::find()
+        .filter(issuer_audit_events::Column::IssuerId.eq(&created.id))
+        .all(db.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.action == "issuer.expiry_changed")
+            .count(),
+        1
+    );
+    assert!(matches!(
+        store
+            .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_renewal_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    let later = renewed + time::Duration::days(1);
+    assert!(
+        store
+            .set_issuer_expiry(&created.id, later, updated.version, "portal-admin")
+            .await
+            .is_err()
+    );
+    let unchanged = store.get_issuer(&created.id).await.unwrap();
+    assert_eq!(unchanged.expires_at, updated.expires_at);
+    assert_eq!(unchanged.version, updated.version);
 }
 
 #[cfg(feature = "mysql")]
@@ -584,39 +823,6 @@ async fn test_mysql_hosted_round_trip() {
         "MySQL",
     )
     .await;
-}
-
-#[cfg(feature = "mysql")]
-#[tokio::test]
-async fn test_mysql_hosted_pagination_uses_bytewise_id_order() {
-    use crate::outbound::sql::test_containers::mysql_helpers;
-
-    let test_db = mysql_helpers::MysqlTestDb::start().await;
-    let store = SqlHostedIssuerStore::new(test_db.connection().await);
-    for id in ["a", "B", "c"] {
-        store.create_issuer(issuer(id)).await.unwrap();
-    }
-
-    let mut after = None;
-    let mut ids = Vec::new();
-    loop {
-        let page = store
-            .list_issuers_after(
-                after.as_deref(),
-                1,
-                &HostedIssuerFilter::default(),
-                OffsetDateTime::now_utc(),
-            )
-            .await
-            .unwrap();
-        let Some(row) = page.into_iter().next() else {
-            break;
-        };
-        after = Some(row.id.clone());
-        ids.push(row.id);
-    }
-
-    assert_eq!(ids, ["B", "a", "c"]);
 }
 
 #[cfg(feature = "mysql")]
@@ -645,4 +851,358 @@ async fn test_postgres_hosted_rejects_conflicts() {
     let store = SqlHostedIssuerStore::new(test_db.db.clone());
     rejects_duplicates(&store, "Postgres").await;
     rejects_reused_material(&store, "Postgres").await;
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
+async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
+    db: std::sync::Arc<sea_orm::DatabaseConnection>,
+) {
+    use crate::domain::models::credential::KeyResolveError;
+    use crate::domain::ports::{HostedIssuerLifecycleStore, IssuerKeyResolver};
+    use crate::outbound::sql::models::issuer_audit_events;
+    use crate::server::auth::hosted::CompositeIssuerKeyResolver;
+    use crate::server::auth::issuer_registry::RegistryHandle;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+    use std::sync::Arc;
+
+    let first = Arc::new(SqlHostedIssuerStore::new(db.clone()));
+    let second = Arc::new(SqlHostedIssuerStore::new(db.clone()));
+    let issuer = first
+        .create_issuer(
+            issuer("00000000-0000-4000-8000-000000000373"),
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+    let signing_key = key(&issuer.id, "lifecycle-key");
+    first.add_key(signing_key, "portal-operator").await.unwrap();
+    let observed_version = first.get_issuer(&issuer.id).await.unwrap().version;
+    let first_resolver =
+        CompositeIssuerKeyResolver::new(Arc::new(RegistryHandle::empty()), Some(first.clone()));
+    let second_resolver =
+        CompositeIssuerKeyResolver::new(Arc::new(RegistryHandle::empty()), Some(second.clone()));
+    assert!(first_resolver.resolve("lifecycle-key").await.is_ok());
+    assert!(second_resolver.resolve("lifecycle-key").await.is_ok());
+
+    let suspended = first
+        .set_issuer_state(
+            &issuer.id,
+            HostedIssuerState::Suspended,
+            observed_version,
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        second
+            .set_issuer_state(
+                &issuer.id,
+                HostedIssuerState::Active,
+                observed_version,
+                "portal-admin",
+            )
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+    let still_suspended = second.get_issuer(&issuer.id).await.unwrap();
+    assert_eq!(still_suspended.state, HostedIssuerState::Suspended);
+    assert_eq!(still_suspended.version, suspended.version);
+    assert!(matches!(
+        second
+            .set_issuer_state(
+                &issuer.id,
+                HostedIssuerState::Suspended,
+                observed_version,
+                "portal-admin",
+            )
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+    for resolver in [&first_resolver, &second_resolver] {
+        assert!(matches!(
+            resolver.resolve("lifecycle-key").await,
+            Err(KeyResolveError::PrincipalDisabled)
+        ));
+    }
+    let resumed = second
+        .set_issuer_state(
+            &issuer.id,
+            HostedIssuerState::Active,
+            suspended.version,
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    second
+        .revoke_key(&issuer.id, "lifecycle-key", resumed.version, "portal-admin")
+        .await
+        .unwrap();
+    for resolver in [&first_resolver, &second_resolver] {
+        assert!(matches!(
+            resolver.resolve("lifecycle-key").await,
+            Err(KeyResolveError::Revoked)
+        ));
+    }
+    assert!(matches!(
+        first
+            .add_key(key(&issuer.id, "lifecycle-key"), "portal-operator")
+            .await,
+        Err(HostedIssuerError::AlreadyExists)
+    ));
+    let events = issuer_audit_events::Entity::find()
+        .filter(issuer_audit_events::Column::IssuerId.eq(&issuer.id))
+        .order_by_asc(issuer_audit_events::Column::Id)
+        .all(db.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 5);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.action.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "issuer.created",
+            "key.registered",
+            "issuer.state_changed",
+            "issuer.state_changed",
+            "key.revoked",
+        ]
+    );
+    for event in events {
+        let expected_actor = if event.action == "issuer.created" || event.action == "key.registered"
+        {
+            "portal-operator"
+        } else {
+            "portal-admin"
+        };
+        assert_eq!(event.actor.as_deref(), Some(expected_actor));
+        match event.action.as_str() {
+            "issuer.created" => {
+                assert_eq!(event.before, None);
+                assert_eq!(
+                    event.after,
+                    Some(serde_json::json!({
+                        "state": "active",
+                        "version": 1,
+                        "aggregation_id": issuer.aggregation_id.0,
+                    }))
+                );
+            }
+            "key.registered" => {
+                assert_eq!(event.before, None);
+                assert_eq!(
+                    event.after,
+                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "active"}))
+                );
+            }
+            "issuer.state_changed" => {
+                let before = event.before.as_ref().unwrap();
+                let after = event.after.as_ref().unwrap();
+                match before["state"].as_str() {
+                    Some("active") => {
+                        assert_eq!(
+                            before,
+                            &serde_json::json!({"state": "active", "version": observed_version})
+                        );
+                        assert_eq!(
+                            after,
+                            &serde_json::json!({"state": "suspended", "version": observed_version + 1})
+                        );
+                    }
+                    Some("suspended") => {
+                        assert_eq!(
+                            before,
+                            &serde_json::json!({"state": "suspended", "version": observed_version + 1})
+                        );
+                        assert_eq!(
+                            after,
+                            &serde_json::json!({"state": "active", "version": observed_version + 2})
+                        );
+                    }
+                    other => panic!("unexpected state change from `{other:?}`"),
+                }
+            }
+            "key.revoked" => {
+                assert_eq!(
+                    event.before,
+                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "active"}))
+                );
+                assert_eq!(
+                    event.after,
+                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "revoked"}))
+                );
+            }
+            other => panic!("unexpected audit action: {other}"),
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn stale_revocation_cannot_revoke_a_second_key() {
+    use crate::domain::ports::HostedIssuerLifecycleStore;
+
+    let db = fixtures::sqlite_connection().await;
+    let first = SqlHostedIssuerStore::new(db.clone());
+    let second = SqlHostedIssuerStore::new(db);
+    let issuer = first
+        .create_issuer(
+            issuer("00000000-0000-4000-8000-000000000375"),
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+    first
+        .add_key(key(&issuer.id, "first-key"), "portal-operator")
+        .await
+        .unwrap();
+    first
+        .add_key(
+            key_with_material(&issuer.id, "second-key", ROTATED_EC_JWK),
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+
+    let observed_version = first.get_issuer(&issuer.id).await.unwrap().version;
+    first
+        .revoke_key(&issuer.id, "first-key", observed_version, "admin-a")
+        .await
+        .unwrap();
+    assert!(matches!(
+        second
+            .revoke_key(&issuer.id, "second-key", observed_version, "admin-b")
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+    assert_eq!(
+        second
+            .find_key_by_kid("second-key")
+            .await
+            .unwrap()
+            .unwrap()
+            .key
+            .state,
+        HostedIssuerKeyState::Active
+    );
+    assert_eq!(
+        second.get_issuer(&issuer.id).await.unwrap().version,
+        observed_version + 1
+    );
+    assert!(matches!(
+        second
+            .revoke_key(&issuer.id, "first-key", observed_version, "admin-b")
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+    assert_eq!(
+        second.get_issuer(&issuer.id).await.unwrap().version,
+        observed_version + 1
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
+    lifecycle_transitions_reach_two_replicas_and_are_audited(fixtures::sqlite_connection().await)
+        .await;
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn lifecycle_changes_reach_two_mysql_replicas_and_are_audited() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    lifecycle_transitions_reach_two_replicas_and_are_audited(test_db.connection().await).await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn lifecycle_changes_reach_two_postgres_replicas_and_are_audited() {
+    use crate::outbound::sql::test_containers::postgres_helpers;
+    let test_db = postgres_helpers::postgres_connection().await;
+    lifecycle_transitions_reach_two_replicas_and_are_audited(test_db.db.clone()).await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn failed_audit_insert_rolls_back_lifecycle_change() {
+    use crate::domain::ports::HostedIssuerLifecycleStore;
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = store
+        .create_issuer(
+            issuer("00000000-0000-4000-8000-000000000374"),
+            "portal-operator",
+        )
+        .await
+        .unwrap();
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_lifecycle_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        store
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Suspended,
+                hosted.version,
+                "portal-admin",
+            )
+            .await
+            .is_err()
+    );
+    let unchanged = store.find_issuer(&hosted.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.state, HostedIssuerState::Active);
+    assert_eq!(unchanged.version, hosted.version);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn failed_audit_insert_rolls_back_registration() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000375");
+    let create_trigger = || {
+        Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE TRIGGER reject_registration_audit BEFORE INSERT ON issuer_audit_events \
+             BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+        )
+    };
+    db.execute_raw(create_trigger()).await.unwrap();
+    assert!(
+        store
+            .create_issuer(hosted.clone(), "portal-operator")
+            .await
+            .is_err()
+    );
+    assert!(store.find_issuer(&hosted.id).await.unwrap().is_none());
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "DROP TRIGGER reject_registration_audit",
+    ))
+    .await
+    .unwrap();
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    db.execute_raw(create_trigger()).await.unwrap();
+    assert!(
+        store
+            .add_key(key(&hosted.id, "audit-key"), "portal-operator")
+            .await
+            .is_err()
+    );
+    assert!(store.find_key_by_kid("audit-key").await.unwrap().is_none());
 }

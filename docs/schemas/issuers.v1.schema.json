@@ -28,6 +28,14 @@
         "$ref": "#/$defs/admin"
       },
       "default": []
+    },
+    "revoked_keys": {
+      "description": "Public records of revoked static keys. These keys never authenticate, and their kid and key material remain reserved while the records stay in this registry file.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/key"
+      },
+      "default": []
     }
   },
   "$defs": {

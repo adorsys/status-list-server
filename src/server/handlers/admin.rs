@@ -108,9 +108,16 @@ pub struct IssuerDto {
     expires_at: Option<i64>,
     keys: Vec<KeyDto>,
     usage: UsageDto,
+    #[serde(skip)]
+    persisted_version: Option<u64>,
+}
+impl IssuerDto {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
 }
 #[derive(Debug, Serialize, Clone)]
-struct KeyDto {
+pub struct KeyDto {
     kid: String,
     alg: String,
     state: String,
@@ -156,13 +163,22 @@ struct IssuerKeyWriteVersion<'a> {
     not_after: Option<i64>,
 }
 
-fn issuer_write_version(issuer: &IssuerDto) -> String {
+pub(crate) fn issuer_write_version(issuer: &IssuerDto) -> String {
     use sha2::{Digest, Sha256};
+    if let Some(version) = issuer.persisted_version {
+        return hex::encode(Sha256::digest(
+            format!("{}:{version}", issuer.id).as_bytes(),
+        ));
+    }
     let write_state = IssuerWriteVersion {
         id: &issuer.id,
         display_name: &issuer.display_name,
         tier: &issuer.tier,
-        state: &issuer.state,
+        state: if issuer.state == "expired" {
+            "active"
+        } else {
+            &issuer.state
+        },
         owner: &issuer.owner,
         expires_at: issuer.expires_at,
         keys: issuer
@@ -191,7 +207,9 @@ struct Cursor {
     filters: Filters,
 }
 
-fn hosted_store_error(err: crate::domain::models::hosted_issuer::HostedIssuerError) -> ApiError {
+pub(crate) fn hosted_store_error(
+    err: crate::domain::models::hosted_issuer::HostedIssuerError,
+) -> ApiError {
     use crate::domain::models::hosted_issuer::HostedIssuerError;
     match err {
         HostedIssuerError::Backend(source) => {
@@ -204,10 +222,19 @@ fn hosted_store_error(err: crate::domain::models::hosted_issuer::HostedIssuerErr
             .retry_after(1)
         }
         HostedIssuerError::Corrupt(source) => ApiError::internal(source),
+        HostedIssuerError::Unavailable => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            Some("issuer store unavailable".into()),
+        )
+        .retry_after(1),
         other => ApiError::internal(other),
     }
 }
-fn require_scope(admin: &AuthenticatedAdmin, needed: &'static str) -> Result<(), ApiError> {
+pub(crate) fn require_scope(
+    admin: &AuthenticatedAdmin,
+    needed: &'static str,
+) -> Result<(), ApiError> {
     if admin.scopes.iter().any(|scope| scope == needed) {
         Ok(())
     } else {
@@ -256,7 +283,7 @@ fn key_from_registry(
             .expect("validated JWK serializes"),
     }
 }
-fn key_from_hosted(k: HostedIssuerKey) -> KeyDto {
+pub(crate) fn key_from_hosted(k: HostedIssuerKey) -> KeyDto {
     let public_key =
         serde_json::from_slice(k.jwk.as_bytes()).expect("validated JWK bytes remain valid JSON");
     let key_state = match k.state {
@@ -302,6 +329,7 @@ fn static_dto(
         owner: None,
         created_at: None,
         expires_at: None,
+        persisted_version: None,
         keys: entry
             .keys
             .iter()
@@ -320,7 +348,7 @@ fn static_dto(
         .into(),
     }
 }
-fn hosted_dto(
+fn hosted_dto_from_parts(
     state: &AppState,
     issuer: HostedIssuer,
     count: u64,
@@ -350,6 +378,7 @@ fn hosted_dto(
         owner: issuer.owner,
         created_at: Some(issuer.created_at.unix_timestamp()),
         expires_at: issuer.expires_at.map(|v| v.unix_timestamp()),
+        persisted_version: Some(issuer.version),
         keys,
         usage: IssuerUsage::new(
             count,
@@ -361,6 +390,38 @@ fn hosted_dto(
         .into(),
     }
 }
+/// Hosted lifecycle preconditions use the persisted version, not live usage.
+pub(crate) fn issuer_etag(dto: &IssuerDto) -> String {
+    use sha2::{Digest, Sha256};
+    if dto.persisted_version.is_some() {
+        return format!("\"{}\"", issuer_write_version(dto));
+    }
+    let bytes = serde_json::to_vec(dto).expect("issuer DTO serializes");
+    format!("\"{}\"", hex::encode(Sha256::digest(bytes)))
+}
+
+pub(crate) async fn hosted_dto(
+    state: &AppState,
+    issuer: HostedIssuer,
+) -> Result<IssuerDto, ApiError> {
+    let store = state
+        .hosted_issuer_store
+        .as_ref()
+        .expect("hosted store is configured");
+    let keys = store
+        .issuer_keys(&issuer.id)
+        .await
+        .map_err(hosted_store_error)?;
+    let count = list_count(state, &issuer.id).await?;
+    Ok(hosted_dto_from_parts(
+        state,
+        issuer,
+        count,
+        keys,
+        time::OffsetDateTime::now_utc(),
+    ))
+}
+
 fn cursor_encode(cursor: Cursor) -> String {
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).expect("cursor serializes"))
 }
@@ -546,7 +607,7 @@ pub async fn list_issuers(
             Row::Hosted(hosted) => {
                 let id = hosted.id.clone();
                 cursor.after_portal = Some(id.clone());
-                hosted_dto(
+                hosted_dto_from_parts(
                     &state,
                     hosted,
                     counts.get(&id).copied().unwrap_or(0),
@@ -624,23 +685,20 @@ pub async fn get_issuer(
             .ok_or_else(|| ApiError::not_found("issuer_not_found", "no issuer has this id"))?;
         let keys = store.issuer_keys(&id).await.map_err(hosted_store_error)?;
         let count = list_count(&state, &id).await?;
-        hosted_dto(&state, issuer, count, keys, now)
+        hosted_dto_from_parts(&state, issuer, count, keys, time::OffsetDateTime::now_utc())
     } else {
         return Err(ApiError::not_found(
             "issuer_not_found",
             "no issuer has this id",
         ));
     };
-    use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(&dto).expect("issuer DTO serializes");
-    let etag = hex::encode(Sha256::digest(&bytes));
+    let etag = issuer_etag(&dto);
     let write_version = issuer_write_version(&dto);
     let mut h = HeaderMap::new();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(
         header::ETAG,
-        HeaderValue::from_str(&format!("\"{etag}\""))
-            .expect("hexadecimal ETag is a valid header value"),
+        HeaderValue::from_str(&etag).expect("hexadecimal ETag is a valid header value"),
     );
     h.insert(
         HeaderName::from_static("issuer-version"),
@@ -759,6 +817,7 @@ mod tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, crate::domain::models::hosted_issuer::HostedIssuerError> {
             unreachable!()
         }
@@ -766,6 +825,7 @@ mod tests {
         async fn add_key(
             &self,
             _key: HostedIssuerKey,
+            _actor: &str,
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             unreachable!()
         }
@@ -937,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn issuer_write_version_ignores_usage_but_tracks_key_state() {
+    fn issuer_write_version_tracks_persisted_version_not_usage() {
         let mut issuer = IssuerDto {
             id: "issuer-a".into(),
             aggregation_id: "aggregation-a".into(),
@@ -964,12 +1024,17 @@ mod tests {
                 keys: 1,
                 keys_limit: 2,
             },
+            persisted_version: Some(1),
         };
         let original = issuer_write_version(&issuer);
         issuer.usage.lists += 1;
         issuer.aggregation_uri = Some("https://example.test/aggregation".into());
         assert_eq!(issuer_write_version(&issuer), original);
+        issuer.state = "expired".into();
+        assert_eq!(issuer_write_version(&issuer), original);
         issuer.keys[0].state = "revoked".into();
+        assert_eq!(issuer_write_version(&issuer), original);
+        issuer.persisted_version = Some(2);
         assert_ne!(issuer_write_version(&issuer), original);
     }
 
@@ -1223,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_etag_tracks_keys_usage_and_expiry_state() {
+    async fn detail_etag_tracks_write_state_without_usage() {
         let issuers = Arc::new(Mutex::new(vec![hosted_issuer("portal")]));
         let keys = Arc::new(Mutex::new(Vec::new()));
         let mut state = crate::test_utils::test_app_state(None).await;
@@ -1252,14 +1317,15 @@ mod tests {
             not_after: None,
             state: HostedIssuerKeyState::Active,
         });
+        issuers.lock().unwrap()[0].version += 1;
         let with_key = detail_response(app.clone(), uri).await.headers()[header::ETAG].clone();
         assert_ne!(with_key, initial);
         crate::test_utils::publish_list(&state.service, "portal", "list-1").await;
         let with_list = detail_response(app.clone(), uri).await.headers()[header::ETAG].clone();
-        assert_ne!(with_list, with_key);
+        assert_eq!(with_list, with_key);
         issuers.lock().unwrap()[0].expires_at = Some(time::OffsetDateTime::UNIX_EPOCH);
         let expired = detail_response(app.clone(), uri).await;
-        assert_ne!(expired.headers()[header::ETAG], with_list);
+        assert_eq!(expired.headers()[header::ETAG], with_list);
         let body: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(expired.into_body(), 16384)
                 .await

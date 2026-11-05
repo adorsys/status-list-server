@@ -151,7 +151,7 @@ async fn validate_dynamic_write(
     };
     // `resolve` is O(1) and complete, catching a kid whose material
     // normalization fails, unlike iterating `all_principal_keys`.
-    if snapshot.resolve(&key.kid).is_some() {
+    if snapshot.resolve(&key.kid).is_some() || snapshot.has_revoked_kid(&key.kid) {
         return Err(HostedIssuerError::AlreadyExists);
     }
     let registers = material_of(&key.jwk).ok_or_else(|| {
@@ -264,20 +264,48 @@ pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     issuer: HostedIssuer,
+    actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &issuer.id, None).await?;
-    store.create_issuer(issuer).await
+    store.create_issuer(issuer, actor).await
+}
+
+pub(crate) async fn register_hosted_issuer_with_key(
+    registry: &RegistryHandle,
+    store: &Arc<dyn HostedIssuerStore>,
+    issuer: HostedIssuer,
+    key: HostedIssuerKey,
+    actor: &str,
+) -> Result<HostedIssuer, HostedIssuerError> {
+    let _guard = registry.write_lock().await;
+    validate_dynamic_write(registry, &issuer.id, Some(&key)).await?;
+    store.create_issuer_with_key(issuer, key, actor).await
 }
 
 pub(crate) async fn register_hosted_issuer_key(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
     key: HostedIssuerKey,
+    actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
     validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
-    store.add_key(key).await
+    store.add_key(key, actor).await
+}
+
+/// Version-checked form of [`register_hosted_issuer_key`] for an admin API
+/// update guarded by `If-Match`.
+pub(crate) async fn register_hosted_issuer_key_if_version(
+    registry: &RegistryHandle,
+    store: &Arc<dyn HostedIssuerStore>,
+    key: HostedIssuerKey,
+    expected_version: u64,
+    actor: &str,
+) -> Result<(), HostedIssuerError> {
+    let _guard = registry.write_lock().await;
+    validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
+    store.add_key_if_version(key, expected_version, actor).await
 }
 
 #[cfg(test)]
@@ -374,11 +402,16 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Ok(issuer)
         }
 
-        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             self.keys.lock().await.insert(key.kid.clone(), key);
             Ok(())
         }
@@ -532,7 +565,7 @@ mod tests {
         hosted.id = "static-issuer".into();
         assert!(
             matches!(
-                register_hosted_issuer(&registry, &store, hosted).await,
+                register_hosted_issuer(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an id collision with the static registry must be a typed AlreadyExists, not Backend"
@@ -549,7 +582,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000003".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "a kid collision with the static registry must be a typed AlreadyExists, not Backend"
@@ -579,7 +612,7 @@ mod tests {
         hosted.jwk = PublicJwk::try_new(serde_json::to_vec(&candidate).unwrap()).unwrap();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::KeyMaterialReused)
             ),
             "material reuse against the static registry must be typed KeyMaterialReused, not Backend"
@@ -595,7 +628,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an admin kid collision must be a typed AlreadyExists, not Backend"
@@ -611,7 +644,7 @@ mod tests {
         hosted.issuer_id = "00000000-0000-4000-8000-000000000004".into();
         assert!(
             matches!(
-                register_hosted_issuer_key(&registry, &store, hosted).await,
+                register_hosted_issuer_key(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::KeyMaterialReused)
             ),
             "admin material reuse must be typed KeyMaterialReused, not Backend"
@@ -626,7 +659,7 @@ mod tests {
         hosted.id = "admin-1".into();
         assert!(
             matches!(
-                register_hosted_issuer(&registry, &store, hosted).await,
+                register_hosted_issuer(&registry, &store, hosted, "portal-operator").await,
                 Err(HostedIssuerError::AlreadyExists)
             ),
             "an admin id collision must be a typed AlreadyExists, not Backend"
@@ -774,13 +807,18 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
-            self.inner.create_issuer(issuer).await
+            self.inner.create_issuer(issuer, actor).await
         }
-        async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            key: HostedIssuerKey,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             self.reached.notify_one();
             self.release.notified().await;
-            self.inner.add_key(key).await
+            self.inner.add_key(key, actor).await
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
@@ -822,6 +860,7 @@ mod tests {
                     &registry,
                     &store,
                     key_with_material("hosted-kid", EC_JWK),
+                    "portal-operator",
                 )
                 .await
             }
@@ -1037,12 +1076,17 @@ mod tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
@@ -1123,10 +1167,15 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Ok(issuer)
         }
-        async fn add_key(&self, _key: HostedIssuerKey) -> Result<(), HostedIssuerError> {
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
             Ok(())
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
@@ -1197,9 +1246,37 @@ mod tests {
         publish_first_list_flow(test_db.db.clone(), "Postgres").await;
     }
 
+    #[cfg(all(feature = "memory", feature = "mysql"))]
+    #[tokio::test]
+    async fn hosted_issuer_publishes_first_list_like_a_static_issuer_mysql() {
+        use crate::outbound::sql::test_containers::mysql_helpers;
+        let test_db = mysql_helpers::MysqlTestDb::start().await;
+        publish_first_list_flow(test_db.connection().await, "MySQL").await;
+    }
+
+    /// The public half of a second EC pair, distinct from `key()`'s, so the
+    /// revocation of one key can be observed while the issuer stays writable
+    /// through the other.
     #[cfg(all(
         feature = "memory",
-        any(feature = "sqlite", feature = "postgres-tests")
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
+    ))]
+    const SECOND_EC_JWK: &str = r#"{
+        "kty":"EC", "crv": "P-256", "kid": "ignored", "alg": "ES256",
+        "x": "qM76BbqD3JmWniT4AuSYM5KwxC5WANcPXBpCUQfAf1E",
+        "y": "c_dO6JH2BqKs9M6UsDNMQ7RsYMgwqON5Ti19gKb8nLk"
+    }"#;
+
+    /// The private half of [`SECOND_EC_JWK`].
+    #[cfg(all(
+        feature = "memory",
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
+    ))]
+    const SECOND_EC_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIIBeQIBADCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0BAQIhAP////8AAAAB\nAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAABAAAAAAAAAAAAAAAA\n///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxTsPY7zjw+J9JgSwMV\nAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg\n9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9QIhAP////8A\nAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBBG0wawIBAQQgyO8dO/IXvyo2\nloV5QPB42Gv31v5U5pik40FfQ12VVzWhRANCAASozvoFuoPcmZaeJPgC5JgzkrDE\nLlYA1w9cGkJRB8B/UXP3TuiR9gairPTOlLAzTEO0bGDIMKjjeU4tfYCm/Jy5\n-----END PRIVATE KEY-----";
+
+    #[cfg(all(
+        feature = "memory",
+        any(feature = "sqlite", feature = "postgres-tests", feature = "mysql")
     ))]
     async fn publish_first_list_flow(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
@@ -1209,26 +1286,37 @@ mod tests {
             Router,
             body::Body,
             http::{Request, StatusCode},
-            routing::put,
+            routing::{get, put},
         };
         use tower::ServiceExt;
 
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer())
+        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal issuer on {backend}: {e}"));
-        register_hosted_issuer_key(&registry, &store, key("portal-key"))
+        register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal key on {backend}: {e}"));
 
         // SQL-backed app state: the publish path's quota slot reservation and
         // the resolver's read both hit this database.
-        let mut state = crate::test_utils::test_app_state(Some(db)).await;
+        let mut state = crate::test_utils::test_app_state(Some(db.clone())).await;
         state.set_issuer_registry(registry.clone());
-        state.issuer_key_resolver =
-            Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
+        state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            registry,
+            Some(store.clone()),
+        ));
+        let mut other_state = crate::test_utils::test_app_state(Some(db.clone())).await;
+        let other_registry = Arc::new(RegistryHandle::empty());
+        other_state.set_issuer_registry(other_registry.clone());
+        other_state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            other_registry,
+            Some(Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(
+                db.clone(),
+            ))),
+        ));
 
         // The private half of `test_fixtures::TEST_EC_PUBLIC_JWK` (which also
         // carries kid `test-key`); the hosted key embeds kid `portal-key`.
@@ -1252,20 +1340,29 @@ mod tests {
         .unwrap();
 
         let list_id = uuid::Uuid::new_v4().to_string();
-        let app = Router::new()
-            .nest(
-                "/api/v1",
-                Router::new().route(
-                    "/status-lists/{list_id}/statuses",
+        let router = |state: crate::server::AppState| {
+            let management = Router::new()
+                .route(
+                    "/api/v1/status-lists/{list_id}/statuses",
                     put(crate::server::handlers::status_list::publish_status_route),
-                ),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::server::auth::auth,
-            ))
-            .with_state(state);
+                )
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::server::auth::auth,
+                ));
+            let public = Router::new().route(
+                "/api/v1/status-lists/{list_id}",
+                get(crate::server::handlers::get_status_list),
+            );
+            Router::new()
+                .merge(management)
+                .merge(public)
+                .with_state(state)
+        };
+        let app = router(state);
+        let other = router(other_state);
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(axum::http::Method::PUT)
@@ -1282,6 +1379,148 @@ mod tests {
             StatusCode::CREATED,
             "the portal issuer's first list must publish on {backend}"
         );
+        async fn write(app: Router, token: &str) -> StatusCode {
+            use tower::ServiceExt;
+            app.oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!(
+                        "/api/v1/status-lists/{}/statuses",
+                        uuid::Uuid::new_v4()
+                    ))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"statuses":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+        async fn public_read(app: &Router, list_id: &str) -> StatusCode {
+            use tower::ServiceExt;
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/status-lists/{list_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        // The second replica must prove it can publish at all before any
+        // lifecycle change, or its later 401 would show nothing.
+        assert_eq!(
+            write(other.clone(), &token).await,
+            StatusCode::CREATED,
+            "the second replica must publish on {backend} before suspension"
+        );
+
+        use crate::domain::ports::HostedIssuerLifecycleStore;
+        let lifecycle = crate::outbound::sql::SqlHostedIssuerStore::new(db.clone());
+        let observed_version = lifecycle.get_issuer(&hosted.id).await.unwrap().version;
+        lifecycle
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Suspended,
+                observed_version,
+                "portal-operator",
+            )
+            .await
+            .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(write(replica, &token).await, StatusCode::UNAUTHORIZED);
+        }
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(public_read(&replica, &list_id).await, StatusCode::OK);
+        }
+        let resumed = lifecycle
+            .set_issuer_state(
+                &hosted.id,
+                HostedIssuerState::Active,
+                observed_version + 1,
+                "portal-operator",
+            )
+            .await
+            .unwrap();
+        // Writes must work again after reactivation: the expiry check below
+        // would otherwise pass even if reactivation had silently failed.
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica, &token).await,
+                StatusCode::CREATED,
+                "writes must recover after reactivation on {backend}"
+            );
+        }
+        // Revocation blocks the next write on every replica, not just key
+        // resolution.
+        lifecycle
+            .revoke_key(&hosted.id, "portal-key", resumed.version, "portal-operator")
+            .await
+            .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica, &token).await,
+                StatusCode::UNAUTHORIZED,
+                "a revoked key must block the next write on {backend}"
+            );
+        }
+        // A second key keeps the issuer writable; expiry then blocks it while
+        // the published lists stay publicly readable.
+        register_hosted_issuer_key(
+            &Arc::new(RegistryHandle::empty()),
+            &store,
+            key_with_material("portal-key-2", SECOND_EC_JWK),
+            "portal-operator",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("registering the second portal key on {backend}: {e}"));
+        let mut second_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        second_header.typ = Some("statuslist-management+jwt".to_string());
+        second_header.kid = Some("portal-key-2".to_string());
+        let second_token = jsonwebtoken::encode(
+            &second_header,
+            &serde_json::json!({
+                "iss": hosted.id,
+                "iat": now,
+                "exp": now + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_ec_pem(SECOND_EC_PRIVATE_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica.clone(), &second_token).await,
+                StatusCode::CREATED,
+                "the second key must publish on {backend}"
+            );
+        }
+        use crate::outbound::sql::issuers;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
+        issuers::Entity::update_many()
+            .col_expr(
+                issuers::Column::ExpiresAt,
+                Expr::value(time::OffsetDateTime::now_utc().unix_timestamp() - 1),
+            )
+            .filter(issuers::Column::Issuer.eq(&hosted.id))
+            .exec(db.as_ref())
+            .await
+            .unwrap();
+        for replica in [app.clone(), other.clone()] {
+            assert_eq!(
+                write(replica.clone(), &second_token).await,
+                StatusCode::UNAUTHORIZED,
+                "an expired issuer must block writes on {backend}"
+            );
+            assert_eq!(
+                public_read(&replica, &list_id).await,
+                StatusCode::OK,
+                "an expired issuer's lists must stay publicly readable on {backend}"
+            );
+        }
     }
 
     /// A hosted-signed management JWT for `issuer_id`, using the private half of
@@ -1323,17 +1562,19 @@ mod tests {
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer())
+        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
             .await
             .unwrap();
-        register_hosted_issuer_key(&registry, &store, key("portal-key"))
+        register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
             .await
             .unwrap();
 
         let mut state = crate::test_utils::test_app_state(Some(db.clone())).await;
         state.set_issuer_registry(registry.clone());
-        state.issuer_key_resolver =
-            Arc::new(CompositeIssuerKeyResolver::new(registry, Some(store)));
+        state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
+            registry,
+            Some(store.clone()),
+        ));
 
         let token = portal_token(&hosted.id);
         let app = Router::new()

@@ -161,7 +161,7 @@ pub struct WatcherConfig {
 /// Per-client-IP rate limits. `strict_*` is the management authentication
 /// gate, which counts rejected authentications only; `admission_*` bounds every
 /// management request before `auth` does any work; `permissive_*` covers
-/// public reads.
+/// public reads; `admin_*` covers the admin issuer API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
@@ -170,6 +170,8 @@ pub struct RateLimitConfig {
     pub admission_per_second: u32,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
+    pub admin_burst_size: u32,
+    pub admin_period_secs: u64,
     /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
     /// management authentication gate believes. Empty keys every request on
     /// its peer address.
@@ -280,6 +282,8 @@ pub struct TierConfig {
     pub write_burst_size: Option<u32>,
     #[serde(default)]
     pub write_period_secs: Option<u64>,
+    #[serde(default)]
+    pub max_lifetime_secs: Option<u64>,
 }
 
 const STANDARD_MAX_KEYS: usize = 5;
@@ -291,6 +295,7 @@ const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
 const SANDBOX_MAX_KEYS: usize = 2;
 const SANDBOX_WRITE_BURST_SIZE: u32 = 10;
 const SANDBOX_WRITE_PERIOD_SECS: u64 = 6;
+const SANDBOX_MAX_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 
 impl TiersConfig {
     /// Fill defaults and check that every tier stays within the global
@@ -301,6 +306,25 @@ impl TiersConfig {
     /// makes a default invalid; explicitly set values are validated, never
     /// clamped.
     pub fn resolve(&self, limits: &LimitsConfig) -> Result<Tiers, ConfigError> {
+        if self.standard.max_lifetime_secs.is_some() {
+            return Err(ConfigError::Message(
+                "tiers.standard.max_lifetime_secs is not supported".into(),
+            ));
+        }
+        let sandbox_max_lifetime_secs = self
+            .sandbox
+            .max_lifetime_secs
+            .unwrap_or(SANDBOX_MAX_LIFETIME_SECS);
+        if sandbox_max_lifetime_secs == 0
+            || sandbox_max_lifetime_secs > i64::MAX as u64
+            || time::OffsetDateTime::now_utc()
+                .checked_add(time::Duration::seconds(sandbox_max_lifetime_secs as i64))
+                .is_none()
+        {
+            return Err(ConfigError::Message(
+                "tiers.sandbox.max_lifetime_secs must be a positive, representable lifetime".into(),
+            ));
+        }
         let standard = RawTier {
             max_lists: self
                 .standard
@@ -358,6 +382,7 @@ impl TiersConfig {
         Ok(Tiers {
             standard: standard.into_limits(),
             sandbox: sandbox.into_limits(),
+            sandbox_max_lifetime: Duration::from_secs(sandbox_max_lifetime_secs),
         })
     }
 }
@@ -1961,6 +1986,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.admission_per_second", 100)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.admin_burst_size", 100)?
+        .set_default("rate_limit.admin_period_secs", 1)?
         .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
@@ -2081,6 +2108,8 @@ mod tests {
         assert_eq!(config.rate_limit.strict_period_secs, 60);
         assert_eq!(config.rate_limit.permissive_burst_size, 100);
         assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.admin_burst_size, 100);
+        assert_eq!(config.rate_limit.admin_period_secs, 1);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -2165,6 +2194,8 @@ mod tests {
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
             ("rate_limit.permissive_period_secs", "10"),
+            ("rate_limit.admin_burst_size", "7"),
+            ("rate_limit.admin_period_secs", "30"),
             ("limits.max_body_size_bytes", "65536"),
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
@@ -2292,6 +2323,8 @@ mod tests {
         assert_eq!(overridden.rate_limit.strict_period_secs, 120);
         assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
         assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(overridden.rate_limit.admin_burst_size, 7);
+        assert_eq!(overridden.rate_limit.admin_period_secs, 30);
         assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
@@ -3012,6 +3045,10 @@ mod tests {
     fn test_tier_defaults() {
         let tiers = resolved_tiers(&[]).unwrap();
         assert_eq!(
+            tiers.sandbox_max_lifetime,
+            Duration::from_secs(30 * 24 * 60 * 60)
+        );
+        assert_eq!(
             tiers.standard,
             TierLimits {
                 max_lists: 1_000,
@@ -3032,6 +3069,20 @@ mod tests {
                 write_burst_size: NonZeroU32::new(10).unwrap(),
                 write_period: Duration::from_secs(6),
             }
+        );
+    }
+
+    #[test]
+    fn sandbox_lifetime_is_configurable_and_positive() {
+        let tiers = resolved_tiers(&[("tiers.sandbox.max_lifetime_secs", "604800")]).unwrap();
+        assert_eq!(tiers.sandbox_max_lifetime, Duration::from_secs(604800));
+        assert!(
+            tier_error(&[("tiers.sandbox.max_lifetime_secs", "0")])
+                .contains("tiers.sandbox.max_lifetime_secs")
+        );
+        assert!(
+            tier_error(&[("tiers.standard.max_lifetime_secs", "604800")])
+                .contains("tiers.standard.max_lifetime_secs is not supported")
         );
     }
 

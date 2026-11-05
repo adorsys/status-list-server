@@ -13,7 +13,6 @@ use axum::{
 use errors::AuthenticationError;
 use hyper::{StatusCode, header};
 use jsonwebtoken::{DecodingKey, Validation};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,8 +38,7 @@ pub struct AuthenticatedAdmin {
 
 #[derive(Debug, Deserialize)]
 struct AdminClaims {
-    #[serde(rename = "iss")]
-    _iss: String,
+    iss: String,
     iat: u64,
     exp: u64,
 }
@@ -75,8 +73,17 @@ pub async fn admin_auth(
     }
     let jwt = token.trim();
     let h = jsonwebtoken::decode_header(jwt)
-        .map_err(|error| invalid_admin_auth(None, None, format!("invalid JWT header: {error}")))?;
-    if !token_type_matches(h.typ.as_deref(), ADMIN_TOKEN_TYPE)
+        .map_err(|_| invalid_admin_auth(None, None, "invalid JWT header"))?;
+    let typ = h.typ.as_deref().unwrap_or("");
+    let typ = if typ
+        .get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/"))
+    {
+        &typ[12..]
+    } else {
+        typ
+    };
+    if !typ.eq_ignore_ascii_case(ADMIN_TOKEN_TYPE)
         || h.crit.is_some()
         || !MANAGEMENT_SIGNING_ALGORITHMS.contains(&h.alg)
     {
@@ -102,18 +109,28 @@ pub async fn admin_auth(
     let resolved = snapshot
         .resolve_admin_key(kid)
         .ok_or_else(|| invalid_admin_auth(Some(kid), None, "kid is not registered to an admin"))?;
-    let id = resolved.admin_id.as_str();
     let now_time = time::OffsetDateTime::now_utc();
     if !resolved.enabled
         || resolved.not_before.is_some_and(|start| now_time < start)
         || resolved.not_after.is_some_and(|end| now_time >= end)
     {
+        let iss = match &resolved.principal {
+            Principal::Admin { id, .. } => Some(id.as_str()),
+            Principal::Issuer { .. } => None,
+        };
         return Err(invalid_admin_auth(
             Some(kid),
-            Some(id),
+            iss,
             "admin key is disabled or outside its validity window",
         ));
     }
+    let Principal::Admin { id, .. } = &resolved.principal else {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            None,
+            "key is not owned by an admin",
+        ));
+    };
     if resolved.public_key.key_id() != kid || resolved.public_key.algorithm() != h.alg {
         return Err(invalid_admin_auth(
             Some(kid),
@@ -121,41 +138,24 @@ pub async fn admin_auth(
             "registered key id or algorithm mismatch",
         ));
     }
-    let key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|error| {
-        invalid_admin_auth(
-            Some(kid),
-            Some(id),
-            format!("invalid registered verification key: {error}"),
-        )
+    let key = DecodingKey::from_jwk(resolved.public_key.jwk()).map_err(|_| {
+        invalid_admin_auth(Some(kid), Some(id), "invalid registered verification key")
     })?;
-    let claims = decode_registered_jwt::<AdminClaims>(
-        jwt,
-        &key,
-        resolved.public_key.algorithm(),
-        id,
-        &state.admin_auth.audiences,
-        state.admin_auth.leeway_secs,
-    )
-    .map_err(|error| {
-        invalid_admin_auth(
-            Some(kid),
-            Some(id),
-            format!("signature or claims validation failed: {error}"),
-        )
+    let mut validation = Validation::new(resolved.public_key.algorithm());
+    validation.leeway = state.admin_auth.leeway_secs;
+    validation.validate_nbf = true;
+    validation.set_issuer(&[id]);
+    validation.set_audience(&state.admin_auth.audiences);
+    validation.set_required_spec_claims(&["iss", "iat", "exp", "aud"]);
+    let data = jsonwebtoken::decode::<AdminClaims>(jwt, &key, &validation).map_err(|_| {
+        invalid_admin_auth(Some(kid), Some(id), "signature or claims validation failed")
     })?;
-    let now = current_unix_timestamp().map_err(|error| {
-        crate::utils::metrics::record_admin_auth_request("internal_error");
-        tracing::error!(error = %error, "admin JWT validation could not read the system clock");
-        error
-    })?;
-    if validate_lifetime_claims(
-        claims.iat,
-        claims.exp,
-        now,
-        state.admin_auth.leeway_secs,
-        state.admin_auth.max_token_lifetime_secs,
-    )
-    .is_err()
+    let now = current_unix_timestamp()
+        .map_err(|_| invalid_admin_auth(Some(kid), Some(id), "system clock unavailable"))?;
+    if data.claims.iss != *id
+        || data.claims.exp <= data.claims.iat
+        || data.claims.iat > now.saturating_add(state.admin_auth.leeway_secs)
+        || data.claims.exp - data.claims.iat > state.admin_auth.max_token_lifetime_secs
     {
         return Err(invalid_admin_auth(
             Some(kid),
@@ -163,78 +163,28 @@ pub async fn admin_auth(
             "issuer or token lifetime claim is invalid",
         ));
     }
-    let entry = snapshot
-        .admin(id)
-        .expect("a resolved admin key belongs to a registered principal");
+    let entry = snapshot.admin(id).ok_or_else(|| {
+        invalid_admin_auth(Some(kid), Some(id), "admin principal is not registered")
+    })?;
+    if entry.disabled {
+        return Err(invalid_admin_auth(
+            Some(kid),
+            Some(id),
+            "admin principal is disabled",
+        ));
+    }
     request.extensions_mut().insert(AuthenticatedAdmin {
-        id: id.to_owned(),
+        id: id.clone(),
         scopes: entry.scopes.clone(),
     });
     crate::utils::metrics::record_admin_auth_request("success");
     Ok(next.run(request).await)
 }
 
-fn invalid_admin_auth(
-    kid: Option<&str>,
-    iss: Option<&str>,
-    reason: impl std::fmt::Display,
-) -> AuthenticationError {
+fn invalid_admin_auth(kid: Option<&str>, iss: Option<&str>, reason: &str) -> AuthenticationError {
     crate::utils::metrics::record_admin_auth_request("rejected");
-    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason = %reason, "Admin JWT rejected");
+    tracing::warn!(kid = %bounded_identifier(kid), iss = %bounded_identifier(iss), reason, "Admin JWT rejected");
     AuthenticationError::InvalidToken
-}
-
-fn token_type_matches(actual: Option<&str>, expected: &str) -> bool {
-    actual.is_some_and(|actual| {
-        actual.eq_ignore_ascii_case(expected)
-            || actual
-                .get(.."application/".len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/"))
-                && actual
-                    .get("application/".len()..)
-                    .is_some_and(|value| value.eq_ignore_ascii_case(expected))
-    })
-}
-
-fn decode_registered_jwt<T: DeserializeOwned>(
-    token: &str,
-    key: &DecodingKey,
-    algorithm: jsonwebtoken::Algorithm,
-    issuer: &str,
-    audiences: &[String],
-    leeway_secs: u64,
-) -> Result<T, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::new(algorithm);
-    validation.leeway = leeway_secs;
-    validation.validate_nbf = true;
-    validation.set_issuer(&[issuer]);
-    if audiences.is_empty() {
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
-        validation.validate_aud = false;
-    } else {
-        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
-        validation.set_audience(audiences);
-    }
-    jsonwebtoken::decode::<T>(token, key, &validation).map(|data| data.claims)
-}
-
-fn validate_lifetime_claims(
-    issued_at: u64,
-    expires_at: u64,
-    now: u64,
-    leeway_secs: u64,
-    max_lifetime_secs: u64,
-) -> Result<(), &'static str> {
-    if expires_at <= issued_at {
-        return Err("exp must be later than iat");
-    }
-    if issued_at > now.saturating_add(leeway_secs) {
-        return Err("iat is in the future beyond configured leeway");
-    }
-    if expires_at - issued_at > max_lifetime_secs {
-        return Err("token lifetime exceeds configured maximum");
-    }
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -253,13 +203,21 @@ impl ManagementClaims {
         leeway_secs: u64,
         max_token_lifetime_secs: u64,
     ) -> Result<(), &'static str> {
-        validate_lifetime_claims(
-            self.iat,
-            self.exp,
-            now,
-            leeway_secs,
-            max_token_lifetime_secs,
-        )
+        if self.exp <= self.iat {
+            return Err("exp must be later than iat");
+        }
+
+        if self.iat > now.saturating_add(leeway_secs) {
+            return Err("iat is in the future beyond configured leeway");
+        }
+
+        // exp > iat was established above, so unsigned subtraction is safe.
+        let lifetime = self.exp - self.iat;
+        if lifetime > max_token_lifetime_secs {
+            return Err("token lifetime exceeds configured maximum");
+        }
+
+        Ok(())
     }
 }
 
@@ -406,17 +364,25 @@ pub async fn auth(
     if token.trim().is_empty() {
         return Err(invalid_auth(None, None, "empty Bearer token"));
     }
-    let token = token.trim();
 
     let header = jsonwebtoken::decode_header(token)
         .map_err(|e| invalid_auth(None, None, format!("invalid JWT header: {e}")))?;
+    let typ_ok = header.typ.as_deref().is_some_and(|typ| {
+        typ.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE)
+            || typ.get(.."application/".len()).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("application/")
+                    && typ
+                        .get("application/".len()..)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(MANAGEMENT_TOKEN_TYPE))
+            })
+    });
     let Some(kid) = header.kid.clone() else {
         return Err(invalid_auth(None, None, "missing kid"));
     };
     if kid.is_empty() || kid.chars().count() > 255 {
         return Err(invalid_auth(Some(&kid), None, "invalid kid length"));
     }
-    if !token_type_matches(header.typ.as_deref(), MANAGEMENT_TOKEN_TYPE) {
+    if !typ_ok {
         return Err(invalid_auth(Some(&kid), None, "missing or invalid typ"));
     }
     if header.crit.is_some() {
@@ -454,11 +420,11 @@ pub async fn auth(
             aggregation_id,
             tier,
         } => (id.as_str(), *aggregation_id, *tier),
-        Principal::Admin { id } => {
+        Principal::Admin { id, .. } => {
             return Err(invalid_auth(
                 Some(&kid),
                 Some(id),
-                "admin keys cannot authenticate issuer management requests",
+                "admin keys cannot authenticate management requests",
             ));
         }
     };
@@ -480,23 +446,31 @@ pub async fn auth(
         )
     })?;
 
-    let claims = decode_registered_jwt::<ManagementClaims>(
-        token,
-        &decoding_key,
-        registered_alg,
-        registered_issuer,
-        &state.management_auth.audiences,
-        state.management_auth.leeway_secs,
-    )
-    .map_err(|e| {
-        invalid_auth(
-            Some(&kid),
-            Some(registered_issuer),
-            format!("claim or signature validation failed: {e}"),
-        )
-    })?;
+    let mut validation = Validation::new(registered_alg);
+    validation.leeway = state.management_auth.leeway_secs;
+    validation.validate_nbf = true;
+    validation.set_issuer(&[registered_issuer]);
+    if !state.management_auth.audiences.is_empty() {
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS_WITH_AUDIENCE);
+        validation.set_audience(&state.management_auth.audiences);
+    } else {
+        // jsonwebtoken can require registered claims like `iss` and `exp`;
+        // `iat` is required by deserializing into `ManagementClaims`.
+        validation.set_required_spec_claims(JWT_REQUIRED_SPEC_CLAIMS);
+        validation.validate_aud = false;
+    }
+
+    let token_data = jsonwebtoken::decode::<ManagementClaims>(token, &decoding_key, &validation)
+        .map_err(|e| {
+            invalid_auth(
+                Some(&kid),
+                Some(registered_issuer),
+                format!("claim or signature validation failed: {e}"),
+            )
+        })?;
     let now = current_unix_timestamp()?;
-    claims
+    token_data
+        .claims
         .validate_policy(
             now,
             state.management_auth.leeway_secs,
@@ -504,11 +478,12 @@ pub async fn auth(
         )
         .map_err(|reason| invalid_auth(Some(&kid), Some(registered_issuer), reason))?;
 
-    let authenticated_issuer = Issuer(registered_issuer.to_owned());
+    // Only issuer principals reach this point; admin principals are rejected
+    // above and authenticate through `admin_auth` instead.
     request
         .extensions_mut()
         .insert(AuthenticatedIssuer::resolved(
-            authenticated_issuer,
+            Issuer(registered_issuer.to_owned()),
             registered_aggregation_id,
             tier,
         ));
@@ -554,7 +529,7 @@ pub(crate) mod tests {
         body::{Body, to_bytes},
         extract::Request,
         http::{StatusCode, header},
-        routing::get,
+        routing::{get, put},
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -788,11 +763,6 @@ pub(crate) mod tests {
             None,
             file.clone(),
             Duration::from_secs(1),
-            crate::setup::RegistryWatcherAuthValidation {
-                environment: crate::config::TelemetryEnvironment::Development,
-                admin_audiences: Vec::new(),
-                management_audiences: Vec::new(),
-            },
         );
         std::fs::write(&file, "version: 1\nissuers: []\nadmins: []\n").unwrap();
 
@@ -1329,6 +1299,118 @@ pub(crate) mod tests {
         );
     }
 
+    /// Each replica owns its registry handle and trusts only its own
+    /// reloads, so this proves that a disabled registry entry blocks the
+    /// next write on every replica after that replica reloaded, not that
+    /// the file change propagates by itself. Public reads of the shared
+    /// store remain available on both.
+    #[tokio::test]
+    async fn disabling_a_static_issuer_blocks_writes_after_each_replicas_registry_reload() {
+        use crate::server::handlers::{get_status_list, publish_status_route};
+
+        async fn write(app: Router, list_id: &str, token: &str) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!("/api/v1/status-lists/{list_id}/statuses/"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"statuses":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        async fn read(app: Router, list_id: &str) -> StatusCode {
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/status-lists/{list_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+
+        let public_key = test_public_jwk();
+        let aggregation_id = uuid::Uuid::new_v4();
+        let registry_yaml = |disabled| {
+            serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [{
+                    "id": "test-issuer",
+                    "aggregation_id": aggregation_id,
+                    "disabled": disabled,
+                    "keys": [{
+                        "kid": public_key.key_id(),
+                        "alg": "ES256",
+                        "jwk": public_key.jwk(),
+                    }],
+                }],
+                "admins": []
+            }))
+            .unwrap()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("issuers.yaml");
+        std::fs::write(&file, registry_yaml(false)).unwrap();
+        let first_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+        let second_registry = Arc::new(issuer_registry::RegistryHandle::load(&file).unwrap());
+
+        let mut first_state = test_app_state(None).await;
+        let mut second_state = first_state.clone();
+        first_state.set_issuer_registry(first_registry.clone());
+        second_state.set_issuer_registry(second_registry.clone());
+        let router = |state: AppState| {
+            let management = Router::new()
+                .route(
+                    "/api/v1/status-lists/{list_id}/statuses/",
+                    put(publish_status_route),
+                )
+                .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth));
+            let public =
+                Router::new().route("/api/v1/status-lists/{list_id}", get(get_status_list));
+            Router::new()
+                .merge(management)
+                .merge(public)
+                .with_state(state)
+        };
+        let first_app = router(first_state);
+        let second_app = router(second_state);
+        let token = create_test_token(
+            "test-issuer",
+            &EncodingKey::from_ec_pem(test_ec_private_pem().as_bytes()).unwrap(),
+            Algorithm::ES256,
+        );
+        let published_list = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            write(first_app.clone(), &published_list, &token).await,
+            StatusCode::CREATED
+        );
+
+        std::fs::write(&file, registry_yaml(true)).unwrap();
+        first_registry.reload().unwrap();
+        second_registry.reload().unwrap();
+        assert_eq!(
+            write(first_app.clone(), &uuid::Uuid::new_v4().to_string(), &token).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            write(
+                second_app.clone(),
+                &uuid::Uuid::new_v4().to_string(),
+                &token
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(read(first_app, &published_list).await, StatusCode::OK);
+        assert_eq!(read(second_app, &published_list).await, StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn watcher_rotates_keys_and_keeps_last_known_good_registry() {
         let old_key = test_public_jwk();
@@ -1544,11 +1626,6 @@ pub(crate) mod tests {
                 None,
                 file.clone(),
                 Duration::from_secs(1),
-                crate::setup::RegistryWatcherAuthValidation {
-                    environment: crate::config::TelemetryEnvironment::Development,
-                    admin_audiences: Vec::new(),
-                    management_audiences: Vec::new(),
-                },
             );
             let duplicate_key_jwk = serde_json::to_value(test_public_jwk().jwk()).unwrap();
             let mut duplicate_key_jwk = duplicate_key_jwk;

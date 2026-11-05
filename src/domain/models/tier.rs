@@ -60,6 +60,7 @@ pub struct TierLimits {
 pub struct Tiers {
     pub standard: TierLimits,
     pub sandbox: TierLimits,
+    pub sandbox_max_lifetime: Duration,
 }
 
 impl Tiers {
