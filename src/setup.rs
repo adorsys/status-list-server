@@ -2306,6 +2306,47 @@ mod general_tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        #[tokio::test]
+        async fn rejected_registry_does_not_record_static_revocations() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let original = uuid::Uuid::new_v4();
+            let active_registry = registry_yaml(original);
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                (
+                    "APP_MANAGEMENT_AUTH__ISSUERS_FILE",
+                    registry_path.to_str().unwrap(),
+                ),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+            build_state(&startable.config(&overrides)).await.unwrap();
+
+            let mut invalid: serde_json::Value = serde_saphyr::from_str(&active_registry).unwrap();
+            let revoked = invalid["issuers"][0]["keys"][0].take();
+            invalid["issuers"][0]["keys"] = serde_json::json!([]);
+            invalid["issuers"][0]["aggregation_id"] = serde_json::json!(uuid::Uuid::new_v4());
+            invalid["revoked_keys"] = serde_json::json!([revoked]);
+            std::fs::write(&registry_path, serde_saphyr::to_string(&invalid).unwrap()).unwrap();
+            assert!(build_state(&startable.config(&overrides)).await.is_err());
+
+            use sea_orm::EntityTrait;
+            let connection = sea_orm::Database::connect(&database).await.unwrap();
+            let rows = crate::outbound::sql::static_key_revocations::Entity::find()
+                .all(&connection)
+                .await
+                .unwrap();
+            assert!(
+                rows.is_empty(),
+                "rejected registry must not leave tombstones"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
         /// In transition publishes past the cap are accepted, so an issuer's
         /// aggregation can outgrow one page.
         #[tokio::test]
@@ -3064,6 +3105,15 @@ mod general_tests {
             _actor: &str,
         ) -> Result<(), HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())

@@ -305,6 +305,23 @@ mod tests {
             *self.key.lock().unwrap() = Some(key);
             Ok(())
         }
+
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            {
+                let mut issuer = self.issuer.lock().unwrap();
+                let current = issuer.as_mut().ok_or(HostedIssuerError::NotFound)?;
+                if current.id != key.issuer_id || current.version != expected_version {
+                    return Err(HostedIssuerError::VersionMismatch);
+                }
+                current.version += 1;
+            }
+            self.add_key(key, actor).await
+        }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(self.key.lock().unwrap().clone().into_iter().collect())
         }

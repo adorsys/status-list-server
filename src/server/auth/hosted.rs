@@ -489,6 +489,19 @@ mod tests {
             Ok(())
         }
 
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            let issuer = self.issuer.as_ref().ok_or(HostedIssuerError::NotFound)?;
+            if issuer.id != key.issuer_id || issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            self.add_key(key, actor).await
+        }
+
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(self.keys.lock().await.values().cloned().collect())
         }
@@ -920,6 +933,17 @@ mod tests {
             self.release.notified().await;
             self.inner.add_key(key, actor).await
         }
+
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            self.inner
+                .add_key_if_version(key, expected_version, actor)
+                .await
+        }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
         }
@@ -1206,6 +1230,15 @@ mod tests {
                 "backend down",
             ))))
         }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
+        }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
@@ -1307,6 +1340,15 @@ mod tests {
             _actor: &str,
         ) -> Result<(), HostedIssuerError> {
             Ok(())
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())

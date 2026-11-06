@@ -199,6 +199,31 @@ async fn test_sqlite_hosted_round_trip() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn test_sqlite_add_key_rejects_stale_issuer_version() {
+    let store = sqlite_store().await;
+    let hosted = issuer("issuer-stale-version");
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    let result = store
+        .add_key_if_version(key(&hosted.id, "stale-key"), 0, "portal-operator")
+        .await;
+    assert!(matches!(result, Err(HostedIssuerError::VersionMismatch)));
+    assert!(store.find_key_by_kid("stale-key").await.unwrap().is_none());
+    assert_eq!(
+        store
+            .find_issuer(&hosted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        1
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn test_sqlite_static_revocation_history_reserves_kid_and_material() {
     let store = sqlite_store().await;
     let revoked = key("static-issuer", "revoked-static-kid");

@@ -840,6 +840,15 @@ mod tests {
             unreachable!()
         }
 
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            unreachable!()
+        }
+
         async fn all_keys(
             &self,
         ) -> Result<Vec<HostedIssuerKey>, crate::domain::models::hosted_issuer::HostedIssuerError>
