@@ -810,63 +810,6 @@
               }
             }
           ]
-        },
-        {
-          "name": "Manual: renew hosted issuer",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "if (pm.collectionVariables.get(\"runRenewal\") !== \"true\") pm.execution.skipRequest();"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test(\"Renewal succeeds\", () => pm.response.to.have.status(200));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{adminToken}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "If-Match",
-                "value": "{{issuerEtag}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"expires_at\": {{renewalExpiry}}}"
-            },
-            "url": {
-              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
-              "host": ["{{adminUrl}}"],
-              "path": ["admin", "v1", "issuers", "{{issuer_id}}"]
-            },
-            "description": "Manual hosted-profile write. Run Get issuer first, set renewalExpiry to a Unix timestamp after now and within 30 days, then set runRenewal=true."
-          },
-          "response": []
         }
       ]
     }
@@ -903,18 +846,6 @@
     {
       "key": "adminToken",
       "value": ""
-    },
-    {
-      "key": "issuerEtag",
-      "value": ""
-    },
-    {
-      "key": "renewalExpiry",
-      "value": ""
-    },
-    {
-      "key": "runRenewal",
-      "value": "false"
     }
   ]
 }

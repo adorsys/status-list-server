@@ -287,7 +287,6 @@ pub struct TierConfig {
 const STANDARD_MAX_KEYS: usize = 5;
 const STANDARD_WRITE_BURST_SIZE: u32 = 100;
 const STANDARD_WRITE_PERIOD_SECS: u64 = 1;
-pub const SANDBOX_MAX_LIFETIME_DAYS: i64 = 30;
 const SANDBOX_MAX_LISTS: u64 = 10;
 const SANDBOX_MAX_STATUS_INDEX: i32 = 10_000;
 const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
@@ -1832,6 +1831,14 @@ impl Config {
                  the memory backend would drop registered issuers on restart",
                 config.server.profile.as_str()
             )));
+        }
+        if config.database.backend == DatabaseBackend::Memory
+            && config.telemetry.environment.is_production()
+        {
+            return Err(ConfigError::Message(
+                "the memory database backend cannot persist static key revocations in production"
+                    .to_string(),
+            ));
         }
         config
             .management_auth
@@ -3942,5 +3949,25 @@ mod tests {
             ])
             .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
+    }
+
+    #[test]
+    fn production_refuses_memory_backend_for_static_revocation_history() {
+        let error = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot persist static key revocations")
+        );
+
+        Config::load_from_overrides(&[
+            ("telemetry.environment", "development"),
+            ("database.backend", "memory"),
+        ])
+        .expect("development may use the in-memory backend");
     }
 }

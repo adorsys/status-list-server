@@ -212,32 +212,6 @@ impl HostedIssuerLifecycleService {
             .await
     }
 
-    pub async fn renew_issuer(
-        &self,
-        issuer_id: &str,
-        expires_at: OffsetDateTime,
-        expected_version: u64,
-        actor: &str,
-    ) -> Result<HostedIssuer, HostedIssuerError> {
-        let now = (self.clock)();
-        let current = self.store.get_issuer(issuer_id).await?;
-        if current.tier != "sandbox" {
-            return Err(HostedIssuerError::InvalidExpiry(
-                "renewal is only supported for tiers with a maximum lifetime".into(),
-            ));
-        }
-        let max_lifetime = time::Duration::days(crate::config::SANDBOX_MAX_LIFETIME_DAYS);
-        if expires_at <= now || expires_at > now + max_lifetime {
-            return Err(HostedIssuerError::InvalidExpiry(format!(
-                "expires_at must be in the future and within {} days",
-                crate::config::SANDBOX_MAX_LIFETIME_DAYS
-            )));
-        }
-        self.store
-            .renew_issuer(issuer_id, expires_at, expected_version, actor)
-            .await
-    }
-
     pub async fn revoke_key(
         &self,
         issuer_id: &str,
@@ -522,16 +496,6 @@ mod tests {
             issuer.state = state;
             issuer.version += 1;
             Ok(issuer.clone())
-        }
-
-        async fn renew_issuer(
-            &self,
-            _issuer_id: &str,
-            _expires_at: OffsetDateTime,
-            _expected_version: u64,
-            _actor: &str,
-        ) -> Result<HostedIssuer, HostedIssuerError> {
-            Err(HostedIssuerError::NotFound)
         }
 
         async fn revoke_key(

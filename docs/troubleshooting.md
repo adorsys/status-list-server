@@ -35,6 +35,14 @@ behaviors and are labeled as such.
 
 ## Startup & Connection Failures
 
+### Memory database refused in production
+
+**When you see this:** Configuration loading fails with `the memory database backend cannot persist static key revocations in production`.
+
+**Cause:** Static key revocation history is durable trust state. The in-memory database loses tombstones on restart, so production requires a SQL backend.
+
+**Fix:** Set `APP_DATABASE__BACKEND` to `sqlite`, `postgres`, or `mysql` and configure the corresponding database connection. The memory backend remains available for development.
+
 ### `Failed to connect to database (kind=connection, backend=postgres, host=..., port=..., database=...)`
 
 **When you see this:** At startup, immediately after config validation. The message carries a

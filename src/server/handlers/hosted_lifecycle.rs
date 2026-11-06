@@ -9,7 +9,6 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
 };
 use serde::Deserialize;
-use time::OffsetDateTime;
 
 use crate::domain::models::hosted_issuer::NewHostedIssuerKey;
 use crate::domain::models::hosted_issuer::{
@@ -40,7 +39,6 @@ pub enum IssuerStateInput {
 #[serde(untagged, deny_unknown_fields)]
 pub enum UpdateIssuerRequest {
     State { state: IssuerStateInput },
-    Renewal { expires_at: i64 },
 }
 
 /// `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` body: the contract
@@ -113,18 +111,20 @@ enum IssuerPrecondition<'a> {
 
 /// Accepts the merged API's write version and the lifecycle ETag precondition.
 fn if_match_value(headers: &HeaderMap) -> Result<IssuerPrecondition<'_>, ApiError> {
-    if let Some(value) = headers.get(HeaderName::from_static("if-issuer-version")) {
-        return value
+    let version = headers.get(HeaderName::from_static("if-issuer-version"));
+    let etag = headers.get(header::IF_MATCH);
+    match (version, etag) {
+        (Some(_), Some(_)) => Err(precondition_required()),
+        (Some(value), None) => value
             .to_str()
             .map(|value| IssuerPrecondition::Version(value.trim()))
-            .map_err(|_| precondition_required());
+            .map_err(|_| precondition_required()),
+        (None, Some(value)) => value
+            .to_str()
+            .map(|value| IssuerPrecondition::ETag(value.trim()))
+            .map_err(|_| precondition_required()),
+        (None, None) => Err(precondition_required()),
     }
-    headers
-        .get(header::IF_MATCH)
-        .ok_or_else(precondition_required)?
-        .to_str()
-        .map(|value| IssuerPrecondition::ETag(value.trim()))
-        .map_err(|_| precondition_required())
 }
 
 fn check_if_match(
@@ -134,7 +134,7 @@ fn check_if_match(
 ) -> Result<(), ApiError> {
     let matches = match if_match {
         IssuerPrecondition::Version(version) => version == current_version,
-        IssuerPrecondition::ETag(etag) => etag == "*" || etag == current_etag,
+        IssuerPrecondition::ETag(etag) => etag == current_etag,
     };
     if !matches {
         return Err(precondition_failed(
@@ -187,8 +187,8 @@ async fn load_issuer_for_update(
             )
         })?;
     let dto = hosted_dto(state, issuer.clone()).await?;
-    let etag = issuer_etag(&dto);
     let version = issuer_write_version(&dto);
+    let etag = issuer_etag(&dto);
     Ok((issuer, etag, version))
 }
 
@@ -291,11 +291,11 @@ pub async fn update_issuer(
 ) -> Result<(HeaderMap, Json<crate::server::handlers::admin::IssuerDto>), ApiError> {
     require_scope(&admin, "issuers:write")?;
     let service = lifecycle_service(&state);
-    let Json(input) = input.map_err(|rejection| {
+    let Json(input) = input.map_err(|_rejection| {
         error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
-            format!("invalid update issuer request: {rejection}"),
+            "invalid update issuer request",
         )
     })?;
     let if_match = if_match_value(&headers)?;
@@ -310,14 +310,6 @@ pub async fn update_issuer(
             };
             service
                 .set_issuer_state(&issuer_id, requested, current.version, &admin.id)
-                .await
-        }
-        UpdateIssuerRequest::Renewal { expires_at } => {
-            let expires_at = OffsetDateTime::from_unix_timestamp(expires_at).map_err(|_| {
-                ApiError::unprocessable("invalid_expiry", "invalid expires_at timestamp")
-            })?;
-            service
-                .renew_issuer(&issuer_id, expires_at, current.version, &admin.id)
                 .await
         }
     };
@@ -337,7 +329,7 @@ pub async fn update_issuer(
             let issuer = load_current(&state, &issuer_id).await?;
             let dto = hosted_dto(&state, issuer).await?;
             Err(precondition_failed(
-                issuer_etag(&dto),
+                format!("\"{}\"", issuer_write_version(&dto)),
                 issuer_write_version(&dto),
             ))
         }
@@ -356,11 +348,11 @@ pub async fn revoke_issuer_key(
 ) -> Result<(HeaderMap, Json<crate::server::handlers::admin::KeyDto>), ApiError> {
     require_scope(&admin, "issuers:write")?;
     let service = lifecycle_service(&state);
-    let Json(input) = input.map_err(|rejection| {
+    let Json(input) = input.map_err(|_rejection| {
         error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
-            format!("invalid update key request: {rejection}"),
+            "invalid update key request",
         )
     })?;
     if input.state != "revoked" {
@@ -399,7 +391,7 @@ pub async fn revoke_issuer_key(
             let issuer = load_current(&state, &issuer_id).await?;
             let dto = hosted_dto(&state, issuer).await?;
             return Err(precondition_failed(
-                issuer_etag(&dto),
+                format!("\"{}\"", issuer_write_version(&dto)),
                 issuer_write_version(&dto),
             ));
         }
@@ -439,11 +431,11 @@ pub async fn add_issuer_key(
     ApiError,
 > {
     require_scope(&admin, "issuers:write")?;
-    let Json(input) = input.map_err(|rejection| {
+    let Json(input) = input.map_err(|_rejection| {
         error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
-            format!("invalid add issuer key request: {rejection}"),
+            "invalid add issuer key request",
         )
     })?;
     let if_match = if_match_value(&headers)?;
@@ -466,7 +458,7 @@ pub async fn add_issuer_key(
             let issuer = load_current(&state, &issuer_id).await?;
             let dto = hosted_dto(&state, issuer).await?;
             return Err(precondition_failed(
-                issuer_etag(&dto),
+                format!("\"{}\"", issuer_write_version(&dto)),
                 issuer_write_version(&dto),
             ));
         }
@@ -763,26 +755,6 @@ mod tests {
                 issuer.state = state;
                 issuer.version += 1;
             }
-            Ok(issuer.clone())
-        }
-
-        async fn renew_issuer(
-            &self,
-            id: &str,
-            expires_at: OffsetDateTime,
-            expected_version: u64,
-            _actor: &str,
-        ) -> Result<HostedIssuer, HostedIssuerError> {
-            let mut issuers = self.issuers.lock().unwrap();
-            let issuer = issuers
-                .iter_mut()
-                .find(|issuer| issuer.id == id)
-                .ok_or(HostedIssuerError::NotFound)?;
-            if issuer.version != expected_version {
-                return Err(HostedIssuerError::VersionMismatch);
-            }
-            issuer.expires_at = Some(expires_at);
-            issuer.version += 1;
             Ok(issuer.clone())
         }
 
@@ -1171,12 +1143,13 @@ mod tests {
             Some(service_now() + time::Duration::days(30)),
         ));
         let token = write_token();
+        let etag = app.current_etag("portal-issuer").await;
 
         let response = app
             .patch(
                 "/admin/v1/issuers/portal-issuer",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"suspended"}"#,
             )
             .await;
@@ -1209,12 +1182,14 @@ mod tests {
     async fn issuer_and_management_tokens_are_rejected() {
         let app = LifecycleApp::new(&["issuers:write"]).await;
         let uri = "/admin/v1/issuers/static-issuer";
+        app.store.insert_issuer(issuer("portal-issuer", None));
+        let etag = app.current_etag("portal-issuer").await;
 
         // A key registered to a static issuer is not an admin key: the kid
         // alone is rejected before any claim is looked at.
         let issuer_token = admin_token("statuslist-admin+jwt", "issuer-key", "static-issuer");
         let response = app
-            .patch(uri, &issuer_token, Some("*"), r#"{"state":"suspended"}"#)
+            .patch(uri, &issuer_token, Some(&etag), r#"{"state":"suspended"}"#)
             .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
@@ -1225,7 +1200,7 @@ mod tests {
             .patch(
                 uri,
                 &management_token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"suspended"}"#,
             )
             .await;
@@ -1234,7 +1209,12 @@ mod tests {
         // A valid admin key with the wrong principal id is not that admin.
         let stranger_token = admin_token("statuslist-admin+jwt", "admin-key", "someone-else");
         let response = app
-            .patch(uri, &stranger_token, Some("*"), r#"{"state":"suspended"}"#)
+            .patch(
+                uri,
+                &stranger_token,
+                Some(&etag),
+                r#"{"state":"suspended"}"#,
+            )
             .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -1242,13 +1222,15 @@ mod tests {
     #[tokio::test]
     async fn static_issuers_are_managed_by_configuration() {
         let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer("portal-issuer", None));
         let token = write_token();
+        let etag = app.current_etag("portal-issuer").await;
 
         let response = app
             .patch(
                 "/admin/v1/issuers/static-issuer",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"suspended"}"#,
             )
             .await;
@@ -1262,7 +1244,7 @@ mod tests {
             .patch(
                 "/admin/v1/issuers/static-issuer/keys/some-key",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"revoked"}"#,
             )
             .await;
@@ -1278,12 +1260,13 @@ mod tests {
         ));
         app.store.insert_key(key("portal-issuer"));
         let token = write_token();
+        let etag = app.current_etag("portal-issuer").await;
 
         let response = app
             .patch(
                 "/admin/v1/issuers/unknown-issuer",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"suspended"}"#,
             )
             .await;
@@ -1294,7 +1277,7 @@ mod tests {
             .patch(
                 "/admin/v1/issuers/portal-issuer/keys/unknown-key",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"revoked"}"#,
             )
             .await;
@@ -1312,78 +1295,18 @@ mod tests {
         expired.state = HostedIssuerState::Suspended;
         app.store.insert_issuer(expired);
         let token = write_token();
+        let etag = app.current_etag("portal-issuer").await;
 
         let response = app
             .patch(
                 "/admin/v1/issuers/portal-issuer",
                 &token,
-                Some("*"),
+                Some(&etag),
                 r#"{"state":"active"}"#,
             )
             .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body_json(response).await["error"], "invalid_expiry");
-    }
-
-    #[tokio::test]
-    async fn renewal_restores_expired_issuer_but_preserves_suspension() {
-        let app = LifecycleApp::new(&["issuers:write"]).await;
-        let mut expired = issuer(
-            "portal-issuer",
-            Some(OffsetDateTime::now_utc() - time::Duration::days(1)),
-        );
-        expired.tier = "sandbox".into();
-        app.store.insert_issuer(expired);
-        let before = hosted_dto(&app.state, app.store.issuer("portal-issuer").unwrap())
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(before).unwrap()["state"], "expired");
-        let token = write_token();
-        let expiry = (service_now() + time::Duration::days(1)).unix_timestamp();
-        let body = format!(r#"{{"expires_at":{expiry}}}"#);
-        let response = app
-            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let data = body_json(response).await;
-        assert_eq!(data["state"], "active");
-        assert_eq!(app.store.issuer("portal-issuer").unwrap().version, 2);
-
-        app.store.issuers.lock().unwrap()[0].state = HostedIssuerState::Suspended;
-        let response = app
-            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_json(response).await["state"], "suspended");
-
-        let too_late = (service_now() + time::Duration::days(31)).unix_timestamp();
-        let response = app
-            .patch(
-                "/admin/v1/issuers/portal-issuer",
-                &token,
-                Some("*"),
-                &format!(r#"{{"expires_at":{too_late}}}"#),
-            )
-            .await;
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body_json(response).await["error"], "invalid_expiry");
-    }
-
-    #[tokio::test]
-    async fn standard_issuer_cannot_be_renewed() {
-        let app = LifecycleApp::new(&["issuers:write"]).await;
-        app.store.insert_issuer(issuer("portal-issuer", None));
-        let token = write_token();
-        let expiry = (service_now() + time::Duration::days(1)).unix_timestamp();
-        let body = format!(r#"{{"expires_at":{expiry}}}"#);
-
-        let response = app
-            .patch("/admin/v1/issuers/portal-issuer", &token, Some("*"), &body)
-            .await;
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body_json(response).await["error"], "invalid_expiry");
-        assert_eq!(app.store.issuer("portal-issuer").unwrap().version, 1);
     }
 
     #[tokio::test]
@@ -1395,6 +1318,7 @@ mod tests {
         ));
         let token = write_token();
         let uri = "/admin/v1/issuers/portal-issuer";
+        let etag = app.current_etag("portal-issuer").await;
 
         for body in [
             r#"{"state":"suspended","expires_at":123}"#,
@@ -1403,7 +1327,7 @@ mod tests {
             r#"{"state":"terminated"}"#,
             r#"{"}"#,
         ] {
-            let response = app.patch(uri, &token, Some("*"), body).await;
+            let response = app.patch(uri, &token, Some(&etag), body).await;
             assert_eq!(
                 response.status(),
                 StatusCode::BAD_REQUEST,
@@ -1431,7 +1355,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
 
         let response = app
-            .patch(uri, &token, Some("*"), r#"{"state":"active"}"#)
+            .patch(
+                uri,
+                &token,
+                Some(&app.current_etag("portal-issuer").await),
+                r#"{"state":"active"}"#,
+            )
             .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 

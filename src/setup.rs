@@ -453,14 +453,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Arc<crate::server::auth::hosted_service::HostedIssuerLifecycleService>,
     >;
 
-    if config.database.backend == DatabaseBackend::Memory
-        && crate::config::classify_app_env(crate::config::normalize_app_env()).is_production()
-    {
-        color_eyre::eyre::bail!(
-            "the memory database backend cannot persist static key revocations in production"
-        );
-    }
-
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
         Arc<dyn CredentialRepo>,
@@ -913,6 +905,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
     validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
         .await?;
+    if let Some(dynamic_store) = &revocation_store {
+        crate::server::auth::hosted::record_static_revocation_history(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
     tracing::info!(
         fingerprint = %issuer_registry.snapshot().fingerprint(),
@@ -1065,6 +1064,13 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             .await?;
                         }
                         validate_registry_aggregation_ids(&service, &active, &candidate).await?;
+                        if let Some(revocation_store) = &revocation_store {
+                            crate::server::auth::hosted::record_static_revocation_history(
+                                revocation_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         registry_handle.replace(candidate)
                     }
                     .await;

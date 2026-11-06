@@ -2,7 +2,7 @@
 ignore = [
   # rkyv 0.7.46 via rust_decimal: no patched 0.7.x and not built; drop once upstream bumps it.
   "RUSTSEC-2026-0235",
-  # Test-only Testcontainers dependency; remove after upstream PR #1006 is released (issue #761).
+  # astral-tokio-tar via testcontainers, test-only; drop once testcontainers no longer depends on it.
   "RUSTSEC-2026-0440",
 ]
 

@@ -68,15 +68,15 @@ hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
 passed, including keys staged for rotation. `keys_limit` is the tier's
 `max_keys`.
 
-The detail ETag identifies the complete JSON representation for either source.
-It changes when returned keys, usage, metadata, or derived expiry state change.
+The detail ETag for hosted issuers derives from the persisted issuer version,
+so usage counts and derived expiry do not invalidate a write precondition.
+Static issuer ETags identify the complete JSON representation.
 
-`PATCH /admin/v1/issuers/{issuer_id}` accepts either `{"state":"suspended"}` or `{"state":"active"}`, or `{"expires_at":<unix-seconds>}` to renew a hosted issuer. The renewed expiry must be later than now and no more than 30 days ahead; otherwise the API returns `422 invalid_expiry`. Renewal makes an expired active issuer usable again. A suspended issuer remains suspended until separately resumed. A body containing both fields returns `400 invalid_input`. Each successful renewal increments the issuer version and records an audit event in the same database transaction.
+`PATCH /admin/v1/issuers/{issuer_id}` accepts `{"state":"suspended"}` or `{"state":"active"}` for lifecycle changes. An expired issuer cannot be reactivated. A body containing unsupported or unknown fields returns `400 invalid_input`.
 `Issuer-Version` separately covers writable issuer metadata, lifecycle, and
-key ID/state/validity windows. Future mutation endpoints use it through
-`If-Issuer-Version`, so ordinary list publishes do not invalidate writes. The
-reads do not provide a transactional snapshot across issuer metadata, keys,
-and usage.
+key ID/state/validity windows. Use either `If-Match` or `If-Issuer-Version`,
+not both. The reads do not provide a transactional snapshot across issuer
+metadata, keys, and usage.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

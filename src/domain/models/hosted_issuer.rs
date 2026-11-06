@@ -11,7 +11,7 @@ use crate::domain::models::credential::{
 };
 use crate::domain::models::tier::IssuerTier;
 
-/// Lifecycle of a hosted issuer row. Stored as a string in `issuers.state`.
+/// Persisted state of a hosted issuer row, stored in `issuers.state`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HostedIssuerState {
@@ -46,7 +46,7 @@ pub struct HostedIssuer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostedIssuerLifecycleState {
+pub enum HostedIssuerEffectiveState {
     Active,
     Suspended,
     Expired,
@@ -56,28 +56,28 @@ impl HostedIssuer {
     /// Expiry is derived at verification time, without a cleanup job.
     /// Suspension wins over expiry so an operator never sees a suspended
     /// issuer reported as merely expired.
-    pub fn lifecycle_state(&self, now: OffsetDateTime) -> HostedIssuerLifecycleState {
+    pub fn effective_state(&self, now: OffsetDateTime) -> HostedIssuerEffectiveState {
         if self.state == HostedIssuerState::Suspended {
-            HostedIssuerLifecycleState::Suspended
+            HostedIssuerEffectiveState::Suspended
         } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
-            HostedIssuerLifecycleState::Expired
+            HostedIssuerEffectiveState::Expired
         } else {
-            HostedIssuerLifecycleState::Active
+            HostedIssuerEffectiveState::Active
         }
     }
 
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.lifecycle_state(now) == HostedIssuerLifecycleState::Active
+        self.effective_state(now) == HostedIssuerEffectiveState::Active
     }
 
     /// Admin-visible lifecycle at the supplied instant.
     pub fn read_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
-        match self.lifecycle_state(now) {
-            HostedIssuerLifecycleState::Active => HostedIssuerReadState::Active,
-            HostedIssuerLifecycleState::Suspended => HostedIssuerReadState::Suspended,
-            HostedIssuerLifecycleState::Expired => HostedIssuerReadState::Expired,
+        match self.effective_state(now) {
+            HostedIssuerEffectiveState::Active => HostedIssuerReadState::Active,
+            HostedIssuerEffectiveState::Suspended => HostedIssuerReadState::Suspended,
+            HostedIssuerEffectiveState::Expired => HostedIssuerReadState::Expired,
         }
     }
 }
@@ -327,8 +327,8 @@ mod tests {
             (None, None),
         );
         assert_eq!(
-            entry.issuer.lifecycle_state(now()),
-            HostedIssuerLifecycleState::Expired
+            entry.issuer.effective_state(now()),
+            HostedIssuerEffectiveState::Expired
         );
         assert!(matches!(
             entry.resolved_key(now()),
@@ -345,8 +345,8 @@ mod tests {
             (None, None),
         );
         assert_eq!(
-            entry.issuer.lifecycle_state(now()),
-            HostedIssuerLifecycleState::Suspended
+            entry.issuer.effective_state(now()),
+            HostedIssuerEffectiveState::Suspended
         );
     }
 

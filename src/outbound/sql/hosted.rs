@@ -321,7 +321,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                 let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
                 match insert_issuer_row(&txn, &stored).await {
                     Ok(()) => {
-                        append_lifecycle_audit(
+                        if let Err(error) = append_lifecycle_audit(
                             &txn,
                             &stored.id,
                             actor,
@@ -334,7 +334,10 @@ impl SeaOrmStore<HostedIssuerRow> {
                             })),
                         )
                         .await
-                        .map_err(err_txn)?;
+                        {
+                            rollback_quietly(txn).await;
+                            return Err(err_txn(error));
+                        }
                         txn.commit().await.map_err(map_insert_err)?;
                         // The row stores whole-second timestamps; return what was
                         // persisted so the returned issuer matches a re-read.
@@ -468,7 +471,7 @@ impl SeaOrmStore<HostedIssuerRow> {
             .await;
             match insert {
                 Ok(_) => {
-                    append_lifecycle_audit(
+                    if let Err(error) = append_lifecycle_audit(
                         &txn,
                         &key.issuer_id,
                         actor,
@@ -477,7 +480,10 @@ impl SeaOrmStore<HostedIssuerRow> {
                         Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str()})),
                     )
                     .await
-                    .map_err(err_txn)?;
+                    {
+                        rollback_quietly(txn).await;
+                        return Err(err_txn(error).into());
+                    }
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
                 }
@@ -706,15 +712,26 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         &self,
         revocations: &[(String, String)],
     ) -> Result<(), HostedIssuerError> {
+        use sea_orm::TransactionTrait;
+
         let db = self.store.current();
+        let txn = db.begin().await.map_err(find_err)?;
         for (kid, material) in revocations {
             let material_hash = static_revocation_hash(material);
             let existing = static_key_revocations::Entity::find_by_id(kid)
-                .one(db.as_ref())
+                .one(&txn)
                 .await
-                .map_err(find_err)?;
+                .map_err(find_err);
+            let existing = match existing {
+                Ok(existing) => existing,
+                Err(error) => {
+                    rollback_quietly(txn).await;
+                    return Err(error.into());
+                }
+            };
             if let Some(existing) = existing {
                 if existing.material != material_hash {
+                    rollback_quietly(txn).await;
                     return Err(HostedIssuerError::AlreadyExists);
                 }
                 continue;
@@ -724,21 +741,24 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
                     kid: Set(kid.clone()),
                     material: Set(material_hash.clone()),
                 })
-                .exec_without_returning(db.as_ref())
+                .exec_without_returning(&txn)
                 .await;
             if let Err(error) = inserted {
                 if is_unique_violation(&error)
                     && static_key_revocations::Entity::find_by_id(kid)
-                        .one(db.as_ref())
+                        .one(&txn)
                         .await
-                        .map_err(find_err)?
+                        .ok()
+                        .flatten()
                         .is_some_and(|row| row.material == material_hash)
                 {
                     continue;
                 }
+                rollback_quietly(txn).await;
                 return Err(hosted_error(map_insert_err(error)));
             }
         }
+        txn.commit().await.map_err(find_err)?;
         Ok(())
     }
 
@@ -1042,91 +1062,6 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         txn.commit().await.map_err(err_txn)?;
         Ok(HostedIssuer {
             state,
-            version: next_version as u64,
-            ..previous
-        })
-    }
-
-    async fn renew_issuer(
-        &self,
-        issuer_id: &str,
-        expires_at: OffsetDateTime,
-        expected_version: u64,
-        actor: &str,
-    ) -> Result<HostedIssuer, HostedIssuerError> {
-        let db = self.store.current();
-        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-        let row = match issuers::Entity::find_by_id(issuer_id)
-            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-            .one(&txn)
-            .await
-        {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                rollback_quietly(txn).await;
-                return Err(HostedIssuerError::NotFound);
-            }
-            Err(error) => {
-                let classified = err_txn(error);
-                rollback_quietly(txn).await;
-                return Err(classified.into());
-            }
-        };
-        let previous = match parse_issuer(row.clone()) {
-            Ok(previous) => previous,
-            Err(error) => {
-                rollback_quietly(txn).await;
-                return Err(error.into());
-            }
-        };
-        if previous.version != expected_version {
-            rollback_quietly(txn).await;
-            return Err(HostedIssuerError::VersionMismatch);
-        }
-        let Some(next_version) = row.version.checked_add(1) else {
-            rollback_quietly(txn).await;
-            return Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
-                "issuer version overflow",
-            ))));
-        };
-        let changed = issuers::Entity::update_many()
-            .col_expr(
-                issuers::Column::ExpiresAt,
-                Expr::value(expires_at.unix_timestamp()),
-            )
-            .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
-            .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-            .filter(issuers::Column::Version.eq(expected_version as i64))
-            .exec(&txn)
-            .await;
-        match changed {
-            Ok(changed) if changed.rows_affected == 1 => {}
-            Ok(_) => {
-                rollback_quietly(txn).await;
-                return Err(HostedIssuerError::VersionMismatch);
-            }
-            Err(e) => {
-                rollback_quietly(txn).await;
-                return Err(err_txn(e).into());
-            }
-        }
-        if let Err(e) = append_lifecycle_audit(
-            &txn,
-            issuer_id,
-            actor,
-            "issuer.renewed",
-            Some(serde_json::json!({"expires_at": row.expires_at, "version": row.version})),
-            Some(serde_json::json!({"expires_at": expires_at.unix_timestamp(), "version": next_version})),
-        )
-        .await
-        {
-            rollback_quietly(txn).await;
-            return Err(err_txn(e).into());
-        }
-        txn.commit().await.map_err(err_txn)?;
-        Ok(HostedIssuer {
-            expires_at: Some(expires_at),
             version: next_version as u64,
             ..previous
         })

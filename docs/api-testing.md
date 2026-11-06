@@ -18,23 +18,17 @@ The environment exposes these variables:
 | `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
 | `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
 | `issuer_id`       | `my-issuer`                            | Issuer identifier generated for the temporary Newman test key.         |
-| `adminToken` | empty | Signed admin JWT with registry-granted `issuers:read`. |
 | `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
 | `adminUrl`        | `http://localhost:8002`                | Admin listener for issuer lifecycle requests.                         |
-| `adminToken`      | empty                                  | Admin JWT used by the hosted lifecycle folder.                       |
-| `kid`             | empty                                  | Portal key ID used by the hosted lifecycle folder.                   |
 
 The collection is organized into Health & Metrics, Status Lists, Aggregation,
 and Admin API (Issuer Management) folders. Requests include Postman test scripts that check
 status codes, content types, token response headers, and JSON response shapes.
 
-The final **Issuer Lifecycle (destructive, hosted profile)** folder requires a
-hosted server, a portal issuer, its key ID, and an admin JWT with
-`issuers:write`. Set `issuer_id`, `kid`, and `adminToken` in Postman before
-running that folder. Its suspend and revoke requests change live issuer state.
-The private profile Newman check omits this folder because it has no portal
-issuer or admin token; the hosted lifecycle is covered by the Rust HTTP tests.
+The collection contains read-only Admin API examples. Lifecycle writes are
+covered by Rust HTTP tests so importing or running the collection cannot change
+live issuer state.
 
 Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK provisioned in the operator-managed issuer

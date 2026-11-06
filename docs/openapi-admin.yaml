@@ -266,14 +266,14 @@ paths:
       tags: [issuers]
       summary: Suspend, resume or renew a portal issuer
       description: |
-        Changes `state` to `suspended` or `active`, or renews `expires_at`.
-        Requires `issuers:write` and `If-Issuer-Version` or `If-Match`.
+        Changes exactly one thing: `state` (`suspended` or `active`) or
+        `expires_at`. Requires `issuers:write` and `If-Issuer-Version` or
+        `If-Match`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
-        stays `expired` until renewed. Renewal requires an expiry after now and
-        within the sandbox tier's 30-day maximum. Renewal of an expired issuer
-        makes it active unless suspended; suspension takes precedence.
-        Suspension takes effect on the next management request on every replica.
+        stays `expired` until it is renewed with a later `expires_at`, which
+        may not exceed now plus the tier's maximum lifetime. Suspension takes
+        effect on the next management request on every replica.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
         - $ref: "#/components/parameters/IfMatch"
@@ -306,11 +306,20 @@ paths:
         "404":
           $ref: "#/components/responses/IssuerNotFound"
         "409":
-          $ref: "#/components/responses/ManagedByConfiguration"
+          description: |
+            `issuer_managed_by_configuration` — the issuer is static.
+            `write_contention` — a concurrent database writer held a lock; retry.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry` — `expires_at` is not later than now or exceeds the tier's maximum lifetime."
+          description: "`invalid_expiry` — `expires_at` is in the past or beyond the tier's maximum lifetime."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -382,7 +391,8 @@ paths:
             `issuer_managed_by_configuration` — the issuer is static.
             `key_limit_reached` — the tier's `max_keys` non-revoked keys
             already exist; revoke one first. `key_material_in_use` — the key
-            is already registered for any issuer or admin.
+            is already registered for any issuer or admin. `write_contention` —
+            a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -470,7 +480,16 @@ paths:
                 error: "key_not_found"
                 error_description: "the issuer has no key with this kid"
         "409":
-          $ref: "#/components/responses/ManagedByConfiguration"
+          description: |
+            `issuer_managed_by_configuration` — the issuer is static.
+            `write_contention` — a concurrent database writer held a lock; retry.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "428":
@@ -792,6 +811,7 @@ components:
             - dynamic_issuers_disabled
             - key_limit_reached
             - key_material_in_use
+            - write_contention
             # 412
             - precondition_failed
             # 413

@@ -437,10 +437,14 @@ impl IssuerRegistry {
                 .all_principal_keys()
                 .into_iter()
                 .map(|(_, _, material)| material)
-                .chain(validated.registry.revoked_keys.iter().map(|key| {
-                    canonical_public_material(&key.jwk)
-                        .expect("registry validation accepted tombstone key material")
-                }))
+                .chain(
+                    validated
+                        .registry
+                        .revoked_keys
+                        .iter()
+                        .map(|key| canonical_public_material(&key.jwk))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
                 .collect(),
             ..validated
         })
@@ -551,14 +555,14 @@ impl ValidatedRegistry {
 
     /// Revoked key identifiers and normalized public-key materials from this
     /// registry snapshot, ready to persist in the shared trust store.
-    pub fn revoked_keys(&self) -> Vec<(String, String)> {
+    pub fn revoked_keys(&self) -> Result<Vec<(String, String)>, RegistryError> {
         self.registry
             .revoked_keys
             .iter()
-            .filter_map(|key| {
-                crate::domain::models::credential::canonical_jwk_material(&key.jwk)
-                    .ok()
-                    .map(|material| (key.kid.clone(), material))
+            .map(|key| {
+                let material = crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                    .map_err(|error| RegistryError::Semantic(error.to_string()))?;
+                Ok((key.kid.clone(), material))
             })
             .collect()
     }

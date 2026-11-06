@@ -257,10 +257,6 @@ pub async fn validate_static_revocation_history(
     store: &Arc<dyn HostedIssuerStore>,
     candidate: &ValidatedRegistry,
 ) -> Result<(), RegistryError> {
-    store
-        .record_static_key_revocations(&candidate.revoked_keys())
-        .await
-        .map_err(dynamic_check_failed)?;
     for (_, kid, material) in candidate.all_principal_keys() {
         if store
             .static_key_was_revoked(kid, &material)
@@ -275,8 +271,28 @@ pub async fn validate_static_revocation_history(
     Ok(())
 }
 
+pub async fn record_static_revocation_history(
+    store: &Arc<dyn HostedIssuerStore>,
+    candidate: &ValidatedRegistry,
+) -> Result<(), RegistryError> {
+    store
+        .record_static_key_revocations(&candidate.revoked_keys()?)
+        .await
+        .map_err(static_revocation_record_failed)
+}
+
 fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
     RegistryError::Database(error.to_string())
+}
+
+fn static_revocation_record_failed(error: HostedIssuerError) -> RegistryError {
+    match error {
+        HostedIssuerError::AlreadyExists => RegistryError::Semantic(
+            "static registry key material conflicts with an existing revocation tombstone"
+                .to_owned(),
+        ),
+        other => RegistryError::Database(other.to_string()),
+    }
 }
 
 /// Runs a hosted write through the cross-source checks before handing it to
@@ -390,6 +406,19 @@ mod tests {
                 }))
         }
 
+        async fn find_key_by_material(
+            &self,
+            material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(self
+                .keys
+                .lock()
+                .await
+                .values()
+                .find(|key| key.jwk.normalized_material().ok().as_deref() == Some(material))
+                .cloned())
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -466,17 +495,6 @@ mod tests {
 
         async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
             Ok(self.issuer.iter().cloned().collect())
-        }
-
-        async fn find_key_by_material(
-            &self,
-            material: &str,
-        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
-            let keys = self.keys.lock().await;
-            Ok(keys
-                .values()
-                .find(|key| material_of(&key.jwk).as_deref() == Some(material))
-                .cloned())
         }
 
         async fn find_issuer_ids(

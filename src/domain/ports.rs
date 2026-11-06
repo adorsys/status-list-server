@@ -35,15 +35,15 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// revoked key after rollback or restart.
     async fn record_static_key_revocations(
         &self,
-        _revocations: &[(String, String)],
+        revocations: &[(String, String)],
     ) -> Result<(), HostedIssuerError>;
 
     /// Check whether either the key id or normalized key material was revoked
     /// from the static registry.
     async fn static_key_was_revoked(
         &self,
-        _kid: &str,
-        _material: &str,
+        kid: &str,
+        material: &str,
     ) -> Result<bool, HostedIssuerError>;
 
     /// Return a bounded page ordered by issuer id, strictly after `after`.
@@ -137,14 +137,6 @@ pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
         &self,
         issuer_id: &str,
         state: crate::domain::models::hosted_issuer::HostedIssuerState,
-        expected_version: u64,
-        actor: &str,
-    ) -> Result<HostedIssuer, HostedIssuerError>;
-
-    async fn renew_issuer(
-        &self,
-        issuer_id: &str,
-        expires_at: time::OffsetDateTime,
         expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;

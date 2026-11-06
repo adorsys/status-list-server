@@ -1027,53 +1027,6 @@ async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn renewal_commits_expiry_and_audit_together() {
-    use crate::outbound::sql::models::issuer_audit_events;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    let db = fixtures::sqlite_connection().await;
-    let store = SqlHostedIssuerStore::new(db.clone());
-    let mut original = issuer("00000000-0000-4000-8000-000000000374");
-    original.expires_at = Some(OffsetDateTime::now_utc() - time::Duration::days(1));
-    let original = store
-        .create_issuer(original, "portal-operator")
-        .await
-        .unwrap();
-    let new_expiry = OffsetDateTime::now_utc() + time::Duration::days(1);
-    let renewed = store
-        .renew_issuer(&original.id, new_expiry, original.version, "portal-admin")
-        .await
-        .unwrap();
-    assert_eq!(renewed.version, original.version + 1);
-    assert_eq!(
-        renewed.expires_at.unwrap().unix_timestamp(),
-        new_expiry.unix_timestamp()
-    );
-    let observed = store.get_issuer(&original.id).await.unwrap();
-    assert_eq!(
-        observed.expires_at.unwrap().unix_timestamp(),
-        new_expiry.unix_timestamp()
-    );
-    assert!(matches!(
-        store
-            .renew_issuer(&original.id, new_expiry, original.version, "portal-admin")
-            .await,
-        Err(HostedIssuerError::VersionMismatch)
-    ));
-    let events = issuer_audit_events::Entity::find()
-        .filter(issuer_audit_events::Column::IssuerId.eq(&original.id))
-        .all(db.as_ref())
-        .await
-        .unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.action == "issuer.renewed")
-            .count(),
-        1
-    );
-}
-
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn lifecycle_changes_reach_two_mysql_replicas_and_are_audited() {
@@ -1125,16 +1078,6 @@ async fn failed_audit_insert_rolls_back_lifecycle_change() {
     );
     let unchanged = store.find_issuer(&hosted.id).await.unwrap().unwrap();
     assert_eq!(unchanged.state, HostedIssuerState::Active);
-    assert_eq!(unchanged.version, hosted.version);
-    let renewed_expiry = OffsetDateTime::now_utc() + time::Duration::days(1);
-    assert!(
-        store
-            .renew_issuer(&hosted.id, renewed_expiry, hosted.version, "portal-admin")
-            .await
-            .is_err()
-    );
-    let unchanged = store.find_issuer(&hosted.id).await.unwrap().unwrap();
-    assert_eq!(unchanged.expires_at, hosted.expires_at);
     assert_eq!(unchanged.version, hosted.version);
 }
 
