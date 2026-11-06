@@ -1025,7 +1025,6 @@ async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
         .await;
 }
 
-#[cfg(feature = "sqlite")]
 #[tokio::test]
 #[cfg(feature = "mysql")]
 #[tokio::test]
