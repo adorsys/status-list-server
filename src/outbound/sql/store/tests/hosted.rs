@@ -12,7 +12,7 @@ use crate::domain::models::hosted_issuer::{
 };
 #[cfg(feature = "sqlite")]
 use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
 use crate::domain::ports::HostedIssuerLifecycleStore;
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
@@ -283,6 +283,18 @@ async fn test_sqlite_admin_read_queries_page_issuers_and_keys() {
         keys.iter().map(|key| key.kid.as_str()).collect::<Vec<_>>(),
         ["newer-key", "older-key", "same-time-key"]
     );
+    let grouped_keys = store
+        .issuer_keys_for(&[first.id.clone(), second.id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        grouped_keys[&first.id]
+            .iter()
+            .map(|key| key.kid.as_str())
+            .collect::<Vec<_>>(),
+        ["newer-key", "older-key", "same-time-key"]
+    );
+    assert!(grouped_keys.get(&second.id).is_none_or(Vec::is_empty));
 }
 
 #[cfg(feature = "sqlite")]
@@ -741,6 +753,75 @@ async fn test_mysql_hosted_round_trip() {
 
 #[cfg(feature = "mysql")]
 #[tokio::test]
+async fn test_mysql_hosted_pagination_uses_bytewise_id_order() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let store = SqlHostedIssuerStore::new(test_db.connection().await);
+    for id in ["a", "B", "c"] {
+        store
+            .create_issuer(issuer(id), "portal-operator")
+            .await
+            .unwrap();
+    }
+
+    let mut after = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = store
+            .list_issuers_after(
+                after.as_deref(),
+                1,
+                &HostedIssuerFilter::default(),
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let Some(row) = page.into_iter().next() else {
+            break;
+        };
+        after = Some(row.id.clone());
+        ids.push(row.id);
+    }
+
+    assert_eq!(ids, ["B", "a", "c"]);
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_lifecycle_rejects_issuer_id_with_different_case() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let store = SqlHostedIssuerStore::new(test_db.connection().await);
+    store
+        .create_issuer(issuer("lowercase"), "portal-operator")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store.get_issuer("LOWERCASE").await,
+        Err(HostedIssuerError::NotFound)
+    ));
+    assert!(matches!(
+        store
+            .set_issuer_state(
+                "LOWERCASE",
+                HostedIssuerState::Suspended,
+                1,
+                "portal-operator"
+            )
+            .await,
+        Err(HostedIssuerError::NotFound)
+    ));
+    assert_eq!(
+        store.get_issuer("lowercase").await.unwrap().state,
+        HostedIssuerState::Active
+    );
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
 async fn test_mysql_hosted_rejects_conflicts() {
     use crate::outbound::sql::test_containers::mysql_helpers;
     let test_db = mysql_helpers::MysqlTestDb::start().await;
@@ -1025,7 +1106,6 @@ async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
         .await;
 }
 
-#[tokio::test]
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn lifecycle_changes_reach_two_mysql_replicas_and_are_audited() {

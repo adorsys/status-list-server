@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, Order, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, sea_query::Expr,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -222,7 +222,12 @@ async fn load_issuer(
     id: &str,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Option<HostedIssuer>, RepositoryError> {
-    let issuer = issuers::Entity::find_by_id(id)
+    let issuer = issuers::Entity::find()
+        .filter(exact_text_eq(
+            "issuers.issuer",
+            id,
+            db.get_database_backend(),
+        ))
         .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
         .one(db)
         .await
@@ -231,6 +236,48 @@ async fn load_issuer(
         Some(row) => Ok(Some(parse_issuer(row)?)),
         None => Ok(None),
     }
+}
+
+fn exact_text_eq(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} = ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') = convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
+        _ => format!("{column} = ?"),
+    };
+    Expr::cust_with_values(expression, [value])
+}
+
+fn bytewise_text_order(column: &str, backend: DatabaseBackend) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column}"),
+        DatabaseBackend::Postgres => format!("convert_to({column}, 'UTF8')"),
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY"),
+        _ => column.to_owned(),
+    };
+    Expr::cust(expression)
+}
+
+fn bytewise_text_after(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} > BINARY ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') > convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY > ?"),
+        _ => format!("{column} > ?"),
+    };
+    Expr::cust_with_values(expression, [value])
 }
 
 async fn insert_issuer_row(
@@ -482,7 +529,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                     .await
                     {
                         rollback_quietly(txn).await;
-                        return Err(err_txn(error).into());
+                        return Err(err_txn(error));
                     }
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
@@ -788,18 +835,30 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         filters: &HostedIssuerFilter,
         now: OffsetDateTime,
     ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        let db = self.store.current();
         let mut query = issuers::Entity::find()
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-            .order_by_asc(issuers::Column::Issuer)
+            .order_by(
+                bytewise_text_order("issuers.issuer", db.get_database_backend()),
+                Order::Asc,
+            )
             .limit(limit as u64);
         if let Some(after) = after {
-            query = query.filter(issuers::Column::Issuer.gt(after));
+            query = query.filter(bytewise_text_after(
+                "issuers.issuer",
+                after,
+                db.get_database_backend(),
+            ));
         }
         if let Some(tier) = &filters.tier {
             query = query.filter(issuers::Column::Tier.eq(tier));
         }
         if let Some(owner) = &filters.owner {
-            query = query.filter(issuers::Column::Owner.eq(owner));
+            query = query.filter(exact_text_eq(
+                "issuers.owner",
+                owner,
+                db.get_database_backend(),
+            ));
         }
         let unexpired = Condition::any()
             .add(issuers::Column::ExpiresAt.is_null())
@@ -985,7 +1044,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         // event in one transaction.
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-        let row = match issuers::Entity::find_by_id(issuer_id)
+        let row = match issuers::Entity::find()
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
@@ -1028,7 +1092,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         let changed = match issuers::Entity::update_many()
             .col_expr(issuers::Column::State, Expr::value(state.as_str()))
             .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .filter(issuers::Column::Version.eq(expected_version as i64))
             .exec(&txn)
@@ -1077,7 +1145,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
         let row = match hosted_issuer_keys::Entity::find_by_id(kid)
-            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuer_keys.issuer_id",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .one(&txn)
             .await
         {
@@ -1094,7 +1166,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
                 return Err(classified.into());
             }
         };
-        let owner = match issuers::Entity::find_by_id(issuer_id)
+        let owner = match issuers::Entity::find()
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
@@ -1135,7 +1212,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         let version_changed = match issuers::Entity::update_many()
             .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .filter(issuers::Column::Version.eq(owner.version))
             .exec(&txn)
