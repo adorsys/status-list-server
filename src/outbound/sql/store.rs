@@ -1302,9 +1302,8 @@ fn map_delete_err(e: sea_orm::DbErr) -> RepositoryError {
     contention_err(&e).unwrap_or_else(|| RepositoryError::DeleteError(e.to_string()))
 }
 
-/// Pool and transport failures are `Unavailable` (503). No contention mapping: a 409 on a read
-/// would make no sense.
-fn find_err(e: sea_orm::DbErr) -> RepositoryError {
+/// Pool and transport failures are `Unavailable` (503); reads never report contention as 409.
+pub(super) fn find_err(e: sea_orm::DbErr) -> RepositoryError {
     use sea_orm::{ConnAcquireErr, DbErr, RuntimeErr, SqlxError};
 
     let unavailable = match &e {

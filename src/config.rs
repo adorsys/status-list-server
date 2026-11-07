@@ -161,7 +161,7 @@ pub struct WatcherConfig {
 /// Per-client-IP rate limits. `strict_*` is the management authentication
 /// gate, which counts rejected authentications only; `admission_*` bounds every
 /// management request before `auth` does any work; `permissive_*` covers
-/// public reads.
+/// public reads; `admin_*` covers the admin issuer API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
@@ -170,6 +170,8 @@ pub struct RateLimitConfig {
     pub admission_per_second: u32,
     pub permissive_burst_size: u32,
     pub permissive_period_secs: u64,
+    pub admin_burst_size: u32,
+    pub admin_period_secs: u64,
     /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
     /// management authentication gate believes. Empty keys every request on
     /// its peer address.
@@ -1830,6 +1832,14 @@ impl Config {
                 config.server.profile.as_str()
             )));
         }
+        if config.database.backend == DatabaseBackend::Memory
+            && config.telemetry.environment.is_production()
+        {
+            return Err(ConfigError::Message(
+                "the memory database backend cannot persist static key revocations in production"
+                    .to_string(),
+            ));
+        }
         config
             .management_auth
             .validate(config.telemetry.environment)?;
@@ -1961,6 +1971,8 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("rate_limit.admission_per_second", 100)?
         .set_default("rate_limit.permissive_burst_size", 100)?
         .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.admin_burst_size", 100)?
+        .set_default("rate_limit.admin_period_secs", 1)?
         .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
@@ -1982,7 +1994,7 @@ mod tests {
 
     #[test]
     fn issuer_registry_path_is_required_only_in_production() {
-        let policy = ManagementAuthConfig {
+        let mut policy = ManagementAuthConfig {
             issuers_file: None,
             leeway_secs: 60,
             max_token_lifetime_secs: 300,
@@ -1990,6 +2002,8 @@ mod tests {
         };
         assert!(policy.validate(TelemetryEnvironment::Development).is_ok());
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
+        policy.issuers_file = Some("issuers.yaml".into());
+        assert!(policy.validate(TelemetryEnvironment::Production).is_ok());
     }
     use secrecy::ExposeSecret;
     use std::path::{Path, PathBuf};
@@ -2081,6 +2095,8 @@ mod tests {
         assert_eq!(config.rate_limit.strict_period_secs, 60);
         assert_eq!(config.rate_limit.permissive_burst_size, 100);
         assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.admin_burst_size, 100);
+        assert_eq!(config.rate_limit.admin_period_secs, 1);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -2165,6 +2181,8 @@ mod tests {
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
             ("rate_limit.permissive_period_secs", "10"),
+            ("rate_limit.admin_burst_size", "7"),
+            ("rate_limit.admin_period_secs", "30"),
             ("limits.max_body_size_bytes", "65536"),
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
@@ -2292,6 +2310,8 @@ mod tests {
         assert_eq!(overridden.rate_limit.strict_period_secs, 120);
         assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
         assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(overridden.rate_limit.admin_burst_size, 7);
+        assert_eq!(overridden.rate_limit.admin_period_secs, 30);
         assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
@@ -3190,6 +3210,8 @@ mod tests {
             ("server.aggregation_uri", uri),
         ];
         if classify_app_env(environment).is_production() {
+            overrides.push(("database.backend", "sqlite"));
+            overrides.push(("database.url", "sqlite://status-list.db"));
             overrides.push(("management_auth.audiences", "status-list-server-management"));
             overrides.push((
                 "management_auth.issuers_file",
@@ -3929,5 +3951,25 @@ mod tests {
             ])
             .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
+    }
+
+    #[test]
+    fn production_refuses_memory_backend_for_static_revocation_history() {
+        let error = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot persist static key revocations")
+        );
+
+        Config::load_from_overrides(&[
+            ("telemetry.environment", "development"),
+            ("database.backend", "memory"),
+        ])
+        .expect("development may use the in-memory backend");
     }
 }

@@ -205,3 +205,20 @@ uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --i
 
 The script prompts for the token without echoing it. The first command walks
 all pages; the second displays one issuer and its ETag. Tokens are never printed.
+
+## Hosted issuer emergency actions
+
+In the hosted profile, an operator uses the admin listener with a registry admin
+JWT carrying `issuers:write`. Read the issuer and its `ETag` with
+`GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`; the issuer's next management request is blocked. A
+missing `If-Match` returns `428 precondition_required`; a stale `ETag` returns
+`412 precondition_failed`, so re-read the issuer and retry.
+To renew a sandbox issuer, send the same PATCH with `{"expires_at":<unix-seconds>}`;
+the new expiry must be after now and within 30 days. A renewed expired issuer
+becomes active unless it is suspended.
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with `If-Match` and
+`{"state":"revoked"}` permanently revokes one key; revoking an already revoked
+key returns `200` unchanged. The public status-list endpoint remains readable
+after either action.

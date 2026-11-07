@@ -39,7 +39,11 @@ use crate::server::handlers::{
 use crate::server::rate_limit::{
     AuthFailureGate, auth_failure_gate, governor_error_response, issuer_rate_limit,
 };
-use crate::server::{AppState, auth::auth, health, service_document};
+use crate::server::{
+    AppState,
+    auth::{admin_auth, auth},
+    health, service_document,
+};
 use crate::utils::metrics::metrics_handler;
 
 #[derive(Clone)]
@@ -93,7 +97,13 @@ impl HttpServer {
 
         let admin_router = with_listener_name(
             with_common_layers(
-                admin_routes(state.clone(), config, prometheus_registry, admin_governor),
+                admin_routes(
+                    state.clone(),
+                    config,
+                    prometheus_registry,
+                    admin_governor.clone(),
+                )
+                .merge(hosted_admin_routes(state.clone(), admin_governor)),
                 config,
             ),
             "admin",
@@ -289,8 +299,8 @@ fn build_governor_configs(
     );
     let admin = Arc::new(
         GovernorConfigBuilder::default()
-            .burst_size(config.permissive_burst_size)
-            .period(Duration::from_secs(config.permissive_period_secs))
+            .burst_size(config.admin_burst_size)
+            .period(Duration::from_secs(config.admin_period_secs))
             .key_extractor(PeerIpKeyExtractor)
             .finish()
             .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
@@ -342,7 +352,7 @@ fn management_routes(state: AppState, auth_gate: Arc<AuthFailureGate>) -> Router
     Router::new().nest(API_V1_PREFIX, protected)
 }
 
-/// Routes owned by the admin listener: readiness, metrics, and authenticated issuer reads.
+/// Routes owned by the admin listener: readiness and (optionally) metrics.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
 fn admin_routes(
@@ -360,7 +370,7 @@ fn admin_routes(
             "/issuers/{issuer_id}",
             get(crate::server::handlers::admin::get_issuer),
         )
-        .layer(GovernorLayer::new(admin_governor));
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response));
     let router = Router::new()
         .route("/health/ready", get(health::ready))
         .nest(
@@ -370,8 +380,36 @@ fn admin_routes(
     attach_metrics(router, config, registry)
 }
 
+/// Hosted-profile lifecycle routes on the admin listener: suspend/resume an
+/// issuer and revoke one of its keys, as `PATCH` operations on the admin
+/// issuer API. Mounted only when the hosted profile provides the lifecycle
+/// service, so the routes are structurally absent in the private profile.
+fn hosted_admin_routes(
+    state: AppState,
+    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+) -> Router<AppState> {
+    if state.hosted_lifecycle_service.is_none() {
+        return Router::new();
+    }
+    Router::new()
+        .route(
+            "/admin/v1/issuers/{issuer_id}/keys",
+            post(crate::server::handlers::hosted_lifecycle::add_issuer_key),
+        )
+        .route(
+            "/admin/v1/issuers/{issuer_id}",
+            patch(crate::server::handlers::hosted_lifecycle::update_issuer),
+        )
+        .route(
+            "/admin/v1/issuers/{issuer_id}/keys/{kid}",
+            patch(crate::server::handlers::hosted_lifecycle::revoke_issuer_key),
+        )
+        .route_layer(from_fn_with_state(state, admin_auth))
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response))
+}
+
 /// Must stay outside CatchPanicLayer so panics still count as 5xx.
-/// Health and metrics routes are skipped so probes don't skew the error-rate SLI.
+/// Health and metrics routes are skipped so probes do not skew the error-rate SLI.
 async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
@@ -1106,30 +1144,36 @@ mod tests {
         let issuer_id = uuid::Uuid::new_v4().to_string();
         let now = time::OffsetDateTime::now_utc();
         store
-            .create_issuer(HostedIssuer {
-                id: issuer_id.clone(),
-                display_name: None,
-                tier: "sandbox".into(),
-                state: HostedIssuerState::Active,
-                owner: None,
-                created_at: now,
-                expires_at: Some(now + time::Duration::days(1)),
-                version: 1,
-                aggregation_id: AggregationId::generate(),
-            })
+            .create_issuer(
+                HostedIssuer {
+                    id: issuer_id.clone(),
+                    display_name: None,
+                    tier: "sandbox".into(),
+                    state: HostedIssuerState::Active,
+                    owner: None,
+                    created_at: now,
+                    expires_at: Some(now + time::Duration::days(1)),
+                    version: 1,
+                    aggregation_id: AggregationId::generate(),
+                },
+                "test-admin",
+            )
             .await
             .unwrap();
         let jwk = test_public_jwk();
         store
-            .add_key(HostedIssuerKey {
-                kid: jwk.key_id().to_owned(),
-                issuer_id: issuer_id.clone(),
-                jwk,
-                created_at: now,
-                not_before: None,
-                not_after: None,
-                state: HostedIssuerKeyState::Active,
-            })
+            .add_key(
+                HostedIssuerKey {
+                    kid: jwk.key_id().to_owned(),
+                    issuer_id: issuer_id.clone(),
+                    jwk,
+                    created_at: now,
+                    not_before: None,
+                    not_after: None,
+                    state: HostedIssuerKeyState::Active,
+                },
+                "test-admin",
+            )
             .await
             .unwrap();
         let mut state = crate::test_utils::test_app_state(Some(db)).await;
@@ -1790,5 +1834,304 @@ mod tests {
                 && body.contains("status_class=\"5xx\""),
             "expected 5xx counter for a panicking handler; body:\n{body}"
         );
+    }
+
+    /// The lifecycle routes exist only on the admin listener and only in the
+    /// hosted profile; everywhere else the request never reaches a
+    /// lifecycle handler.
+    #[tokio::test]
+    async fn lifecycle_routes_are_mounted_only_on_the_admin_listener() {
+        use crate::domain::models::hosted_issuer::{
+            HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerState,
+        };
+        use crate::domain::ports::HostedIssuerLifecycleStore;
+        use axum::http::header;
+
+        struct UnreachableLifecycleStore;
+        #[async_trait::async_trait]
+        impl HostedIssuerLifecycleStore for UnreachableLifecycleStore {
+            async fn get_issuer(&self, _id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn set_issuer_state(
+                &self,
+                _id: &str,
+                _state: HostedIssuerState,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn revoke_key(
+                &self,
+                _issuer_id: &str,
+                _kid: &str,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuerKey, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+        }
+
+        fn admin_registry() -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
+            let public_jwk: serde_json::Value =
+                serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+            let yaml = serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [],
+                "admins": [{
+                    "id": "admin-1",
+                    "scopes": ["issuers:write"],
+                    "keys": [{
+                        "kid": "test-key",
+                        "alg": "ES256",
+                        "jwk": public_jwk,
+                    }],
+                }],
+            }))
+            .unwrap();
+            Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap(),
+            )
+        }
+
+        fn admin_token() -> String {
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+            header.typ = Some("statuslist-admin+jwt".into());
+            header.kid = Some("test-key".into());
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+                crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+            )
+            .unwrap();
+            jsonwebtoken::encode(
+                &header,
+                &serde_json::json!({
+                    "iss": "admin-1",
+                    "iat": now,
+                    "exp": now + 300,
+                    "aud": ["status-list-server-admin"],
+                }),
+                &secret,
+            )
+            .unwrap()
+        }
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (auth_gate, permissive, admin_governor) =
+            build_governor_configs(&config.rate_limit).unwrap();
+        let registry = admin_registry();
+        let mut hosted = crate::test_utils::test_app_state(None).await;
+        hosted.admin_registry = registry.clone();
+        hosted.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+        hosted.hosted_lifecycle_service = Some(Arc::new(
+            crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(Arc::new(
+                UnreachableLifecycleStore,
+            )),
+        ));
+        let mut private = crate::test_utils::test_app_state(None).await;
+        private.admin_registry = registry;
+        private.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+
+        let hosted_for_limit = hosted.clone();
+        let admin = admin_routes(
+            hosted.clone(),
+            &config,
+            Registry::new(),
+            admin_governor.clone(),
+        )
+        .merge(hosted_admin_routes(hosted.clone(), admin_governor.clone()))
+        .with_state(hosted);
+        let public = {
+            let state = crate::test_utils::test_app_state(None).await;
+            public_routes(permissive).with_state(state)
+        };
+        let management = {
+            let state = crate::test_utils::test_app_state(None).await;
+            management_routes(state.clone(), auth_gate).with_state(state)
+        };
+        let private_admin = {
+            admin_routes(
+                private.clone(),
+                &config,
+                Registry::new(),
+                admin_governor.clone(),
+            )
+            .merge(hosted_admin_routes(private.clone(), admin_governor))
+            .with_state(private)
+        };
+
+        let token = admin_token();
+        let send = |router: Router, uri: String, token: Option<&str>, body: &'static str| {
+            let mut builder = Request::builder()
+                .method(Method::PATCH)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            if let Some(token) = token {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            router.oneshot(builder.body(Body::from(body)).unwrap())
+        };
+
+        for (uri, body) in [
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001",
+                r#"{"state":"suspended"}"#,
+            ),
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001/keys/some-kid",
+                r#"{"state":"revoked"}"#,
+            ),
+        ] {
+            // Other listeners have no admin route at all.
+            let response = send(public.clone(), uri.into(), None, body).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "public listener");
+            let response = send(management.clone(), uri.into(), None, body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "management listener"
+            );
+
+            // Private profile: the issuer read route exists (GET), so a PATCH
+            // is a method-not-allowed on it, and the key route does not exist.
+            let response = send(private_admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            let expected = if uri.ends_with("/keys/some-kid") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::METHOD_NOT_ALLOWED
+            };
+            assert_eq!(
+                response.status(),
+                expected,
+                "private profile must not mount lifecycle routes"
+            );
+
+            // Hosted profile: the lifecycle handlers answer. Without the
+            // precondition the request stops at 428, never at the store.
+            let response = send(admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PRECONDITION_REQUIRED,
+                "hosted admin listener"
+            );
+        }
+
+        let limited_config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let (_, _, governor) = build_governor_configs(&limited_config.rate_limit).unwrap();
+        let limited =
+            hosted_admin_routes(hosted_for_limit.clone(), governor).with_state(hosted_for_limit);
+        let uri = "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into();
+        let body = r#"{"state":"suspended"}"#;
+        let first = send(limited.clone(), uri, Some(&token), body)
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::PRECONDITION_REQUIRED);
+        let second = send(
+            limited,
+            "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into(),
+            Some(&token),
+            body,
+        )
+        .await
+        .unwrap();
+        assert_contract_429(second).await;
+    }
+
+    #[tokio::test]
+    async fn admin_issuer_reads_are_rate_limited() {
+        use axum::http::header;
+
+        let config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let jwk: serde_json::Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{
+                "id": "read-admin",
+                "scopes": ["issuers:read"],
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": jwk}],
+            }],
+        }))
+        .unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        );
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+
+        let mut token_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        token_header.typ = Some("statuslist-admin+jwt".into());
+        token_header.kid = Some("test-key".into());
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+            crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+        )
+        .unwrap();
+        let token = jsonwebtoken::encode(
+            &token_header,
+            &serde_json::json!({
+                "iss": "read-admin",
+                "iat": now,
+                "exp": now + 300,
+                "aud": ["status-list-server-admin"],
+            }),
+            &secret,
+        )
+        .unwrap();
+
+        for (uri, expected_first) in [
+            ("/admin/v1/issuers", StatusCode::OK),
+            ("/admin/v1/issuers/missing", StatusCode::NOT_FOUND),
+        ] {
+            let (_, _, governor) = build_governor_configs(&config.rate_limit).unwrap();
+            let router = admin_routes(state.clone(), &config, Registry::new(), governor)
+                .with_state(state.clone());
+            let request = || {
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        12345,
+                    )))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let first = router.clone().oneshot(request()).await.unwrap();
+            assert_eq!(first.status(), expected_first);
+            let second = router.clone().oneshot(request()).await.unwrap();
+            assert_contract_429(second).await;
+        }
     }
 }

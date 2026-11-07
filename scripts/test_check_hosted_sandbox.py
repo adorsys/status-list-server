@@ -37,6 +37,7 @@ class SandboxScanTests(unittest.TestCase):
                 self.send_response(status)
                 if status == 302:
                     self.send_header('Location', '/health/live')
+                self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
