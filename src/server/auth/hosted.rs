@@ -257,16 +257,21 @@ pub async fn validate_static_revocation_history(
     store: &Arc<dyn HostedIssuerStore>,
     candidate: &ValidatedRegistry,
 ) -> Result<(), RegistryError> {
-    for (_, kid, material) in candidate.all_principal_keys() {
-        if store
-            .static_key_was_revoked(kid, &material)
-            .await
-            .map_err(dynamic_check_failed)?
-        {
-            return Err(RegistryError::Semantic(format!(
-                "key `{kid}` was previously revoked"
-            )));
-        }
+    let keys: Vec<_> = candidate
+        .all_principal_keys()
+        .into_iter()
+        .map(|(_, kid, material)| (kid.to_owned(), material))
+        .collect();
+    if let Some(kid) = store
+        .static_keys_were_revoked(&keys)
+        .await
+        .map_err(dynamic_check_failed)?
+        .into_iter()
+        .next()
+    {
+        return Err(RegistryError::Semantic(format!(
+            "key `{kid}` was previously revoked"
+        )));
     }
     Ok(())
 }
@@ -382,12 +387,13 @@ mod tests {
     impl HostedIssuerStore for InMemoryHostedStore {
         async fn record_static_key_revocations(
             &self,
-            revocations: &[(String, String)],
+            revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), HostedIssuerError> {
-            self.revocations
-                .lock()
-                .await
-                .extend(revocations.iter().cloned());
+            self.revocations.lock().await.extend(
+                revocations
+                    .iter()
+                    .map(|revocation| (revocation.kid.clone(), revocation.material.clone())),
+            );
             Ok(())
         }
 
@@ -701,7 +707,10 @@ mod tests {
         let mut revoked = key("old-static-kid");
         let material = revoked.jwk.normalized_material().unwrap();
         store
-            .record_static_key_revocations(&[(revoked.kid.clone(), material)])
+            .record_static_key_revocations(&[crate::domain::ports::StaticKeyRevocation {
+                kid: revoked.kid.clone(),
+                material,
+            }])
             .await
             .unwrap();
 
@@ -714,6 +723,39 @@ mod tests {
         )
         .await;
 
+        assert!(matches!(result, Err(HostedIssuerError::KeyMaterialReused)));
+    }
+
+    #[tokio::test]
+    async fn registry_revocation_blocks_hosted_registration_of_the_same_material() {
+        let mut revoked_jwk: serde_json::Value = serde_json::from_str(EC_JWK).unwrap();
+        revoked_jwk["kid"] = "old-static-kid".into();
+        let registry = RegistryHandle::from_yaml(
+            &serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [],
+                "admins": [],
+                "revoked_keys": [{
+                    "kid": "old-static-kid",
+                    "alg": "ES256",
+                    "jwk": revoked_jwk,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
+        record_static_revocation_history(&store, &registry.snapshot())
+            .await
+            .unwrap();
+
+        let result = register_hosted_issuer_key(
+            &registry,
+            &store,
+            key_with_material("new-hosted-kid", EC_JWK),
+            "portal-operator",
+        )
+        .await;
         assert!(matches!(result, Err(HostedIssuerError::KeyMaterialReused)));
     }
 
@@ -879,7 +921,7 @@ mod tests {
     impl HostedIssuerStore for GatedStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }
@@ -1170,7 +1212,7 @@ mod tests {
     impl HostedIssuerStore for FailingHostedStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }
@@ -1289,7 +1331,7 @@ mod tests {
     impl HostedIssuerStore for CorruptHostedStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }
@@ -1407,7 +1449,7 @@ mod tests {
     #[tokio::test]
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer() {
         let db = crate::test_utils::sqlite_test_db(None).await;
-        publish_first_list_flow(db, "SQLite").await;
+        publish_first_list_flow(db.clone(), db, "SQLite").await;
     }
 
     #[cfg(all(feature = "memory", feature = "postgres-tests"))]
@@ -1415,7 +1457,8 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_postgres() {
         use crate::outbound::sql::test_containers::postgres_helpers;
         let test_db = postgres_helpers::postgres_connection().await;
-        publish_first_list_flow(test_db.db.clone(), "Postgres").await;
+        let second = Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 1).await);
+        publish_first_list_flow(test_db.db.clone(), second, "Postgres").await;
     }
 
     #[cfg(all(feature = "memory", feature = "mysql"))]
@@ -1423,7 +1466,12 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_mysql() {
         use crate::outbound::sql::test_containers::mysql_helpers;
         let test_db = mysql_helpers::MysqlTestDb::start().await;
-        publish_first_list_flow(test_db.connection().await, "MySQL").await;
+        publish_first_list_flow(
+            test_db.connection().await,
+            test_db.connection().await,
+            "MySQL",
+        )
+        .await;
     }
 
     /// The public half of a second EC pair, distinct from `key()`'s, so the
@@ -1452,6 +1500,7 @@ mod tests {
     ))]
     async fn publish_first_list_flow(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
+        second_db: std::sync::Arc<sea_orm::DatabaseConnection>,
         backend: &str,
     ) {
         use axum::{
@@ -1465,7 +1514,10 @@ mod tests {
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
+        let mut sandbox = issuer();
+        sandbox.tier = "sandbox".into();
+        sandbox.expires_at = Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1));
+        let hosted = register_hosted_issuer(&registry, &store, sandbox, "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal issuer on {backend}: {e}"));
         register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
@@ -1480,13 +1532,13 @@ mod tests {
             registry,
             Some(store.clone()),
         ));
-        let mut other_state = crate::test_utils::test_app_state(Some(db.clone())).await;
+        let mut other_state = crate::test_utils::test_app_state(Some(second_db.clone())).await;
         let other_registry = Arc::new(RegistryHandle::empty());
         other_state.set_issuer_registry(other_registry.clone());
         other_state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
             other_registry,
             Some(Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(
-                db.clone(),
+                second_db,
             ))),
         ));
 

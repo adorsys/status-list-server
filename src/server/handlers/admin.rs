@@ -161,9 +161,7 @@ struct IssuerKeyWriteVersion<'a> {
 pub(crate) fn issuer_write_version(issuer: &IssuerDto) -> String {
     use sha2::{Digest, Sha256};
     if let Some(version) = issuer.persisted_version {
-        return hex::encode(Sha256::digest(
-            format!("{}:{version}", issuer.id).as_bytes(),
-        ));
+        return hosted_issuer_write_version(&issuer.id, version);
     }
     let write_state = IssuerWriteVersion {
         id: &issuer.id,
@@ -190,6 +188,12 @@ pub(crate) fn issuer_write_version(issuer: &IssuerDto) -> String {
     let bytes = serde_json::to_vec(&write_state).expect("issuer write state serializes");
     hex::encode(Sha256::digest(bytes))
 }
+
+pub(crate) fn hosted_issuer_write_version(id: &str, version: u64) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(format!("{id}:{version}").as_bytes()))
+}
+
 #[derive(Debug, Serialize)]
 pub struct IssuerPage {
     issuers: Vec<IssuerDto>,
@@ -719,7 +723,7 @@ mod tests {
     impl crate::domain::ports::HostedIssuerStore for MutableHostedStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }

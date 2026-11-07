@@ -8,7 +8,8 @@
 use async_trait::async_trait;
 use sea_orm::{
     ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, Order, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, sea_query::Expr,
+    QueryFilter, QueryOrder, QuerySelect, Set,
+    sea_query::{Expr, OnConflict},
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -320,11 +321,6 @@ fn material_hash(material: &str) -> String {
     hex::encode(Sha256::digest(material.as_bytes()))
 }
 
-fn static_revocation_hash(material: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(material.as_bytes()))
-}
-
 /// The JOSE `alg` name for a validated management key. `PublicJwk` restricts
 /// the algorithm to this set, so the `alg` column stores a stable data contract
 /// rather than a `Debug` representation.
@@ -465,8 +461,14 @@ impl SeaOrmStore<HostedIssuerRow> {
             let issuer = issuers::Entity::find_by_id(&key.issuer_id)
                 .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
                 .one(&txn)
-                .await
-                .map_err(err_txn)?;
+                .await;
+            let issuer = match issuer {
+                Ok(issuer) => issuer,
+                Err(error) => {
+                    rollback_quietly(txn).await;
+                    return Err(err_txn(error));
+                }
+            };
             let Some(issuer) = issuer else {
                 txn.rollback().await.ok();
                 return Err(RepositoryError::NotFound);
@@ -524,7 +526,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                         actor,
                         "key.registered",
                         None,
-                        Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str()})),
+                        Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str(), "version": issuer.version + 1})),
                     )
                     .await
                     {
@@ -757,52 +759,57 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 impl HostedIssuerStore for SqlHostedIssuerStore {
     async fn record_static_key_revocations(
         &self,
-        revocations: &[(String, String)],
+        revocations: &[crate::domain::ports::StaticKeyRevocation],
     ) -> Result<(), HostedIssuerError> {
-        use sea_orm::TransactionTrait;
-
+        if revocations.is_empty() {
+            return Ok(());
+        }
         let db = self.store.current();
-        let txn = db.begin().await.map_err(find_err)?;
-        for (kid, material) in revocations {
-            let material_hash = static_revocation_hash(material);
-            let existing = static_key_revocations::Entity::find_by_id(kid)
-                .one(&txn)
-                .await
-                .map_err(find_err);
-            let existing = match existing {
-                Ok(existing) => existing,
-                Err(error) => {
-                    rollback_quietly(txn).await;
-                    return Err(error.into());
-                }
-            };
-            if let Some(existing) = existing {
-                if existing.material != material_hash {
+        let txn = begin_read_committed(&db).await.map_err(find_err)?;
+        let rows = revocations
+            .iter()
+            .map(|revocation| static_key_revocations::ActiveModel {
+                kid: Set(revocation.kid.clone()),
+                material: Set(material_hash(&revocation.material)),
+            });
+        let inserted = static_key_revocations::Entity::insert_many(rows)
+            .on_conflict(
+                OnConflict::column(static_key_revocations::Column::Kid)
+                    .do_nothing_on([static_key_revocations::Column::Kid])
+                    .to_owned(),
+            )
+            .exec_without_returning(&txn)
+            .await;
+        if let Err(error) = inserted {
+            rollback_quietly(txn).await;
+            return Err(hosted_error(map_insert_err(error)));
+        }
+        let kids: Vec<_> = revocations.iter().map(|entry| entry.kid.clone()).collect();
+        let existing = static_key_revocations::Entity::find()
+            .filter(static_key_revocations::Column::Kid.is_in(kids))
+            .all(&txn)
+            .await;
+        let existing = match existing {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| (row.kid, row.material))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                rollback_quietly(txn).await;
+                return Err(find_err(error).into());
+            }
+        };
+        for revocation in revocations {
+            match existing.get(&revocation.kid) {
+                Some(hash) if *hash == material_hash(&revocation.material) => {}
+                Some(_) => {
                     rollback_quietly(txn).await;
                     return Err(HostedIssuerError::AlreadyExists);
                 }
-                continue;
-            }
-            let inserted =
-                static_key_revocations::Entity::insert(static_key_revocations::ActiveModel {
-                    kid: Set(kid.clone()),
-                    material: Set(material_hash.clone()),
-                })
-                .exec_without_returning(&txn)
-                .await;
-            if let Err(error) = inserted {
-                if is_unique_violation(&error)
-                    && static_key_revocations::Entity::find_by_id(kid)
-                        .one(&txn)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some_and(|row| row.material == material_hash)
-                {
-                    continue;
+                None => {
+                    rollback_quietly(txn).await;
+                    return Err(HostedIssuerError::Unavailable);
                 }
-                rollback_quietly(txn).await;
-                return Err(hosted_error(map_insert_err(error)));
             }
         }
         txn.commit().await.map_err(find_err)?;
@@ -814,7 +821,7 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         kid: &str,
         material: &str,
     ) -> Result<bool, HostedIssuerError> {
-        let material_hash = static_revocation_hash(material);
+        let material_hash = material_hash(material);
         static_key_revocations::Entity::find()
             .filter(
                 Condition::any()
@@ -826,6 +833,39 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .map(|row| row.is_some())
             .map_err(find_err)
             .map_err(Into::into)
+    }
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kids: Vec<_> = keys.iter().map(|(kid, _)| kid.clone()).collect();
+        let hashes: Vec<_> = keys
+            .iter()
+            .map(|(_, material)| material_hash(material))
+            .collect();
+        let rows = static_key_revocations::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(static_key_revocations::Column::Kid.is_in(kids))
+                    .add(static_key_revocations::Column::Material.is_in(hashes)),
+            )
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?;
+        let revoked_kids: HashSet<_> = rows.iter().map(|row| row.kid.as_str()).collect();
+        let revoked_materials: HashSet<_> = rows.iter().map(|row| row.material.as_str()).collect();
+        Ok(keys
+            .iter()
+            .filter(|(kid, material)| {
+                let hash = material_hash(material);
+                revoked_kids.contains(kid.as_str()) || revoked_materials.contains(hash.as_str())
+            })
+            .map(|(kid, _)| kid.clone())
+            .collect())
     }
 
     async fn list_issuers_after(
@@ -1025,9 +1065,8 @@ async fn append_lifecycle_audit(
 #[async_trait]
 impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
     async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError> {
-        load_issuer(issuer_id, self.store.current().as_ref())
-            .await
-            .map_err(HostedIssuerError::from)?
+        self.find_issuer(issuer_id)
+            .await?
             .ok_or(HostedIssuerError::NotFound)
     }
 
@@ -1257,8 +1296,8 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
             issuer_id,
             actor,
             "key.revoked",
-            Some(serde_json::json!({"kid": kid, "state": row.state})),
-            Some(serde_json::json!({"kid": kid, "state": "revoked"})),
+            Some(serde_json::json!({"kid": kid, "state": row.state, "version": owner.version})),
+            Some(serde_json::json!({"kid": kid, "state": "revoked", "version": next_version})),
         )
         .await
         {

@@ -46,7 +46,7 @@ pub struct HostedIssuer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostedIssuerEffectiveState {
+pub enum HostedIssuerReadState {
     Active,
     Suspended,
     Expired,
@@ -56,29 +56,25 @@ impl HostedIssuer {
     /// Expiry is derived at verification time, without a cleanup job.
     /// Suspension wins over expiry so an operator never sees a suspended
     /// issuer reported as merely expired.
-    pub fn effective_state(&self, now: OffsetDateTime) -> HostedIssuerEffectiveState {
+    pub fn effective_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
         if self.state == HostedIssuerState::Suspended {
-            HostedIssuerEffectiveState::Suspended
+            HostedIssuerReadState::Suspended
         } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
-            HostedIssuerEffectiveState::Expired
+            HostedIssuerReadState::Expired
         } else {
-            HostedIssuerEffectiveState::Active
+            HostedIssuerReadState::Active
         }
     }
 
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.effective_state(now) == HostedIssuerEffectiveState::Active
+        self.effective_state(now) == HostedIssuerReadState::Active
     }
 
     /// Admin-visible lifecycle at the supplied instant.
     pub fn read_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
-        match self.effective_state(now) {
-            HostedIssuerEffectiveState::Active => HostedIssuerReadState::Active,
-            HostedIssuerEffectiveState::Suspended => HostedIssuerReadState::Suspended,
-            HostedIssuerEffectiveState::Expired => HostedIssuerReadState::Expired,
-        }
+        self.effective_state(now)
     }
 }
 
@@ -88,14 +84,6 @@ pub struct HostedIssuerFilter {
     pub tier: Option<String>,
     pub state: Option<HostedIssuerReadState>,
     pub owner: Option<String>,
-}
-
-/// Admin-visible lifecycle derived from persisted state and expiry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostedIssuerReadState {
-    Active,
-    Suspended,
-    Expired,
 }
 
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
@@ -328,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             entry.issuer.effective_state(now()),
-            HostedIssuerEffectiveState::Expired
+            HostedIssuerReadState::Expired
         );
         assert!(matches!(
             entry.resolved_key(now()),
@@ -346,7 +334,7 @@ mod tests {
         );
         assert_eq!(
             entry.issuer.effective_state(now()),
-            HostedIssuerEffectiveState::Suspended
+            HostedIssuerReadState::Suspended
         );
     }
 

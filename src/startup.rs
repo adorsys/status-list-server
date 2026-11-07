@@ -660,7 +660,7 @@ mod tests {
         use axum::body::to_bytes;
 
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
         let public = public_routes(permissive).with_state(state);
 
@@ -706,7 +706,7 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let router = public_routes(permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)

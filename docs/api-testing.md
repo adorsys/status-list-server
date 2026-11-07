@@ -18,9 +18,10 @@ The environment exposes these variables:
 | `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
 | `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
 | `issuer_id`       | `my-issuer`                            | Issuer identifier generated for the temporary Newman test key.         |
+| `adminToken`      | empty                                  | Signed admin JWT with registry-granted `issuers:read`.                 |
 | `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
 | `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
-| `adminUrl`        | `http://localhost:8002`                | Admin listener for issuer lifecycle requests.                         |
+| `adminUrl`        | `http://localhost:8002`                | Admin listener used by health, metrics, and read-only Admin API requests. |
 
 The collection is organized into Health & Metrics, Status Lists, Aggregation,
 and Admin API (Issuer Management) folders. Requests include Postman test scripts that check

@@ -2307,6 +2307,87 @@ mod general_tests {
         }
 
         #[tokio::test]
+        async fn live_reload_rejects_restored_static_key_after_revocation() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let active_registry = registry_yaml(uuid::Uuid::new_v4());
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+            let state = build_state(&startable.config(&overrides)).await.unwrap();
+            let registry = Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::load(&registry_path).unwrap(),
+            );
+            let connection = sea_orm::Database::connect(&database).await.unwrap();
+            let revocation_store: Arc<dyn crate::domain::ports::HostedIssuerStore> = Arc::new(
+                crate::outbound::sql::SqlHostedIssuerStore::new(Arc::new(connection)),
+            );
+            spawn_issuer_registry_watcher(
+                registry.clone(),
+                state.service,
+                None,
+                Some(revocation_store),
+                registry_path.clone(),
+                Duration::from_secs(1),
+                RegistryWatcherAuthValidation {
+                    environment: crate::config::TelemetryEnvironment::Development,
+                    admin_audiences: Vec::new(),
+                    management_audiences: Vec::new(),
+                },
+            );
+
+            let mut revoked_registry: serde_json::Value =
+                serde_saphyr::from_str(&active_registry).unwrap();
+            let key = revoked_registry["issuers"][0]["keys"][0].take();
+            revoked_registry["issuers"][0]["keys"] = serde_json::json!([{
+                "kid": "another-active-key",
+                "alg": "ES256",
+                "jwk": {
+                    "kty": "EC", "crv": "P-256",
+                    "x": "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY",
+                    "y": "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+                }
+            }]);
+            revoked_registry["revoked_keys"] = serde_json::json!([key]);
+            std::fs::write(
+                &registry_path,
+                serde_saphyr::to_string(&revoked_registry).unwrap(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while !registry
+                    .snapshot()
+                    .has_revoked_kid("058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50")
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("live reload did not accept the revocation");
+
+            let failures = registry.reload_failure_count();
+            std::fs::write(&registry_path, active_registry).unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while registry.reload_failure_count() == failures {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("live reload did not reject the restored key");
+            assert!(
+                registry
+                    .snapshot()
+                    .has_revoked_kid("058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50")
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[tokio::test]
         async fn rejected_registry_does_not_record_static_revocations() {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let startable = Startable::new().await;
@@ -3042,7 +3123,7 @@ mod general_tests {
     impl HostedIssuerStore for ProbeStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }

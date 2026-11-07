@@ -85,22 +85,7 @@ impl HostedIssuerService {
         input: NewHostedIssuerKey,
         actor: &str,
     ) -> Result<HostedIssuerKey, HostedIssuerError> {
-        let kid = key_thumbprint(&input.jwk)?;
-        let mut map = input.jwk;
-        map.insert("kid".into(), serde_json::Value::String(kid.clone()));
-        let bytes = serde_json::to_vec(&map)
-            .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
-        let jwk = PublicJwk::try_new(bytes)
-            .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
-        let key = HostedIssuerKey {
-            kid,
-            issuer_id: input.issuer_id,
-            jwk,
-            created_at: (self.clock)(),
-            not_before: input.not_before,
-            not_after: input.not_after,
-            state: HostedIssuerKeyState::Active,
-        };
+        let key = self.build_key(input)?;
         register_hosted_issuer_key(registry, &self.store, key.clone(), actor).await?;
         Ok(key)
     }
@@ -114,6 +99,19 @@ impl HostedIssuerService {
         expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuerKey, HostedIssuerError> {
+        let key = self.build_key(input)?;
+        register_hosted_issuer_key_if_version(
+            registry,
+            &self.store,
+            key.clone(),
+            expected_version,
+            actor,
+        )
+        .await?;
+        Ok(key)
+    }
+
+    fn build_key(&self, input: NewHostedIssuerKey) -> Result<HostedIssuerKey, HostedIssuerError> {
         let kid = key_thumbprint(&input.jwk)?;
         let mut map = input.jwk;
         map.insert("kid".into(), serde_json::Value::String(kid.clone()));
@@ -130,14 +128,6 @@ impl HostedIssuerService {
             not_after: input.not_after,
             state: HostedIssuerKeyState::Active,
         };
-        register_hosted_issuer_key_if_version(
-            registry,
-            &self.store,
-            key.clone(),
-            expected_version,
-            actor,
-        )
-        .await?;
         Ok(key)
     }
 }
@@ -243,7 +233,7 @@ mod tests {
     impl HostedIssuerStore for RecordingStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }

@@ -25,6 +25,12 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
     async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticKeyRevocation {
+    pub kid: String,
+    pub material: String,
+}
+
 /// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
 /// is looked up by its `kid` primary key with no cache: every resolution reads
 /// the row, so revocation takes effect on the next request (ADR 0002, no
@@ -35,7 +41,7 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// revoked key after rollback or restart.
     async fn record_static_key_revocations(
         &self,
-        revocations: &[(String, String)],
+        revocations: &[StaticKeyRevocation],
     ) -> Result<(), HostedIssuerError>;
 
     /// Check whether either the key id or normalized key material was revoked
@@ -45,6 +51,19 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
         kid: &str,
         material: &str,
     ) -> Result<bool, HostedIssuerError>;
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        let mut revoked = Vec::new();
+        for (kid, material) in keys {
+            if self.static_key_was_revoked(kid, material).await? {
+                revoked.push(kid.clone());
+            }
+        }
+        Ok(revoked)
+    }
 
     /// Return a bounded page ordered by issuer id, strictly after `after`.
     async fn list_issuers_after(

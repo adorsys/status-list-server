@@ -3210,6 +3210,8 @@ mod tests {
             ("server.aggregation_uri", uri),
         ];
         if classify_app_env(environment).is_production() {
+            overrides.push(("database.backend", "sqlite"));
+            overrides.push(("database.url", "sqlite://status-list.db"));
             overrides.push(("management_auth.audiences", "status-list-server-management"));
             overrides.push((
                 "management_auth.issuers_file",

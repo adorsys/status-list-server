@@ -19,8 +19,8 @@ use crate::server::{
     auth::AuthenticatedAdmin,
     error::ApiError,
     handlers::admin::{
-        hosted_dto, hosted_store_error, issuer_etag, issuer_write_version, key_from_hosted,
-        require_scope,
+        hosted_dto, hosted_issuer_write_version, hosted_store_error, issuer_etag,
+        issuer_write_version, key_from_hosted, require_scope,
     },
 };
 
@@ -78,6 +78,14 @@ fn precondition_required() -> ApiError {
     )
 }
 
+fn conflicting_preconditions() -> ApiError {
+    error(
+        StatusCode::BAD_REQUEST,
+        "invalid_input",
+        "send only one of If-Issuer-Version or If-Match",
+    )
+}
+
 fn precondition_failed(current_etag: String, current_version: String) -> ApiError {
     ApiError::with_header(
         error(
@@ -114,7 +122,7 @@ fn if_match_value(headers: &HeaderMap) -> Result<IssuerPrecondition<'_>, ApiErro
     let version = headers.get(HeaderName::from_static("if-issuer-version"));
     let etag = headers.get(header::IF_MATCH);
     match (version, etag) {
-        (Some(_), Some(_)) => Err(precondition_required()),
+        (Some(_), Some(_)) => Err(conflicting_preconditions()),
         (Some(value), None) => value
             .to_str()
             .map(|value| IssuerPrecondition::Version(value.trim()))
@@ -186,9 +194,8 @@ async fn load_issuer_for_update(
                 "no issuer has this id",
             )
         })?;
-    let dto = hosted_dto(state, issuer.clone()).await?;
-    let version = issuer_write_version(&dto);
-    let etag = issuer_etag(&dto);
+    let version = hosted_issuer_write_version(&issuer.id, issuer.version);
+    let etag = format!("\"{version}\"");
     Ok((issuer, etag, version))
 }
 
@@ -202,10 +209,6 @@ fn lifecycle_error(error: HostedIssuerError) -> ApiError {
         }
         HostedIssuerError::Contention { .. } => ApiError::write_contention(),
         HostedIssuerError::Unavailable => service_unavailable(),
-        HostedIssuerError::VersionMismatch => ApiError::conflict(
-            "issuer_version_mismatch",
-            "Issuer version changed; read the current state before retrying",
-        ),
         other => {
             tracing::error!(error = %other, "hosted lifecycle write failed");
             ApiError::internal("hosted lifecycle write failed")
@@ -591,7 +594,7 @@ mod tests {
     impl HostedIssuerStore for FakeLifecycleStore {
         async fn record_static_key_revocations(
             &self,
-            _revocations: &[(String, String)],
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             Ok(())
         }
@@ -1055,6 +1058,33 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_json(response).await["state"], "active");
+    }
+
+    #[tokio::test]
+    async fn both_precondition_headers_are_invalid_input() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer(
+            "portal-issuer",
+            Some(service_now() + time::Duration::days(30)),
+        ));
+        let response = app
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/admin/v1/issuers/portal-issuer")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", write_token()))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("If-Match", "\"etag\"")
+                    .header("If-Issuer-Version", "1")
+                    .body(Body::from(r#"{"state":"suspended"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response).await["error"], "invalid_input");
     }
 
     #[tokio::test]

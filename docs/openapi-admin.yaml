@@ -200,8 +200,8 @@ paths:
           $ref: "#/components/responses/InsufficientScope"
         "409":
           description: |
-            `dynamic_issuers_disabled` — the server runs the `private`
-            profile. `key_material_in_use` — `public_key` is already
+            `dynamic_issuers_disabled`: the server runs the `private`
+            profile. `key_material_in_use`: `public_key` is already
             registered for another issuer or admin.
           headers:
             Cache-Control:
@@ -307,8 +307,8 @@ paths:
           $ref: "#/components/responses/IssuerNotFound"
         "409":
           description: |
-            `issuer_managed_by_configuration` — the issuer is static.
-            `write_contention` — a concurrent database writer held a lock; retry.
+            `issuer_managed_by_configuration`: the issuer is static.
+            `write_contention`: a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -319,7 +319,7 @@ paths:
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry` — `expires_at` is in the past or beyond the tier's maximum lifetime."
+          description: "`invalid_expiry`: `expires_at` is in the past or beyond the tier's maximum lifetime."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -388,10 +388,10 @@ paths:
           $ref: "#/components/responses/IssuerNotFound"
         "409":
           description: |
-            `issuer_managed_by_configuration` — the issuer is static.
-            `key_limit_reached` — the tier's `max_keys` non-revoked keys
-            already exist; revoke one first. `key_material_in_use` — the key
-            is already registered for any issuer or admin. `write_contention` —
+            `issuer_managed_by_configuration`: the issuer is static.
+            `key_limit_reached`: the tier's `max_keys` non-revoked keys
+            already exist; revoke one first. `key_material_in_use`: the key
+            is already registered for any issuer or admin. `write_contention`:
             a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
@@ -481,8 +481,8 @@ paths:
                 error_description: "the issuer has no key with this kid"
         "409":
           description: |
-            `issuer_managed_by_configuration` — the issuer is static.
-            `write_contention` — a concurrent database writer held a lock; retry.
+            `issuer_managed_by_configuration`: the issuer is static.
+            `write_contention`: a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"
@@ -535,7 +535,7 @@ components:
       name: If-Issuer-Version
       in: header
       required: false
-      description: The current `Issuer-Version` returned by the issuer detail endpoint. Required unless `If-Match` is sent.
+      description: The current `Issuer-Version` returned by the issuer detail endpoint. Required when `If-Match` is absent; send this header or `If-Match`, never both.
       schema:
         type: string
         example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -543,7 +543,7 @@ components:
       name: If-Match
       in: header
       required: false
-      description: The quoted detail `ETag`. Required unless `If-Issuer-Version` is sent.
+      description: The quoted detail `ETag`. Required when `If-Issuer-Version` is absent; send this header or `If-Issuer-Version`, never both.
       schema:
         type: string
         example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
@@ -833,7 +833,7 @@ components:
 
   responses:
     InvalidQuery:
-      description: "`invalid_query` — a filter, `limit` or `cursor` is invalid."
+      description: "`invalid_query`: a filter, `limit` or `cursor` is invalid."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -846,9 +846,9 @@ components:
             error_description: "limit must be between 1 and 100"
     InvalidInput:
       description: |
-        `invalid_input` — the body is not valid JSON, misses a required
-        member, contains a member the caller may not set, or the issuer path
-        parameter is not valid UTF-8.
+        `invalid_input`: the body is not valid JSON, misses a required
+        member, contains a member the caller may not set, sends both issuer
+        precondition headers, or the issuer path parameter is not valid UTF-8.
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -878,7 +878,7 @@ components:
             error: "invalid_token"
             error_description: "Invalid authentication token"
     InsufficientScope:
-      description: "`insufficient_scope` — valid admin token, but its principal lacks the scope (RFC 6750 §3.1)."
+      description: "`insufficient_scope`: valid admin token, but its principal lacks the scope (RFC 6750 §3.1)."
       headers:
         WWW-Authenticate:
           description: 'For example `Bearer error="insufficient_scope", scope="issuers:write"`.'
@@ -894,7 +894,7 @@ components:
             error: "insufficient_scope"
             error_description: "issuers:write is required"
     IssuerNotFound:
-      description: "`issuer_not_found` — no issuer has this id."
+      description: "`issuer_not_found`: no issuer has this id."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -906,7 +906,7 @@ components:
             error: "issuer_not_found"
             error_description: "no issuer has this id"
     ManagedByConfiguration:
-      description: "`issuer_managed_by_configuration` — the issuer is static; change the registry file instead."
+      description: "`issuer_managed_by_configuration`: the issuer is static; change the registry file instead."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -918,7 +918,7 @@ components:
             error: "issuer_managed_by_configuration"
             error_description: "static issuers are changed through the registry file"
     PreconditionFailed:
-      description: "`precondition_failed` — the supplied issuer validator is stale."
+      description: "`precondition_failed`: the supplied issuer validator is stale."
       headers:
         ETag:
           $ref: "#/components/headers/ETag"
@@ -934,7 +934,7 @@ components:
             error: "precondition_failed"
             error_description: "the issuer changed; re-read it and retry"
     PreconditionRequired:
-      description: "`precondition_required` — both `If-Issuer-Version` and `If-Match` are missing."
+      description: "`precondition_required`: both `If-Issuer-Version` and `If-Match` are missing."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -946,7 +946,7 @@ components:
             error: "precondition_required"
             error_description: "send If-Issuer-Version or If-Match from the issuer detail response"
     PayloadTooLarge:
-      description: "`payload_too_large` — the body exceeds `limits.max_body_size_bytes`."
+      description: "`payload_too_large`: the body exceeds `limits.max_body_size_bytes`."
       headers:
         Cache-Control:
           $ref: "#/components/headers/CacheControl"
@@ -958,9 +958,9 @@ components:
             error: "payload_too_large"
     UnprocessableKey:
       description: |
-        `invalid_public_jwk` — not a public key the registry accepts
+        `invalid_public_jwk`: not a public key the registry accepts
         (symmetric, private members, wrong curve, RSA modulus under 2048
-        bits). `unsupported_algorithm` — `alg` is outside the allowlist or
+        bits). `unsupported_algorithm`: `alg` is outside the allowlist or
         does not match the key type.
       headers:
         Cache-Control:
@@ -973,7 +973,7 @@ components:
             error: "invalid_public_jwk"
             error_description: "private key members are not accepted"
     TooManyRequests:
-      description: "`too_many_requests` — the admin peer-IP budget is exhausted. Retry after the indicated number of seconds."
+      description: "`too_many_requests`: the admin peer-IP budget is exhausted. Retry after the indicated number of seconds."
       headers:
         Retry-After:
           description: Minimum number of seconds before retrying.
@@ -1000,7 +1000,7 @@ components:
           example:
             error: "internal_error"
     ServiceUnavailable:
-      description: "`service_unavailable` — the issuer store is unreachable. Retry later."
+      description: "`service_unavailable`: the issuer store is unreachable. Retry later."
       headers:
         Retry-After:
           schema:

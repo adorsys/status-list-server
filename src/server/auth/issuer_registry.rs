@@ -407,7 +407,6 @@ impl IssuerRegistry {
                     Arc::new(ResolvedKey {
                         principal: Principal::Admin {
                             id: admin.id.clone(),
-                            scopes: admin.scopes.clone(),
                         },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !admin.disabled,
@@ -555,14 +554,19 @@ impl ValidatedRegistry {
 
     /// Revoked key identifiers and normalized public-key materials from this
     /// registry snapshot, ready to persist in the shared trust store.
-    pub fn revoked_keys(&self) -> Result<Vec<(String, String)>, RegistryError> {
+    pub fn revoked_keys(
+        &self,
+    ) -> Result<Vec<crate::domain::ports::StaticKeyRevocation>, RegistryError> {
         self.registry
             .revoked_keys
             .iter()
             .map(|key| {
                 let material = crate::domain::models::credential::canonical_jwk_material(&key.jwk)
                     .map_err(|error| RegistryError::Semantic(error.to_string()))?;
-                Ok((key.kid.clone(), material))
+                Ok(crate::domain::ports::StaticKeyRevocation {
+                    kid: key.kid.clone(),
+                    material,
+                })
             })
             .collect()
     }
