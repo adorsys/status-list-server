@@ -320,8 +320,7 @@ impl Service {
         self.status_list_repo.count_by_issuer(issuer).await
     }
 
-    /// Count lists for a page of issuer IDs using a grouped repository query
-    /// where the storage adapter supports it.
+    /// Count lists for a page of issuer IDs with one grouped query where supported.
     pub async fn issuer_status_list_counts(
         &self,
         issuers: &[String],

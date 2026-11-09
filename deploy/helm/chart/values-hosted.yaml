@@ -36,7 +36,6 @@ statuslist:
     # Set the dedicated controller pods' addresses or CIDR in the site overlay.
     APP_RATE_LIMIT__TRUSTED_PROXIES: ""
     # Public reads share one bucket per controller pod, so raise it for the edge limit.
-    # The admin API limiter reads these settings too, lifting its per-peer limit.
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100000000"
     APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "1"
   issuerRegistry:

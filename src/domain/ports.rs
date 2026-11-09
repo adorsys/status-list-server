@@ -25,12 +25,46 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
     async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticKeyRevocation {
+    pub kid: String,
+    pub material: String,
+}
+
 /// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
 /// is looked up by its `kid` primary key with no cache: every resolution reads
 /// the row, so revocation takes effect on the next request (ADR 0002, no
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Persist static-key revocations so registry snapshots cannot restore a
+    /// revoked key after rollback or restart.
+    async fn record_static_key_revocations(
+        &self,
+        revocations: &[StaticKeyRevocation],
+    ) -> Result<(), HostedIssuerError>;
+
+    /// Check whether either the key id or normalized key material was revoked
+    /// from the static registry.
+    async fn static_key_was_revoked(
+        &self,
+        kid: &str,
+        material: &str,
+    ) -> Result<bool, HostedIssuerError>;
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        let mut revoked = Vec::new();
+        for (kid, material) in keys {
+            if self.static_key_was_revoked(kid, material).await? {
+                revoked.push(kid.clone());
+            }
+        }
+        Ok(revoked)
+    }
+
     /// Return a bounded page ordered by issuer id, strictly after `after`.
     async fn list_issuers_after(
         &self,
@@ -66,10 +100,22 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// mapping in one unit; both rows commit or neither does. Returns the
     /// stored issuer: an aggregation ID that collided with one already in use
     /// was regenerated server-side, because identifiers are server-assigned.
-    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError>;
+    async fn create_issuer(
+        &self,
+        issuer: HostedIssuer,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
 
     /// Register a signing key for an existing hosted issuer.
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
+
+    /// Register a signing key only while the issuer is still at `expected_version`.
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<(), HostedIssuerError>;
 
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
@@ -92,6 +138,29 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Used by the startup/reload warning path so it does not run one
     /// `find_issuer` per owner.
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;
+}
+
+/// Durable lifecycle changes for hosted issuers. Each method commits the state
+/// transition and its audit record in one transaction.
+#[async_trait]
+pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
+    async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError>;
 }
 
 /// Public aggregation mappings supplied by the active issuer source.
@@ -142,8 +211,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Count all lists owned by one issuer, including during quota transitions.
     async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError>;
 
-    /// Count lists for a page of issuers, allowing SQL adapters to group the
-    /// counts into one query.
+    /// Count lists for a page of issuers, allowing SQL adapters to group the counts.
     async fn count_by_issuers(
         &self,
         issuers: &[String],

@@ -45,6 +45,8 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 
 ## Configure Your Secrets
 
+Static-key revocations are recorded in the configured SQL database, shared by all replicas and included in the normal database backup and migration process. No additional writable volume is required.
+
 The application Secret is always named `statuslist-secret`. The chart-managed fallback Secret and default ExternalSecret publish the database password under both `database-password` and the legacy `postgres-password` key.
 
 There are two secret delivery modes, and the chart rejects enabling both at once.
