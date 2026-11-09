@@ -11,7 +11,7 @@ organized around the four operational areas that account for most incidents:
 5. [Status List Quota](#status-list-quota)
 
 Object names below follow the production release (`statuslist` in namespace
-`statuslist-production`). Substitute your release/namespace for other deployments.
+`statuslist`). Substitute your release/namespace for other deployments.
 
 | Standard object    | Kubernetes name                                |
 | ------------------ | ---------------------------------------------- |
@@ -65,12 +65,12 @@ small closed set (`connection`, `connection_acquire`, `execution`, `query`, `con
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=200
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist
 # What host/port is the pod actually talking to?
-kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production -o jsonpath='{.items[*].spec.containers[*].env}'
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist -o jsonpath='{.items[*].spec.containers[*].env}'
 # The password is mounted as a file; confirm the mount and its key names (never the value):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
@@ -80,7 +80,7 @@ kubectl get secret statuslist-secret -n statuslist-production \
   `nc`), so attach a temporary debug container with a utility image instead of `exec`:
 
   ```bash
-  kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist-production \
+  kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist \
     --image=alpine -- sh -c 'command -v nc || apk add --no-cache netcat-openbsd; nc -vz <db-host> <db-port>'
   ```
 
@@ -157,9 +157,9 @@ different feature set than the configuration expects (e.g. a build without `post
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
-helm get values statuslist -n statuslist-production
-kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production -o jsonpath='{.items[0].spec.containers[0].image}'
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=50
+helm get values statuslist -n statuslist
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist -o jsonpath='{.items[0].spec.containers[0].image}'
 ```
 
 **Fix:** Use the image variant compiled for your backend, or set `database.backend` to a backend
@@ -183,8 +183,8 @@ prefix set. Expected prefixes: `memory:`/`memory`, `postgres://`/`postgresql://`
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
-helm get values statuslist -n statuslist-production
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=50
+helm get values statuslist -n statuslist
 ```
 
 **Fix:** Align `database.backend` with the URL scheme (prefer the split fields; see next entry,
@@ -225,11 +225,11 @@ pointing at a mounted password, or `statuslist-secret` is missing the configured
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=50
 # List the secret's key names (never their values):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist
 ```
 
 **Fix:** Ensure the secret with the configured mounted key exists and is referenced. In ESO
@@ -290,13 +290,13 @@ Several distinct strings:
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 # List secret key names (never values):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 # Confirm the service-account token volume is mounted and the expected env is present:
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
-kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production \
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist \
   -o jsonpath='{.items[*].spec.containers[*].env}'
 ```
 
@@ -304,7 +304,7 @@ The published image is scratch-based (no shell), so to inspect the mounted SA to
 `vault.k8s_token_path` attach a temporary debug container instead of `kubectl exec`:
 
 ```bash
-kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist-production \
+kubectl debug -it deploy/statuslist-status-list-server-deployment -n statuslist \
   --image=busybox -- ls -l /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null || true
 ```
 
@@ -353,13 +353,13 @@ changed.
 **Diagnostics:**
 
 ```bash
-kubectl get events -n statuslist-production --sort-by=.lastTimestamp | tail -40
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
+kubectl get events -n statuslist --sort-by=.lastTimestamp | tail -40
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 # Confirm the password is delivered as a file the watcher can see:
-kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production \
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist \
   -o jsonpath='{.items[*].spec.containers[*].env}'
 # Confirm the Secret exists and the key is present (names only):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
@@ -371,8 +371,8 @@ kubectl get secret statuslist-secret -n statuslist-production \
   required:
 
   ```bash
-  kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
-  kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist-production
+  kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist
+  kubectl rollout status deployment/statuslist-status-list-server-deployment -n statuslist
   ```
 
 - Check the pod actually mounts the Secret (a stale mount or a Secret that never changed means
@@ -405,9 +405,9 @@ secret written as plain text or DER).
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=50
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=50
 # List the secret's key names (never values):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
@@ -428,7 +428,7 @@ first, run the appropriate conversion above, then replace the stored value with 
 application-facing value must be PEM, not base64-encoded PEM or DER.
 
 ```bash
-kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist-production
+kubectl rollout restart deployment/statuslist-status-list-server-deployment -n statuslist
 ```
 
 **Prevention:** Rotate cert and key together in one transaction, and validate the pair locally
@@ -456,7 +456,7 @@ longer honors it, or the Vault server is unreachable during renewal.
 **Diagnostics:**
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=100
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=100
 # Vault-side (run against your Vault/OpenBao):
 vault token lookup   # confirm the client token is alive and renewable
 vault policy list
@@ -487,10 +487,10 @@ app from ever starting.
 **Diagnostics:**
 
 ```bash
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
-kubectl get events -n statuslist-production --sort-by=.lastTimestamp | tail -40
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200 --previous
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist
+kubectl get events -n statuslist --sort-by=.lastTimestamp | tail -40
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=200 --previous
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=200
 ```
 
 **Fix:** Resolve the underlying startup error (see Section 1). If an init container is the
@@ -516,14 +516,14 @@ the SecretStore itself is unhealthy.
 **Diagnostics:**
 
 ```bash
-kubectl get externalsecret statuslist-external-secret -n statuslist-production
-kubectl describe externalsecret statuslist-external-secret -n statuslist-production
-kubectl get secretstore statuslist-secret-store -n statuslist-production
-kubectl describe secretstore statuslist-secret-store -n statuslist-production
-kubectl get externalsecret statuslist-external-secret -n statuslist-production \
+kubectl get externalsecret statuslist-external-secret -n statuslist
+kubectl describe externalsecret statuslist-external-secret -n statuslist
+kubectl get secretstore statuslist-secret-store -n statuslist
+kubectl describe secretstore statuslist-secret-store -n statuslist
+kubectl get externalsecret statuslist-external-secret -n statuslist \
   -o jsonpath='{.status.conditions[?(@.type=="Ready")]}'
 # List app-secret key names (never values):
-kubectl get secret statuslist-secret -n statuslist-production \
+kubectl get secret statuslist-secret -n statuslist \
   -o go-template='{{range $k,$v := .data}}{{println $k}}{{end}}'
 ```
 
@@ -541,7 +541,7 @@ validated at render time; see the Helm section).
 After fixing the provider, force a refresh if you do not want to wait `refreshInterval`:
 
 ```bash
-kubectl annotate externalsecret statuslist-external-secret -n statuslist-production \
+kubectl annotate externalsecret statuslist-external-secret -n statuslist \
   force-sync=$(date +%s) --overwrite
 ```
 
@@ -606,8 +606,8 @@ material storage reachability, or configured certificate-file availability.
 **Diagnostics:**
 
 ```bash
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production
-kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist-production --tail=200
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist
+kubectl logs -l app.kubernetes.io/name=status-list-server -n statuslist --tail=200
 # Replicate the probe against a running pod (or a local instance).
 # Readiness is served on the ADMIN listener (default :8002), not the public one.
 curl -s -o /dev/null -w '%{http_code}\n' http://<pod-ip>:8002/health/ready
@@ -651,10 +651,10 @@ is open to all destinations); if it is blocked, it is usually on a non-443 port 
 **Diagnostics:**
 
 ```bash
-kubectl get networkpolicy statuslist-status-list-server-network-policy -n statuslist-production -o yaml
-kubectl describe networkpolicy statuslist-status-list-server-network-policy -n statuslist-production
-kubectl get pods -l app.kubernetes.io/name=postgres -n statuslist-production
-kubectl get pods -l app.kubernetes.io/name=opentelemetry-collector -n statuslist-production
+kubectl get networkpolicy statuslist-status-list-server-network-policy -n statuslist -o yaml
+kubectl describe networkpolicy statuslist-status-list-server-network-policy -n statuslist
+kubectl get pods -l app.kubernetes.io/name=postgres -n statuslist
+kubectl get pods -l app.kubernetes.io/name=opentelemetry-collector -n statuslist
 ```
 
 **Fix:** Understand the chart's current limitation before changing anything:
@@ -711,10 +711,10 @@ enabled).
 
 ```bash
 helm lint deploy/helm/chart -f <your-values>.yaml
-helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production \
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist \
   --debug --validate
 # Show just the failing assertion when present:
-helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist-production 2>&1 | head -40
+helm template statuslist deploy/helm/chart -f <your-values>.yaml --namespace statuslist 2>&1 | head -40
 ```
 
 Correct the flagged value. Fixes are implied by each message: pick one, mutually-exclusive mode;
@@ -758,10 +758,10 @@ present/permitted.
 **Diagnostics:**
 
 ```bash
-kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist-production -o yaml | grep -A3 'image:'
-kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist-production | grep -i -A3 'pulled\|image'
-kubectl get events -n statuslist-production --sort-by=.lastTimestamp | tail -20
-helm history statuslist -n statuslist-production
+kubectl get pod -l app.kubernetes.io/name=status-list-server -n statuslist -o yaml | grep -A3 'image:'
+kubectl describe pod -l app.kubernetes.io/name=status-list-server -n statuslist | grep -i -A3 'pulled\|image'
+kubectl get events -n statuslist --sort-by=.lastTimestamp | tail -20
+helm history statuslist -n statuslist
 ```
 
 **Fix:** Set a valid, present tag/digest. Because digest precedence means a stored digest wins
@@ -770,7 +770,7 @@ it with `--set statuslist.image.digest=null`); a plain tag change under `--reuse
 "succeed" and change nothing.
 
 ```bash
-helm upgrade statuslist deploy/helm/chart -n statuslist-production \
+helm upgrade statuslist deploy/helm/chart -n statuslist \
   --reuse-values \
   --set statuslist.image.repository=<repo> \
   --set statuslist.image.tag=<tag> \

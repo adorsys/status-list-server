@@ -110,19 +110,41 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f
 DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
 DATEV_HPA="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/hpa.yaml"
-if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT" ||
-   ! grep -q '^  replicas: 1$' "$DATEV_DEPLOYMENT" ||
-   ! grep -q '^    type: Recreate$' "$DATEV_DEPLOYMENT" ||
-   [ -f "$DATEV_HPA" ] ||
-   ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS" ||
-   ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS" ||
-   ! grep -A2 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288' ||
-   grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS" ||
-   ! grep -A1 'name: APP_CACHE__BACKEND' "$DATEV_DEPLOYMENT" | grep -q 'value: "memory"' ||
-   grep -q 'name: APP_CACHE__PASSWORD' "$DATEV_DEPLOYMENT" ||
-   find "${RENDER_TEMP}/rendered/datev-staging" -iname '*redis*' | grep -q . ||
-   grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
-  echo "ERROR: Datev staging must render one replica without HPA using Recreate, the fscert image, signing key mode 0440, and in-memory cache without AWS or Redis credentials"; exit 1
+if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use the fscert image"; exit 1
+fi
+if ! grep -q '^  replicas: 1$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must run one application replica"; exit 1
+fi
+if ! grep -q '^    type: Recreate$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use Recreate to avoid overlapping memory caches"; exit 1
+fi
+if [ -f "$DATEV_HPA" ]; then
+  echo "ERROR: Datev staging must not render an HPA"; exit 1
+fi
+if ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging must render the signing ExternalSecret"; exit 1
+fi
+if ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging signing ExternalSecret must reference statuslist-fscert-signing"; exit 1
+fi
+if ! grep -A2 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288'; then
+  echo "ERROR: Datev staging signing key must render mode 0440"; exit 1
+fi
+if grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging must not fetch a Redis password"; exit 1
+fi
+if ! grep -A1 'name: APP_CACHE__BACKEND' "$DATEV_DEPLOYMENT" | grep -q 'value: "memory"'; then
+  echo "ERROR: Datev staging must use the in-memory cache"; exit 1
+fi
+if grep -q 'name: APP_CACHE__PASSWORD' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not mount a Redis cache password"; exit 1
+fi
+if find "${RENDER_TEMP}/rendered/datev-staging" -iname '*redis*' | grep -q .; then
+  echo "ERROR: Datev staging must not render Redis resources"; exit 1
+fi
+if grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not mount AWS signer credentials"; exit 1
 fi
 helm template status-list-server "$CHART_DIR" \
   --set postgres.enabled=false \
