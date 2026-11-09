@@ -19,6 +19,12 @@ criteria = "safe-to-deploy"
 delta = "1.3.0 -> 2.0.0"
 notes = "Delta 1.3.0 -> 2.0.0. Verified 2.0.0 still has forbid(unsafe_code), no build script (build = false), no proc macro, no native/network code. Duplicate directives/keys remain rejected (duplicate version/tag directive tests pass). Used only through serde-saphyr for the operator-managed issuer registry."
 
+[[audits.libsqlite3-sys]]
+who = "Codex (AI-assisted audit for Christian Yemele)"
+criteria = "safe-to-deploy"
+delta = "0.37.0 -> 0.39.1"
+notes = "Reviewed 0.37.0 -> 0.39.1 for the bundled SQLite feature path used by SQLx. Bundled SQLite 3.54.1 C source and headers match the official sqlite-amalgamation-3540100.zip byte-for-byte; archive SHA3-256 matches sqlite.org. Reviewed Cargo manifest and build.rs delta: bundled path compiles local SQLite source, copies bundled bindings, and adds no network or process execution. Other Rust source change is an import reorder in src/error.rs. Built all features and exercised 53 SQLite unit tests."
+
 [[audits.serde-saphyr]]
 who = "Christiantyemele <yemelechristian2@gmail.com>"
 criteria = "safe-to-deploy"
