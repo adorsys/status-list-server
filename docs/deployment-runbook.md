@@ -830,13 +830,11 @@ Helm values or GitHub Actions. Preserve verification material for tokens issued
 before the switch until they expire.
 
 Before triggering a tagged release, provide the `status-list-server-issuers`
-ConfigMap and a shared writable `status-list-revocations` PVC in `statuslist`.
-Neither was present during the read-only inspection, and the workflow checks
-both before running Helm. The repository-level GitHub Actions variable
-`IMAGE_VARIANT` was `aws` at the time of inspection. Set it to `fscert` when
-the prerequisites are ready; the workflow rejects any other value, and the
-scheduled image scan reads the same repository-level variable. The workflow
-uses short-lived AWS credentials through OIDC.
+ConfigMap in `statuslist`; the workflow checks for it before running Helm. Set
+the repository-level GitHub Actions variable `IMAGE_VARIANT` to `fscert` before
+the first deployment. The workflow rejects any other value, and the scheduled
+image scan reads the same repository-level variable. The workflow uses
+short-lived AWS credentials through OIDC.
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
