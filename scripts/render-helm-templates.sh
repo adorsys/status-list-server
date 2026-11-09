@@ -116,12 +116,13 @@ if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-
    [ -f "$DATEV_HPA" ] ||
    ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS" ||
    ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS" ||
+   ! grep -A2 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288' ||
    grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS" ||
    ! grep -A1 'name: APP_CACHE__BACKEND' "$DATEV_DEPLOYMENT" | grep -q 'value: "memory"' ||
    grep -q 'name: APP_CACHE__PASSWORD' "$DATEV_DEPLOYMENT" ||
    find "${RENDER_TEMP}/rendered/datev-staging" -iname '*redis*' | grep -q . ||
    grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
-  echo "ERROR: Datev staging must render one replica without HPA using Recreate, the fscert image, signing ESO path, and in-memory cache without AWS or Redis credentials"; exit 1
+  echo "ERROR: Datev staging must render one replica without HPA using Recreate, the fscert image, signing key mode 0440, and in-memory cache without AWS or Redis credentials"; exit 1
 fi
 helm template status-list-server "$CHART_DIR" \
   --set postgres.enabled=false \

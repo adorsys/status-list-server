@@ -27,6 +27,7 @@ statuslist:
           path: tls.crt
         - key: tls.key
           path: tls.key
+          mode: 0440
       fileEnv:
         APP_SERVER__CERT__STORE__CERTIFICATE_PATH: tls.crt
         APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: tls.key
