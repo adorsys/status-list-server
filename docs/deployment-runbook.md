@@ -807,9 +807,13 @@ The `statuslist` Helm release currently owns Redis HA resources. Redis is not
 part of the new chart or the Datev-compatible profile. Upgrading that release
 will remove those Redis resources. Review any other consumers before the first
 upgrade, and do not switch the image until the signing material and the newer
-chart's prerequisites are ready. The overlay uses `Recreate` so old AWS-backed
-and new file-backed signers do not serve at the same time; expect a brief outage
-during that upgrade.
+chart's prerequisites are ready. This profile keeps `Recreate` for every
+deployment. The initial upgrade must not run old AWS-backed and new file-backed
+signers together. Later upgrades must also avoid overlapping application pods:
+each pod has its own in-memory status-list cache, so a write on one pod cannot
+invalidate a cached list on another. **Expect a brief service outage on every
+release**, including RC and final deployments, while the old pod stops and the
+new one becomes ready. Plan deployments around integrator traffic.
 
 The existing AWS Secrets Manager entry `statuslist-secret` supplies
 `POSTGRES_PASSWORD` to the namespaced `statuslist-secret-store`. The chart's
