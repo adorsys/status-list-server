@@ -109,7 +109,9 @@ impl FromStr for DataType {
 
             _ if s.contains("blob") => DataType::Blob,
 
-            _ if s.contains("real") || s.contains("floa") || s.contains("doub") => DataType::Float,
+            _ if s.contains("real") || s.contains("floa") || s.contains(&"double"[..4]) => {
+                DataType::Float
+            }
 
             _ => {
                 return Err(format!("unknown type: `{s}`").into());
