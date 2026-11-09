@@ -214,7 +214,8 @@ required-features = ["memory"]
 [profile.dev.package.backtrace]
 opt-level = 3
 
-# SQLx 0.9 caps libsqlite3-sys below the first release fixing RUSTSEC-2026-0459.
-# Drop this patch after an upstream SQLx release accepts libsqlite3-sys 0.39.1.
 [patch.crates-io]
-sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
+sqlx-core = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
+sqlx-mysql = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
+sqlx-postgres = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
+sqlx-sqlite = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }

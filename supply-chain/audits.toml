@@ -19,11 +19,29 @@ criteria = "safe-to-deploy"
 delta = "1.3.0 -> 2.0.0"
 notes = "Delta 1.3.0 -> 2.0.0. Verified 2.0.0 still has forbid(unsafe_code), no build script (build = false), no proc macro, no native/network code. Duplicate directives/keys remain rejected (duplicate version/tag directive tests pass). Used only through serde-saphyr for the operator-managed issuer registry."
 
+[[audits.libredox]]
+who = "Codex (AI-assisted audit for Christian Yemele)"
+criteria = "safe-to-deploy"
+version = "0.1.25"
+notes = "Reviewed the target-specific path: sqlx-postgres -> whoami -> libredox. This crate has build = false and is a single-file Redox OS syscall/ABI wrapper with explicit unsafe FFI boundaries and error demultiplexing. It has no process, network, or filesystem helper code beyond its Redox syscall interface, and it is not compiled for this project’s declared Linux, macOS, or musl targets."
+
 [[audits.libsqlite3-sys]]
 who = "Codex (AI-assisted audit for Christian Yemele)"
 criteria = "safe-to-deploy"
 delta = "0.37.0 -> 0.39.1"
 notes = "Reviewed 0.37.0 -> 0.39.1 for the bundled SQLite feature path used by SQLx. Bundled SQLite 3.54.1 C source and headers match the official sqlite-amalgamation-3540100.zip byte-for-byte; archive SHA3-256 matches sqlite.org. Reviewed Cargo manifest and build.rs delta: bundled path compiles local SQLite source, copies bundled bindings, and adds no network or process execution. Other Rust source change is an import reorder in src/error.rs. Built all features and exercised 53 SQLite unit tests."
+
+[[audits.objc2-core-foundation]]
+who = "Codex (AI-assisted audit for Christian Yemele)"
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = "Reviewed the macOS-only transitive dependency path: sqlx-postgres -> whoami -> objc2-system-configuration -> objc2-core-foundation. This crate has build = false and no process, network, or filesystem execution. Its source is generated Rust FFI wrappers for Apple CoreFoundation APIs plus ownership/thread-safety bindings; it is not compiled on this project’s Linux targets."
+
+[[audits.objc2-system-configuration]]
+who = "Codex (AI-assisted audit for Christian Yemele)"
+criteria = "safe-to-deploy"
+version = "0.3.2"
+notes = "Reviewed the macOS-only transitive dependency path: sqlx-postgres -> whoami -> objc2-system-configuration. This crate has build = false and no process, network, or filesystem execution. Its source is generated Rust FFI wrappers for Apple SystemConfiguration APIs using objc2-core-foundation ownership types; it is not compiled on this project’s Linux targets."
 
 [[audits.serde-saphyr]]
 who = "Christiantyemele <yemelechristian2@gmail.com>"
