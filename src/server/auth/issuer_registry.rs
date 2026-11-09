@@ -56,8 +56,8 @@ pub struct IssuerRegistry {
     #[serde(default)]
     pub admins: Vec<AdminEntry>,
     /// Public key records retained after a static key is removed. They are
-    /// never trusted for authentication, but reserve the key id and material
-    /// while the tombstone remains in the operator-managed file.
+    /// never trusted for authentication, but permanently reserve the key id
+    /// and material in the durable revocation history.
     #[serde(default)]
     pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
@@ -437,10 +437,14 @@ impl IssuerRegistry {
                 .all_principal_keys()
                 .into_iter()
                 .map(|(_, _, material)| material)
-                .chain(validated.registry.revoked_keys.iter().map(|key| {
-                    canonical_public_material(&key.jwk)
-                        .expect("registry validation accepted tombstone key material")
-                }))
+                .chain(
+                    validated
+                        .registry
+                        .revoked_keys
+                        .iter()
+                        .map(|key| canonical_public_material(&key.jwk))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
                 .collect(),
             ..validated
         })
@@ -547,6 +551,25 @@ impl ValidatedRegistry {
             }
         }
         out
+    }
+
+    /// Revoked key identifiers and normalized public-key materials from this
+    /// registry snapshot, ready to persist in the shared trust store.
+    pub fn revoked_keys(
+        &self,
+    ) -> Result<Vec<crate::domain::ports::StaticKeyRevocation>, RegistryError> {
+        self.registry
+            .revoked_keys
+            .iter()
+            .map(|key| {
+                let material = crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                    .map_err(|error| RegistryError::Semantic(error.to_string()))?;
+                Ok(crate::domain::ports::StaticKeyRevocation {
+                    kid: key.kid.clone(),
+                    material,
+                })
+            })
+            .collect()
     }
 
     /// Whether any principal (issuer or admin) carries this id.

@@ -116,6 +116,7 @@ impl IssuerDto {
         &self.id
     }
 }
+
 #[derive(Debug, Serialize, Clone)]
 pub struct KeyDto {
     kid: String,
@@ -166,9 +167,7 @@ struct IssuerKeyWriteVersion<'a> {
 pub(crate) fn issuer_write_version(issuer: &IssuerDto) -> String {
     use sha2::{Digest, Sha256};
     if let Some(version) = issuer.persisted_version {
-        return hex::encode(Sha256::digest(
-            format!("{}:{version}", issuer.id).as_bytes(),
-        ));
+        return hosted_issuer_write_version(&issuer.id, version);
     }
     let write_state = IssuerWriteVersion {
         id: &issuer.id,
@@ -195,6 +194,12 @@ pub(crate) fn issuer_write_version(issuer: &IssuerDto) -> String {
     let bytes = serde_json::to_vec(&write_state).expect("issuer write state serializes");
     hex::encode(Sha256::digest(bytes))
 }
+
+pub(crate) fn hosted_issuer_write_version(id: &str, version: u64) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(format!("{id}:{version}").as_bytes()))
+}
+
 #[derive(Debug, Serialize)]
 pub struct IssuerPage {
     issuers: Vec<IssuerDto>,
@@ -722,6 +727,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::domain::ports::HostedIssuerStore for MutableHostedStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             after: Option<&str>,
@@ -825,6 +845,15 @@ mod tests {
         async fn add_key(
             &self,
             _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            unreachable!()
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
             _actor: &str,
         ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
             unreachable!()

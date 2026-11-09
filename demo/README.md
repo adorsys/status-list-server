@@ -230,6 +230,9 @@ JWT carrying `issuers:write`. Read the issuer and its `ETag` with
 `{"state":"suspended"}`; the issuer's next management request is blocked. A
 missing `If-Match` returns `428 precondition_required`; a stale `ETag` returns
 `412 precondition_failed`, so re-read the issuer and retry.
+To renew a sandbox issuer, send the same PATCH with `{"expires_at":<unix-seconds>}`;
+the new expiry must be after now and within 30 days. A renewed expired issuer
+becomes active unless it is suspended.
 `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with `If-Match` and
 `{"state":"revoked"}` permanently revokes one key; revoking an already revoked
 key returns `200` unchanged. The public status-list endpoint remains readable

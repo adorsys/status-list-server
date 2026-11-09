@@ -220,9 +220,6 @@ impl HostedIssuerLifecycleService {
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
         let current = self.store.get_issuer(issuer_id).await?;
-        if current.version != expected_version {
-            return Err(HostedIssuerError::VersionMismatch);
-        }
         if state == HostedIssuerState::Active
             && current
                 .expires_at
@@ -283,6 +280,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for RecordingStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -331,6 +343,23 @@ mod tests {
         ) -> Result<(), HostedIssuerError> {
             *self.key.lock().unwrap() = Some(key);
             Ok(())
+        }
+
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            {
+                let mut issuer = self.issuer.lock().unwrap();
+                let current = issuer.as_mut().ok_or(HostedIssuerError::NotFound)?;
+                if current.id != key.issuer_id || current.version != expected_version {
+                    return Err(HostedIssuerError::VersionMismatch);
+                }
+                current.version += 1;
+            }
+            self.add_key(key, actor).await
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(self.key.lock().unwrap().clone().into_iter().collect())
@@ -613,17 +642,6 @@ mod tests {
             issuer.version, 1,
             "a no-op must not bump the version or write an audit event"
         );
-        assert!(matches!(
-            service
-                .set_issuer_state(
-                    "00000000-0000-4000-8000-000000000001",
-                    HostedIssuerState::Suspended,
-                    0,
-                    "portal-admin",
-                )
-                .await,
-            Err(HostedIssuerError::VersionMismatch)
-        ));
         assert!(store.writes.lock().unwrap().is_empty());
     }
 

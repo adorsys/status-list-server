@@ -258,6 +258,24 @@ pub(crate) mod status_list_allocations {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[allow(unreachable_pub)]
+pub(crate) mod static_key_revocations {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "static_key_revocations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub kid: String,
+        pub material: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: u8,

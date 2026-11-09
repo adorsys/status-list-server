@@ -7,15 +7,18 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ColumnTrait, Condition, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, Order, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set,
+    sea_query::{Expr, OnConflict},
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
 use super::error::{RepositoryError, contention_err};
-use super::models::{PublicKey, hosted_issuer_keys, issuer_audit_events, issuers};
+use super::models::{
+    PublicKey, hosted_issuer_keys, issuer_audit_events, issuers, static_key_revocations,
+};
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed, find_err};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
 use crate::domain::models::hosted_issuer::{
@@ -220,7 +223,12 @@ async fn load_issuer(
     id: &str,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Option<HostedIssuer>, RepositoryError> {
-    let issuer = issuers::Entity::find_by_id(id)
+    let issuer = issuers::Entity::find()
+        .filter(exact_text_eq(
+            "issuers.issuer",
+            id,
+            db.get_database_backend(),
+        ))
         .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
         .one(db)
         .await
@@ -229,6 +237,48 @@ async fn load_issuer(
         Some(row) => Ok(Some(parse_issuer(row)?)),
         None => Ok(None),
     }
+}
+
+fn exact_text_eq(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} = ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') = convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY = ?"),
+        _ => format!("{column} = ?"),
+    };
+    Expr::cust_with_values(expression, [value])
+}
+
+fn bytewise_text_order(column: &str, backend: DatabaseBackend) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column}"),
+        DatabaseBackend::Postgres => format!("convert_to({column}, 'UTF8')"),
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY"),
+        _ => column.to_owned(),
+    };
+    Expr::cust(expression)
+}
+
+fn bytewise_text_after(
+    column: &str,
+    value: &str,
+    backend: DatabaseBackend,
+) -> sea_orm::sea_query::SimpleExpr {
+    let expression = match backend {
+        DatabaseBackend::MySql => format!("BINARY {column} > BINARY ?"),
+        DatabaseBackend::Postgres => {
+            format!("convert_to({column}, 'UTF8') > convert_to($1, 'UTF8')")
+        }
+        DatabaseBackend::Sqlite => format!("{column} COLLATE BINARY > ?"),
+        _ => format!("{column} > ?"),
+    };
+    Expr::cust_with_values(expression, [value])
 }
 
 async fn insert_issuer_row(
@@ -314,7 +364,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                 let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
                 match insert_issuer_row(&txn, &stored).await {
                     Ok(()) => {
-                        append_lifecycle_audit(
+                        if let Err(error) = append_lifecycle_audit(
                             &txn,
                             &stored.id,
                             actor,
@@ -327,7 +377,10 @@ impl SeaOrmStore<HostedIssuerRow> {
                             })),
                         )
                         .await
-                        .map_err(err_txn)?;
+                        {
+                            rollback_quietly(txn).await;
+                            return Err(err_txn(error));
+                        }
                         txn.commit().await.map_err(map_insert_err)?;
                         // The row stores whole-second timestamps; return what was
                         // persisted so the returned issuer matches a re-read.
@@ -408,8 +461,14 @@ impl SeaOrmStore<HostedIssuerRow> {
             let issuer = issuers::Entity::find_by_id(&key.issuer_id)
                 .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
                 .one(&txn)
-                .await
-                .map_err(err_txn)?;
+                .await;
+            let issuer = match issuer {
+                Ok(issuer) => issuer,
+                Err(error) => {
+                    rollback_quietly(txn).await;
+                    return Err(err_txn(error));
+                }
+            };
             let Some(issuer) = issuer else {
                 txn.rollback().await.ok();
                 return Err(RepositoryError::NotFound);
@@ -461,16 +520,19 @@ impl SeaOrmStore<HostedIssuerRow> {
             .await;
             match insert {
                 Ok(_) => {
-                    append_lifecycle_audit(
+                    if let Err(error) = append_lifecycle_audit(
                         &txn,
                         &key.issuer_id,
                         actor,
                         "key.registered",
                         None,
-                        Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str()})),
+                        Some(serde_json::json!({"kid": key.kid, "state": key.state.as_str(), "version": issuer.version + 1})),
                     )
                     .await
-                    .map_err(err_txn)?;
+                    {
+                        rollback_quietly(txn).await;
+                        return Err(err_txn(error));
+                    }
                     txn.commit().await.map_err(map_insert_err)?;
                     Ok(())
                 }
@@ -666,6 +728,25 @@ async fn rollback_quietly(txn: sea_orm::DatabaseTransaction) {
     }
 }
 
+async fn revoked_key_after_rollback(
+    db: &sea_orm::DatabaseConnection,
+    issuer_id: &str,
+    kid: &str,
+) -> Result<HostedIssuerKey, HostedIssuerError> {
+    let current = hosted_issuer_keys::Entity::find_by_id(kid)
+        .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+        .one(db)
+        .await
+        .map_err(err_txn)?
+        .ok_or(HostedIssuerError::NotFound)?;
+    let current = parse_key(current).map_err(HostedIssuerError::from)?;
+    if current.state == HostedIssuerKeyState::Revoked {
+        Ok(current)
+    } else {
+        Err(HostedIssuerError::VersionMismatch)
+    }
+}
+
 fn err_jwk(message: String) -> RepositoryError {
     RepositoryError::InvalidKey(format!("invalid public JWK: {message}"))
 }
@@ -676,6 +757,117 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 
 #[async_trait]
 impl HostedIssuerStore for SqlHostedIssuerStore {
+    async fn record_static_key_revocations(
+        &self,
+        revocations: &[crate::domain::ports::StaticKeyRevocation],
+    ) -> Result<(), HostedIssuerError> {
+        if revocations.is_empty() {
+            return Ok(());
+        }
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(find_err)?;
+        let rows = revocations
+            .iter()
+            .map(|revocation| static_key_revocations::ActiveModel {
+                kid: Set(revocation.kid.clone()),
+                material: Set(material_hash(&revocation.material)),
+            });
+        let inserted = static_key_revocations::Entity::insert_many(rows)
+            .on_conflict(
+                OnConflict::column(static_key_revocations::Column::Kid)
+                    .do_nothing_on([static_key_revocations::Column::Kid])
+                    .to_owned(),
+            )
+            .exec_without_returning(&txn)
+            .await;
+        if let Err(error) = inserted {
+            rollback_quietly(txn).await;
+            return Err(hosted_error(map_insert_err(error)));
+        }
+        let kids: Vec<_> = revocations.iter().map(|entry| entry.kid.clone()).collect();
+        let existing = static_key_revocations::Entity::find()
+            .filter(static_key_revocations::Column::Kid.is_in(kids))
+            .all(&txn)
+            .await;
+        let existing = match existing {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| (row.kid, row.material))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                rollback_quietly(txn).await;
+                return Err(find_err(error).into());
+            }
+        };
+        for revocation in revocations {
+            match existing.get(&revocation.kid) {
+                Some(hash) if *hash == material_hash(&revocation.material) => {}
+                Some(_) => {
+                    rollback_quietly(txn).await;
+                    return Err(HostedIssuerError::AlreadyExists);
+                }
+                None => {
+                    rollback_quietly(txn).await;
+                    return Err(HostedIssuerError::Unavailable);
+                }
+            }
+        }
+        txn.commit().await.map_err(find_err)?;
+        Ok(())
+    }
+
+    async fn static_key_was_revoked(
+        &self,
+        kid: &str,
+        material: &str,
+    ) -> Result<bool, HostedIssuerError> {
+        let material_hash = material_hash(material);
+        static_key_revocations::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(static_key_revocations::Column::Kid.eq(kid))
+                    .add(static_key_revocations::Column::Material.eq(material_hash)),
+            )
+            .one(self.store.current().as_ref())
+            .await
+            .map(|row| row.is_some())
+            .map_err(find_err)
+            .map_err(Into::into)
+    }
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kids: Vec<_> = keys.iter().map(|(kid, _)| kid.clone()).collect();
+        let hashes: Vec<_> = keys
+            .iter()
+            .map(|(_, material)| material_hash(material))
+            .collect();
+        let rows = static_key_revocations::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(static_key_revocations::Column::Kid.is_in(kids))
+                    .add(static_key_revocations::Column::Material.is_in(hashes)),
+            )
+            .all(self.store.current().as_ref())
+            .await
+            .map_err(find_err)?;
+        let revoked_kids: HashSet<_> = rows.iter().map(|row| row.kid.as_str()).collect();
+        let revoked_materials: HashSet<_> = rows.iter().map(|row| row.material.as_str()).collect();
+        Ok(keys
+            .iter()
+            .filter(|(kid, material)| {
+                let hash = material_hash(material);
+                revoked_kids.contains(kid.as_str()) || revoked_materials.contains(hash.as_str())
+            })
+            .map(|(kid, _)| kid.clone())
+            .collect())
+    }
+
     async fn list_issuers_after(
         &self,
         after: Option<&str>,
@@ -683,18 +875,30 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         filters: &HostedIssuerFilter,
         now: OffsetDateTime,
     ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+        let db = self.store.current();
         let mut query = issuers::Entity::find()
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
-            .order_by_asc(issuers::Column::Issuer)
+            .order_by(
+                bytewise_text_order("issuers.issuer", db.get_database_backend()),
+                Order::Asc,
+            )
             .limit(limit as u64);
         if let Some(after) = after {
-            query = query.filter(issuers::Column::Issuer.gt(after));
+            query = query.filter(bytewise_text_after(
+                "issuers.issuer",
+                after,
+                db.get_database_backend(),
+            ));
         }
         if let Some(tier) = &filters.tier {
             query = query.filter(issuers::Column::Tier.eq(tier));
         }
         if let Some(owner) = &filters.owner {
-            query = query.filter(issuers::Column::Owner.eq(owner));
+            query = query.filter(exact_text_eq(
+                "issuers.owner",
+                owner,
+                db.get_database_backend(),
+            ));
         }
         let unexpired = Condition::any()
             .add(issuers::Column::ExpiresAt.is_null())
@@ -942,9 +1146,8 @@ async fn append_lifecycle_audit(
 #[async_trait]
 impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
     async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError> {
-        load_issuer(issuer_id, self.store.current().as_ref())
-            .await
-            .map_err(HostedIssuerError::from)?
+        self.find_issuer(issuer_id)
+            .await?
             .ok_or(HostedIssuerError::NotFound)
     }
 
@@ -961,7 +1164,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         // event in one transaction.
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-        let row = match issuers::Entity::find_by_id(issuer_id)
+        let row = match issuers::Entity::find()
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
@@ -1004,7 +1212,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         let changed = match issuers::Entity::update_many()
             .col_expr(issuers::Column::State, Expr::value(state.as_str()))
             .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .filter(issuers::Column::Version.eq(expected_version as i64))
             .exec(&txn)
@@ -1052,7 +1264,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
     ) -> Result<HostedIssuer, HostedIssuerError> {
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-        let row = issuers::Entity::find_by_id(issuer_id)
+        let row = issuers::Entity::find()
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
@@ -1079,7 +1296,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
                 Expr::value(expires_at.unix_timestamp()),
             )
             .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .filter(issuers::Column::Version.eq(row.version))
             .exec(&txn)
@@ -1115,7 +1336,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         let db = self.store.current();
         let txn = begin_read_committed(&db).await.map_err(err_txn)?;
         let row = match hosted_issuer_keys::Entity::find_by_id(kid)
-            .filter(hosted_issuer_keys::Column::IssuerId.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuer_keys.issuer_id",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .one(&txn)
             .await
         {
@@ -1132,7 +1357,12 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
                 return Err(classified.into());
             }
         };
-        let owner = match issuers::Entity::find_by_id(issuer_id)
+        let owner = match issuers::Entity::find()
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .one(&txn)
             .await
@@ -1157,13 +1387,13 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
                 return Err(e.into());
             }
         };
-        if owner.version != i64::try_from(expected_version).unwrap_or(-1) {
-            rollback_quietly(txn).await;
-            return Err(HostedIssuerError::VersionMismatch);
-        }
         if previous.state == HostedIssuerKeyState::Revoked {
             txn.commit().await.map_err(err_txn)?;
             return Ok(previous);
+        }
+        if owner.version != i64::try_from(expected_version).unwrap_or(-1) {
+            rollback_quietly(txn).await;
+            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
         }
         let Some(next_version) = owner.version.checked_add(1) else {
             rollback_quietly(txn).await;
@@ -1173,7 +1403,11 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         let version_changed = match issuers::Entity::update_many()
             .col_expr(issuers::Column::Version, Expr::value(next_version))
-            .filter(issuers::Column::Issuer.eq(issuer_id))
+            .filter(exact_text_eq(
+                "issuers.issuer",
+                issuer_id,
+                db.get_database_backend(),
+            ))
             .filter(issuers::Column::Source.eq(PORTAL_SOURCE))
             .filter(issuers::Column::Version.eq(owner.version))
             .exec(&txn)
@@ -1188,7 +1422,7 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         if version_changed.rows_affected != 1 {
             rollback_quietly(txn).await;
-            return Err(HostedIssuerError::VersionMismatch);
+            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
         }
         let changed = match hosted_issuer_keys::Entity::update_many()
             .col_expr(hosted_issuer_keys::Column::State, Expr::value("revoked"))
@@ -1207,15 +1441,15 @@ impl HostedIssuerLifecycleStore for SqlHostedIssuerStore {
         };
         if changed.rows_affected != 1 {
             rollback_quietly(txn).await;
-            return Err(HostedIssuerError::VersionMismatch);
+            return revoked_key_after_rollback(db.as_ref(), issuer_id, kid).await;
         }
         if let Err(e) = append_lifecycle_audit(
             &txn,
             issuer_id,
             actor,
             "key.revoked",
-            Some(serde_json::json!({"kid": kid, "state": row.state})),
-            Some(serde_json::json!({"kid": kid, "state": "revoked"})),
+            Some(serde_json::json!({"kid": kid, "state": row.state, "version": owner.version})),
+            Some(serde_json::json!({"kid": kid, "state": "revoked", "version": next_version})),
         )
         .await
         {

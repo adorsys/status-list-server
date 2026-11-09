@@ -6,13 +6,15 @@
 #[cfg(feature = "sqlite")]
 use super::fixtures;
 use crate::domain::models::credential::{AggregationId, PublicJwk};
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
+use crate::domain::models::hosted_issuer::HostedIssuerFilter;
+#[cfg(feature = "sqlite")]
+use crate::domain::models::hosted_issuer::HostedIssuerReadState;
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
     HostedIssuerState,
 };
-#[cfg(feature = "sqlite")]
-use crate::domain::models::hosted_issuer::{HostedIssuerFilter, HostedIssuerReadState};
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "mysql"))]
 use crate::domain::ports::HostedIssuerLifecycleStore;
 use crate::domain::ports::HostedIssuerStore;
 use crate::outbound::sql::SqlHostedIssuerStore;
@@ -193,6 +195,121 @@ async fn rejects_reused_material(store: &SqlHostedIssuerStore, backend: &str) {
 #[tokio::test]
 async fn test_sqlite_hosted_round_trip() {
     round_trip(&sqlite_store().await, "SQLite").await;
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_add_key_rejects_stale_issuer_version() {
+    let store = sqlite_store().await;
+    let hosted = issuer("issuer-stale-version");
+    store
+        .create_issuer(hosted.clone(), "portal-operator")
+        .await
+        .unwrap();
+    let result = store
+        .add_key_if_version(key(&hosted.id, "stale-key"), 0, "portal-operator")
+        .await;
+    assert!(matches!(result, Err(HostedIssuerError::VersionMismatch)));
+    assert!(store.find_key_by_kid("stale-key").await.unwrap().is_none());
+    assert_eq!(
+        store
+            .find_issuer(&hosted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        1
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn test_sqlite_static_revocation_history_reserves_kid_and_material() {
+    let store = sqlite_store().await;
+    let revoked = key("static-issuer", "revoked-static-kid");
+    let material = revoked.jwk.normalized_material().unwrap();
+
+    store
+        .record_static_key_revocations(&[crate::domain::ports::StaticKeyRevocation {
+            kid: revoked.kid.clone(),
+            material: material.clone(),
+        }])
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .static_key_was_revoked("revoked-static-kid", "different-material")
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .static_key_was_revoked("different-kid", &material)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .static_key_was_revoked("different-kid", "different-material")
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(any(feature = "mysql", feature = "postgres-tests"))]
+async fn concurrent_identical_static_revocations_succeed(
+    first_db: std::sync::Arc<sea_orm::DatabaseConnection>,
+    second_db: std::sync::Arc<sea_orm::DatabaseConnection>,
+) {
+    let first = SqlHostedIssuerStore::new(first_db);
+    let second = SqlHostedIssuerStore::new(second_db);
+    let revoked = crate::domain::ports::StaticKeyRevocation {
+        kid: "concurrent-static-key".into(),
+        material: key("static-issuer", "concurrent-static-key")
+            .jwk
+            .normalized_material()
+            .unwrap(),
+    };
+    let (left, right) = tokio::join!(
+        first.record_static_key_revocations(std::slice::from_ref(&revoked)),
+        second.record_static_key_revocations(std::slice::from_ref(&revoked)),
+    );
+    assert!(left.is_ok(), "first writer failed: {left:?}");
+    assert!(right.is_ok(), "second writer failed: {right:?}");
+    assert!(
+        second
+            .static_key_was_revoked(&revoked.kid, &revoked.material)
+            .await
+            .unwrap()
+    );
+
+    let conflicting = crate::domain::ports::StaticKeyRevocation {
+        kid: revoked.kid,
+        material: "different-material".into(),
+    };
+    assert!(matches!(
+        second.record_static_key_revocations(&[conflicting]).await,
+        Err(HostedIssuerError::AlreadyExists)
+    ));
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_concurrent_identical_static_revocations_succeed() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+    let db = mysql_helpers::MysqlTestDb::start().await;
+    concurrent_identical_static_revocations_succeed(db.connection().await, db.connection().await)
+        .await;
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_concurrent_identical_static_revocations_succeed() {
+    use crate::outbound::sql::test_containers::postgres_helpers;
+    let db = postgres_helpers::postgres_connection().await;
+    let second = std::sync::Arc::new(postgres_helpers::connect_to_test_db(&db.url, 1).await);
+    concurrent_identical_static_revocations_succeed(db.db.clone(), second).await;
 }
 
 #[cfg(feature = "sqlite")]
@@ -827,6 +944,75 @@ async fn test_mysql_hosted_round_trip() {
 
 #[cfg(feature = "mysql")]
 #[tokio::test]
+async fn test_mysql_hosted_pagination_uses_bytewise_id_order() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let store = SqlHostedIssuerStore::new(test_db.connection().await);
+    for id in ["a", "B", "c"] {
+        store
+            .create_issuer(issuer(id), "portal-operator")
+            .await
+            .unwrap();
+    }
+
+    let mut after = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = store
+            .list_issuers_after(
+                after.as_deref(),
+                1,
+                &HostedIssuerFilter::default(),
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let Some(row) = page.into_iter().next() else {
+            break;
+        };
+        after = Some(row.id.clone());
+        ids.push(row.id);
+    }
+
+    assert_eq!(ids, ["B", "a", "c"]);
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_lifecycle_rejects_issuer_id_with_different_case() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+
+    let test_db = mysql_helpers::MysqlTestDb::start().await;
+    let store = SqlHostedIssuerStore::new(test_db.connection().await);
+    store
+        .create_issuer(issuer("lowercase"), "portal-operator")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store.get_issuer("LOWERCASE").await,
+        Err(HostedIssuerError::NotFound)
+    ));
+    assert!(matches!(
+        store
+            .set_issuer_state(
+                "LOWERCASE",
+                HostedIssuerState::Suspended,
+                1,
+                "portal-operator"
+            )
+            .await,
+        Err(HostedIssuerError::NotFound)
+    ));
+    assert_eq!(
+        store.get_issuer("lowercase").await.unwrap().state,
+        HostedIssuerState::Active
+    );
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
 async fn test_mysql_hosted_rejects_conflicts() {
     use crate::outbound::sql::test_containers::mysql_helpers;
     let test_db = mysql_helpers::MysqlTestDb::start().await;
@@ -856,6 +1042,7 @@ async fn test_postgres_hosted_rejects_conflicts() {
 #[cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
     db: std::sync::Arc<sea_orm::DatabaseConnection>,
+    second_db: std::sync::Arc<sea_orm::DatabaseConnection>,
 ) {
     use crate::domain::models::credential::KeyResolveError;
     use crate::domain::ports::{HostedIssuerLifecycleStore, IssuerKeyResolver};
@@ -866,7 +1053,7 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
     use std::sync::Arc;
 
     let first = Arc::new(SqlHostedIssuerStore::new(db.clone()));
-    let second = Arc::new(SqlHostedIssuerStore::new(db.clone()));
+    let second = Arc::new(SqlHostedIssuerStore::new(second_db));
     let issuer = first
         .create_issuer(
             issuer("00000000-0000-4000-8000-000000000373"),
@@ -993,7 +1180,9 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
                 assert_eq!(event.before, None);
                 assert_eq!(
                     event.after,
-                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "active"}))
+                    Some(
+                        serde_json::json!({"kid": "lifecycle-key", "state": "active", "version": observed_version})
+                    )
                 );
             }
             "issuer.state_changed" => {
@@ -1026,11 +1215,15 @@ async fn lifecycle_transitions_reach_two_replicas_and_are_audited(
             "key.revoked" => {
                 assert_eq!(
                     event.before,
-                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "active"}))
+                    Some(
+                        serde_json::json!({"kid": "lifecycle-key", "state": "active", "version": observed_version + 2})
+                    )
                 );
                 assert_eq!(
                     event.after,
-                    Some(serde_json::json!({"kid": "lifecycle-key", "state": "revoked"}))
+                    Some(
+                        serde_json::json!({"kid": "lifecycle-key", "state": "revoked", "version": observed_version + 3})
+                    )
                 );
             }
             other => panic!("unexpected audit action: {other}"),
@@ -1090,12 +1283,14 @@ async fn stale_revocation_cannot_revoke_a_second_key() {
         second.get_issuer(&issuer.id).await.unwrap().version,
         observed_version + 1
     );
-    assert!(matches!(
+    assert_eq!(
         second
             .revoke_key(&issuer.id, "first-key", observed_version, "admin-b")
-            .await,
-        Err(HostedIssuerError::VersionMismatch)
-    ));
+            .await
+            .unwrap()
+            .state,
+        HostedIssuerKeyState::Revoked
+    );
     assert_eq!(
         second.get_issuer(&issuer.id).await.unwrap().version,
         observed_version + 1
@@ -1105,8 +1300,8 @@ async fn stale_revocation_cannot_revoke_a_second_key() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
-    lifecycle_transitions_reach_two_replicas_and_are_audited(fixtures::sqlite_connection().await)
-        .await;
+    let db = fixtures::sqlite_connection().await;
+    lifecycle_transitions_reach_two_replicas_and_are_audited(db.clone(), db).await;
 }
 
 #[cfg(feature = "mysql")]
@@ -1114,7 +1309,11 @@ async fn lifecycle_changes_reach_two_sqlite_replicas_and_are_audited() {
 async fn lifecycle_changes_reach_two_mysql_replicas_and_are_audited() {
     use crate::outbound::sql::test_containers::mysql_helpers;
     let test_db = mysql_helpers::MysqlTestDb::start().await;
-    lifecycle_transitions_reach_two_replicas_and_are_audited(test_db.connection().await).await;
+    lifecycle_transitions_reach_two_replicas_and_are_audited(
+        test_db.connection().await,
+        test_db.connection().await,
+    )
+    .await;
 }
 
 #[cfg(feature = "postgres-tests")]
@@ -1122,7 +1321,8 @@ async fn lifecycle_changes_reach_two_mysql_replicas_and_are_audited() {
 async fn lifecycle_changes_reach_two_postgres_replicas_and_are_audited() {
     use crate::outbound::sql::test_containers::postgres_helpers;
     let test_db = postgres_helpers::postgres_connection().await;
-    lifecycle_transitions_reach_two_replicas_and_are_audited(test_db.db.clone()).await;
+    let second = std::sync::Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 1).await);
+    lifecycle_transitions_reach_two_replicas_and_are_audited(test_db.db.clone(), second).await;
 }
 
 #[cfg(feature = "sqlite")]

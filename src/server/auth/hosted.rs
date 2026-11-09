@@ -136,6 +136,7 @@ fn material_of(jwk: &PublicJwk) -> Option<String> {
 /// (`static_conflict`).
 async fn validate_dynamic_write(
     registry: &RegistryHandle,
+    store: &Arc<dyn HostedIssuerStore>,
     issuer_id: &str,
     key: Option<&HostedIssuerKey>,
 ) -> Result<(), HostedIssuerError> {
@@ -159,6 +160,9 @@ async fn validate_dynamic_write(
             "the requested issuer key has malformed JWK parameters".into(),
         )
     })?;
+    if store.static_key_was_revoked(&key.kid, &registers).await? {
+        return Err(HostedIssuerError::KeyMaterialReused);
+    }
     if snapshot.has_key_material(&registers) {
         return Err(HostedIssuerError::KeyMaterialReused);
     }
@@ -247,8 +251,53 @@ pub async fn validate_static_candidate_against_dynamic(
     Ok(())
 }
 
+/// Store static revocation tombstones and reject any candidate that attempts
+/// to activate their kid or normalized key material.
+pub async fn validate_static_revocation_history(
+    store: &Arc<dyn HostedIssuerStore>,
+    candidate: &ValidatedRegistry,
+) -> Result<(), RegistryError> {
+    let keys: Vec<_> = candidate
+        .all_principal_keys()
+        .into_iter()
+        .map(|(_, kid, material)| (kid.to_owned(), material))
+        .collect();
+    if let Some(kid) = store
+        .static_keys_were_revoked(&keys)
+        .await
+        .map_err(dynamic_check_failed)?
+        .into_iter()
+        .next()
+    {
+        return Err(RegistryError::Semantic(format!(
+            "key `{kid}` was previously revoked"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn record_static_revocation_history(
+    store: &Arc<dyn HostedIssuerStore>,
+    candidate: &ValidatedRegistry,
+) -> Result<(), RegistryError> {
+    store
+        .record_static_key_revocations(&candidate.revoked_keys()?)
+        .await
+        .map_err(static_revocation_record_failed)
+}
+
 fn dynamic_check_failed(error: HostedIssuerError) -> RegistryError {
     RegistryError::Database(error.to_string())
+}
+
+fn static_revocation_record_failed(error: HostedIssuerError) -> RegistryError {
+    match error {
+        HostedIssuerError::AlreadyExists => RegistryError::Semantic(
+            "static registry key material conflicts with an existing revocation tombstone"
+                .to_owned(),
+        ),
+        other => RegistryError::Database(other.to_string()),
+    }
 }
 
 /// Runs a hosted write through the cross-source checks before handing it to
@@ -267,7 +316,7 @@ pub(crate) async fn register_hosted_issuer(
     actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
-    validate_dynamic_write(registry, &issuer.id, None).await?;
+    validate_dynamic_write(registry, store, &issuer.id, None).await?;
     store.create_issuer(issuer, actor).await
 }
 
@@ -279,7 +328,7 @@ pub(crate) async fn register_hosted_issuer_with_key(
     actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
-    validate_dynamic_write(registry, &issuer.id, Some(&key)).await?;
+    validate_dynamic_write(registry, store, &issuer.id, Some(&key)).await?;
     store.create_issuer_with_key(issuer, key, actor).await
 }
 
@@ -290,7 +339,7 @@ pub(crate) async fn register_hosted_issuer_key(
     actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
-    validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
+    validate_dynamic_write(registry, store, &key.issuer_id, Some(&key)).await?;
     store.add_key(key, actor).await
 }
 
@@ -304,7 +353,7 @@ pub(crate) async fn register_hosted_issuer_key_if_version(
     actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
-    validate_dynamic_write(registry, &key.issuer_id, Some(&key)).await?;
+    validate_dynamic_write(registry, store, &key.issuer_id, Some(&key)).await?;
     store.add_key_if_version(key, expected_version, actor).await
 }
 
@@ -315,7 +364,7 @@ mod tests {
     use crate::domain::models::hosted_issuer::{
         HostedIssuerKeyEntry, HostedIssuerKeyState, HostedIssuerState,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     const EC_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"dynamic-key","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}"#;
 
@@ -329,6 +378,7 @@ mod tests {
     struct InMemoryHostedStore {
         issuer: Option<HostedIssuer>,
         keys: tokio::sync::Mutex<HashMap<String, HostedIssuerKey>>,
+        revocations: tokio::sync::Mutex<HashSet<(String, String)>>,
     }
 
     impl InMemoryHostedStore {
@@ -340,12 +390,53 @@ mod tests {
             Arc::new(Self {
                 issuer: None,
                 keys: tokio::sync::Mutex::new(map),
+                revocations: tokio::sync::Mutex::new(HashSet::new()),
             })
         }
     }
 
     #[async_trait]
     impl HostedIssuerStore for InMemoryHostedStore {
+        async fn record_static_key_revocations(
+            &self,
+            revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), HostedIssuerError> {
+            self.revocations.lock().await.extend(
+                revocations
+                    .iter()
+                    .map(|revocation| (revocation.kid.clone(), revocation.material.clone())),
+            );
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            kid: &str,
+            material: &str,
+        ) -> Result<bool, HostedIssuerError> {
+            Ok(self
+                .revocations
+                .lock()
+                .await
+                .iter()
+                .any(|(revoked_kid, revoked_material)| {
+                    revoked_kid == kid || revoked_material == material
+                }))
+        }
+
+        async fn find_key_by_material(
+            &self,
+            material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(self
+                .keys
+                .lock()
+                .await
+                .values()
+                .find(|key| key.jwk.normalized_material().ok().as_deref() == Some(material))
+                .cloned())
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -416,23 +507,25 @@ mod tests {
             Ok(())
         }
 
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            let issuer = self.issuer.as_ref().ok_or(HostedIssuerError::NotFound)?;
+            if issuer.id != key.issuer_id || issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            self.add_key(key, actor).await
+        }
+
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(self.keys.lock().await.values().cloned().collect())
         }
 
         async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
             Ok(self.issuer.iter().cloned().collect())
-        }
-
-        async fn find_key_by_material(
-            &self,
-            material: &str,
-        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
-            let keys = self.keys.lock().await;
-            Ok(keys
-                .values()
-                .find(|key| material_of(&key.jwk).as_deref() == Some(material))
-                .cloned())
         }
 
         async fn find_issuer_ids(
@@ -620,6 +713,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_registration_rejects_material_reserved_by_static_revocation_history() {
+        let registry = RegistryHandle::empty();
+        let store = Arc::new(InMemoryHostedStore::default());
+        let mut revoked = key("old-static-kid");
+        let material = revoked.jwk.normalized_material().unwrap();
+        store
+            .record_static_key_revocations(&[crate::domain::ports::StaticKeyRevocation {
+                kid: revoked.kid.clone(),
+                material,
+            }])
+            .await
+            .unwrap();
+
+        revoked.kid = "new-hosted-kid".into();
+        let result = register_hosted_issuer_key(
+            &registry,
+            &(store as Arc<dyn HostedIssuerStore>),
+            revoked,
+            "portal-operator",
+        )
+        .await;
+
+        assert!(matches!(result, Err(HostedIssuerError::KeyMaterialReused)));
+    }
+
+    #[tokio::test]
+    async fn registry_revocation_blocks_hosted_registration_of_the_same_material() {
+        let mut revoked_jwk: serde_json::Value = serde_json::from_str(EC_JWK).unwrap();
+        revoked_jwk["kid"] = "old-static-kid".into();
+        let registry = RegistryHandle::from_yaml(
+            &serde_saphyr::to_string(&serde_json::json!({
+                "version": 1,
+                "issuers": [],
+                "admins": [],
+                "revoked_keys": [{
+                    "kid": "old-static-kid",
+                    "alg": "ES256",
+                    "jwk": revoked_jwk,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
+        record_static_revocation_history(&store, &registry.snapshot())
+            .await
+            .unwrap();
+
+        let result = register_hosted_issuer_key(
+            &registry,
+            &store,
+            key_with_material("new-hosted-kid", EC_JWK),
+            "portal-operator",
+        )
+        .await;
+        assert!(matches!(result, Err(HostedIssuerError::KeyMaterialReused)));
+    }
+
+    #[tokio::test]
     async fn write_colliding_with_admin_kid_fails_closed() {
         let registry = registry_with_admin();
         let store: Arc<dyn HostedIssuerStore> = Arc::new(InMemoryHostedStore::default());
@@ -779,6 +931,21 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for GatedStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -819,6 +986,17 @@ mod tests {
             self.reached.notify_one();
             self.release.notified().await;
             self.inner.add_key(key, actor).await
+        }
+
+        async fn add_key_if_version(
+            &self,
+            key: HostedIssuerKey,
+            expected_version: u64,
+            actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            self.inner
+                .add_key_if_version(key, expected_version, actor)
+                .await
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             self.inner.all_keys().await
@@ -1044,6 +1222,21 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for FailingHostedStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -1090,6 +1283,15 @@ mod tests {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
@@ -1139,6 +1341,21 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for CorruptHostedStore {
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
         async fn list_issuers_after(
             &self,
             _after: Option<&str>,
@@ -1177,6 +1394,15 @@ mod tests {
             _actor: &str,
         ) -> Result<(), HostedIssuerError> {
             Ok(())
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
         }
         async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
             Ok(Vec::new())
@@ -1235,7 +1461,7 @@ mod tests {
     #[tokio::test]
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer() {
         let db = crate::test_utils::sqlite_test_db(None).await;
-        publish_first_list_flow(db, "SQLite").await;
+        publish_first_list_flow(db.clone(), db, "SQLite").await;
     }
 
     #[cfg(all(feature = "memory", feature = "postgres-tests"))]
@@ -1243,7 +1469,8 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_postgres() {
         use crate::outbound::sql::test_containers::postgres_helpers;
         let test_db = postgres_helpers::postgres_connection().await;
-        publish_first_list_flow(test_db.db.clone(), "Postgres").await;
+        let second = Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 1).await);
+        publish_first_list_flow(test_db.db.clone(), second, "Postgres").await;
     }
 
     #[cfg(all(feature = "memory", feature = "mysql"))]
@@ -1251,7 +1478,12 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_mysql() {
         use crate::outbound::sql::test_containers::mysql_helpers;
         let test_db = mysql_helpers::MysqlTestDb::start().await;
-        publish_first_list_flow(test_db.connection().await, "MySQL").await;
+        publish_first_list_flow(
+            test_db.connection().await,
+            test_db.connection().await,
+            "MySQL",
+        )
+        .await;
     }
 
     /// The public half of a second EC pair, distinct from `key()`'s, so the
@@ -1280,6 +1512,7 @@ mod tests {
     ))]
     async fn publish_first_list_flow(
         db: std::sync::Arc<sea_orm::DatabaseConnection>,
+        second_db: std::sync::Arc<sea_orm::DatabaseConnection>,
         backend: &str,
     ) {
         use axum::{
@@ -1293,7 +1526,10 @@ mod tests {
         let registry = Arc::new(RegistryHandle::empty());
         let store: Arc<dyn HostedIssuerStore> =
             Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
-        let hosted = register_hosted_issuer(&registry, &store, issuer(), "portal-operator")
+        let mut sandbox = issuer();
+        sandbox.tier = "sandbox".into();
+        sandbox.expires_at = Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1));
+        let hosted = register_hosted_issuer(&registry, &store, sandbox, "portal-operator")
             .await
             .unwrap_or_else(|e| panic!("registering a portal issuer on {backend}: {e}"));
         register_hosted_issuer_key(&registry, &store, key("portal-key"), "portal-operator")
@@ -1308,13 +1544,13 @@ mod tests {
             registry,
             Some(store.clone()),
         ));
-        let mut other_state = crate::test_utils::test_app_state(Some(db.clone())).await;
+        let mut other_state = crate::test_utils::test_app_state(Some(second_db.clone())).await;
         let other_registry = Arc::new(RegistryHandle::empty());
         other_state.set_issuer_registry(other_registry.clone());
         other_state.issuer_key_resolver = Arc::new(CompositeIssuerKeyResolver::new(
             other_registry,
             Some(Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(
-                db.clone(),
+                second_db,
             ))),
         ));
 

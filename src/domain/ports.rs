@@ -25,12 +25,46 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
     async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticKeyRevocation {
+    pub kid: String,
+    pub material: String,
+}
+
 /// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
 /// is looked up by its `kid` primary key with no cache: every resolution reads
 /// the row, so revocation takes effect on the next request (ADR 0002, no
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    /// Persist static-key revocations so registry snapshots cannot restore a
+    /// revoked key after rollback or restart.
+    async fn record_static_key_revocations(
+        &self,
+        revocations: &[StaticKeyRevocation],
+    ) -> Result<(), HostedIssuerError>;
+
+    /// Check whether either the key id or normalized key material was revoked
+    /// from the static registry.
+    async fn static_key_was_revoked(
+        &self,
+        kid: &str,
+        material: &str,
+    ) -> Result<bool, HostedIssuerError>;
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        let mut revoked = Vec::new();
+        for (kid, material) in keys {
+            if self.static_key_was_revoked(kid, material).await? {
+                revoked.push(kid.clone());
+            }
+        }
+        Ok(revoked)
+    }
+
     /// Return a bounded page ordered by issuer id, strictly after `after`.
     async fn list_issuers_after(
         &self,
@@ -86,19 +120,13 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// Register a signing key for an existing hosted issuer.
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
 
-    /// Register a signing key only while the issuer is still at
-    /// `expected_version`. The default preserves the store's existing API for
-    /// test-only adapters; durable stores override it to make an HTTP
-    /// `If-Match` precondition atomic with the insertion.
+    /// Register a signing key only while the issuer is still at `expected_version`.
     async fn add_key_if_version(
         &self,
         key: HostedIssuerKey,
         expected_version: u64,
         actor: &str,
-    ) -> Result<(), HostedIssuerError> {
-        let _ = expected_version;
-        self.add_key(key, actor).await
-    }
+    ) -> Result<(), HostedIssuerError>;
 
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).

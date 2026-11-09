@@ -80,9 +80,9 @@ per-client 100 requests/second limit is the one clients hit. All clients reachin
 one controller pod share that bucket. Sustained aggregate traffic above one
 request per second drains its burst over time. Once drained, clients sharing
 that pod can collectively pass at most one request per second and may see HTTP
-429 responses; lower traffic lets tokens accumulate again. The admin API limiter
-reads the same settings, so its per-peer limit is lifted too; the NetworkPolicy
-and admin authentication bound that listener.
+429 responses; lower traffic lets tokens accumulate again. The admin listener
+has its own per-peer budget, configured with `APP_RATE_LIMIT__ADMIN_*`.
+The NetworkPolicy and admin authentication also bound that listener.
 The management authentication and admission gates use the client address from
 the controller's overwritten `X-Forwarded-For` only when
 `APP_RATE_LIMIT__TRUSTED_PROXIES` lists the controller pods' addresses or CIDR.

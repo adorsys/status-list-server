@@ -1855,6 +1855,14 @@ impl Config {
                 config.server.profile.as_str()
             )));
         }
+        if config.database.backend == DatabaseBackend::Memory
+            && config.telemetry.environment.is_production()
+        {
+            return Err(ConfigError::Message(
+                "the memory database backend cannot persist static key revocations in production"
+                    .to_string(),
+            ));
+        }
         config
             .management_auth
             .validate(config.telemetry.environment)?;
@@ -2009,7 +2017,7 @@ mod tests {
 
     #[test]
     fn issuer_registry_path_is_required_only_in_production() {
-        let policy = ManagementAuthConfig {
+        let mut policy = ManagementAuthConfig {
             issuers_file: None,
             leeway_secs: 60,
             max_token_lifetime_secs: 300,
@@ -2017,6 +2025,8 @@ mod tests {
         };
         assert!(policy.validate(TelemetryEnvironment::Development).is_ok());
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
+        policy.issuers_file = Some("issuers.yaml".into());
+        assert!(policy.validate(TelemetryEnvironment::Production).is_ok());
     }
     use secrecy::ExposeSecret;
     use std::path::{Path, PathBuf};
@@ -3241,6 +3251,8 @@ mod tests {
             ("server.aggregation_uri", uri),
         ];
         if classify_app_env(environment).is_production() {
+            overrides.push(("database.backend", "sqlite"));
+            overrides.push(("database.url", "sqlite://status-list.db"));
             overrides.push(("management_auth.audiences", "status-list-server-management"));
             overrides.push((
                 "management_auth.issuers_file",
@@ -3980,5 +3992,25 @@ mod tests {
             ])
             .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
+    }
+
+    #[test]
+    fn production_refuses_memory_backend_for_static_revocation_history() {
+        let error = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot persist static key revocations")
+        );
+
+        Config::load_from_overrides(&[
+            ("telemetry.environment", "development"),
+            ("database.backend", "memory"),
+        ])
+        .expect("development may use the in-memory backend");
     }
 }

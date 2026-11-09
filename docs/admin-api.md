@@ -69,7 +69,7 @@ passed, including keys staged for rotation. `keys_limit` is the tier's
 
 For static issuers, the detail ETag identifies the complete JSON representation.
 For hosted issuers, the ETag and `Issuer-Version` derive from the persisted
-issuer version. Mutations use them through `If-Match` or
+issuer version. Mutations use exactly one of `If-Match` or
 `If-Issuer-Version`, so ordinary list publishes and derived expiry state do
 not invalidate writes. The reads do not provide a transactional snapshot
 across issuer metadata, keys, and usage.
@@ -82,6 +82,7 @@ Static issuers remain managed through the registry. Creation is available only
 in the hosted profile; it assigns the issuer and aggregation identifiers and
 the key thumbprint. Other writes require the current issuer `ETag` or
 `Issuer-Version`; stale values return 412 and missing values return 428.
+Retrying an already revoked key returns 200 unchanged.
 
 `APP_TIERS__SANDBOX__MAX_LIFETIME_SECS` defaults to 2592000 (30 days).
 Creation defaults `expires_at` to that duration from now. Creation and renewal

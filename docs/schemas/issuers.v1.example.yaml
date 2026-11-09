@@ -41,5 +41,5 @@ admins:
 
 # When a static key is revoked, move its complete public record here instead
 # of deleting it. Tombstones never authenticate and reserve the kid and JWK
-# material while they remain in the file.
+# material permanently when durable revocation history is configured.
 revoked_keys: []
