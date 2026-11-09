@@ -821,6 +821,16 @@ ExternalSecret writes it to `statuslist-secret` as both `database-password` and
 `postgres-password`. The existing `REDIS_PASSWORD` property is no longer mapped
 into the application Secret by the new profile.
 
+Before the first upgrade, verify that `statuslist-secret-store` is owned by the
+`statuslist` Helm release in the `statuslist` namespace. The deploy workflow
+rejects a store owned by another release or created outside Helm. It also
+rejects an existing store with AWS provider settings beyond the chart's
+`SecretsManager` service and `eu-central-1` region, because the chart would
+replace those settings. The rendered store has no `auth` block, so ESO uses its
+controller identity. Confirm that identity can read both the existing
+`statuslist-secret` entry and the new `statuslist-fscert-signing` entry in AWS
+Secrets Manager before deploying.
+
 The `fscert` image also needs a matching issuer certificate and private key.
 Provision an AWS Secrets Manager entry named `statuslist-fscert-signing` with
 `CERTIFICATE` and `SIGNING_KEY` properties through the approved secret-management

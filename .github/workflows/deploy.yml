@@ -850,6 +850,36 @@ jobs:
           fi
           echo "ConfigMap 'status-list-server-issuers' is present."
 
+      - name: Check existing SecretStore before upgrade
+        run: |
+          set -euo pipefail
+          store_json="$RUNNER_TEMP/statuslist-secret-store.json"
+          kubectl get secretstore statuslist-secret-store -n "${{ env.HELM_NAMESPACE }}" \
+            --ignore-not-found -o json > "$store_json"
+          if [ ! -s "$store_json" ]; then
+            echo "No existing statuslist-secret-store; Helm will create it."
+            exit 0
+          fi
+          if ! jq -e --arg release "${{ env.HELM_RELEASE_NAME }}" \
+              --arg namespace "${{ env.HELM_NAMESPACE }}" '
+            .metadata.labels["app.kubernetes.io/managed-by"] == "Helm" and
+            .metadata.annotations["meta.helm.sh/release-name"] == $release and
+            .metadata.annotations["meta.helm.sh/release-namespace"] == $namespace
+          ' "$store_json" >/dev/null; then
+            echo "::error::Existing statuslist-secret-store is not owned by this Helm release. Resolve ownership before upgrading."
+            exit 1
+          fi
+          if ! jq -e '
+            (.spec.provider | keys == ["aws"]) and
+            (.spec.provider.aws | keys == ["region", "service"]) and
+            .spec.provider.aws.region == "eu-central-1" and
+            .spec.provider.aws.service == "SecretsManager"
+          ' "$store_json" >/dev/null; then
+            echo "::error::Existing statuslist-secret-store has provider settings that the chart would replace. Verify ESO authentication and reconcile the store before upgrading."
+            exit 1
+          fi
+          echo "Existing statuslist-secret-store ownership and AWS provider settings match the chart."
+
       - name: Assert the deployed variant is visible outside this environment
         # The nightly scan only sees the repo-scoped IMAGE_VARIANT. If production overrides it,
         # the nightly would verify a variant nobody runs, so fail the deploy instead.
@@ -940,9 +970,6 @@ jobs:
             -f "$CHART_DIR"/values-production.yaml \
             -f "$CHART_DIR"/values-datev-staging.yaml \
             --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
-            --set-string "externalSecret.spec.secretStoreRef.name=statuslist-secret-store" \
-            --set-string "externalSecret.spec.secretStoreRef.kind=SecretStore" \
-            --set "secretStore.enabled=true" \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
