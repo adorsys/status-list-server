@@ -35,7 +35,7 @@ impl Principal {
     /// The principal identifier, shared by both variants.
     pub fn id(&self) -> &str {
         match self {
-            Principal::Issuer { id, .. } | Principal::Admin { id } => id,
+            Principal::Issuer { id, .. } | Principal::Admin { id, .. } => id,
         }
     }
 

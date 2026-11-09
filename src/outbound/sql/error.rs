@@ -32,6 +32,9 @@ pub enum RepositoryError {
     /// another hosted issuer; the owner is logged server-side, never returned.
     #[error("key material was already registered")]
     KeyMaterialReused,
+    /// An optimistic issuer-version guard did not match. No write committed.
+    #[error("issuer version changed")]
+    VersionMismatch,
     /// The hosted issuer already holds its tier's `max_keys` keys.
     #[error("hosted issuer key quota exceeded: at most {max_keys} keys")]
     KeyQuotaExceeded { max_keys: usize },

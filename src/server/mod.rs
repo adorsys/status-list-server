@@ -97,6 +97,8 @@ pub struct AppState {
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
     pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
+    /// Hosted-profile lifecycle commands, absent in the private profile.
+    pub hosted_lifecycle_service: Option<Arc<auth::hosted_service::HostedIssuerLifecycleService>>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,

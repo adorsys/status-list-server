@@ -41,6 +41,10 @@ same `401 invalid_token` body. A valid admin without `issuers:read` receives
 `403 insufficient_scope` with the required scope in `WWW-Authenticate`.
 Successful responses use `Cache-Control: no-store`; API errors use
 `Cache-Control: no-store, max-age=0`.
+The admin issuer API has a separate per-peer-IP budget, configured by
+`APP_RATE_LIMIT__ADMIN_BURST_SIZE` (default 100) and
+`APP_RATE_LIMIT__ADMIN_PERIOD_SECS` (default 1 second per replenished request).
+Excess reads or writes return JSON `429 too_many_requests` with `Retry-After`.
 
 ## Pagination and filters
 
@@ -64,13 +68,15 @@ hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
 passed, including keys staged for rotation. `keys_limit` is the tier's
 `max_keys`.
 
-The detail ETag identifies the complete JSON representation for either source.
-It changes when returned keys, usage, metadata, or derived expiry state change.
+The detail ETag for hosted issuers derives from the persisted issuer version,
+so usage counts and derived expiry do not invalidate a write precondition.
+Static issuer ETags identify the complete JSON representation.
+
+`PATCH /admin/v1/issuers/{issuer_id}` accepts `{"state":"suspended"}` or `{"state":"active"}` for lifecycle changes. An expired issuer cannot be reactivated. A body containing unsupported or unknown fields returns `400 invalid_input`.
 `Issuer-Version` separately covers writable issuer metadata, lifecycle, and
-key ID/state/validity windows. Future mutation endpoints use it through
-`If-Issuer-Version`, so ordinary list publishes do not invalidate writes. The
-reads do not provide a transactional snapshot across issuer metadata, keys,
-and usage.
+key ID/state/validity windows. Use either `If-Match` or `If-Issuer-Version`,
+not both. The reads do not provide a transactional snapshot across issuer
+metadata, keys, and usage.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

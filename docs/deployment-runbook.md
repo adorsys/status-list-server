@@ -135,9 +135,34 @@ For a zero-downtime rotation:
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
 3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the exact bytes delivered by the selected volume source, then compare the result with the `fingerprint` in each pod's `issuer_registry_reloaded` log. For a ConfigMap, use `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`. For a Secret, decode the base64 value first: `kubectl get secret <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | base64 --decode | shasum -a 256` (use the platform's equivalent decode flag if needed). For a CSI volume, hash the file from the provider's source or another copy of the exact mounted bytes; there is no Kubernetes API object to query. `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
-5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
+5. Move the old key from that issuer's `keys` list to the top-level `revoked_keys` list, validate the file again, and publish the registry. Tombstones do not authenticate and permanently reserve both the `kid` and the public-key material in the durable history. Confirm reload on every pod; requests signed with the removed key should then be rejected. Simply deleting the key from `keys` stops trusting it in the current registry but creates no tombstone, so restoring an older registry can trust it again.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+For emergency revocation, move the compromised key from `keys` to the top-level `revoked_keys` list; to suspend the whole issuer, set its `disabled` field to `true`. Commit the change when the operator-managed registry is version-controlled, validate the file, then publish it to the mounted source. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer needs to authenticate, and do not delete the durable mapping while published tokens may still reference its URL. Public status-list reads continue while the issuer is disabled.
+
+Static registry tombstones are recorded in the SQL database. A candidate that reuses a revoked `kid` or normalized public-key material is rejected even after restoring an older registry file and restarting **on a release that enforces this history**. An older binary ignores the table: rolling back that binary and restoring an old registry file can trust the revoked key again. Do not rely on tombstone enforcement during a binary rollback; use a registry compatible with the older release that excludes the revoked key from active `keys`, and verify rejection on every pod. The same records prevent portal registration of a revoked key on the current release. Database backups must retain the revocation table, and normal migrations create it. Finish propagating one registry revision before publishing the next. Hosted-profile and static-key revocations share the database durability boundary.
+
+Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
+
+For a hosted issuer, use the admin listener with a registry admin JWT carrying
+`issuers:write`. See [the admin API guide](admin-api.md) for how to mint it
+(header `typ: statuslist-admin+jwt`, the admin's `kid`, `iss` equal to the
+admin id, `aud` from `APP_ADMIN_AUTH__AUDIENCES`, `exp - iat` within
+`APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS`, default 300s). Read the issuer and
+its `ETag` with `GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`. A missing `If-Match` returns `428
+precondition_required`; a stale `ETag` returns `412 precondition_failed`, so
+re-read and retry. `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with
+`If-Match` and `{"state":"revoked"}` permanently revokes one key; repeating it
+returns the key unchanged. The committed state and actor audit event are
+written in one database transaction. The admin routes have their own
+rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults to a burst of 100 and one replenished request per second per peer IP),
+and a write that already authenticated before the change can still commit.
+Send the old issuer token to each pod's management listener
+(`GET /api/v1/credentials` must answer `401`); public status-list reads remain
+available. A revoked `kid` remains stored and cannot be reused. An expired
+hosted issuer is rejected at verification time, even if no cleanup job has
+run.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
 
@@ -781,6 +806,7 @@ here; a test fails until it does.
 | `m20261023_000002_issuer_keys` | Yes: an older release ignores the table | None; keep the table | Created empty; the next migration fills it with `reserved` rows |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
 | `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
+| `m20261105_000001_static_key_revocations` | Schema-compatible: an older release ignores the table, but rollback does not preserve revocation enforcement if an old registry file is restored | Keep the table and revocations; use a registry compatible with the older release that excludes revoked keys from active `keys`, then verify rejection | Current releases retain static key revocations across restarts and registry file restores |
 
 ### Preparing existing management credentials
 
