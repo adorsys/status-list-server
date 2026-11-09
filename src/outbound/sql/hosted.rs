@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseBackend, DbErr, EntityTrait, Order, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, DbErr, EntityTrait, Order,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     sea_query::{Expr, OnConflict},
 };
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,8 @@ use time::OffsetDateTime;
 
 use super::error::{RepositoryError, contention_err};
 use super::models::{
-    PublicKey, hosted_issuer_keys, issuer_audit_events, issuers, static_key_revocations,
+    PublicKey, hosted_issuer_keys, issuer_audit_events, issuers, registry_static_claims,
+    static_key_revocations,
 };
 use super::store::{SeaOrmStore, SwappableDatabaseConnection, begin_read_committed, find_err};
 use crate::domain::models::credential::{AggregationId, PublicJwk, canonical_jwk_material};
@@ -26,7 +27,9 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuerKeyState, HostedIssuerReadState, HostedIssuerState,
 };
 use crate::domain::models::tier::{IssuerTier, Tiers};
-use crate::domain::ports::{HostedIssuerLifecycleStore, HostedIssuerStore};
+use crate::domain::ports::{
+    HostedIssuerLifecycleStore, HostedIssuerStore, RegistryWriteGuard, StaticClaimConflict,
+};
 use crate::utils::metrics_db::time_query;
 
 /// How often a creation regenerates a colliding random aggregation ID. 122
@@ -303,6 +306,47 @@ async fn insert_issuer_row(
     .map(|_| ())
 }
 
+async fn insert_key_row(
+    txn: &sea_orm::DatabaseTransaction,
+    key: &HostedIssuerKey,
+    key_material: &str,
+) -> Result<(), DbErr> {
+    hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
+        kid: Set(key.kid.clone()),
+        issuer_id: Set(key.issuer_id.clone()),
+        key_material: Set(key_material.to_owned()),
+        alg: Set(jose_alg_name(key.jwk.algorithm()).to_owned()),
+        jwk: Set(PublicKey::from(key.jwk.jwk().clone())),
+        state: Set(key.state.as_str().to_owned()),
+        not_before: Set(key.not_before.map(|value| value.unix_timestamp())),
+        not_after: Set(key.not_after.map(|value| value.unix_timestamp())),
+        created_at: Set(key.created_at.unix_timestamp()),
+    })
+    .exec_without_returning(txn)
+    .await
+    .map(|_| ())
+}
+
+fn validate_key_window(key: &HostedIssuerKey) -> Result<(), RepositoryError> {
+    if key.jwk.key_id() != key.kid {
+        return Err(RepositoryError::InvalidKey(format!(
+            "key `{}` has conflicting JWK kid metadata",
+            key.kid
+        )));
+    }
+    if key
+        .not_before
+        .zip(key.not_after)
+        .is_some_and(|(before, after)| before >= after)
+    {
+        return Err(RepositoryError::InvalidKey(format!(
+            "key `{}` has not_before >= not_after",
+            key.kid
+        )));
+    }
+    Ok(())
+}
+
 /// Whether a `DbErr` is a unique-constraint violation, which is how both the
 /// issuer `id` primary key and the `aggregation_id` unique index surface a
 /// collision on insert.
@@ -319,6 +363,10 @@ fn is_unique_violation(err: &DbErr) -> bool {
 fn material_hash(material: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(material.as_bytes()))
+}
+
+fn static_claim_hash(kind: &str, value: &str) -> String {
+    material_hash(&format!("{kind}:{value}"))
 }
 
 /// The JOSE `alg` name for a validated management key. `PublicJwk` restricts
@@ -430,27 +478,7 @@ impl SeaOrmStore<HostedIssuerRow> {
         key_limits: Option<&Tiers>,
         actor: &str,
     ) -> Result<(), RepositoryError> {
-        // The `kid` column is authoritative (the registry keeps the same
-        // rule): a key whose embedded `kid` disagrees with its row never
-        // enters storage.
-        if key.jwk.key_id() != key.kid {
-            return Err(RepositoryError::InvalidKey(format!(
-                "key `{}` has conflicting JWK kid metadata",
-                key.kid
-            )));
-        }
-        // A permanently invalid window is a config error, not a valid key that
-        // happens to be out of range: it can never authenticate.
-        if key
-            .not_before
-            .zip(key.not_after)
-            .is_some_and(|(before, after)| before >= after)
-        {
-            return Err(RepositoryError::InvalidKey(format!(
-                "key `{}` has not_before >= not_after",
-                key.kid
-            )));
-        }
+        validate_key_window(&key)?;
         time_query("insert", "issuer_key", async {
             let material = serde_json::from_slice::<serde_json::Value>(key.jwk.as_bytes())
                 .map_err(|err| RepositoryError::InvalidKey(err.to_string()))
@@ -505,19 +533,7 @@ impl SeaOrmStore<HostedIssuerRow> {
                 txn.rollback().await.ok();
                 return Err(err);
             }
-            let insert = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
-                kid: Set(key.kid.clone()),
-                issuer_id: Set(key.issuer_id.clone()),
-                key_material: Set(hash),
-                alg: Set(jose_alg_name(key.jwk.algorithm()).to_string()),
-                jwk: Set(PublicKey::from(key.jwk.jwk().clone())),
-                state: Set(key.state.as_str().to_string()),
-                not_before: Set(key.not_before.map(|value| value.unix_timestamp())),
-                not_after: Set(key.not_after.map(|value| value.unix_timestamp())),
-                created_at: Set(key.created_at.unix_timestamp()),
-            })
-            .exec_without_returning(&txn)
-            .await;
+            let insert = insert_key_row(&txn, &key, &hash).await;
             match insert {
                 Ok(_) => {
                     if let Err(error) = append_lifecycle_audit(
@@ -757,6 +773,92 @@ fn insert_first_err(e: DbErr) -> RepositoryError {
 
 #[async_trait]
 impl HostedIssuerStore for SqlHostedIssuerStore {
+    async fn registry_write_guard(&self) -> Result<Box<dyn RegistryWriteGuard>, HostedIssuerError> {
+        let db = self.store.current();
+        if db.get_database_backend() == DatabaseBackend::Sqlite {
+            // SQLite is a single-node backend; the local registry lock covers its writes.
+            return Ok(Box::new(()));
+        }
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        let row = txn
+            .query_one_raw(sea_orm::Statement::from_string(
+                db.get_database_backend(),
+                "SELECT id FROM registry_write_guard WHERE id = 1 FOR UPDATE",
+            ))
+            .await
+            .map_err(err_txn)?;
+        if row.is_none() {
+            return Err(HostedIssuerError::Unavailable);
+        }
+        Ok(Box::new(txn))
+    }
+
+    async fn record_static_registry_claims(
+        &self,
+        keys: &[(String, String, String)],
+    ) -> Result<(), HostedIssuerError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let db = self.store.current();
+        let txn = begin_read_committed(&db).await.map_err(err_txn)?;
+        for (id, kid, material) in keys {
+            for claim in [
+                static_claim_hash("id", id),
+                static_claim_hash("kid", kid),
+                static_claim_hash("material", material),
+            ] {
+                registry_static_claims::Entity::insert(registry_static_claims::ActiveModel {
+                    claim: Set(claim),
+                })
+                .on_conflict(
+                    OnConflict::column(registry_static_claims::Column::Claim)
+                        .do_nothing_on([registry_static_claims::Column::Claim])
+                        .to_owned(),
+                )
+                .exec_without_returning(&txn)
+                .await
+                .map_err(err_txn)?;
+            }
+        }
+        txn.commit().await.map_err(err_txn)?;
+        Ok(())
+    }
+
+    async fn static_claim_conflict(
+        &self,
+        issuer_id: &str,
+        kid: Option<&str>,
+        material: Option<&str>,
+    ) -> Result<Option<StaticClaimConflict>, HostedIssuerError> {
+        let db = self.store.current();
+        for (claim, conflict) in [
+            (
+                Some(static_claim_hash("id", issuer_id)),
+                StaticClaimConflict::PrincipalId,
+            ),
+            (
+                kid.map(|value| static_claim_hash("kid", value)),
+                StaticClaimConflict::KeyId,
+            ),
+            (
+                material.map(|value| static_claim_hash("material", value)),
+                StaticClaimConflict::KeyMaterial,
+            ),
+        ] {
+            if let Some(claim) = claim
+                && registry_static_claims::Entity::find_by_id(claim)
+                    .one(db.as_ref())
+                    .await
+                    .map_err(find_err)?
+                    .is_some()
+            {
+                return Ok(Some(conflict));
+            }
+        }
+        Ok(None)
+    }
+
     async fn record_static_key_revocations(
         &self,
         revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -997,15 +1099,17 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         key: HostedIssuerKey,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
-        if key.issuer_id != issuer.id || key.jwk.key_id() != key.kid {
+        if key.issuer_id != issuer.id {
             return Err(HostedIssuerError::InvalidPublicJwk(
                 "key metadata does not match its issuer".into(),
             ));
         }
+        validate_key_window(&key).map_err(hosted_error)?;
         let value: serde_json::Value = serde_json::from_slice(key.jwk.as_bytes())
             .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
         let material =
             canonical_jwk_material(&value).map_err(HostedIssuerError::InvalidPublicJwk)?;
+        time_query("insert", "hosted_issuer", async {
         let db = self.store.current();
         for attempt in 0..AGGREGATION_ID_RETRIES {
             if attempt > 0 {
@@ -1024,23 +1128,26 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
                 }
                 return Err(classified.into());
             }
-            if let Err(e) = hosted_issuer_keys::Entity::insert(hosted_issuer_keys::ActiveModel {
-                kid: Set(key.kid.clone()),
-                issuer_id: Set(issuer.id.clone()),
-                key_material: Set(material_hash(&material)),
-                alg: Set(jose_alg_name(key.jwk.algorithm()).to_owned()),
-                jwk: Set(PublicKey::from(key.jwk.jwk().clone())),
-                state: Set(key.state.as_str().to_owned()),
-                not_before: Set(key.not_before.map(|v| v.unix_timestamp())),
-                not_after: Set(key.not_after.map(|v| v.unix_timestamp())),
-                created_at: Set(key.created_at.unix_timestamp()),
-            })
-            .exec_without_returning(&txn)
-            .await
-            {
-                return Err(classify_after_rollback(txn, e, "initial key insert")
-                    .await
-                    .into());
+            let key_hash = material_hash(&material);
+            if let Err(e) = time_query("insert", "issuer_key", insert_key_row(&txn, &key, &key_hash)).await {
+                let classified = classify_after_rollback(txn, e, "initial key insert").await;
+                if matches!(classified, RepositoryError::DuplicateEntry) {
+                    if load_entry(&key.kid, &db).await.map_err(HostedIssuerError::from)?.is_some() {
+                        return Err(HostedIssuerError::AlreadyExists);
+                    }
+                    if let Some(blocker) = find_key_by_material_hash(&material_hash(&material), &db)
+                        .await
+                        .map_err(HostedIssuerError::from)?
+                    {
+                        tracing::warn!(
+                            kid = %key.kid,
+                            owner = %blocker.issuer_id,
+                            "rejecting a hosted key whose material is already registered"
+                        );
+                        return Err(HostedIssuerError::KeyMaterialReused);
+                    }
+                }
+                return Err(classified.into());
             }
             for (action, after) in [
                 (
@@ -1049,7 +1156,7 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
                 ),
                 (
                     "key.registered",
-                    serde_json::json!({"kid": key.kid, "state": "active"}),
+                    serde_json::json!({"kid": key.kid, "state": key.state.as_str(), "version": issuer.version}),
                 ),
             ] {
                 if let Err(e) =
@@ -1070,6 +1177,7 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             return Ok(issuer);
         }
         Err(HostedIssuerError::AlreadyExists)
+        }).await
     }
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {

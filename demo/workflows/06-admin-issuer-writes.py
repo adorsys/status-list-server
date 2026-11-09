@@ -43,6 +43,8 @@ def main():
         )
         if current.status_code != 200:
             raise SystemExit(f"Admin read failed with HTTP {current.status_code}")
+        if current.json().get("tier") != "sandbox":
+            raise SystemExit("Only sandbox issuers support expiry renewal")
         headers["If-Match"] = current.headers["ETag"]
         response = requests.patch(
             endpoint,

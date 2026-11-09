@@ -272,7 +272,7 @@ paths:
     patch:
       operationId: updateIssuer
       tags: [issuers]
-      summary: Suspend or resume a portal issuer
+      summary: Suspend, resume or renew a portal issuer
       description: |
         Changes exactly one thing: `state` (`suspended` or `active`) or
         `expires_at`. Requires `issuers:write` and `If-Issuer-Version` or
@@ -283,6 +283,7 @@ paths:
         (now, now + tiers.sandbox.max_lifetime_secs], including for an expired
         issuer. The default maximum lifetime is 30 days. Suspension takes
         effect on the next management request on every replica.
+        Portal issuers with the `standard` tier do not expire and reject renewal.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
         - $ref: "#/components/parameters/IfMatch"
@@ -328,7 +329,7 @@ paths:
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry` — `expires_at` is not in (now, now + tiers.sandbox.max_lifetime_secs]."
+          description: "`invalid_expiry` — `expires_at` is outside the sandbox lifetime window, or this issuer tier does not support renewal."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"

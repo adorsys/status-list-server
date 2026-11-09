@@ -912,6 +912,7 @@
         {
           "name": "Renew issuer",
           "request": {
+            "description": "Renew a sandbox issuer. Portal issuers with the standard tier never expire and reject renewal.",
             "auth": {
               "type": "bearer",
               "bearer": [

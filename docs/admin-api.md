@@ -88,7 +88,14 @@ Retrying an already revoked key returns 200 unchanged.
 Creation defaults `expires_at` to that duration from now. Creation and renewal
 accept an expiry strictly after now and no later than now plus the configured
 duration. Renewal may restore an expired issuer; resuming a suspension alone
-does not. Each change is recorded in the SQL audit log with its actor.
+does not. Portal issuers stored with the `standard` tier do not expire and
+reject renewal. Each change is recorded in the SQL audit log with its actor.
+
+Hosted key writes and registry reloads share a database lock on PostgreSQL and
+MySQL. Reloads also record static principal IDs, key IDs, and normalized key
+material as durable claims. These claims are retained after a registry entry
+is removed, so a lagging replica cannot admit a hosted key still trusted by
+another replica. This reserves historical static identities from hosted use.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

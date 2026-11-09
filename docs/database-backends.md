@@ -121,5 +121,6 @@ There is no separate MariaDB service because MariaDB uses the same MySQL-driver 
 ## HA And Distributed Storage
 
 - For high availability, prefer PostgreSQL or MySQL backed by a managed HA service or a replicated cluster.
+- Hosted PostgreSQL and MySQL require a pool of at least two connections per pod. One connection can hold the registry coordination lock while a second performs the checked write. The forward-only `registry_coordination` migration creates the lock row and durable static-claim table; apply it before rolling out this version.
 - Avoid SQLite for multi-replica production deployments.
 - If you need distributed storage semantics, use a database that already provides them rather than trying to layer them on top of SQLite.

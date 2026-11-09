@@ -25,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(issuer_audit_events::Migration),
             Box::new(issuer_keys_carry_over::Migration),
             Box::new(static_key_revocations::Migration),
+            Box::new(registry_coordination::Migration),
         ]
     }
 
@@ -34,6 +35,71 @@ impl MigratorTrait for Migrator {
         C: IntoSchemaManagerConnection<'c>,
     {
         Err(forward_only("dropping every table is refused"))
+    }
+}
+
+pub(crate) mod registry_coordination {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261109_000001_registry_coordination"
+        }
+    }
+
+    #[async_trait::async_trait]
+    // SeaORM's migration trait uses an elided lifetime in this signature.
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            let mut guard = Table::create();
+            guard.table(RegistryWriteGuard::Table).if_not_exists().col(
+                ColumnDef::new(RegistryWriteGuard::Id)
+                    .integer()
+                    .not_null()
+                    .primary_key(),
+            );
+            pin_innodb_on_mysql(manager, &mut guard);
+            manager.create_table(guard).await?;
+            let seed = match manager.get_database_backend() {
+                sea_orm::DatabaseBackend::MySql => {
+                    "INSERT IGNORE INTO registry_write_guard (id) VALUES (1)"
+                }
+                _ => "INSERT INTO registry_write_guard (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
+            };
+            manager.get_connection().execute_unprepared(seed).await?;
+
+            let mut claims = Table::create();
+            claims
+                .table(RegistryStaticClaims::Table)
+                .if_not_exists()
+                .col(
+                    ColumnDef::new(RegistryStaticClaims::Claim)
+                        .string_len(64)
+                        .not_null()
+                        .primary_key(),
+                );
+            pin_innodb_on_mysql(manager, &mut claims);
+            manager.create_table(claims).await
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum RegistryWriteGuard {
+        Table,
+        Id,
+    }
+
+    #[derive(Iden)]
+    enum RegistryStaticClaims {
+        Table,
+        Claim,
     }
 }
 

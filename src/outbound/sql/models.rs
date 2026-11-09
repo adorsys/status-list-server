@@ -276,6 +276,24 @@ pub(crate) mod static_key_revocations {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+// SeaORM's generated entity types are public within this crate-private module.
+#[allow(unreachable_pub)]
+pub(crate) mod registry_static_claims {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+    #[sea_orm(table_name = "registry_static_claims")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub claim: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, FromJsonQueryResult)]
 pub struct StatusList {
     pub bits: u8,

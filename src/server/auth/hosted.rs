@@ -17,7 +17,7 @@ use crate::domain::models::credential::{
 use crate::domain::models::hosted_issuer::{
     HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry, HostedIssuerKeyState,
 };
-use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver};
+use crate::domain::ports::{HostedIssuerStore, IssuerKeyResolver, StaticClaimConflict};
 use crate::server::auth::issuer_registry::{RegistryError, RegistryHandle, ValidatedRegistry};
 
 /// Static-first resolution. A hosted key is served only while the static
@@ -147,6 +147,31 @@ async fn validate_dynamic_write(
     if snapshot.has_principal_id(issuer_id) {
         return Err(HostedIssuerError::AlreadyExists);
     }
+    let material = key
+        .map(|key| {
+            material_of(&key.jwk).ok_or_else(|| {
+                HostedIssuerError::InvalidPublicJwk(
+                    "the requested issuer key has malformed JWK parameters".into(),
+                )
+            })
+        })
+        .transpose()?;
+    match store
+        .static_claim_conflict(
+            issuer_id,
+            key.map(|key| key.kid.as_str()),
+            material.as_deref(),
+        )
+        .await?
+    {
+        Some(StaticClaimConflict::PrincipalId | StaticClaimConflict::KeyId) => {
+            return Err(HostedIssuerError::AlreadyExists);
+        }
+        Some(StaticClaimConflict::KeyMaterial) => {
+            return Err(HostedIssuerError::KeyMaterialReused);
+        }
+        None => {}
+    }
     let Some(key) = key else {
         return Ok(());
     };
@@ -155,11 +180,7 @@ async fn validate_dynamic_write(
     if snapshot.resolve(&key.kid).is_some() || snapshot.has_revoked_kid(&key.kid) {
         return Err(HostedIssuerError::AlreadyExists);
     }
-    let registers = material_of(&key.jwk).ok_or_else(|| {
-        HostedIssuerError::InvalidPublicJwk(
-            "the requested issuer key has malformed JWK parameters".into(),
-        )
-    })?;
+    let registers = material.expect("key material was normalized above");
     if store.static_key_was_revoked(&key.kid, &registers).await? {
         return Err(HostedIssuerError::KeyMaterialReused);
     }
@@ -170,6 +191,21 @@ async fn validate_dynamic_write(
     // unique index in storage, not here: a pre-check here would be racy and
     // would duplicate the full-table scan the index replaces.
     Ok(())
+}
+
+pub async fn record_static_registry_claims(
+    store: &Arc<dyn HostedIssuerStore>,
+    candidate: &ValidatedRegistry,
+) -> Result<(), RegistryError> {
+    let keys = candidate
+        .all_principal_keys()
+        .into_iter()
+        .map(|(id, kid, material)| (id.to_owned(), kid.to_owned(), material))
+        .collect::<Vec<_>>();
+    store
+        .record_static_registry_claims(&keys)
+        .await
+        .map_err(dynamic_check_failed)
 }
 
 /// Cross-check only *new* candidate ids and kids, and materials not already
@@ -306,9 +342,8 @@ fn static_revocation_record_failed(error: HostedIssuerError) -> RegistryError {
 /// (which assigns identifiers) rather than accepting whole entities; hosted
 /// tests use this to exercise the same path production would.
 ///
-/// The registry write lock serializes this with a reload in the same process
-/// only. If a reload on another pod races it, `static_conflict` fails the
-/// hosted key closed rather than trusting it twice.
+/// The registry and database guards serialize this with reloads on this and
+/// other pods before either side checks its trust claims.
 pub(crate) async fn register_hosted_issuer(
     registry: &RegistryHandle,
     store: &Arc<dyn HostedIssuerStore>,
@@ -316,6 +351,7 @@ pub(crate) async fn register_hosted_issuer(
     actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
+    let _database_guard = store.registry_write_guard().await?;
     validate_dynamic_write(registry, store, &issuer.id, None).await?;
     store.create_issuer(issuer, actor).await
 }
@@ -328,6 +364,7 @@ pub(crate) async fn register_hosted_issuer_with_key(
     actor: &str,
 ) -> Result<HostedIssuer, HostedIssuerError> {
     let _guard = registry.write_lock().await;
+    let _database_guard = store.registry_write_guard().await?;
     validate_dynamic_write(registry, store, &issuer.id, Some(&key)).await?;
     store.create_issuer_with_key(issuer, key, actor).await
 }
@@ -339,6 +376,7 @@ pub(crate) async fn register_hosted_issuer_key(
     actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
+    let _database_guard = store.registry_write_guard().await?;
     validate_dynamic_write(registry, store, &key.issuer_id, Some(&key)).await?;
     store.add_key(key, actor).await
 }
@@ -353,6 +391,7 @@ pub(crate) async fn register_hosted_issuer_key_if_version(
     actor: &str,
 ) -> Result<(), HostedIssuerError> {
     let _guard = registry.write_lock().await;
+    let _database_guard = store.registry_write_guard().await?;
     validate_dynamic_write(registry, store, &key.issuer_id, Some(&key)).await?;
     store.add_key_if_version(key, expected_version, actor).await
 }
@@ -397,6 +436,28 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for InMemoryHostedStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -495,6 +556,16 @@ mod tests {
             issuer: HostedIssuer,
             _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
+            Ok(issuer)
+        }
+
+        async fn create_issuer_with_key(
+            &self,
+            issuer: HostedIssuer,
+            key: HostedIssuerKey,
+            actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            self.add_key(key, actor).await?;
             Ok(issuer)
         }
 
@@ -931,6 +1002,28 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for GatedStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -977,6 +1070,14 @@ mod tests {
             actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             self.inner.create_issuer(issuer, actor).await
+        }
+        async fn create_issuer_with_key(
+            &self,
+            issuer: HostedIssuer,
+            key: HostedIssuerKey,
+            actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            self.inner.create_issuer_with_key(issuer, key, actor).await
         }
         async fn add_key(
             &self,
@@ -1222,6 +1323,28 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for FailingHostedStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -1274,6 +1397,14 @@ mod tests {
             Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
                 "backend down",
             ))))
+        }
+        async fn create_issuer_with_key(
+            &self,
+            _issuer: HostedIssuer,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            Err(HostedIssuerError::Unavailable)
         }
         async fn add_key(
             &self,
@@ -1341,6 +1472,28 @@ mod tests {
 
     #[async_trait]
     impl HostedIssuerStore for CorruptHostedStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -1384,6 +1537,14 @@ mod tests {
         async fn create_issuer(
             &self,
             issuer: HostedIssuer,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            Ok(issuer)
+        }
+        async fn create_issuer_with_key(
+            &self,
+            issuer: HostedIssuer,
+            _key: HostedIssuerKey,
             _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             Ok(issuer)
@@ -1469,8 +1630,9 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_postgres() {
         use crate::outbound::sql::test_containers::postgres_helpers;
         let test_db = postgres_helpers::postgres_connection().await;
-        let second = Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 1).await);
-        publish_first_list_flow(test_db.db.clone(), second, "Postgres").await;
+        let first = Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 2).await);
+        let second = Arc::new(postgres_helpers::connect_to_test_db(&test_db.url, 2).await);
+        publish_first_list_flow(first, second, "Postgres").await;
     }
 
     #[cfg(all(feature = "memory", feature = "mysql"))]
@@ -1478,12 +1640,9 @@ mod tests {
     async fn hosted_issuer_publishes_first_list_like_a_static_issuer_mysql() {
         use crate::outbound::sql::test_containers::mysql_helpers;
         let test_db = mysql_helpers::MysqlTestDb::start().await;
-        publish_first_list_flow(
-            test_db.connection().await,
-            test_db.connection().await,
-            "MySQL",
-        )
-        .await;
+        let first = Arc::new(mysql_helpers::connect_to_test_db(&test_db.url, 2).await);
+        let second = Arc::new(mysql_helpers::connect_to_test_db(&test_db.url, 2).await);
+        publish_first_list_flow(first, second, "MySQL").await;
     }
 
     /// The public half of a second EC pair, distinct from `key()`'s, so the

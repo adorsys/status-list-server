@@ -1855,6 +1855,18 @@ impl Config {
                 config.server.profile.as_str()
             )));
         }
+        if config.server.profile.is_hosted()
+            && matches!(
+                config.database.backend,
+                DatabaseBackend::Postgres | DatabaseBackend::MySql
+            )
+            && config.database.pool.max_connections < 2
+        {
+            return Err(ConfigError::Message(
+                "hosted PostgreSQL and MySQL need database.pool.max_connections >= 2 for registry coordination"
+                    .to_string(),
+            ));
+        }
         if config.database.backend == DatabaseBackend::Memory
             && config.telemetry.environment.is_production()
         {
@@ -3992,6 +4004,25 @@ mod tests {
             ])
             .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
+    }
+
+    #[test]
+    fn hosted_multi_pod_backends_need_two_pool_connections() {
+        for backend in ["postgres", "mysql"] {
+            let error = Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", backend),
+                ("database.pool.max_connections", "1"),
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("max_connections >= 2"));
+        }
+        Config::load_from_overrides(&[
+            ("server.profile", "hosted"),
+            ("database.backend", "sqlite"),
+            ("database.pool.max_connections", "1"),
+        ])
+        .unwrap();
     }
 
     #[test]

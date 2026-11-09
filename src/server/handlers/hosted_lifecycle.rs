@@ -341,18 +341,7 @@ pub async fn create_issuer(
             "display_name must be 1 to 100 characters",
         ));
     }
-    let valid_owner = input
-        .owner
-        .split_once('|')
-        .is_some_and(|(provider, subject)| {
-            !provider.is_empty()
-                && provider
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                && !subject.is_empty()
-                && input.owner.chars().count() <= 255
-        });
-    if !valid_owner {
+    if !crate::server::handlers::admin::valid_owner(&input.owner) {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -415,7 +404,7 @@ fn response_headers(etag: &str, version: &str) -> HeaderMap {
     headers
 }
 
-/// `PATCH /admin/v1/issuers/{issuer_id}`: suspend or resume a portal issuer.
+/// `PATCH /admin/v1/issuers/{issuer_id}`: suspend, resume or renew a portal issuer.
 pub async fn update_issuer(
     State(state): State<AppState>,
     Extension(admin): Extension<AuthenticatedAdmin>,
@@ -437,48 +426,39 @@ pub async fn update_issuer(
     let (current, current_etag, current_version) =
         load_issuer_for_update(&state, &issuer_id).await?;
     check_if_match(if_match, &current_etag, &current_version)?;
-    let requested = match input {
-        UpdateIssuerRequest::State { state } => match state {
-            IssuerStateInput::Active => HostedIssuerState::Active,
-            IssuerStateInput::Suspended => HostedIssuerState::Suspended,
-        },
+    let result = match input {
+        UpdateIssuerRequest::State { state } => {
+            let requested = match state {
+                IssuerStateInput::Active => HostedIssuerState::Active,
+                IssuerStateInput::Suspended => HostedIssuerState::Suspended,
+            };
+            service
+                .set_issuer_state(&issuer_id, requested, current.version, &admin.id)
+                .await
+        }
         UpdateIssuerRequest::Renewal { expires_at } => {
+            if current.tier != "sandbox" {
+                return Err(error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_expiry",
+                    "this issuer tier does not support renewal",
+                ));
+            }
             let expiry = validate_expiry(
                 expires_at,
                 time::OffsetDateTime::now_utc(),
                 state.tiers.sandbox_max_lifetime,
             )?;
-            let updated = match service
+            service
                 .set_issuer_expiry(&issuer_id, expiry, current.version, &admin.id)
                 .await
-            {
-                Ok(updated) => updated,
-                Err(HostedIssuerError::VersionMismatch) => {
-                    let issuer = load_current(&state, &issuer_id).await?;
-                    let dto = hosted_dto(&state, issuer).await?;
-                    return Err(precondition_failed(
-                        issuer_etag(&dto),
-                        issuer_write_version(&dto),
-                    ));
-                }
-                Err(other) => return Err(lifecycle_error(other)),
-            };
-            let dto = hosted_dto(&state, updated).await?;
-            return Ok((
-                response_headers(&issuer_etag(&dto), &issuer_write_version(&dto)),
-                Json(dto),
-            ));
         }
     };
-    match service
-        .set_issuer_state(&issuer_id, requested, current.version, &admin.id)
-        .await
-    {
+    match result {
         Ok(updated) => {
             let dto = hosted_dto(&state, updated).await?;
-            let etag = issuer_etag(&dto);
             Ok((
-                response_headers(&etag, &issuer_write_version(&dto)),
+                response_headers(&issuer_etag(&dto), &issuer_write_version(&dto)),
                 Json(dto),
             ))
         }
@@ -489,7 +469,7 @@ pub async fn update_issuer(
             let issuer = load_current(&state, &issuer_id).await?;
             let dto = hosted_dto(&state, issuer).await?;
             Err(precondition_failed(
-                format!("\"{}\"", issuer_write_version(&dto)),
+                issuer_etag(&dto),
                 issuer_write_version(&dto),
             ))
         }
@@ -751,6 +731,28 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for FakeLifecycleStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -1668,6 +1670,17 @@ mod tests {
             "display_name":"Sandbox", "owner":"github|5821374",
             "public_key":key, "alg":"ES256"
         });
+        let mut invalid_owner = request_body.clone();
+        invalid_owner["owner"] = serde_json::json!("github|a\nb");
+        let response = app
+            .post(
+                "/admin/v1/issuers",
+                &token,
+                None,
+                &invalid_owner.to_string(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let response = app
             .post("/admin/v1/issuers", &token, None, &request_body.to_string())
             .await;
@@ -1694,10 +1707,12 @@ mod tests {
     #[tokio::test]
     async fn expired_issuer_can_renew_with_bounded_expiry() {
         let app = LifecycleApp::new(&["issuers:write"]).await;
-        app.store.insert_issuer(issuer(
+        let mut hosted = issuer(
             "portal-issuer",
             Some(OffsetDateTime::now_utc() - time::Duration::days(1)),
-        ));
+        );
+        hosted.tier = "sandbox".into();
+        app.store.insert_issuer(hosted);
         let token = write_token();
         let uri = "/admin/v1/issuers/portal-issuer";
         let etag = app.current_etag("portal-issuer").await;
@@ -1724,5 +1739,23 @@ mod tests {
             .await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body_json(response).await["error"], "invalid_expiry");
+    }
+
+    #[tokio::test]
+    async fn standard_issuer_cannot_be_given_a_sandbox_expiry() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        app.store.insert_issuer(issuer("portal-issuer", None));
+        let expiry = (OffsetDateTime::now_utc() + time::Duration::days(7)).unix_timestamp();
+        let response = app
+            .patch(
+                "/admin/v1/issuers/portal-issuer",
+                &write_token(),
+                Some(&app.current_etag("portal-issuer").await),
+                &format!(r#"{{"expires_at":{expiry}}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(response).await["error"], "invalid_expiry");
+        assert_eq!(app.store.issuer("portal-issuer").unwrap().expires_at, None);
     }
 }

@@ -280,6 +280,28 @@ mod tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for RecordingStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -335,6 +357,16 @@ mod tests {
         ) -> Result<HostedIssuer, HostedIssuerError> {
             *self.issuer.lock().unwrap() = Some(issuer.clone());
             Ok(issuer)
+        }
+        async fn create_issuer_with_key(
+            &self,
+            issuer: HostedIssuer,
+            key: HostedIssuerKey,
+            actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            let stored = self.create_issuer(issuer, actor).await?;
+            self.add_key(key, actor).await?;
+            Ok(stored)
         }
         async fn add_key(
             &self,
@@ -550,6 +582,22 @@ mod tests {
                 return Err(HostedIssuerError::VersionMismatch);
             }
             issuer.state = state;
+            issuer.version += 1;
+            Ok(issuer.clone())
+        }
+
+        async fn set_issuer_expiry(
+            &self,
+            _id: &str,
+            expires_at: OffsetDateTime,
+            expected_version: u64,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            let mut issuer = self.issuer.lock().unwrap();
+            if issuer.version != expected_version {
+                return Err(HostedIssuerError::VersionMismatch);
+            }
+            issuer.expires_at = Some(expires_at);
             issuer.version += 1;
             Ok(issuer.clone())
         }

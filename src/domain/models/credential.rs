@@ -28,7 +28,7 @@ pub enum Principal {
         tier: IssuerTier,
     },
     /// A management admin principal, which authenticates with no aggregation.
-    Admin { id: String, scopes: Vec<String> },
+    Admin { id: String },
 }
 
 impl Principal {
