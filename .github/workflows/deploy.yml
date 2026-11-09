@@ -991,7 +991,6 @@ jobs:
 
       - name: Verify ESO secret path reconciles
         # Ready=True can be stale from before the upgrade, so require refreshTime to move past the baseline.
-        # ClusterSecretStore isn't readable with the deploy role's namespaced RBAC.
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
         env:
           PRIMARY_ES: statuslist-external-secret
@@ -1054,7 +1053,7 @@ jobs:
               sleep 5
               i=$((i + 5))
             done
-            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the cluster store (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
+            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the SecretStore (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
             return 1
           }
 

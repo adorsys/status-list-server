@@ -829,13 +829,14 @@ its registry source.
 
 ### Existing EKS staging profile
 
-The `statuslist` Helm release currently owns Redis HA resources. Redis is not
-part of the new chart or the Datev-compatible profile. Upgrading that release
-will remove those Redis resources. Review any other consumers before the first
-upgrade, and do not switch the image until the signing material and the newer
-chart's prerequisites are ready. This profile keeps `Recreate` for every
-deployment. The initial upgrade must not run old AWS-backed and new file-backed
-signers together. Later upgrades must also avoid overlapping application pods:
+Before the first switch, check whether the existing `statuslist` Helm release
+owns Redis HA resources. Redis is not part of this chart or the Datev-compatible
+profile, so upgrading a release that owns Redis will remove those resources.
+Review any other consumers before that upgrade, and do not switch the image
+until the signing material and the chart's prerequisites are ready. This profile
+keeps `Recreate` for every deployment. The initial upgrade must not run old
+AWS-backed and new file-backed signers together. Later upgrades must also avoid
+overlapping application pods:
 each pod has its own in-memory status-list cache, so a write on one pod cannot
 invalidate a cached list on another. **Expect a brief service outage on every
 release**, including RC and final deployments, while the old pod stops and the

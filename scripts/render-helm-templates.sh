@@ -109,6 +109,7 @@ fi
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist --output-dir "${RENDER_TEMP}/rendered/datev-staging"
 DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
+DATEV_SECRET_STORE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/secret-store.yaml"
 DATEV_HPA="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/hpa.yaml"
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT"; then
   echo "ERROR: Datev staging must use the fscert image"; exit 1
@@ -124,6 +125,27 @@ if [ -f "$DATEV_HPA" ]; then
 fi
 if ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging must render the signing ExternalSecret"; exit 1
+fi
+if [ ! -f "$DATEV_SECRET_STORE" ]; then
+  echo "ERROR: Datev staging must render a namespaced SecretStore"; exit 1
+fi
+if ! grep -q 'name: statuslist-secret-store' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must be named statuslist-secret-store"; exit 1
+fi
+if ! grep -q '^      service: SecretsManager$' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must use SecretsManager, matching the deploy preflight"; exit 1
+fi
+if ! grep -q '^      region: eu-central-1$' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must use eu-central-1, matching the deploy preflight"; exit 1
+fi
+if grep -q '^[[:space:]]*auth:' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must use the ESO controller identity, matching the deploy preflight"; exit 1
+fi
+if ! grep -q 'kind: SecretStore' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging ExternalSecrets must use a namespaced SecretStore"; exit 1
+fi
+if ! grep -q 'name: statuslist-secret-store' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging ExternalSecrets must reference statuslist-secret-store"; exit 1
 fi
 if ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging signing ExternalSecret must reference statuslist-fscert-signing"; exit 1
