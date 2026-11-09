@@ -793,7 +793,9 @@ include that configured value in their management tokens' `aud` claim.
 
 The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`, and
 `values-datev-staging.yaml`, in that order, in the existing `statuslist` namespace.
-The last overlay selects the `fscert` image and the in-memory cache. Its
+The last overlay selects the `fscert` image and the in-memory cache, disables
+autoscaling, and runs one application replica. The in-memory cache is local to
+that pod, so status updates invalidate the cache used by subsequent reads. Its
 management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
 Issuers calling this deployment must put this value in their management tokens'
 `aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as

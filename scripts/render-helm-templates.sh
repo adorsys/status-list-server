@@ -109,7 +109,10 @@ fi
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist --output-dir "${RENDER_TEMP}/rendered/datev-staging"
 DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
+DATEV_HPA="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/hpa.yaml"
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT" ||
+   ! grep -q '^  replicas: 1$' "$DATEV_DEPLOYMENT" ||
+   [ -f "$DATEV_HPA" ] ||
    ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS" ||
    ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS" ||
    grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS" ||
@@ -117,7 +120,7 @@ if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-
    grep -q 'name: APP_CACHE__PASSWORD' "$DATEV_DEPLOYMENT" ||
    find "${RENDER_TEMP}/rendered/datev-staging" -iname '*redis*' | grep -q . ||
    grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
-  echo "ERROR: Datev staging must render the fscert image, signing ESO path, and in-memory cache without AWS or Redis credentials"; exit 1
+  echo "ERROR: Datev staging must render one replica without HPA, the fscert image, signing ESO path, and in-memory cache without AWS or Redis credentials"; exit 1
 fi
 helm template status-list-server "$CHART_DIR" \
   --set postgres.enabled=false \
