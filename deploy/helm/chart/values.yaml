@@ -91,6 +91,18 @@ statuslist:
         # Set this for a separate hostname: empty inherits the public secret,
         # whose cert may not cover the management host.
         secretName: ""
+  # Routes instead of the Ingresses, reusing their hosts, paths and management switch.
+  gateway:
+    enabled: false
+    parentRefs: []
+    # Per client address and Envoy replica.
+    rateLimit:
+      publicRequestsPerSecond: 100
+      managementRequestsPerSecond: 10
+      # Needs the platform's rate limit service; without it both routes answer 500.
+      global:
+        enabled: false
+        shadowMode: true
   env:
     RUST_LOG: "info"
     APP_ENV: "production"

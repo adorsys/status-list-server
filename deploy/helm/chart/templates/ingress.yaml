@@ -1,4 +1,4 @@
-{{- if .Values.statuslist.ingress.enabled }}
+{{- if and .Values.statuslist.ingress.enabled (not .Values.statuslist.gateway.enabled) }}
 {{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
 {{- $_ := required "hosted ingress requires statuslist.ingress.externalDnsHostname" .Values.statuslist.ingress.externalDnsHostname }}
 {{- $_ := required "hosted ingress requires statuslist.ingress.tls.secretName" .Values.statuslist.ingress.tls.secretName }}

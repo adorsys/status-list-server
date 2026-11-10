@@ -316,6 +316,59 @@
             }
           }
         },
+        "gateway": {
+          "type": "object",
+          "title": "Gateway API mode",
+          "description": "Renders HTTPRoutes and Envoy Gateway BackendTrafficPolicies instead of the Ingresses. The routes reuse statuslist.ingress hostnames, management.path and management.enabled, and never target the admin port. Requires APP_RATE_LIMIT__TRUSTED_PROXIES to cover the Envoy pods.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "title": "Render the Gateway API resources"
+            },
+            "parentRefs": {
+              "type": "array",
+              "title": "Gateway parent references",
+              "description": "Gateway API ParentReferences both HTTPRoutes attach to. Required when enabled.",
+              "items": {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                  "group": { "type": "string" },
+                  "kind": { "type": "string" },
+                  "namespace": { "type": "string" },
+                  "name": { "type": "string", "minLength": 1 },
+                  "sectionName": { "type": "string" },
+                  "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                }
+              }
+            },
+            "rateLimit": {
+              "type": "object",
+              "title": "Edge rate limits",
+              "description": "Requests per second per client address and Envoy replica. Each limit gets an IPv4 and an IPv6 rule, and Envoy's 429 carries Retry-After: 1.",
+              "additionalProperties": false,
+              "properties": {
+                "publicRequestsPerSecond": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                "managementRequestsPerSecond": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                "global": {
+                  "type": "object",
+                  "title": "Limits across Envoy replicas",
+                  "description": "Counts the same per-address limits across Envoy replicas through the platform's rate limit service and Redis. Enable only once that service runs: without it Envoy Gateway answers 500 on both routes.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "shadowMode": {
+                      "type": "boolean",
+                      "description": "Count and report over-limit requests without rejecting them."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "env": {
           "type": "object",
           "title": "Application environment variables",

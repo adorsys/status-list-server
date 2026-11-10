@@ -14,6 +14,9 @@
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
 {{- end }}
 {{- $trustedProxies := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES | default "")) "" }}
+{{- if and .Values.statuslist.gateway.enabled (empty $trustedProxies) }}
+{{- fail "gateway mode requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES for the Envoy proxy pods (their CIDR, usually the pod CIDR); without it the server keys every client on the Envoy pod" }}
+{{- end }}
 {{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
 {{- $adminAudience := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_ADMIN_AUTH__AUDIENCES | default "")) "" }}
 {{- if empty $adminAudience }}

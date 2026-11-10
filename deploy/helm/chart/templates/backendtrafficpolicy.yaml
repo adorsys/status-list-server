@@ -1,0 +1,67 @@
+{{- if .Values.statuslist.gateway.enabled }}
+{{- $rateLimit := .Values.statuslist.gateway.rateLimit }}
+{{- $scopes := list "local" }}
+{{- if $rateLimit.global.enabled }}
+{{- $scopes = append $scopes "global" }}
+{{- end }}
+{{- $routes := list (list "route" $rateLimit.publicRequestsPerSecond) }}
+{{- if .Values.statuslist.ingress.management.enabled }}
+{{- $routes = append $routes (list "management-route" $rateLimit.managementRequestsPerSecond) }}
+{{- end }}
+{{- $body := dict "error" "too_many_requests" "error_description" "Too many requests from this address" | toJson }}
+{{- range $index, $route := $routes }}
+{{- $name := printf "%s-%s" (include "status-list-server-chart.fullname" $) (index $route 0) }}
+{{- if $index }}
+---
+{{- end }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "status-list-server-chart.labels" $ | nindent 4 }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  {{- /* Off, or Envoy adds per-replica X-RateLimit headers to every response. */}}
+  rateLimit:
+    {{- range $scope := $scopes }}
+    {{ $scope }}:
+      rules:
+        {{- range $cidr := list "0.0.0.0/0" "::/0" }}
+        - clientSelectors:
+            - sourceCIDR:
+                type: Distinct
+                value: {{ $cidr | quote }}
+          limit:
+            requests: {{ index $route 1 | int64 }}
+            unit: Second
+          {{- if eq $scope "global" }}
+          shadowMode: {{ $rateLimit.global.shadowMode }}
+          {{- end }}
+          xRateLimitHeaders: "Off"
+        {{- end }}
+    {{- end }}
+  {{- /* Local only, so the server's own 429s pass through untouched. */}}
+  responseOverride:
+    - match:
+        statusCodes:
+          - type: Value
+            value: 429
+      source: Local
+      response:
+        contentType: application/json
+        body:
+          type: Inline
+          inline: {{ $body | squote }}
+        header:
+          set:
+            - name: Retry-After
+              value: "1"
+            - name: Cache-Control
+              value: "no-store, max-age=0"
+{{- end }}
+{{- end }}

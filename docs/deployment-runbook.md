@@ -296,6 +296,187 @@ reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
 The subject URI is fixed when a status list is published. Changing
 `server.public_base_url` or `server.domain` affects only new lists; existing lists retain their original URI. Keep the old endpoint serving those lists because already-issued credentials still reference it. A hostname change does not migrate published lists or update those credentials.
 
+### Expose the service through Envoy Gateway
+
+Instead of the Ingresses, the chart can render Gateway API routes with Envoy
+Gateway rate limits. [`deploy/helm/README.md`](../deploy/helm/README.md#gateway-api-mode)
+lists the values, and [architecture](architecture.md#edge-and-server-layers)
+explains how the edge and server limits fit together.
+
+#### Topology requirements
+
+- **Envoy must see each client's own address.** The edge limits key on the peer
+  of each connection Envoy accepts, and Envoy appends that address to
+  `X-Forwarded-For` for the server. If a load balancer replaces it, every client
+  behind it shares one bucket at the edge and at the server, and nothing logs a
+  warning. On AWS:
+  - An NLB with `ip` targets does not preserve client addresses for TCP or TLS
+    by default. Set
+    `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true`
+    in the EnvoyProxy's `envoyService.annotations`, or enable proxy protocol v2
+    on the NLB and in the ClientTrafficPolicy.
+  - An NLB with `instance` targets preserves them while the Service keeps
+    `externalTrafficPolicy: Local`, which the reference EnvoyProxy sets.
+  - IPv6 clients that reach IPv4 targets always arrive with the NLB's address.
+    Use proxy protocol v2, or keep the load balancer IPv4-only.
+  - An L7 load balancer or CDN in front, such as an ALB or CloudFront, becomes
+    Envoy's peer and passes the client address in `X-Forwarded-For`. For each
+    one, raise `numTrustedHops` in the ClientTrafficPolicy by one and add its
+    addresses to `APP_RATE_LIMIT__TRUSTED_PROXIES`; otherwise the server keys
+    every client on it. Clients must not reach Envoy around it, or they choose
+    their own edge key.
+- **Only Envoy may reach the public and management ports.** Set
+  `APP_RATE_LIMIT__TRUSTED_PROXIES` to the Envoy pods' addresses, in practice the
+  pod CIDR. Trusting the whole CIDR is safe only because the overlay's
+  NetworkPolicy admits the Envoy proxies alone, so the CNI must enforce
+  NetworkPolicy. On EKS, turn on network policy in the VPC CNI; pods there take
+  addresses from the node subnets, so the trusted range is wider still.
+- **Callers inside the trusted range choose their server-side key.** A pod in
+  that range that calls through Envoy is treated as a proxy: the server skips
+  the address Envoy appended for it and keys on the next `X-Forwarded-For` entry
+  to the left, which the pod wrote itself. Envoy's own limit still keys on the
+  pod's address.
+- **Turning the NetworkPolicy on closes more than the edge.** It also closes the
+  admin port and restricts egress: set `adminIngress` or `prometheusIngress` for
+  Prometheus and the portal, `databaseEgress` for an external database and
+  `cacheEgress` for Redis.
+- The overlay selects the Envoy pods of the reference `statuslist` Gateway in
+  `envoy-gateway-system`, where Envoy Gateway runs proxies by default. Adjust
+  its selectors for another Gateway or namespace.
+- Use Envoy Gateway v1.9.2 or newer: earlier releases keep only 20 client
+  addresses per route in each replica. The reference was checked with v1.9.3,
+  and v1.9 reaches end of life on 14 February 2027.
+- Leave `preserveRouteOrder` unset in the EnvoyProxy, so that on a shared
+  hostname the management route's regular expression is matched before the
+  public `/` prefix.
+
+#### Rollout
+
+1. Edit the Redis URL in `deploy/helm/envoy-gateway.yaml`, and the TLS Secret
+   and route namespace in `deploy/helm/envoy-gateway-platform.yaml`. Then install
+   Envoy Gateway and apply the platform resources:
+
+   ```bash
+   helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
+     --namespace envoy-gateway-system --create-namespace -f deploy/helm/envoy-gateway.yaml
+   kubectl apply -f deploy/helm/envoy-gateway-platform.yaml
+   ```
+
+   Only global rules need Redis. Until it runs, the rate limit service cannot
+   start, and the local limits work regardless.
+2. Upgrade the release with `values-envoy-gateway.yaml` after your environment
+   overlays and before your site values, which set
+   `APP_RATE_LIMIT__TRUSTED_PROXIES`. Check that the routes and policies are
+   accepted and that no server pod warns about an untrusted proxy:
+
+   ```bash
+   kubectl get httproute,backendtrafficpolicy -n <namespace>
+   kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=-1 \
+     | grep 'ignoring X-Forwarded-For' || echo "no untrusted proxy"
+   ```
+
+3. Point DNS at the Envoy Service's address and issue the certificate the
+   Gateway listener references. external-dns reads HTTPRoute hostnames through
+   its `gateway-httproute` source; the Ingress annotations no longer apply.
+4. Send one request from each of two networks, then check that Envoy's access
+   log shows two different `downstream_remote_address` values. If both show the
+   same address, the load balancer is hiding clients; fix that first.
+
+   ```bash
+   kubectl logs -n envoy-gateway-system -c envoy --tail=20 \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist
+   ```
+
+5. For a cap across Envoy replicas, run Redis for the rate limit service, then
+   set `statuslist.gateway.rateLimit.global.enabled=true`. The rules start in
+   shadow mode, which counts without rejecting. Right after the upgrade, check
+   that both policies are still accepted: Envoy Gateway answers `500` on the
+   routes of a policy it cannot apply. Once the counts look right, set
+   `statuslist.gateway.rateLimit.global.shadowMode=false`.
+6. To roll back, set `statuslist.gateway.enabled=false`. The Ingresses render
+   again, and DNS has to move back with them.
+
+#### Verify the cap across two Envoy replicas
+
+This sends sustained load from one address; run it in a test cluster or a quiet
+window, with the global rules enforced (`shadowMode=false`).
+
+1. Give the Gateway two Envoy replicas and wait for both:
+
+   ```bash
+   kubectl patch envoyproxy statuslist -n envoy-gateway-system --type merge \
+     -p '{"spec":{"provider":{"kubernetes":{"envoyDeployment":{"replicas":2}}}}}'
+   kubectl wait pod -n envoy-gateway-system --for condition=Ready --timeout 120s \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist
+   ```
+
+2. From one client address, send requests faster than the public limit for ten
+   seconds, each on a new connection so they spread over both replicas:
+
+   ```bash
+   end=$((SECONDS + 10))
+   while [ "$SECONDS" -lt "$end" ]; do
+     seq 50 | xargs -P 50 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+       https://<host>/api/v1/status-lists/<list-id>
+   done | sort | uniq -c
+   ```
+
+3. Confirm that both replicas served the run:
+
+   ```bash
+   for pod in $(kubectl get pods -n envoy-gateway-system -o name \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist); do
+     printf '%s ' "$pod"
+     kubectl logs -n envoy-gateway-system "$pod" -c envoy --since=1m | grep -c '/api/v1/status-lists/'
+   done
+   ```
+
+4. Count the requests that passed in each second, across both replicas. The
+   busiest second stays near the 100 a second limit; a few more can pass where
+   Envoy's clock and the rate limit service's one-second window disagree:
+
+   ```bash
+   for pod in $(kubectl get pods -n envoy-gateway-system -o name \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist); do
+     kubectl logs -n envoy-gateway-system "$pod" -c envoy --since=2m
+   done | jq -rR 'fromjson? | select(.response_code != 429)
+     | select((.["x-envoy-origin-path"] // "") | startswith("/api/v1/status-lists/"))
+     | .start_time[0:19]' | sort | uniq -c | sort -rn | head -n 1
+   ```
+
+5. Repeat with `shadowMode=true`. The busiest second now goes well past the
+   limit, because only the per-replica limits reject.
+
+#### Verify a Redis outage
+
+With the global rules enforced:
+
+1. Stop Redis, for example `kubectl scale deployment <redis> -n <redis-namespace> --replicas=0`.
+2. Repeat step 2 of the previous section, faster than 100 requests a second per
+   replica. Requests keep passing, none fails with `500`, and each replica still
+   answers `429` above its own limit.
+3. Check that the server's own limits still apply. Send eleven requests with an
+   invalid token, slower than the management limit:
+
+   ```bash
+   for i in $(seq 11); do
+     curl -s -o /dev/null -w '%{http_code} ' -H 'Authorization: Bearer invalid' \
+       https://<host>/api/v1/credentials
+     sleep 0.2
+   done
+   ```
+
+   The first ten get `401` and the eleventh gets the server's own `429`, whose
+   body says `Too many failed authentications from this address`.
+4. Envoy counts the requests it let through without an answer:
+
+   ```bash
+   kubectl port-forward -n envoy-gateway-system <envoy-pod> 19000:19000 &
+   curl -s localhost:19000/stats | grep 'ratelimit.failure_mode_allowed'
+   ```
+
+5. Start Redis again.
+
 ### Content negotiation at the edge
 
 The `GET /api/v1/status-lists/{list_id}` endpoint negotiates the token format
@@ -1124,6 +1305,7 @@ Do not bypass this gate. It is the only check that establishes a signed statemen
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
 - **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
+- **Envoy Gateway**: needed only for the Gateway API mode, v1.9.2 or newer.
 - **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
 
 ## Upgrading to the Three-Listener Architecture

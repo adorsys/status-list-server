@@ -1625,3 +1625,505 @@ fn hosted_scan_script_rejects_exposure_and_missing_authentication() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+const GATEWAY_MODE: [&str; 8] = [
+    "--set",
+    "statuslist.gateway.enabled=true",
+    "--set",
+    "statuslist.gateway.parentRefs[0].name=statuslist",
+    "--set",
+    "statuslist.gateway.parentRefs[0].namespace=envoy-gateway-system",
+    "--set",
+    "statuslist.gateway.parentRefs[0].sectionName=https",
+];
+
+fn render_gateway(extra: &[&str]) -> Option<Vec<serde_json::Value>> {
+    let mut args = GATEWAY_MODE.to_vec();
+    args.extend_from_slice(extra);
+    render_helm(&args).map(|rendered| helm_documents(&rendered))
+}
+
+fn of_kind<'a>(documents: &'a [serde_json::Value], kind: &str) -> Vec<&'a serde_json::Value> {
+    documents.iter().filter(|doc| doc["kind"] == kind).collect()
+}
+
+fn named<'a>(documents: &'a [serde_json::Value], kind: &str, name: &str) -> &'a serde_json::Value {
+    documents
+        .iter()
+        .find(|doc| doc["kind"] == kind && doc["metadata"]["name"] == name)
+        .unwrap_or_else(|| panic!("no {kind} named {name}"))
+}
+
+#[test]
+fn gateway_mode_off_renders_no_gateway_api_resources() {
+    for (extra, ingresses) in [
+        (vec![], 1),
+        (
+            vec!["--set", "statuslist.ingress.management.enabled=true"],
+            2,
+        ),
+    ] {
+        let Some(rendered) = render_helm(&extra) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        assert!(documents.iter().all(|doc| {
+            let api_version = doc["apiVersion"].as_str().unwrap_or_default();
+            !api_version.starts_with("gateway.networking.k8s.io/")
+                && !api_version.starts_with("gateway.envoyproxy.io/")
+        }));
+        assert_eq!(of_kind(&documents, "Ingress").len(), ingresses);
+    }
+}
+
+#[test]
+fn gateway_mode_renders_routes_and_policies_instead_of_ingresses() {
+    for (management, routes) in [("true", 2), ("false", 1)] {
+        let Some(documents) = render_gateway(&[
+            "--set",
+            "statuslist.ingress.enabled=true",
+            "--set",
+            &format!("statuslist.ingress.management.enabled={management}"),
+        ]) else {
+            return;
+        };
+        assert!(of_kind(&documents, "Ingress").is_empty());
+        let route_names: Vec<&str> = of_kind(&documents, "HTTPRoute")
+            .iter()
+            .map(|route| route["metadata"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(route_names.len(), routes);
+        for route in of_kind(&documents, "HTTPRoute") {
+            assert_eq!(
+                route["spec"]["parentRefs"],
+                serde_json::json!([{
+                    "name": "statuslist",
+                    "namespace": "envoy-gateway-system",
+                    "sectionName": "https"
+                }])
+            );
+        }
+        let policies = of_kind(&documents, "BackendTrafficPolicy");
+        assert_eq!(policies.len(), routes);
+        for policy in policies {
+            let name = policy["metadata"]["name"].as_str().unwrap();
+            assert!(route_names.contains(&name), "{name}");
+            assert_eq!(
+                policy["spec"]["targetRefs"],
+                serde_json::json!([{
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "HTTPRoute",
+                    "name": name
+                }])
+            );
+        }
+    }
+}
+
+#[test]
+fn gateway_routes_never_target_the_admin_port() {
+    let Some(documents) = render_gateway(&[
+        "--set",
+        "statuslist.ingress.management.enabled=true",
+        "--set",
+        "statuslist.service.managementPort=18001",
+        "--set",
+        "statuslist.service.adminPort=18002",
+    ]) else {
+        return;
+    };
+    let mut backends: Vec<(String, i64)> = of_kind(&documents, "HTTPRoute")
+        .iter()
+        .flat_map(|route| route["spec"]["rules"].as_array().unwrap())
+        .flat_map(|rule| rule["backendRefs"].as_array().unwrap())
+        .map(|backend| {
+            (
+                backend["name"].as_str().unwrap().to_owned(),
+                backend["port"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    backends.sort();
+    assert_eq!(
+        backends,
+        [
+            ("status-list-server-internal-service".to_owned(), 18001),
+            ("status-list-server-service".to_owned(), 8081),
+        ]
+    );
+}
+
+#[test]
+fn gateway_routes_match_the_ingress_hosts_and_management_path() {
+    for extra in [
+        vec![],
+        vec!["--set-string", "global.domain=Example.COM."],
+        vec![
+            "--set-string",
+            "statuslist.ingress.externalDnsHostname=StatusList.Example.NET",
+        ],
+        vec![
+            "--set-string",
+            "statuslist.ingress.management.hostname=Mgmt.Example.com",
+        ],
+    ] {
+        let mut args = vec!["--set", "statuslist.ingress.management.enabled=true"];
+        args.extend(extra);
+        let Some(ingresses) = render_helm(&args).map(|rendered| helm_documents(&rendered)) else {
+            return;
+        };
+        let Some(routes) = render_gateway(&args) else {
+            return;
+        };
+        for (ingress, route, path_type) in [
+            (
+                "status-list-server-ingress",
+                "status-list-server-route",
+                "PathPrefix",
+            ),
+            (
+                "status-list-server-management-ingress",
+                "status-list-server-management-route",
+                "RegularExpression",
+            ),
+        ] {
+            let rule = &named(&ingresses, "Ingress", ingress)["spec"]["rules"][0];
+            let route = &named(&routes, "HTTPRoute", route)["spec"];
+            assert_eq!(
+                route["hostnames"],
+                serde_json::json!([rule["host"]]),
+                "{args:?}"
+            );
+            let path = &route["rules"][0]["matches"][0]["path"];
+            assert_eq!(path["type"], path_type);
+            assert_eq!(path["value"], rule["http"]["paths"][0]["path"], "{args:?}");
+        }
+    }
+}
+
+#[test]
+fn gateway_429_matches_the_too_many_requests_contract() {
+    let Some(documents) = render_gateway(&["--set", "statuslist.ingress.management.enabled=true"])
+    else {
+        return;
+    };
+    let openapi: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../docs/openapi.yaml")).unwrap();
+    let error_schema =
+        jsonschema::validator_for(&openapi["components"]["schemas"]["ErrorResponse"]).unwrap();
+    let contract = &openapi["components"]["responses"]["TooManyRequests"];
+    let retry_after = &contract["headers"]["Retry-After"];
+    assert_eq!(retry_after["required"], true);
+    let retry_after_schema = jsonschema::validator_for(&retry_after["schema"]).unwrap();
+    let media_types: Vec<&str> = contract["content"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let policies = of_kind(&documents, "BackendTrafficPolicy");
+    assert_eq!(policies.len(), 2);
+    for policy in policies {
+        let overrides = policy["spec"]["responseOverride"].as_array().unwrap();
+        assert_eq!(overrides.len(), 1);
+        let edge = &overrides[0];
+        assert_eq!(
+            edge["match"]["statusCodes"],
+            serde_json::json!([{"type": "Value", "value": 429}])
+        );
+        assert_eq!(edge["source"], "Local");
+        let response = &edge["response"];
+        assert_eq!(media_types, [response["contentType"].as_str().unwrap()]);
+        assert_eq!(response["body"]["type"], "Inline");
+        let body: serde_json::Value =
+            serde_json::from_str(response["body"]["inline"].as_str().unwrap()).unwrap();
+        assert!(error_schema.is_valid(&body), "{body}");
+        assert_eq!(body["error"], "too_many_requests");
+        let header = |name: &str| {
+            response["header"]["set"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|header| header["name"] == name)
+                .and_then(|header| header["value"].as_str())
+        };
+        let seconds: i64 = header("Retry-After").unwrap().parse().unwrap();
+        assert!(retry_after_schema.is_valid(&serde_json::json!(seconds)));
+        assert_eq!(header("Cache-Control"), Some("no-store, max-age=0"));
+    }
+}
+
+#[test]
+fn gateway_limits_key_every_ipv4_and_ipv6_address() {
+    let cases = [
+        (vec![], [100, 10], None),
+        (
+            vec![
+                "--set",
+                "statuslist.gateway.rateLimit.publicRequestsPerSecond=250",
+                "--set",
+                "statuslist.gateway.rateLimit.managementRequestsPerSecond=25",
+            ],
+            [250, 25],
+            None,
+        ),
+        (
+            vec!["--set", "statuslist.gateway.rateLimit.global.enabled=true"],
+            [100, 10],
+            Some(true),
+        ),
+        (
+            vec![
+                "--set",
+                "statuslist.gateway.rateLimit.global.enabled=true",
+                "--set",
+                "statuslist.gateway.rateLimit.global.shadowMode=false",
+            ],
+            [100, 10],
+            Some(false),
+        ),
+    ];
+    for (extra, requests, shadow_mode) in cases {
+        let mut args = vec!["--set", "statuslist.ingress.management.enabled=true"];
+        args.extend(extra);
+        let Some(documents) = render_gateway(&args) else {
+            return;
+        };
+        for (route, requests) in [
+            "status-list-server-route",
+            "status-list-server-management-route",
+        ]
+        .into_iter()
+        .zip(requests)
+        {
+            let rules = |shadow_mode: Option<bool>| {
+                ["0.0.0.0/0", "::/0"]
+                    .into_iter()
+                    .map(|cidr| {
+                        let mut rule = serde_json::json!({
+                            "clientSelectors": [{"sourceCIDR": {"type": "Distinct", "value": cidr}}],
+                            "limit": {"requests": requests, "unit": "Second"},
+                            "xRateLimitHeaders": "Off"
+                        });
+                        if let Some(shadow_mode) = shadow_mode {
+                            rule["shadowMode"] = serde_json::json!(shadow_mode);
+                        }
+                        rule
+                    })
+                    .collect::<serde_json::Value>()
+            };
+            let rate_limit = &named(&documents, "BackendTrafficPolicy", route)["spec"]["rateLimit"];
+            assert_eq!(rate_limit["local"]["rules"], rules(None), "{route}");
+            match shadow_mode {
+                None => assert!(rate_limit.get("global").is_none(), "{route}"),
+                Some(shadow_mode) => {
+                    assert_eq!(rate_limit["global"]["rules"], rules(Some(shadow_mode)))
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn gateway_mode_rejects_missing_parent_refs_trusted_proxies_and_bad_values() {
+    let gateway = |extra: &[&'static str]| [GATEWAY_MODE.as_slice(), extra].concat();
+    for (args, expected) in [
+        (
+            vec!["--set", "statuslist.gateway.enabled=true"],
+            "statuslist.gateway.parentRefs is required",
+        ),
+        (
+            gateway(&[
+                "--set-string",
+                "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+            ]),
+            "gateway mode requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES",
+        ),
+        (
+            gateway(&[
+                "--set-string",
+                "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+                "--set-string",
+                "statuslist.env.APP_ENV=development",
+                "--set-string",
+                "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+            ]),
+            "gateway mode requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES",
+        ),
+        (
+            gateway(&["--set", "statuslist.gateway.parentRefs[0].section=https"]),
+            "section",
+        ),
+        (
+            gateway(&[
+                "--set",
+                "statuslist.gateway.rateLimit.publicRequestsPerSecond=0",
+            ]),
+            "publicRequestsPerSecond",
+        ),
+    ] {
+        let Some(output) = render_helm_failure(&args) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn envoy_gateway_overlay_admits_only_envoy_pods() {
+    let envoy = serde_json::json!([{
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "envoy-gateway-system"}},
+        "podSelector": {"matchLabels": {
+            "app.kubernetes.io/name": "envoy",
+            "app.kubernetes.io/component": "proxy",
+            "gateway.envoyproxy.io/owning-gateway-name": "statuslist",
+            "gateway.envoyproxy.io/owning-gateway-namespace": "envoy-gateway-system"
+        }}
+    }]);
+    for base in [
+        vec![],
+        vec![
+            "-f",
+            "deploy/helm/chart/values-aws.yaml",
+            "-f",
+            "deploy/helm/chart/values-production.yaml",
+        ],
+    ] {
+        let mut args = base.clone();
+        args.extend(["-f", "deploy/helm/chart/values-envoy-gateway.yaml"]);
+        let Some(rendered) = render_helm(&args) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        assert!(of_kind(&documents, "Ingress").is_empty(), "{base:?}");
+        assert_eq!(of_kind(&documents, "HTTPRoute").len(), 2, "{base:?}");
+        let policy = of_kind(&documents, "NetworkPolicy")[0];
+        let rules = policy["spec"]["ingress"].as_array().unwrap();
+        let ports: Vec<i64> = rules
+            .iter()
+            .map(|rule| rule["ports"][0]["port"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ports, [8000, 8001], "{base:?}");
+        for rule in rules {
+            assert_eq!(rule["from"], envoy, "{base:?}");
+        }
+        assert!(
+            rendered_env(&rendered).contains(&(
+                "APP_RATE_LIMIT__CLIENT_IP_SOURCE".into(),
+                "rightmost_x_forwarded_for".into()
+            )),
+            "{base:?}"
+        );
+    }
+}
+
+#[test]
+fn envoy_gateway_overlay_restores_the_permissive_defaults_over_production() {
+    let permissive = |args: &[&str]| {
+        render_helm(args).map(|rendered| {
+            rendered_env(&rendered)
+                .into_iter()
+                .filter(|(name, _)| name.starts_with("APP_RATE_LIMIT__PERMISSIVE_"))
+                .collect::<Vec<_>>()
+        })
+    };
+    let Some(defaults) = permissive(&[]) else {
+        return;
+    };
+    let Some(production) = permissive(&[
+        "-f",
+        "deploy/helm/chart/values-aws.yaml",
+        "-f",
+        "deploy/helm/chart/values-production.yaml",
+        "-f",
+        "deploy/helm/chart/values-envoy-gateway.yaml",
+    ]) else {
+        return;
+    };
+    assert_eq!(defaults.len(), 2);
+    assert_eq!(production, defaults);
+}
+
+#[test]
+fn envoy_gateway_platform_reference_matches_the_overlay() {
+    let overlay: serde_json::Value = serde_saphyr::from_str(include_str!(
+        "../deploy/helm/chart/values-envoy-gateway.yaml"
+    ))
+    .unwrap();
+    let install: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../deploy/helm/envoy-gateway.yaml")).unwrap();
+    let platform = helm_documents(include_str!("../deploy/helm/envoy-gateway-platform.yaml"));
+    let find = |kind: &str| platform.iter().find(|doc| doc["kind"] == kind).unwrap();
+    let (class, proxy, gateway, client) = (
+        find("GatewayClass"),
+        find("EnvoyProxy"),
+        find("Gateway"),
+        find("ClientTrafficPolicy"),
+    );
+
+    let parent = &overlay["statuslist"]["gateway"]["parentRefs"][0];
+    assert_eq!(gateway["metadata"]["name"], parent["name"]);
+    assert_eq!(gateway["metadata"]["namespace"], parent["namespace"]);
+    let listener = gateway["spec"]["listeners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listener| listener["name"] == parent["sectionName"])
+        .unwrap();
+    assert_eq!(listener["protocol"], "HTTPS");
+    assert_eq!(
+        gateway["spec"]["gatewayClassName"],
+        class["metadata"]["name"]
+    );
+    assert_eq!(
+        class["spec"]["parametersRef"],
+        serde_json::json!({
+            "group": "gateway.envoyproxy.io",
+            "kind": "EnvoyProxy",
+            "name": proxy["metadata"]["name"],
+            "namespace": proxy["metadata"]["namespace"]
+        })
+    );
+    assert_eq!(
+        proxy["spec"]["provider"]["kubernetes"]["envoyService"]["externalTrafficPolicy"],
+        "Local"
+    );
+    assert_eq!(
+        client["spec"]["targetRefs"],
+        serde_json::json!([{
+            "group": "gateway.networking.k8s.io",
+            "kind": "Gateway",
+            "name": gateway["metadata"]["name"]
+        }])
+    );
+    assert_eq!(
+        client["spec"]["clientIPDetection"]["xForwardedFor"]["numTrustedHops"],
+        0
+    );
+
+    for peers in ["ingress", "managementIngress"] {
+        let peer = &overlay["statuslist"]["networkPolicy"][peers][0];
+        assert_eq!(
+            peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+            proxy["metadata"]["namespace"]
+        );
+        assert_eq!(
+            peer["podSelector"]["matchLabels"]["gateway.envoyproxy.io/owning-gateway-name"],
+            gateway["metadata"]["name"]
+        );
+        assert_eq!(
+            peer["podSelector"]["matchLabels"]["gateway.envoyproxy.io/owning-gateway-namespace"],
+            gateway["metadata"]["namespace"]
+        );
+    }
+
+    let rate_limit = &install["config"]["envoyGateway"]["rateLimit"];
+    assert_eq!(rate_limit["backend"]["type"], "Redis");
+    assert!(
+        rate_limit["backend"]["redis"]["url"]
+            .as_str()
+            .is_some_and(|url| !url.is_empty())
+    );
+    assert_eq!(rate_limit["failClosed"], false);
+}
