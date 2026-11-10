@@ -593,6 +593,96 @@ jobs:
           bash scripts/verify-attestation.sh \
             "${IMAGE_BASE}@${index_digest}" "$GITHUB_REPOSITORY" "$GITHUB_REF"
 
+  direct-upgrade:
+    name: Direct Upgrade from Last Release
+    runs-on: ubuntu-latest
+    needs: [validate-tag, scan-image, verify-provenance]
+    if: ${{ !cancelled() && github.event_name == 'push' && contains(github.ref_name, '-rc.') && needs.validate-tag.outputs.is_final == 'false' && needs.scan-image.result == 'success' && needs.verify-provenance.result == 'success' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find last stable release
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "::error::No stable release tag was found."
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout last stable release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.previous.outputs.tag }}
+          path: previous-release
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Create disposable Kubernetes cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          cluster_name: direct-upgrade
+
+      - name: Build both charts' dependencies
+        run: |
+          set -euo pipefail
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          if [[ -d previous-release/deploy/helm/chart ]]; then
+            previous_chart=previous-release/deploy/helm/chart
+          else
+            previous_chart=previous-release/helm/chart
+          fi
+          [[ -f "$previous_chart/Chart.yaml" ]] || { echo "::error::Previous release chart missing."; exit 1; }
+          echo "$previous_chart" > "$RUNNER_TEMP/previous-chart-path"
+          helm dependency build "$previous_chart"
+          helm dependency build "$CHART_DIR"
+
+      - name: Resolve verified image digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            --name image-digest-fscert --dir "$RUNNER_TEMP/candidate-digest"
+          candidate_digest=$(cat "$RUNNER_TEMP/candidate-digest/image-digest-fscert.txt")
+          previous_ref="${IMAGE_BASE}:${PREVIOUS_TAG#v}-fscert"
+          previous_digest=$(docker buildx imagetools inspect "$previous_ref" --format '{{ .Manifest.Digest }}')
+          for digest in "$previous_digest" "$candidate_digest"; do
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Invalid image digest."; exit 1; }
+          done
+          printf '%s\n' "$previous_digest" > "$RUNNER_TEMP/previous-digest"
+          printf '%s\n' "$candidate_digest" > "$RUNNER_TEMP/candidate-digest.txt"
+
+      - name: Install last release and upgrade to candidate
+        run: bash scripts/test-direct-upgrade.sh \
+          "$(cat "$RUNNER_TEMP/previous-chart-path")" "$CHART_DIR" \
+          "$(cat "$RUNNER_TEMP/previous-digest")" "$(cat "$RUNNER_TEMP/candidate-digest.txt")"
+
+      - name: Collect cluster diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -n direct-upgrade -o wide || true
+          kubectl describe pods -n direct-upgrade || true
+          kubectl logs -n direct-upgrade -l app.kubernetes.io/name=status-list-server --tail=150 || true
+          kubectl logs -n direct-upgrade -l app.kubernetes.io/name=postgres --tail=150 || true
+
   promote-tags:
     name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
     runs-on: ubuntu-latest
@@ -603,11 +693,12 @@ jobs:
       - image-source
       - scan-image
       - verify-provenance
+      - direct-upgrade
     # Check the event too: workflow_dispatch can run on tag refs.
     # !cancelled() drops the implicit all-needs-succeeded rule, so every gate is spelled out here.
     # ci and helm-checks are listed because image-source does not wait for them. A final tag skips
     # verify-provenance; this job verifies the RC's digest against the RC's ref instead.
-    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.ci.result == 'success' && needs.helm-checks.result == 'success' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && (needs.verify-provenance.result == 'success' || needs.validate-tag.outputs.is_final == 'true') }}
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.ci.result == 'success' && needs.helm-checks.result == 'success' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && (needs.verify-provenance.result == 'success' || needs.validate-tag.outputs.is_final == 'true') && (needs.direct-upgrade.result == 'success' || needs.validate-tag.outputs.is_final == 'true') }}
     timeout-minutes: 15
     permissions:
       contents: read

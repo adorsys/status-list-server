@@ -146,6 +146,7 @@ _FINAL_GREEN = {
         build_and_push="skipped",
         scan_image="success",
         verify_provenance="skipped",
+        direct_upgrade="skipped",
         promote_tags="success",
     ),
 }
@@ -154,7 +155,7 @@ _PRERELEASE_GREEN = {
     "github.ref": "refs/tags/v1.2.3-rc.1",
     "github.ref_name": "v1.2.3-rc.1",
     "needs.validate-tag.outputs.is_final": "false",
-    **_outcome(build_and_push="success", verify_provenance="success"),
+    **_outcome(build_and_push="success", verify_provenance="success", direct_upgrade="success"),
 }
 
 
@@ -229,11 +230,28 @@ class DeployReleaseGatingTest(unittest.TestCase):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(verify_provenance=result)}
                 self.assertFalse(self.runs("promote-tags", scenario))
 
+    def test_a_prerelease_needs_the_direct_upgrade(self) -> None:
+        self.assertIn("direct-upgrade", self.needs("promote-tags"))
+        direct = self.jobs["direct-upgrade"]
+        read = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.", str(direct["if"])))
+        self.assertLessEqual(read, self.needs("direct-upgrade"))
+        self.assertTrue(self.runs("direct-upgrade", _PRERELEASE_GREEN))
+        self.assertFalse(self.runs("direct-upgrade", _FINAL_GREEN))
+        for gate in ("scan_image", "verify_provenance"):
+            with self.subTest(gate=gate):
+                scenario = {**_PRERELEASE_GREEN, **_outcome(**{gate: "failure"})}
+                self.assertFalse(self.runs("direct-upgrade", scenario))
+        for result in ("failure", "skipped"):
+            with self.subTest(direct_upgrade=result):
+                scenario = {**_PRERELEASE_GREEN, **_outcome(direct_upgrade=result)}
+                self.assertFalse(self.runs("promote-tags", scenario))
+                self.assertFalse(self.runs("deploy", {**scenario, **_outcome(promote_tags="skipped")}))
+
     def test_promote_tags_lists_every_job_its_condition_reads(self) -> None:
         condition = str(self.jobs["promote-tags"]["if"])
         read = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.", condition))
         self.assertLessEqual(read, self.needs("promote-tags"))
-        self.assertLessEqual({"ci", "helm-checks", "image-source", "scan-image", "verify-provenance"}, read)
+        self.assertLessEqual({"ci", "helm-checks", "image-source", "scan-image", "verify-provenance", "direct-upgrade"}, read)
 
     def test_deploy_needs_a_successful_promotion(self) -> None:
         self.assertIn("promote-tags", self.needs("deploy"))
