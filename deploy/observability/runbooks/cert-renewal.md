@@ -3,7 +3,7 @@
 Alerts:
 
 - `CertRenewalFailures` (severity=warn) — fires when the certificate expires
-  within 14 days (`cert_time_to_expiry_seconds <= 14d`): the renewal loop is not
+  within 14 days (`cert_time_to_expiry_seconds <= 14d`): renewal is not
   refreshing the certificate and there is runway to intervene.
 - `CertRenewalErrorBudgetCritical` (severity=page) — fires when the certificate
   expires within 7 days (`cert_time_to_expiry_seconds <= 7d`): imminent expiry,
@@ -20,14 +20,15 @@ never fire reliably.
 
 The firing alerts therefore watch the **continuous** `cert_time_to_expiry_seconds`
 gauge. The file-backed signer records it every minute, so it drops toward 0
-while renewals fail to keep the certificate fresh. This is the deterministic,
-actionable signal: when it crosses the interval thresholds, the certificate is
-not being re-signed.
+while renewals fail to keep the certificate fresh. When it crosses the interval
+thresholds, the certificate needs attention.
 
 ## Ranked likely causes
 
 For the EKS `fscert` profile, inspect the dedicated cert-manager Certificate
-first. The app reads its Secret and cannot renew it itself.
+first. The app reads its Secret and cannot renew it itself. The app's ACME
+renewal counters and `cert_last_successful_renewal_timestamp` do not apply to
+this profile.
 
 ```bash
 kubectl get certificate statuslist-token-signing -n statuslist
@@ -65,6 +66,15 @@ curl -f http://localhost:8002/health/ready
 
 ## Mitigation
 
+For EKS `fscert`, inspect the Certificate and its CertificateRequests, Orders,
+and Challenges. Restore the `letsencrypt-prod` ClusterIssuer or its Route53
+DNS challenge path if issuance is failing. Confirm that the
+`statuslist-token-signing` Certificate becomes Ready and the mounted Secret
+updates; the app then reloads the signer and the expiry gauge rises. The app's
+ACME renewal scheduler and counters are not part of this path.
+
+For images with app-managed ACME renewal:
+
 1. Confirm the ACME account / DNS credentials are valid and un-expired.
 2. Test the DNS challenge path the handler uses; fix the provider config.
 3. Ensure the material backend is reachable so the new key persists; otherwise
@@ -77,5 +87,5 @@ curl -f http://localhost:8002/health/ready
 
 - Warn (≤14d): no page. Root-cause and fix before the certificate expires.
 - Page (≤7d): treat as imminent-expiry incident. The certificate will stop being
-  valid for token verification; follow the relevant renewal path immediately and, if the
-  renewal cannot be restored in time, plan a manual re-issue of the certificate.
+  valid for token verification; follow the relevant renewal path immediately
+  and, if renewal cannot be restored in time, plan a manual re-issue.

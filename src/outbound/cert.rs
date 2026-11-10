@@ -240,6 +240,11 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "acme"))]
     use std::path::{Path, PathBuf};
+    #[cfg(not(feature = "acme"))]
+    use std::sync::atomic::AtomicU64;
+
+    #[cfg(not(feature = "acme"))]
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(not(feature = "acme"))]
     struct TempDir {
@@ -250,11 +255,12 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "status-list-cert-test-{}-{}",
+                "status-list-cert-test-{}-{}-{}",
                 std::process::id(),
-                time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+                time::OffsetDateTime::now_utc().unix_timestamp_nanos(),
+                NEXT_TEMP_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
-            std::fs::create_dir_all(&path).expect("create temp dir");
+            std::fs::create_dir(&path).expect("create temp dir");
             Self { path }
         }
 
@@ -481,6 +487,89 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[test]
+    fn filesystem_provider_updates_expiry_metric_on_reload() {
+        use crate::config::{TelemetryConfig, TelemetryEnvironment};
+        use crate::utils::metrics::{metrics_test_lock, setup_metrics};
+        use opentelemetry_sdk::Resource;
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = prometheus::Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("cert-file-test")
+                .build(),
+        )
+        .expect("metrics setup");
+        let gauge_value = || {
+            registry
+                .gather()
+                .into_iter()
+                .find(|family| family.name().contains("cert_time_to_expiry_seconds"))
+                .and_then(|family| {
+                    family
+                        .get_metric()
+                        .first()
+                        .map(|metric| metric.get_gauge().value())
+                })
+                .expect("expiry gauge")
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async {
+            let dir = TempDir::new();
+            let cert_path = dir.path().join("statuslist.crt");
+            let key_path = dir.path().join("statuslist.key");
+            let key = rcgen::KeyPair::generate().expect("generate key");
+            let now = time::OffsetDateTime::now_utc();
+            let certificate = |days| {
+                let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+                    .expect("certificate parameters");
+                params.not_before = now - time::Duration::days(1);
+                params.not_after = now + time::Duration::days(days);
+                params.self_signed(&key).expect("sign certificate").pem()
+            };
+            tokio::fs::write(&cert_path, certificate(30))
+                .await
+                .expect("write certificate");
+            tokio::fs::write(&key_path, key.serialize_pem())
+                .await
+                .expect("write key");
+            let provider = ReloadingCertificateProvider::from_files(
+                cert_path.to_string_lossy().to_string(),
+                key_path.to_string_lossy().to_string(),
+            )
+            .await
+            .expect("provider");
+            let first = gauge_value();
+            assert!(first > 29.0 * 86_400.0);
+
+            tokio::fs::write(&cert_path, certificate(60))
+                .await
+                .expect("write renewed certificate");
+            provider
+                .reload_from_files(
+                    cert_path.to_str().expect("cert path"),
+                    key_path.to_str().expect("key path"),
+                )
+                .await
+                .expect("reload");
+            assert!(gauge_value() > first + 20.0 * 86_400.0);
+        });
     }
 
     #[cfg(not(feature = "acme"))]

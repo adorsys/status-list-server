@@ -867,6 +867,7 @@ mounts them as `statuslist.crt` and `statuslist.key`. Do not reuse the
 material for tokens issued before the switch until they expire. Verify
 `kubectl get certificate statuslist-token-signing -n statuslist` reports Ready
 and check the certificate-expiry alerts after deployment.
+
 The public ACME certificate has the `serverAuth` extended key usage, as the
 current AWS signer does. Confirm integrator profiles accept that usage; a
 document-signing certificate requires a different issuer.
