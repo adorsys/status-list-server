@@ -364,7 +364,8 @@ fn admin_routes(
     let admin_api = Router::new()
         .route(
             "/issuers",
-            get(crate::server::handlers::admin::list_issuers),
+            get(crate::server::handlers::admin::list_issuers)
+                .post(crate::server::handlers::hosted_lifecycle::create_issuer),
         )
         .route(
             "/issuers/{issuer_id}",
@@ -1857,6 +1858,15 @@ mod tests {
                 &self,
                 _id: &str,
                 _state: HostedIssuerState,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn set_issuer_expiry(
+                &self,
+                _id: &str,
+                _expires_at: time::OffsetDateTime,
                 _expected_version: u64,
                 _actor: &str,
             ) -> Result<HostedIssuer, HostedIssuerError> {

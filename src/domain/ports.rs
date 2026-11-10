@@ -31,12 +31,38 @@ pub struct StaticKeyRevocation {
     pub material: String,
 }
 
+/// Keeps a database transaction open while cross-source trust is checked.
+/// Releasing the value releases the database lock.
+pub trait RegistryWriteGuard: Send {}
+impl<T: Send> RegistryWriteGuard for T {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaticClaimConflict {
+    PrincipalId,
+    KeyId,
+    KeyMaterial,
+}
+
 /// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
 /// is looked up by its `kid` primary key with no cache: every resolution reads
 /// the row, so revocation takes effect on the next request (ADR 0002, no
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    async fn registry_write_guard(&self) -> Result<Box<dyn RegistryWriteGuard>, HostedIssuerError>;
+
+    async fn record_static_registry_claims(
+        &self,
+        keys: &[(String, String, String)],
+    ) -> Result<(), HostedIssuerError>;
+
+    async fn static_claim_conflict(
+        &self,
+        issuer_id: &str,
+        kid: Option<&str>,
+        material: Option<&str>,
+    ) -> Result<Option<StaticClaimConflict>, HostedIssuerError>;
+
     /// Persist static-key revocations so registry snapshots cannot restore a
     /// revoked key after rollback or restart.
     async fn record_static_key_revocations(
@@ -106,6 +132,14 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;
 
+    /// Create an issuer with its first key and audit records in one unit.
+    async fn create_issuer_with_key(
+        &self,
+        issuer: HostedIssuer,
+        key: HostedIssuerKey,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
     /// Register a signing key for an existing hosted issuer.
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
 
@@ -150,6 +184,14 @@ pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
         &self,
         issuer_id: &str,
         state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_expiry(
+        &self,
+        issuer_id: &str,
+        expires_at: time::OffsetDateTime,
         expected_version: u64,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError>;

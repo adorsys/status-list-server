@@ -169,7 +169,8 @@ paths:
         the `hosted` profile.
 
         `expires_at` defaults to now plus the sandbox tier's maximum lifetime
-        and may not exceed it.
+        (30 days by default) and must be in
+        (now, now + tiers.sandbox.max_lifetime_secs].
       requestBody:
         required: true
         content:
@@ -216,7 +217,14 @@ paths:
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
-          $ref: "#/components/responses/UnprocessableKey"
+          description: "`invalid_public_jwk` or `invalid_expiry`."
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -271,9 +279,11 @@ paths:
         `If-Match`.
 
         `state: active` lifts a suspension only. An issuer past `expires_at`
-        stays `expired` until it is renewed with a later `expires_at`, which
-        may not exceed now plus the tier's maximum lifetime. Suspension takes
+        stays `expired` until renewed. Renewal accepts a Unix timestamp in
+        (now, now + tiers.sandbox.max_lifetime_secs], including for an expired
+        issuer. The default maximum lifetime is 30 days. Suspension takes
         effect on the next management request on every replica.
+        Portal issuers with the `standard` tier do not expire and reject renewal.
       parameters:
         - $ref: "#/components/parameters/IfIssuerVersion"
         - $ref: "#/components/parameters/IfMatch"
@@ -319,7 +329,7 @@ paths:
         "412":
           $ref: "#/components/responses/PreconditionFailed"
         "422":
-          description: "`invalid_expiry`: `expires_at` is in the past or beyond the tier's maximum lifetime."
+          description: "`invalid_expiry` — `expires_at` is outside the sandbox lifetime window, or this issuer tier does not support renewal."
           headers:
             Cache-Control:
               $ref: "#/components/headers/CacheControl"

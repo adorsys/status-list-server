@@ -879,6 +879,11 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
     }
 
+    let _registry_database_guard = if let Some(store) = &dynamic_issuer_store {
+        Some(store.registry_write_guard().await?)
+    } else {
+        None
+    };
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
     if let Some(dynamic_store) = &revocation_store {
         crate::server::auth::hosted::validate_static_revocation_history(
@@ -907,6 +912,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         .await?;
     if let Some(dynamic_store) = &revocation_store {
         crate::server::auth::hosted::record_static_revocation_history(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        crate::server::auth::hosted::record_static_registry_claims(
             dynamic_store,
             &issuer_registry.snapshot(),
         )
@@ -1074,9 +1086,16 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             )
                             .await?;
                         }
-                        // Serializes with hosted writes in this process; see
-                        // register_hosted_issuer for the cross-pod case.
                         let _guard = registry_handle.write_lock().await;
+                        let _database_guard = if let Some(store) = &dynamic_issuer_store {
+                            Some(store.registry_write_guard().await.map_err(|error| {
+                                crate::server::auth::issuer_registry::RegistryError::Database(
+                                    error.to_string(),
+                                )
+                            })?)
+                        } else {
+                            None
+                        };
                         let active = registry_handle.snapshot();
                         // Read-only cross-source checks run before the immutable
                         // aggregation rows are written, so rejection leaves none.
@@ -1092,6 +1111,13 @@ pub(crate) fn spawn_issuer_registry_watcher(
                         if let Some(revocation_store) = &revocation_store {
                             crate::server::auth::hosted::record_static_revocation_history(
                                 revocation_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::record_static_registry_claims(
+                                dynamic_store,
                                 &candidate,
                             )
                             .await?;
@@ -3121,6 +3147,28 @@ mod general_tests {
 
     #[async_trait::async_trait]
     impl HostedIssuerStore for ProbeStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -3176,6 +3224,14 @@ mod general_tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn create_issuer_with_key(
+            &self,
+            _issuer: HostedIssuer,
+            _key: HostedIssuerKey,
             _actor: &str,
         ) -> Result<HostedIssuer, HostedIssuerError> {
             unreachable!("not used by the missing-issuer path")

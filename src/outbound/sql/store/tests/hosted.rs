@@ -824,6 +824,274 @@ async fn sqlite_store() -> SqlHostedIssuerStore {
     SqlHostedIssuerStore::new(fixtures::sqlite_connection().await)
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_key_and_issuer_commit_together() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000626");
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_initial_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    assert!(
+        store
+            .create_issuer_with_key(
+                hosted.clone(),
+                key(&hosted.id, "initial-key"),
+                "portal-admin"
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.find_issuer(&hosted.id).await.unwrap().is_none());
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "DROP TRIGGER reject_initial_audit",
+    ))
+    .await
+    .unwrap();
+    let created = store
+        .create_issuer_with_key(
+            hosted.clone(),
+            key(&hosted.id, "initial-key"),
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.version, 1);
+    assert!(
+        store
+            .find_key_by_kid("initial-key")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_key_creation_retries_aggregation_id_collisions() {
+    let store = sqlite_store().await;
+    let first = issuer("00000000-0000-4000-8000-000000000631");
+    store
+        .create_issuer(first.clone(), "portal-admin")
+        .await
+        .unwrap();
+
+    let mut second = issuer("00000000-0000-4000-8000-000000000632");
+    second.aggregation_id = first.aggregation_id;
+    let created = store
+        .create_issuer_with_key(
+            second.clone(),
+            key(&second.id, "collision-key"),
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert_ne!(created.aggregation_id, first.aggregation_id);
+    assert_eq!(
+        store
+            .find_issuer(&second.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .aggregation_id,
+        created.aggregation_id
+    );
+    assert!(
+        store
+            .find_key_by_kid("collision-key")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn renewal_updates_expiry_and_version() {
+    use crate::outbound::sql::models::issuer_audit_events;
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Statement,
+    };
+
+    let db = fixtures::sqlite_connection().await;
+    let store = SqlHostedIssuerStore::new(db.clone());
+    let hosted = issuer("00000000-0000-4000-8000-000000000627");
+    let created = store.create_issuer(hosted, "portal-admin").await.unwrap();
+    let renewed = OffsetDateTime::now_utc() + time::Duration::days(7);
+    let updated = store
+        .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+        .await
+        .unwrap();
+    assert_eq!(
+        updated.expires_at.unwrap().unix_timestamp(),
+        renewed.unix_timestamp()
+    );
+    assert_eq!(updated.version, created.version + 1);
+    let events = issuer_audit_events::Entity::find()
+        .filter(issuer_audit_events::Column::IssuerId.eq(&created.id))
+        .all(db.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.action == "issuer.expiry_changed")
+            .count(),
+        1
+    );
+    assert!(matches!(
+        store
+            .set_issuer_expiry(&created.id, renewed, created.version, "portal-admin")
+            .await,
+        Err(HostedIssuerError::VersionMismatch)
+    ));
+
+    db.execute_raw(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        "CREATE TRIGGER reject_renewal_audit BEFORE INSERT ON issuer_audit_events \
+         BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
+    ))
+    .await
+    .unwrap();
+    let later = renewed + time::Duration::days(1);
+    assert!(
+        store
+            .set_issuer_expiry(&created.id, later, updated.version, "portal-admin")
+            .await
+            .is_err()
+    );
+    let unchanged = store.get_issuer(&created.id).await.unwrap();
+    assert_eq!(unchanged.expires_at, updated.expires_at);
+    assert_eq!(unchanged.version, updated.version);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn static_claims_block_a_stale_replicas_hosted_key_write() {
+    let db = fixtures::sqlite_connection().await;
+    let store = std::sync::Arc::new(SqlHostedIssuerStore::new(db));
+    let hosted = issuer("00000000-0000-4000-8000-000000000628");
+    let initial_key = key(&hosted.id, "initial-key");
+    let material = initial_key.jwk.normalized_material().unwrap();
+    let claims = [("static-owner".into(), "static-key".into(), material)];
+    store.record_static_registry_claims(&claims).await.unwrap();
+    store.record_static_registry_claims(&claims).await.unwrap();
+    let other_replica: std::sync::Arc<dyn HostedIssuerStore> = store.clone();
+    let stale_registry = crate::server::auth::issuer_registry::RegistryHandle::empty();
+    let result = crate::server::auth::hosted::register_hosted_issuer_with_key(
+        &stale_registry,
+        &other_replica,
+        hosted.clone(),
+        initial_key,
+        "portal-admin",
+    )
+    .await;
+    assert!(matches!(result, Err(HostedIssuerError::KeyMaterialReused)));
+    assert!(store.find_issuer(&hosted.id).await.unwrap().is_none());
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn initial_key_uses_the_same_window_and_material_rules_as_key_registration() {
+    let store = sqlite_store().await;
+    let first = issuer("00000000-0000-4000-8000-000000000629");
+    let mut invalid = key(&first.id, "invalid-window");
+    invalid.not_before = Some(OffsetDateTime::now_utc() + time::Duration::days(1));
+    invalid.not_after = Some(OffsetDateTime::now_utc());
+    assert!(matches!(
+        store
+            .create_issuer_with_key(first.clone(), invalid, "portal-admin")
+            .await,
+        Err(HostedIssuerError::InvalidPublicJwk(_))
+    ));
+    assert!(store.find_issuer(&first.id).await.unwrap().is_none());
+
+    store
+        .create_issuer_with_key(first.clone(), key(&first.id, "first-key"), "portal-admin")
+        .await
+        .unwrap();
+    let second = issuer("00000000-0000-4000-8000-000000000630");
+    assert!(matches!(
+        store
+            .create_issuer_with_key(
+                second.clone(),
+                key(&second.id, "second-key"),
+                "portal-admin"
+            )
+            .await,
+        Err(HostedIssuerError::KeyMaterialReused)
+    ));
+    assert!(store.find_issuer(&second.id).await.unwrap().is_none());
+}
+
+#[cfg(feature = "postgres-tests")]
+#[tokio::test]
+async fn test_postgres_registry_guard_serializes_replicas() {
+    use crate::outbound::sql::test_containers::postgres_helpers;
+    use std::{sync::Arc, time::Duration};
+
+    let fixture = postgres_helpers::postgres_connection().await;
+    let first = SqlHostedIssuerStore::new(Arc::new(
+        postgres_helpers::connect_to_test_db(&fixture.url, 2).await,
+    ));
+    let second = SqlHostedIssuerStore::new(Arc::new(
+        postgres_helpers::connect_to_test_db(&fixture.url, 2).await,
+    ));
+    let guard = first.registry_write_guard().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), second.registry_write_guard())
+            .await
+            .is_err()
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), second.registry_write_guard())
+        .await
+        .expect("other replica acquires the released lock")
+        .unwrap();
+}
+
+#[cfg(feature = "mysql")]
+#[tokio::test]
+async fn test_mysql_registry_guard_serializes_replicas() {
+    use crate::outbound::sql::test_containers::mysql_helpers;
+    use std::{sync::Arc, time::Duration};
+
+    let fixture = mysql_helpers::mysql_connection().await;
+    let first = SqlHostedIssuerStore::new(Arc::new(
+        mysql_helpers::connect_to_test_db(&fixture.url, 2).await,
+    ));
+    let second = SqlHostedIssuerStore::new(Arc::new(
+        mysql_helpers::connect_to_test_db(&fixture.url, 2).await,
+    ));
+    let guard = first.registry_write_guard().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), second.registry_write_guard())
+            .await
+            .is_err()
+    );
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), second.registry_write_guard())
+        .await
+        .expect("other replica acquires the released lock")
+        .unwrap();
+}
+
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_hosted_round_trip() {
