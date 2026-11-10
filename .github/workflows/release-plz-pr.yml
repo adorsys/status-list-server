@@ -48,12 +48,12 @@ jobs:
           git merge-base --is-ancestor "$latest" HEAD \
             || { echo "::error::$latest is not in this branch; back-merge main first"; exit 1; }
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           toolchain: stable
           rustflags: ''
       - name: Run release-plz
-        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
         env:

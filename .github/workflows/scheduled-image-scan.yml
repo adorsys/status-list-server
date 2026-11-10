@@ -92,7 +92,7 @@ jobs:
 
       - name: Login to GHCR
         # repository_owner, not github.actor, which on a schedule is whoever last edited this file.
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
@@ -473,7 +473,7 @@ jobs:
       - name: Upload SARIF to code scanning
         # No continue-on-error: a scheduled run always has the write scope.
         if: ${{ always() && steps.sarif.outputs.present == 'true' }}
-        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: merged.sarif
 
