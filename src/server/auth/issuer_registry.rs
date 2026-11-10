@@ -629,6 +629,34 @@ fn validate_schema(value: &Value) -> Result<(), RegistryError> {
     Ok(())
 }
 
+pub(crate) fn validate_hosted_key(
+    kid: &str,
+    alg: &str,
+    jwk: Value,
+) -> Result<PublicJwk, RegistryError> {
+    let schema: Value = serde_json::from_str(REGISTRY_SCHEMA)
+        .map_err(|err| RegistryError::SchemaDefinition(err.to_string()))?;
+    let key_schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/key",
+        "$defs": schema["$defs"],
+    });
+    let compiled = jsonschema::validator_for(&key_schema)
+        .map_err(|err| RegistryError::SchemaDefinition(err.to_string()))?;
+    let key = RegistryKey {
+        kid: kid.to_owned(),
+        alg: alg.to_owned(),
+        jwk,
+        not_before: None,
+        not_after: None,
+    };
+    let value = serde_json::json!({"kid": kid, "alg": alg, "jwk": key.jwk});
+    if let Some(error) = compiled.iter_errors(&value).next() {
+        return Err(RegistryError::Schema(error.to_string()));
+    }
+    validated_public_key(&key)
+}
+
 fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
     let mut principal_ids = HashMap::new();
     let mut aggregations = HashMap::new();

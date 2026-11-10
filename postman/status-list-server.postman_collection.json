@@ -812,6 +812,203 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Issuer Lifecycle (destructive, hosted profile)",
+      "description": "Manual hosted-profile writes. Supply an adminToken with issuers:write, portalOwner, portalPublicJwk, issuer_id and issuer_etag. Excluded from the automated Newman run.",
+      "item": [
+        {
+          "name": "Create portal issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"display_name\":\"Sandbox issuer\",\"owner\":\"{{portalOwner}}\",\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}/keys",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Renew issuer",
+          "request": {
+            "description": "Renew a sandbox issuer. Portal issuers with the standard tier never expire and reject renewal.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"expires_at\":{{renewalExpiry}}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"revoked\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}/keys/{{kid}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys",
+                "{{kid}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
     }
   ],
   "variable": [
@@ -846,6 +1043,26 @@
     {
       "key": "adminToken",
       "value": ""
+    },
+    {
+      "key": "portalOwner",
+      "value": "github|5821374"
+    },
+    {
+      "key": "portalPublicJwk",
+      "value": "{}"
+    },
+    {
+      "key": "renewalExpiry",
+      "value": "0"
+    },
+    {
+      "key": "issuer_etag",
+      "value": "\"paste-current-etag\""
+    },
+    {
+      "key": "kid",
+      "value": "paste-key-id"
     }
   ]
 }

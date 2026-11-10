@@ -111,6 +111,12 @@ pub struct IssuerDto {
     #[serde(skip)]
     persisted_version: Option<u64>,
 }
+impl IssuerDto {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct KeyDto {
     kid: String,
@@ -446,6 +452,20 @@ fn cursor_decode(raw: &str, filters: &Filters) -> Result<Cursor, ApiError> {
     Ok(cursor)
 }
 
+pub(crate) fn valid_owner(owner: &str) -> bool {
+    let chars = owner.chars().count();
+    let Some((provider, subject)) = owner.split_once('|') else {
+        return false;
+    };
+    (3..=255).contains(&chars)
+        && !provider.is_empty()
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !subject.is_empty()
+        && !subject.chars().any(char::is_control)
+}
+
 pub async fn list_issuers(
     State(state): State<AppState>,
     Extension(admin): Extension<AuthenticatedAdmin>,
@@ -461,19 +481,11 @@ pub async fn list_issuers(
             "limit must be between 1 and 100",
         ));
     }
-    if query.owner.as_deref().is_some_and(|owner| {
-        let chars = owner.chars().count();
-        let Some((provider, subject)) = owner.split_once('|') else {
-            return true;
-        };
-        !(3..=255).contains(&chars)
-            || provider.is_empty()
-            || !provider
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || subject.is_empty()
-            || subject.chars().any(char::is_control)
-    }) {
+    if query
+        .owner
+        .as_deref()
+        .is_some_and(|owner| !valid_owner(owner))
+    {
         return Err(ApiError::bad_request(
             "invalid_query",
             "owner must match the <provider>|<subject> format",
@@ -710,6 +722,7 @@ pub async fn get_issuer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::hosted_issuer::HostedIssuerError;
     use axum::response::IntoResponse;
     use std::sync::{Arc, Mutex};
 
@@ -721,6 +734,28 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::domain::ports::HostedIssuerStore for MutableHostedStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
         async fn record_static_key_revocations(
             &self,
             _revocations: &[crate::domain::ports::StaticKeyRevocation],
@@ -831,6 +866,14 @@ mod tests {
         async fn create_issuer(
             &self,
             _issuer: HostedIssuer,
+            _actor: &str,
+        ) -> Result<HostedIssuer, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            unreachable!()
+        }
+        async fn create_issuer_with_key(
+            &self,
+            _issuer: HostedIssuer,
+            _key: HostedIssuerKey,
             _actor: &str,
         ) -> Result<HostedIssuer, crate::domain::models::hosted_issuer::HostedIssuerError> {
             unreachable!()

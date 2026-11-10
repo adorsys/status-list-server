@@ -30,6 +30,7 @@ statuslist:
     APP_ENV: "production"
     APP_SERVER__PROFILE: "hosted"
     APP_DATABASE__BACKEND: "postgres"
+    APP_DATABASE__POOL__MAX_CONNECTIONS: "5"
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     # Set a site-specific value distinct from the management audience.
     APP_ADMIN_AUTH__AUDIENCES: ""
