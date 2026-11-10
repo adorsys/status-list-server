@@ -12,6 +12,7 @@ use crate::domain::models::hosted_issuer::{
     HostedIssuerError, HostedIssuerKeyState, HostedIssuerState,
 };
 use crate::domain::models::hosted_issuer::{NewHostedIssuer, NewHostedIssuerKey};
+use crate::domain::models::tier::IssuerTier;
 use crate::server::{
     AppState,
     auth::AuthenticatedAdmin,
@@ -437,7 +438,7 @@ pub async fn update_issuer(
                 .await
         }
         UpdateIssuerRequest::Renewal { expires_at } => {
-            if current.tier != "sandbox" {
+            if IssuerTier::from_name_or_strictest(&current.tier) == IssuerTier::Standard {
                 return Err(error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid_expiry",
@@ -1757,5 +1758,27 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body_json(response).await["error"], "invalid_expiry");
         assert_eq!(app.store.issuer("portal-issuer").unwrap().expires_at, None);
+    }
+
+    #[tokio::test]
+    async fn expired_issuer_with_unknown_tier_can_renew_under_sandbox_limits() {
+        let app = LifecycleApp::new(&["issuers:write"]).await;
+        let mut hosted = issuer(
+            "portal-issuer",
+            Some(OffsetDateTime::now_utc() - time::Duration::days(1)),
+        );
+        hosted.tier = "unrecognized".into();
+        app.store.insert_issuer(hosted);
+        let expiry = (OffsetDateTime::now_utc() + time::Duration::days(7)).unix_timestamp();
+        let response = app
+            .patch(
+                "/admin/v1/issuers/portal-issuer",
+                &write_token(),
+                Some(&app.current_etag("portal-issuer").await),
+                &format!(r#"{{"expires_at":{expiry}}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["expires_at"], expiry);
     }
 }

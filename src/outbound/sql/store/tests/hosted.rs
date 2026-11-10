@@ -884,6 +884,45 @@ async fn initial_key_and_issuer_commit_together() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn initial_key_creation_retries_aggregation_id_collisions() {
+    let store = sqlite_store().await;
+    let first = issuer("00000000-0000-4000-8000-000000000631");
+    store
+        .create_issuer(first.clone(), "portal-admin")
+        .await
+        .unwrap();
+
+    let mut second = issuer("00000000-0000-4000-8000-000000000632");
+    second.aggregation_id = first.aggregation_id;
+    let created = store
+        .create_issuer_with_key(
+            second.clone(),
+            key(&second.id, "collision-key"),
+            "portal-admin",
+        )
+        .await
+        .unwrap();
+    assert_ne!(created.aggregation_id, first.aggregation_id);
+    assert_eq!(
+        store
+            .find_issuer(&second.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .aggregation_id,
+        created.aggregation_id
+    );
+    assert!(
+        store
+            .find_key_by_kid("collision-key")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn renewal_updates_expiry_and_version() {
     use crate::outbound::sql::models::issuer_audit_events;
     use sea_orm::{

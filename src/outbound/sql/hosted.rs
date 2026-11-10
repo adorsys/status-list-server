@@ -395,11 +395,44 @@ async fn find_key_by_material_hash(
     row.map(parse_key).transpose()
 }
 
+async fn classify_key_insert_failure(
+    txn: sea_orm::DatabaseTransaction,
+    error: DbErr,
+    db: &sea_orm::DatabaseConnection,
+    key: &HostedIssuerKey,
+    material_hash: &str,
+    operation: &str,
+) -> RepositoryError {
+    let classified = classify_after_rollback(txn, error, operation).await;
+    if !matches!(classified, RepositoryError::DuplicateEntry) {
+        return classified;
+    }
+    match load_entry(&key.kid, db).await {
+        Ok(Some(_)) => return RepositoryError::DuplicateEntry,
+        Ok(None) => {}
+        Err(error) => return error,
+    }
+    match find_key_by_material_hash(material_hash, db).await {
+        Ok(Some(blocker)) => {
+            // Keep the conflicting owner in server logs, never in the response.
+            tracing::warn!(
+                kid = %key.kid,
+                owner = %blocker.issuer_id,
+                "rejecting a hosted key whose material is already registered"
+            );
+            RepositoryError::KeyMaterialReused
+        }
+        Ok(None) => classified,
+        Err(error) => error,
+    }
+}
+
 impl SeaOrmStore<HostedIssuerRow> {
-    #[tracing::instrument(skip(self, issuer), fields(db.system = "sea-orm"))]
+    #[tracing::instrument(skip(self, issuer, first_key), fields(db.system = "sea-orm"))]
     async fn create_issuer_unit(
         &self,
         issuer: HostedIssuer,
+        first_key: Option<(&HostedIssuerKey, &str)>,
         actor: &str,
     ) -> Result<HostedIssuer, RepositoryError> {
         time_query("insert", "hosted_issuer", async {
@@ -412,6 +445,21 @@ impl SeaOrmStore<HostedIssuerRow> {
                 let txn = begin_read_committed(&db).await.map_err(insert_first_err)?;
                 match insert_issuer_row(&txn, &stored).await {
                     Ok(()) => {
+                        if let Some((key, hash)) = first_key
+                            && let Err(error) =
+                                time_query("insert", "issuer_key", insert_key_row(&txn, key, hash))
+                                    .await
+                        {
+                            return Err(classify_key_insert_failure(
+                                txn,
+                                error,
+                                db.as_ref(),
+                                key,
+                                hash,
+                                "initial key insert",
+                            )
+                            .await);
+                        }
                         if let Err(error) = append_lifecycle_audit(
                             &txn,
                             &stored.id,
@@ -425,6 +473,24 @@ impl SeaOrmStore<HostedIssuerRow> {
                             })),
                         )
                         .await
+                        {
+                            rollback_quietly(txn).await;
+                            return Err(err_txn(error));
+                        }
+                        if let Some((key, _)) = first_key
+                            && let Err(error) = append_lifecycle_audit(
+                                &txn,
+                                &stored.id,
+                                actor,
+                                "key.registered",
+                                None,
+                                Some(serde_json::json!({
+                                    "kid": key.kid,
+                                    "state": key.state.as_str(),
+                                    "version": stored.version,
+                                })),
+                            )
+                            .await
                         {
                             rollback_quietly(txn).await;
                             return Err(err_txn(error));
@@ -553,31 +619,17 @@ impl SeaOrmStore<HostedIssuerRow> {
                     Ok(())
                 }
                 Err(insert_err) => {
-                    let classified =
-                        classify_after_rollback(txn, insert_err, "issuer key insert").await;
-                    // A unique violation is either the `kid` primary key (the id
-                    // was already taken) or the `key_material` index (the
-                    // material is reused by another issuer). Distinguish by what
-                    // is already stored.
-                    if matches!(classified, RepositoryError::DuplicateEntry) {
-                        if load_entry(&key.kid, &db).await?.is_some() {
-                            return Err(RepositoryError::DuplicateEntry);
-                        }
-                        if let Some(blocker) =
-                            find_key_by_material_hash(&material_hash(&material), &db).await?
-                        {
-                            // Log the owner server-side; never return it, so one
-                            // tenant cannot learn another tenant's id.
-                            tracing::warn!(
-                                kid = %key.kid,
-                                owner = %blocker.issuer_id,
-                                "rejecting a hosted key whose material is already registered"
-                            );
-                            return Err(RepositoryError::KeyMaterialReused);
-                        }
-                        return Err(classified);
-                    }
-                    Err(classified)
+                    Err(
+                        classify_key_insert_failure(
+                            txn,
+                            insert_err,
+                            db.as_ref(),
+                            &key,
+                            &hash,
+                            "issuer key insert",
+                        )
+                        .await,
+                    )
                 }
             }
         })
@@ -1088,14 +1140,14 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
         self.store
-            .create_issuer_unit(issuer, actor)
+            .create_issuer_unit(issuer, None, actor)
             .await
             .map_err(Into::into)
     }
 
     async fn create_issuer_with_key(
         &self,
-        mut issuer: HostedIssuer,
+        issuer: HostedIssuer,
         key: HostedIssuerKey,
         actor: &str,
     ) -> Result<HostedIssuer, HostedIssuerError> {
@@ -1109,75 +1161,11 @@ impl HostedIssuerStore for SqlHostedIssuerStore {
             .map_err(|e| HostedIssuerError::InvalidPublicJwk(e.to_string()))?;
         let material =
             canonical_jwk_material(&value).map_err(HostedIssuerError::InvalidPublicJwk)?;
-        time_query("insert", "hosted_issuer", async {
-        let db = self.store.current();
-        for attempt in 0..AGGREGATION_ID_RETRIES {
-            if attempt > 0 {
-                issuer.aggregation_id = AggregationId::generate();
-            }
-            let txn = begin_read_committed(&db).await.map_err(err_txn)?;
-            if let Err(e) = insert_issuer_row(&txn, &issuer).await {
-                let classified = classify_after_rollback(txn, e, "hosted issuer insert").await;
-                if matches!(classified, RepositoryError::DuplicateEntry)
-                    && load_issuer(&issuer.id, db.as_ref())
-                        .await
-                        .map_err(HostedIssuerError::from)?
-                        .is_none()
-                {
-                    continue;
-                }
-                return Err(classified.into());
-            }
-            let key_hash = material_hash(&material);
-            if let Err(e) = time_query("insert", "issuer_key", insert_key_row(&txn, &key, &key_hash)).await {
-                let classified = classify_after_rollback(txn, e, "initial key insert").await;
-                if matches!(classified, RepositoryError::DuplicateEntry) {
-                    if load_entry(&key.kid, &db).await.map_err(HostedIssuerError::from)?.is_some() {
-                        return Err(HostedIssuerError::AlreadyExists);
-                    }
-                    if let Some(blocker) = find_key_by_material_hash(&material_hash(&material), &db)
-                        .await
-                        .map_err(HostedIssuerError::from)?
-                    {
-                        tracing::warn!(
-                            kid = %key.kid,
-                            owner = %blocker.issuer_id,
-                            "rejecting a hosted key whose material is already registered"
-                        );
-                        return Err(HostedIssuerError::KeyMaterialReused);
-                    }
-                }
-                return Err(classified.into());
-            }
-            for (action, after) in [
-                (
-                    "issuer.created",
-                    serde_json::json!({"state": "active", "version": 1, "aggregation_id": issuer.aggregation_id.0}),
-                ),
-                (
-                    "key.registered",
-                    serde_json::json!({"kid": key.kid, "state": key.state.as_str(), "version": issuer.version}),
-                ),
-            ] {
-                if let Err(e) =
-                    append_lifecycle_audit(&txn, &issuer.id, actor, action, None, Some(after)).await
-                {
-                    rollback_quietly(txn).await;
-                    return Err(HostedIssuerError::Backend(Box::new(e)));
-                }
-            }
-            txn.commit().await.map_err(err_txn)?;
-            issuer.created_at =
-                OffsetDateTime::from_unix_timestamp(issuer.created_at.unix_timestamp())
-                    .expect("persisted timestamp is valid");
-            issuer.expires_at = issuer.expires_at.map(|v| {
-                OffsetDateTime::from_unix_timestamp(v.unix_timestamp())
-                    .expect("persisted timestamp is valid")
-            });
-            return Ok(issuer);
-        }
-        Err(HostedIssuerError::AlreadyExists)
-        }).await
+        let hash = material_hash(&material);
+        self.store
+            .create_issuer_unit(issuer, Some((&key, &hash)), actor)
+            .await
+            .map_err(hosted_error)
     }
 
     async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError> {
