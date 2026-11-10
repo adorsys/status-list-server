@@ -807,6 +807,7 @@ here; a test fails until it does.
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
 | `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
 | `m20261105_000001_static_key_revocations` | Schema-compatible: an older release ignores the table, but rollback does not preserve revocation enforcement if an old registry file is restored | Keep the table and revocations; use a registry compatible with the older release that excludes revoked keys from active `keys`, then verify rejection | Current releases retain static key revocations across restarts and registry file restores |
+| `m20261109_000001_registry_coordination` | Schema-compatible: an older release ignores the lock and claims tables, but does not enforce cross-pod hosted/static serialization | Keep both tables; do not rely on cross-pod coordination until all pods run the new release | Current releases reserve admitted static identities and serialize registry reloads with hosted key writes |
 
 ### Preparing existing management credentials
 

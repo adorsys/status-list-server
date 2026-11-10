@@ -1,10 +1,9 @@
-# Admin issuer reads
+# Admin issuer API
 
-The admin listener (default `localhost:8002`) serves `GET /admin/v1/issuers`
-and `GET /admin/v1/issuers/{issuer_id}`. The public and management listeners
-return 404 for these routes. Keep the admin listener on a private network.
+The admin listener (default `localhost:8002`) serves issuer reads and writes.
+The public and management listeners return 404 for these routes. Keep the admin
+listener on a private network.
 The [Admin OpenAPI contract](openapi-admin.yaml) describes the response fields.
-The server implements only the read operations in that contract.
 
 ## Authentication and configuration
 
@@ -68,15 +67,35 @@ hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
 passed, including keys staged for rotation. `keys_limit` is the tier's
 `max_keys`.
 
-The detail ETag for hosted issuers derives from the persisted issuer version,
-so usage counts and derived expiry do not invalidate a write precondition.
-Static issuer ETags identify the complete JSON representation.
+For static issuers, the detail ETag identifies the complete JSON representation.
+For hosted issuers, the ETag and `Issuer-Version` derive from the persisted
+issuer version. Mutations use exactly one of `If-Match` or
+`If-Issuer-Version`, so ordinary list publishes and derived expiry state do
+not invalidate writes. The reads do not provide a transactional snapshot
+across issuer metadata, keys, and usage.
 
-`PATCH /admin/v1/issuers/{issuer_id}` accepts `{"state":"suspended"}` or `{"state":"active"}` for lifecycle changes. An expired issuer cannot be reactivated. A body containing unsupported or unknown fields returns `400 invalid_input`.
-`Issuer-Version` separately covers writable issuer metadata, lifecycle, and
-key ID/state/validity windows. Use either `If-Match` or `If-Issuer-Version`,
-not both. The reads do not provide a transactional snapshot across issuer
-metadata, keys, and usage.
+## Hosted issuer writes
+
+An admin with `issuers:write` can create a portal issuer with its first public
+key, add a key, suspend or resume an issuer, renew its expiry, and revoke a key.
+Static issuers remain managed through the registry. Creation is available only
+in the hosted profile; it assigns the issuer and aggregation identifiers and
+the key thumbprint. Other writes require the current issuer `ETag` or
+`Issuer-Version`; stale values return 412 and missing values return 428.
+Retrying an already revoked key returns 200 unchanged.
+
+`APP_TIERS__SANDBOX__MAX_LIFETIME_SECS` defaults to 2592000 (30 days).
+Creation defaults `expires_at` to that duration from now. Creation and renewal
+accept an expiry strictly after now and no later than now plus the configured
+duration. Renewal may restore an expired issuer; resuming a suspension alone
+does not. Portal issuers stored with the `standard` tier do not expire and
+reject renewal. Each change is recorded in the SQL audit log with its actor.
+
+Hosted key writes and registry reloads share a database lock on PostgreSQL and
+MySQL. Reloads also record static principal IDs, key IDs, and normalized key
+material as durable claims. These claims are retained after a registry entry
+is removed, so a lagging replica cannot admit a hosted key still trusted by
+another replica. This reserves historical static identities from hosted use.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.

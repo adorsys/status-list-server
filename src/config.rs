@@ -282,6 +282,8 @@ pub struct TierConfig {
     pub write_burst_size: Option<u32>,
     #[serde(default)]
     pub write_period_secs: Option<u64>,
+    #[serde(default)]
+    pub max_lifetime_secs: Option<u64>,
 }
 
 const STANDARD_MAX_KEYS: usize = 5;
@@ -293,6 +295,7 @@ const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
 const SANDBOX_MAX_KEYS: usize = 2;
 const SANDBOX_WRITE_BURST_SIZE: u32 = 10;
 const SANDBOX_WRITE_PERIOD_SECS: u64 = 6;
+const SANDBOX_MAX_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 
 impl TiersConfig {
     /// Fill defaults and check that every tier stays within the global
@@ -303,6 +306,25 @@ impl TiersConfig {
     /// makes a default invalid; explicitly set values are validated, never
     /// clamped.
     pub fn resolve(&self, limits: &LimitsConfig) -> Result<Tiers, ConfigError> {
+        if self.standard.max_lifetime_secs.is_some() {
+            return Err(ConfigError::Message(
+                "tiers.standard.max_lifetime_secs is not supported".into(),
+            ));
+        }
+        let sandbox_max_lifetime_secs = self
+            .sandbox
+            .max_lifetime_secs
+            .unwrap_or(SANDBOX_MAX_LIFETIME_SECS);
+        if sandbox_max_lifetime_secs == 0
+            || sandbox_max_lifetime_secs > i64::MAX as u64
+            || time::OffsetDateTime::now_utc()
+                .checked_add(time::Duration::seconds(sandbox_max_lifetime_secs as i64))
+                .is_none()
+        {
+            return Err(ConfigError::Message(
+                "tiers.sandbox.max_lifetime_secs must be a positive, representable lifetime".into(),
+            ));
+        }
         let standard = RawTier {
             max_lists: self
                 .standard
@@ -360,6 +382,7 @@ impl TiersConfig {
         Ok(Tiers {
             standard: standard.into_limits(),
             sandbox: sandbox.into_limits(),
+            sandbox_max_lifetime: Duration::from_secs(sandbox_max_lifetime_secs),
         })
     }
 }
@@ -1832,6 +1855,18 @@ impl Config {
                 config.server.profile.as_str()
             )));
         }
+        if config.server.profile.is_hosted()
+            && matches!(
+                config.database.backend,
+                DatabaseBackend::Postgres | DatabaseBackend::MySql
+            )
+            && config.database.pool.max_connections < 2
+        {
+            return Err(ConfigError::Message(
+                "hosted PostgreSQL and MySQL need database.pool.max_connections >= 2 for registry coordination"
+                    .to_string(),
+            ));
+        }
         if config.database.backend == DatabaseBackend::Memory
             && config.telemetry.environment.is_production()
         {
@@ -3032,6 +3067,10 @@ mod tests {
     fn test_tier_defaults() {
         let tiers = resolved_tiers(&[]).unwrap();
         assert_eq!(
+            tiers.sandbox_max_lifetime,
+            Duration::from_secs(30 * 24 * 60 * 60)
+        );
+        assert_eq!(
             tiers.standard,
             TierLimits {
                 max_lists: 1_000,
@@ -3052,6 +3091,20 @@ mod tests {
                 write_burst_size: NonZeroU32::new(10).unwrap(),
                 write_period: Duration::from_secs(6),
             }
+        );
+    }
+
+    #[test]
+    fn sandbox_lifetime_is_configurable_and_positive() {
+        let tiers = resolved_tiers(&[("tiers.sandbox.max_lifetime_secs", "604800")]).unwrap();
+        assert_eq!(tiers.sandbox_max_lifetime, Duration::from_secs(604800));
+        assert!(
+            tier_error(&[("tiers.sandbox.max_lifetime_secs", "0")])
+                .contains("tiers.sandbox.max_lifetime_secs")
+        );
+        assert!(
+            tier_error(&[("tiers.standard.max_lifetime_secs", "604800")])
+                .contains("tiers.standard.max_lifetime_secs is not supported")
         );
     }
 
@@ -3951,6 +4004,25 @@ mod tests {
             ])
             .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
         }
+    }
+
+    #[test]
+    fn hosted_multi_pod_backends_need_two_pool_connections() {
+        for backend in ["postgres", "mysql"] {
+            let error = Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", backend),
+                ("database.pool.max_connections", "1"),
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("max_connections >= 2"));
+        }
+        Config::load_from_overrides(&[
+            ("server.profile", "hosted"),
+            ("database.backend", "sqlite"),
+            ("database.pool.max_connections", "1"),
+        ])
+        .unwrap();
     }
 
     #[test]
