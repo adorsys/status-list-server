@@ -217,8 +217,10 @@ running server):
 2. **Statuses are integers** in the request body: `0`=VALID, `1`=INVALID,
    `2`=SUSPENDED (`src/server/handlers/status_list/utils/request.rs`). Sending
    `"VALID"` yields `422`.
-3. The server **rate-limits by source IP** (strict 10 req/60s writes,
-   permissive 100 req/60s reads by default). Single-IP load is throttled with
+3. The server **rate-limits by client address**: each limit allows a burst,
+   then one request per period (by default, strict: 10 rejected writes, then one
+   every 60 seconds; permissive: 1000 reads, then one every 5 milliseconds).
+   Single-address load is throttled with
    `429 Too Many Requests`. For a demo, raise the limits (Section 8) or keep
    traffic just under them.
 

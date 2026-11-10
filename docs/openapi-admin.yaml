@@ -50,6 +50,10 @@ info:
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
+    - Authenticated requests from one client address share a budget per
+      replica (`APP_RATE_LIMIT__ADMIN_*`): a burst, then one request
+      per period. Past it, the server answers `429 too_many_requests` with
+      `Retry-After`.
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -983,10 +987,11 @@ components:
             error: "invalid_public_jwk"
             error_description: "private key members are not accepted"
     TooManyRequests:
-      description: "`too_many_requests`: the admin peer-IP budget is exhausted. Retry after the indicated number of seconds."
+      description: "`too_many_requests`: this client address has spent its admin request budget."
       headers:
         Retry-After:
-          description: Minimum number of seconds before retrying.
+          description: Seconds until the budget admits another request.
+          required: true
           schema:
             type: integer
             minimum: 1
@@ -998,6 +1003,7 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
           example:
             error: "too_many_requests"
+            error_description: "Too many requests from this address"
     InternalServerError:
       description: "`internal_error`."
       headers:
