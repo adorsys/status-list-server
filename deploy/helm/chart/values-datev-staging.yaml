@@ -20,36 +20,22 @@ statuslist:
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
     - name: signing-material
-      secretName: statuslist-signing
-      mountPath: /var/run/status-list-server/signing
+      secretName: statuslist-token-signing
+      mountPath: /var/run/status-list-server/token-signing
       items:
         - key: tls.crt
-          path: tls.crt
+          path: statuslist.crt
         - key: tls.key
-          path: tls.key
+          path: statuslist.key
           mode: 0440
       fileEnv:
-        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: tls.crt
-        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: tls.key
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
 
 autoscaling:
   enabled: false
 
-externalSecret:
-  spec:
-    extraExternalSecrets:
-      - metadata:
-          name: statuslist-signing
-        spec:
-          target:
-            name: statuslist-signing
-            creationPolicy: Owner
-          data:
-            - secretKey: tls.crt
-              remoteRef:
-                key: statuslist-fscert-signing
-                property: CERTIFICATE
-            - secretKey: tls.key
-              remoteRef:
-                key: statuslist-fscert-signing
-                property: SIGNING_KEY
+tokenSigningCertificate:
+  enabled: true
+  dnsName: statuslist.eudi-adorsys.com
+  issuerName: letsencrypt-prod

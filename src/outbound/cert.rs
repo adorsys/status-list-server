@@ -3,7 +3,11 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 #[cfg(not(feature = "acme"))]
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+#[cfg(not(feature = "acme"))]
+use opentelemetry::{global, metrics::Gauge};
 use std::sync::Arc;
+#[cfg(not(feature = "acme"))]
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::domain::{
     models::status_list::StatusListError,
@@ -40,14 +44,38 @@ impl CertificateProvider for AcmeCertificateProvider {
 #[derive(Clone)]
 pub struct ReloadingCertificateProvider {
     active: Arc<ArcSwap<SigningMaterial>>,
+    expires_at: Arc<AtomicI64>,
+    expiry_gauge: Gauge<i64>,
 }
 
 #[cfg(not(feature = "acme"))]
 impl ReloadingCertificateProvider {
     pub async fn from_files(cert_path: String, key_path: String) -> Result<Self, StatusListError> {
-        let material = load_and_validate_signing_material(&cert_path, &key_path).await?;
+        let (material, expires_at) =
+            load_and_validate_signing_material(&cert_path, &key_path).await?;
+        let expires_at = Arc::new(AtomicI64::new(expires_at));
+        let expiry_gauge = global::meter("status-list-server")
+            .i64_gauge("cert_time_to_expiry_seconds")
+            .with_description("Time remaining until the current certificate expires")
+            .build();
+        record_expiry(&expiry_gauge, expires_at.load(Ordering::Relaxed));
+        let task_expiry = Arc::downgrade(&expires_at);
+        let task_gauge = expiry_gauge.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(expires_at) = task_expiry.upgrade() else {
+                    break;
+                };
+                record_expiry(&task_gauge, expires_at.load(Ordering::Relaxed));
+            }
+        });
         Ok(Self {
             active: Arc::new(ArcSwap::from_pointee(material)),
+            expires_at,
+            expiry_gauge,
         })
     }
 
@@ -57,8 +85,11 @@ impl ReloadingCertificateProvider {
         cert_path: &str,
         key_path: &str,
     ) -> Result<(), StatusListError> {
-        let material = load_and_validate_signing_material(cert_path, key_path).await?;
+        let (material, expires_at) =
+            load_and_validate_signing_material(cert_path, key_path).await?;
         self.active.store(Arc::new(material));
+        self.expires_at.store(expires_at, Ordering::Relaxed);
+        record_expiry(&self.expiry_gauge, expires_at);
         Ok(())
     }
 }
@@ -103,7 +134,7 @@ impl CertificateProvider for InlineCertificateProvider {
 async fn load_and_validate_signing_material(
     cert_path: &str,
     key_path: &str,
-) -> Result<SigningMaterial, StatusListError> {
+) -> Result<(SigningMaterial, i64), StatusListError> {
     let cert_pem = tokio::fs::read_to_string(cert_path)
         .await
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
@@ -111,8 +142,43 @@ async fn load_and_validate_signing_material(
         .await
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
+    let expires_at = certificate_expiry(&cert_pem)?;
+    if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
+        return Err(StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "signing certificate has expired",
+        ))));
+    }
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
-    SigningMaterial::new(Some(certificate_chain), Arc::new(signing_key))
+    Ok((
+        SigningMaterial::new(Some(certificate_chain), Arc::new(signing_key))?,
+        expires_at,
+    ))
+}
+
+#[cfg(not(feature = "acme"))]
+fn record_expiry(gauge: &Gauge<i64>, expires_at: i64) {
+    gauge.record(
+        expires_at.saturating_sub(time::OffsetDateTime::now_utc().unix_timestamp()),
+        &[],
+    );
+}
+
+#[cfg(not(feature = "acme"))]
+fn certificate_expiry(cert_pem: &str) -> Result<i64, StatusListError> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(|err| {
+        StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.to_string(),
+        )))
+    })?;
+    let (_, certificate) = x509_parser::parse_x509_certificate(&block.contents).map_err(|err| {
+        StatusListError::Backend(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.to_string(),
+        )))
+    })?;
+    Ok(certificate.validity().not_after.timestamp())
 }
 
 #[cfg(not(feature = "acme"))]
@@ -313,6 +379,107 @@ mod tests {
                 .signing_key
                 .public_key_bytes(),
             original_public_key
+        );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn expired_reload_keeps_last_known_good_material() {
+        let dir = TempDir::new();
+        let cert_path = dir.path().join("statuslist.crt");
+        let key_path = dir.path().join("statuslist.key");
+        let (cert, key) = matching_cert_and_key();
+        tokio::fs::write(&cert_path, cert)
+            .await
+            .expect("write cert");
+        tokio::fs::write(&key_path, &key).await.expect("write key");
+        let provider = ReloadingCertificateProvider::from_files(
+            cert_path.to_string_lossy().to_string(),
+            key_path.to_string_lossy().to_string(),
+        )
+        .await
+        .expect("provider");
+        let original_key = provider
+            .signing_material()
+            .await
+            .expect("material")
+            .signing_key
+            .public_key_bytes()
+            .to_vec();
+        let original_chain = provider
+            .signing_material()
+            .await
+            .expect("material")
+            .certificate_chain()
+            .expect("certificate chain")
+            .to_vec();
+
+        let signing_key = rcgen::KeyPair::from_pem(&key).expect("parse key");
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate parameters");
+        params.not_before = time::OffsetDateTime::UNIX_EPOCH;
+        params.not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(1);
+        let expired = params
+            .self_signed(&signing_key)
+            .expect("expired certificate")
+            .pem();
+        tokio::fs::write(&cert_path, expired)
+            .await
+            .expect("write expired cert");
+        assert!(
+            provider
+                .reload_from_files(
+                    cert_path.to_str().expect("cert path"),
+                    key_path.to_str().expect("key path"),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            provider
+                .signing_material()
+                .await
+                .expect("retained material")
+                .signing_key
+                .public_key_bytes(),
+            original_key
+        );
+        assert_eq!(
+            provider
+                .signing_material()
+                .await
+                .expect("retained material")
+                .certificate_chain()
+                .expect("certificate chain"),
+            original_chain
+        );
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn expired_certificate_is_rejected_on_startup() {
+        let dir = TempDir::new();
+        let cert_path = dir.path().join("statuslist.crt");
+        let key_path = dir.path().join("statuslist.key");
+        let key = rcgen::KeyPair::generate().expect("generate key");
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate parameters");
+        params.not_before = time::OffsetDateTime::UNIX_EPOCH;
+        params.not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(1);
+        let cert = params.self_signed(&key).expect("expired certificate").pem();
+        tokio::fs::write(&cert_path, cert)
+            .await
+            .expect("write cert");
+        tokio::fs::write(&key_path, key.serialize_pem())
+            .await
+            .expect("write key");
+        assert!(
+            ReloadingCertificateProvider::from_files(
+                cert_path.to_string_lossy().to_string(),
+                key_path.to_string_lossy().to_string(),
+            )
+            .await
+            .is_err()
         );
     }
 

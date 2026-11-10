@@ -213,9 +213,3 @@ required-features = ["memory"]
 
 [profile.dev.package.backtrace]
 opt-level = 3
-
-[patch.crates-io]
-sqlx-core = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
-sqlx-mysql = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
-sqlx-postgres = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }
-sqlx-sqlite = { git = "https://github.com/transact-rs/sqlx.git", rev = "ae659a0ca4e5e6708e589abc216f734deddb8e29" }

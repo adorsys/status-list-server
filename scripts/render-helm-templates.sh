@@ -111,6 +111,7 @@ DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templ
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
 DATEV_SECRET_STORE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/secret-store.yaml"
 DATEV_HPA="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/hpa.yaml"
+DATEV_CERTIFICATE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/token-signing-certificate.yaml"
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT"; then
   echo "ERROR: Datev staging must use the fscert image"; exit 1
 fi
@@ -123,8 +124,17 @@ fi
 if [ -f "$DATEV_HPA" ]; then
   echo "ERROR: Datev staging must not render an HPA"; exit 1
 fi
-if ! grep -q 'name: statuslist-signing' "$DATEV_EXTERNAL_SECRETS"; then
-  echo "ERROR: Datev staging must render the signing ExternalSecret"; exit 1
+if [ ! -f "$DATEV_CERTIFICATE" ] || ! grep -q 'name: statuslist-token-signing' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging must render the dedicated signing Certificate"; exit 1
+fi
+if ! grep -q 'statuslist.eudi-adorsys.com' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging signing Certificate must use the exact service hostname"; exit 1
+fi
+if ! grep -q 'name: "letsencrypt-prod"' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging signing Certificate must use letsencrypt-prod"; exit 1
+fi
+if ! grep -q 'secretName: statuslist-token-signing' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must mount the dedicated signing Secret"; exit 1
 fi
 if [ ! -f "$DATEV_SECRET_STORE" ]; then
   echo "ERROR: Datev staging must render a namespaced SecretStore"; exit 1
@@ -133,13 +143,13 @@ if ! grep -q 'name: statuslist-secret-store' "$DATEV_SECRET_STORE"; then
   echo "ERROR: Datev staging SecretStore must be named statuslist-secret-store"; exit 1
 fi
 if ! grep -q '^      service: SecretsManager$' "$DATEV_SECRET_STORE"; then
-  echo "ERROR: Datev staging SecretStore must use SecretsManager, matching the deploy preflight"; exit 1
+  echo "ERROR: Datev staging SecretStore must use SecretsManager"; exit 1
 fi
 if ! grep -q '^      region: eu-central-1$' "$DATEV_SECRET_STORE"; then
-  echo "ERROR: Datev staging SecretStore must use eu-central-1, matching the deploy preflight"; exit 1
+  echo "ERROR: Datev staging SecretStore must use eu-central-1"; exit 1
 fi
 if grep -q '^[[:space:]]*auth:' "$DATEV_SECRET_STORE"; then
-  echo "ERROR: Datev staging SecretStore must use the ESO controller identity, matching the deploy preflight"; exit 1
+  echo "ERROR: Datev staging SecretStore must use the ESO controller identity"; exit 1
 fi
 if ! grep -q 'kind: SecretStore' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging ExternalSecrets must use a namespaced SecretStore"; exit 1
@@ -147,11 +157,14 @@ fi
 if ! grep -q 'name: statuslist-secret-store' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging ExternalSecrets must reference statuslist-secret-store"; exit 1
 fi
-if ! grep -q 'key: statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS"; then
-  echo "ERROR: Datev staging signing ExternalSecret must reference statuslist-fscert-signing"; exit 1
+if grep -q 'statuslist-signing\|statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging must not fetch signing material through ESO"; exit 1
 fi
-if ! grep -A2 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288'; then
+if ! grep -A3 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288'; then
   echo "ERROR: Datev staging signing key must render mode 0440"; exit 1
+fi
+if ! grep -q 'path: statuslist.crt' "$DATEV_DEPLOYMENT" || ! grep -q 'path: statuslist.key' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use token signing file names"; exit 1
 fi
 if grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging must not fetch a Redis password"; exit 1

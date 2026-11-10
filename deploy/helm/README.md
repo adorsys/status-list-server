@@ -34,7 +34,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values.yaml`](chart/values.yaml): provider-neutral defaults.
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
-* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): existing EKS release profile using the `fscert` image, ESO signing files, and the in-memory cache. Apply after the AWS and production overlays; see the [EKS staging prerequisites](../../docs/deployment-runbook.md#existing-eks-staging-profile).
+* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): existing EKS release profile using the `fscert` image, a cert-manager signing certificate, and the in-memory cache. Apply after the AWS and production overlays; see the [EKS staging prerequisites](../../docs/deployment-runbook.md#existing-eks-staging-profile).
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
@@ -42,6 +42,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * `mysql.auth.username`, `mysql.auth.database`, `mysql.service.port`: connection defaults for an external MySQL database after `APP_DATABASE__HOST` is set.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
+* `tokenSigningCertificate`: optionally creates a dedicated cert-manager Certificate and Secret for file-backed token signing. Set `enabled`, `dnsName`, and `issuerName`; the issuer must be a pre-existing ClusterIssuer. The Datev staging overlay uses this setting.
 
 ## Configure Your Secrets
 

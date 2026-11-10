@@ -848,23 +848,33 @@ ExternalSecret writes it to `statuslist-secret` as both `database-password` and
 `postgres-password`. The existing `REDIS_PASSWORD` property is no longer mapped
 into the application Secret by the new profile.
 
-Before the first upgrade, verify that `statuslist-secret-store` is owned by the
-`statuslist` Helm release in the `statuslist` namespace. The deploy workflow
-rejects a store owned by another release or created outside Helm. It also
-rejects an existing store with AWS provider settings beyond the chart's
-`SecretsManager` service and `eu-central-1` region, because the chart would
-replace those settings. The rendered store has no `auth` block, so ESO uses its
-controller identity. Confirm that identity can read both the existing
-`statuslist-secret` entry and the new `statuslist-fscert-signing` entry in AWS
-Secrets Manager before deploying.
+Before the first upgrade, inspect the existing store with
+`kubectl get secretstore statuslist-secret-store -n statuslist -o yaml`.
+Verify Helm release ownership, the AWS provider configuration, and whether ESO
+uses controller identity or explicit credentials. The chart renders the store
+without an `auth` block, so its controller identity must still be able to read
+the existing `statuslist-secret` entry. Helm will reject an existing store that
+belongs to another release.
 
-The `fscert` image also needs a matching issuer certificate and private key.
-Provision an AWS Secrets Manager entry named `statuslist-fscert-signing` with
-`CERTIFICATE` and `SIGNING_KEY` properties through the approved secret-management
-process. The chart's `statuslist-signing` ExternalSecret maps them to `tls.crt`
-and `tls.key` in a Kubernetes Secret mounted as files. Do not put their values in
-Helm values or GitHub Actions. Preserve verification material for tokens issued
-before the switch until they expire.
+The `fscert` image reads a dedicated token-signing certificate and private key
+from `statuslist-token-signing`. The chart creates a cert-manager `Certificate`
+for the exact host `statuslist.eudi-adorsys.com`, issued by the
+`letsencrypt-prod` ClusterIssuer, with an ECDSA P-256 key that rotates on
+renewal. Verify that cert-manager and this ClusterIssuer are available before
+upgrading. cert-manager writes `tls.crt` and `tls.key` to the Secret; the pod
+mounts them as `statuslist.crt` and `statuslist.key`. Do not reuse the
+`statuslist-tls` ingress Secret for token signing. Preserve verification
+material for tokens issued before the switch until they expire. Verify
+`kubectl get certificate statuslist-token-signing -n statuslist` reports Ready
+and check the certificate-expiry alerts after deployment.
+The public ACME certificate has the `serverAuth` extended key usage, as the
+current AWS signer does. Confirm integrator profiles accept that usage; a
+document-signing certificate requires a different issuer.
+
+Before deploying this chart to either EKS or Datev, verify that the installed
+ESO CRDs serve `external-secrets.io/v1beta1` for ExternalSecret and SecretStore.
+The chart still renders that version; Datev's own ExternalSecret uses `v1`.
+Plan a separate chart migration to `v1` after checking both clusters.
 
 Before triggering a tagged release, provide the `status-list-server-issuers`
 ConfigMap in `statuslist`; the workflow checks for it before running Helm. Set

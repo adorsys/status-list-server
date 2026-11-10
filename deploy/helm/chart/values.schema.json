@@ -16,6 +16,15 @@
         }
       }
     },
+    "tokenSigningCertificate": {
+      "type": "object",
+      "description": "Optional cert-manager Certificate for a dedicated token-signing Secret. Requires the cert-manager CRD and named ClusterIssuer.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dnsName": { "type": "string" },
+        "issuerName": { "type": "string" }
+      }
+    },
     "podAnnotations": {
       "type": "object",
       "title": "Pod annotations",

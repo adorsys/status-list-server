@@ -13,6 +13,12 @@ global:
 # Merged on top of the prometheus.io annotations when those are enabled.
 podAnnotations: {}
 
+# Dedicated cert-manager certificate for token signing, separate from ingress TLS.
+tokenSigningCertificate:
+  enabled: false
+  dnsName: ""
+  issuerName: ""
+
 statuslist:
   enabled: true
   # Waits for the database. deployment.yaml overwrites each entry's resources, volumeMounts and

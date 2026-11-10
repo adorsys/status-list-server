@@ -7,24 +7,33 @@ Alerts:
   refreshing the certificate and there is runway to intervene.
 - `CertRenewalErrorBudgetCritical` (severity=page) — fires when the certificate
   expires within 7 days (`cert_time_to_expiry_seconds <= 7d`): imminent expiry,
-  the certificate will be invalid for TLS handshakes unless action is taken
+  verifiers will reject new status-list tokens unless action is taken
   immediately.
 
 ## What fired
 
-Wallet renewals run on a low-frequency cycle (every few days to weeks, governed
+ACME renewals run on a low-frequency cycle (every few days to weeks, governed
 by the renewal strategy), not a continuous stream, so a `rate()` of the
 `cert_renewal_failures_total` / `cert_renewal_attempts_total` counters over a
 fixed window is `0/0 = NaN` whenever no renewal happened in the window and can
 never fire reliably.
 
 The firing alerts therefore watch the **continuous** `cert_time_to_expiry_seconds`
-gauge, which is emitted on every renewal/refresh and drops monotonically toward 0
+gauge. The file-backed signer records it every minute, so it drops toward 0
 while renewals fail to keep the certificate fresh. This is the deterministic,
 actionable signal: when it crosses the interval thresholds, the certificate is
 not being re-signed.
 
 ## Ranked likely causes
+
+For the EKS `fscert` profile, inspect the dedicated cert-manager Certificate
+first. The app reads its Secret and cannot renew it itself.
+
+```bash
+kubectl get certificate statuslist-token-signing -n statuslist
+kubectl describe certificate statuslist-token-signing -n statuslist
+kubectl get certificaterequests -n statuslist
+```
 
 1. **ACME / DNS challenge failure** — the DNS-01 or HTTP-01 challenge handler
    (Route53, Cloudflare, GCloud, Azure, acme-dns, Pebble) could not satisfy the
@@ -68,5 +77,5 @@ curl -f http://localhost:8002/health/ready
 
 - Warn (≤14d): no page. Root-cause and fix before the certificate expires.
 - Page (≤7d): treat as imminent-expiry incident. The certificate will stop being
-  valid for TLS handshakes; follow the ACME recovery path immediately and, if the
+  valid for token verification; follow the relevant renewal path immediately and, if the
   renewal cannot be restored in time, plan a manual re-issue of the certificate.

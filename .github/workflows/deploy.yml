@@ -850,36 +850,6 @@ jobs:
           fi
           echo "ConfigMap 'status-list-server-issuers' is present."
 
-      - name: Check existing SecretStore before upgrade
-        run: |
-          set -euo pipefail
-          store_json="$RUNNER_TEMP/statuslist-secret-store.json"
-          kubectl get secretstore statuslist-secret-store -n "${{ env.HELM_NAMESPACE }}" \
-            --ignore-not-found -o json > "$store_json"
-          if [ ! -s "$store_json" ]; then
-            echo "No existing statuslist-secret-store; Helm will create it."
-            exit 0
-          fi
-          if ! jq -e --arg release "${{ env.HELM_RELEASE_NAME }}" \
-              --arg namespace "${{ env.HELM_NAMESPACE }}" '
-            .metadata.labels["app.kubernetes.io/managed-by"] == "Helm" and
-            .metadata.annotations["meta.helm.sh/release-name"] == $release and
-            .metadata.annotations["meta.helm.sh/release-namespace"] == $namespace
-          ' "$store_json" >/dev/null; then
-            echo "::error::Existing statuslist-secret-store is not owned by this Helm release. Resolve ownership before upgrading."
-            exit 1
-          fi
-          if ! jq -e '
-            (.spec.provider | keys == ["aws"]) and
-            (.spec.provider.aws | keys == ["region", "service"]) and
-            .spec.provider.aws.region == "eu-central-1" and
-            .spec.provider.aws.service == "SecretsManager"
-          ' "$store_json" >/dev/null; then
-            echo "::error::Existing statuslist-secret-store has provider settings that the chart would replace. Verify ESO authentication and reconcile the store before upgrading."
-            exit 1
-          fi
-          echo "Existing statuslist-secret-store ownership and AWS provider settings match the chart."
-
       - name: Assert the deployed variant is visible outside this environment
         # The nightly scan only sees the repo-scoped IMAGE_VARIANT. If production overrides it,
         # the nightly would verify a variant nobody runs, so fail the deploy instead.
@@ -949,7 +919,7 @@ jobs:
           # Record each ExternalSecret's refreshTime so the verify step can prove this deploy reconciled.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
-          for es in statuslist-external-secret statuslist-signing; do
+          for es in statuslist-external-secret; do
             rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
               -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
@@ -989,12 +959,11 @@ jobs:
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
 
-      - name: Verify ESO secret path reconciles
+      - name: Verify database secret and signing certificate
         # Ready=True can be stale from before the upgrade, so require refreshTime to move past the baseline.
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
         env:
           PRIMARY_ES: statuslist-external-secret
-          SIGNING_ES: statuslist-signing
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
@@ -1028,7 +997,7 @@ jobs:
           trap cleanup_on_failure EXIT
 
           # Force a sync: the 30m refreshInterval could outlast the wait.
-          for es in "$PRIMARY_ES" "$SIGNING_ES"; do
+          for es in "$PRIMARY_ES"; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
               echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
@@ -1059,7 +1028,8 @@ jobs:
 
           await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
 
-          await_synced "$SIGNING_ES" "ExternalSecret $SIGNING_ES ($NAMESPACE)"
+          kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
+            --for=condition=Ready --timeout=2m
 
           rollback_done=1
 

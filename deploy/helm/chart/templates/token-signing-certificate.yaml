@@ -1,0 +1,23 @@
+{{- if and .Values.statuslist.enabled .Values.tokenSigningCertificate.enabled }}
+{{- if or (empty .Values.tokenSigningCertificate.dnsName) (empty .Values.tokenSigningCertificate.issuerName) }}
+{{- fail "tokenSigningCertificate requires dnsName and issuerName" }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: statuslist-token-signing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+spec:
+  secretName: statuslist-token-signing
+  dnsNames:
+    - {{ .Values.tokenSigningCertificate.dnsName | quote }}
+  issuerRef:
+    name: {{ .Values.tokenSigningCertificate.issuerName | quote }}
+    kind: ClusterIssuer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+{{- end }}
