@@ -114,8 +114,32 @@ admin audience before adding admin principals to the mounted registry.
 
 ### Onboard a registry issuer
 
-Generate a key pair using a trusted local tool. Keep the private key with the
-issuer and export only its public JWK. Start with this `issuers.yaml` file:
+Generate a P-256 key pair with OpenSSL. Keep the private key with the issuer;
+only the public JWK goes into the registry. The commands below use the Python
+dependencies from the [demo setup](../demo/README.md) to convert the public key
+and sign a management token. From the repository root:
+
+```bash
+umask 077
+install -d -m 700 "$HOME/.local/share/status-list-server"
+export ISSUER_KEY
+ISSUER_KEY=$(mktemp "$HOME/.local/share/status-list-server/issuer.XXXXXXXX")
+openssl ecparam -name prime256v1 -genkey -noout -out "$ISSUER_KEY"
+printf 'Private key: %s\n' "$ISSUER_KEY"
+uv run --project demo --locked python - > public.jwk <<'PY'
+import json
+import os
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from jwt.algorithms import ECAlgorithm
+
+with open(os.environ["ISSUER_KEY"], "rb") as key_file:
+    public_key = load_pem_private_key(key_file.read(), password=None).public_key()
+jwk = ECAlgorithm.to_jwk(public_key, as_dict=True)
+print(json.dumps({field: jwk[field] for field in ("kty", "crv", "x", "y")}))
+PY
+```
+
+Start with this `issuers.yaml` file:
 
 ```yaml
 version: 1
@@ -123,8 +147,12 @@ issuers: []
 admins: []
 ```
 
-Add the issuer with
-`cargo xtask issuer add --file issuers.yaml --jwk '<public-jwk-json>' --alg ES256`.
+Add the issuer with:
+
+```bash
+cargo xtask issuer add --file issuers.yaml --jwk "$(cat public.jwk)" --alg ES256
+```
+
 The command assigns the issuer ID, aggregation ID, and key ID. Give the issuer
 its assigned issuer and key IDs, and keep the private key outside the registry.
 Validate the file with
@@ -142,6 +170,40 @@ management listener (default `localhost:8001`). A `PUT` to
 `{"statuses":[]}` publishes an empty list. The returned URI is served from
 the public listener. See the [public OpenAPI contract](openapi.yaml) for
 status update requests.
+
+To publish the first list, copy the generated `id` and `keys[0].kid` from
+`issuers.yaml` into `ISSUER_ID` and `KID` below. Start or reload the server with
+that registry, using the [quick start](../README.md#quick-start) and
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml`. If audience validation is
+configured, also export `MANAGEMENT_AUDIENCE` with one accepted audience before
+signing. Keep `ISSUER_KEY` on the issuer's machine and run these commands there:
+
+```bash
+export ISSUER_ID='<generated id>'
+export KID='<generated keys[0].kid>'
+TOKEN=$(uv run --project demo --locked python - <<'PY'
+import os
+import time
+import jwt
+
+now = int(time.time())
+claims = {"iss": os.environ["ISSUER_ID"], "iat": now, "exp": now + 300}
+if os.environ.get("MANAGEMENT_AUDIENCE"):
+    claims["aud"] = os.environ["MANAGEMENT_AUDIENCE"]
+with open(os.environ["ISSUER_KEY"], encoding="utf-8") as key_file:
+    token = jwt.encode(
+        claims, key_file.read(), algorithm="ES256",
+        headers={"typ": "statuslist-management+jwt", "kid": os.environ["KID"]},
+    )
+print(token)
+PY
+)
+LIST_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+curl -i -X PUT "http://localhost:8001/api/v1/status-lists/$LIST_ID/statuses" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data '{"statuses":[]}'
+unset TOKEN ISSUER_ID KID ISSUER_KEY
+```
 
 ### Rotate or revoke issuer keys
 

@@ -1090,7 +1090,9 @@ mod tests {
 
     #[tokio::test]
     async fn management_write_routes_enforce_authentication_and_issuer_ownership() {
-        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+        use crate::server::auth::tests::{
+            rotation_private_pem, test_ec_private_pem, test_public_jwk,
+        };
         use axum::http::header;
         use std::io::Write;
 
@@ -1134,6 +1136,7 @@ mod tests {
             two_issuer_management_with(&[("rate_limit.strict_burst_size", "100")], 100).await;
         let list_id = uuid::Uuid::new_v4().to_string();
         let private_pem = test_ec_private_pem();
+        let server_private_pem = include_str!("../test_data/ec-private.pem");
         let issuer_a = format!(
             "Bearer {}",
             issuer_token("issuer-a", "test-key", &private_pem)
@@ -1148,7 +1151,7 @@ mod tests {
         );
         let unregistered_issuer = format!(
             "Bearer {}",
-            issuer_token("unknown-issuer", "test-key", &private_pem)
+            issuer_token("unknown-issuer", "unknown-key", server_private_pem)
         );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1183,7 +1186,7 @@ mod tests {
             jsonwebtoken::encode(
                 &wrong_alg_header,
                 &serde_json::json!({"iss":"issuer-a", "iat":now, "exp":now + 300}),
-                &jsonwebtoken::EncodingKey::from_secret(b"wrong-algorithm"),
+                &jsonwebtoken::EncodingKey::from_secret(test_public_jwk().as_bytes()),
             )
             .unwrap()
         );
@@ -1192,6 +1195,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
             .with_writer(move || LogWriter(sink.clone()))
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -1207,17 +1211,21 @@ mod tests {
                 "missing_token"
             );
 
-            for authorization in [
-                "Basic credential",
-                "Bearer invalid.jwt.token",
-                forged_issuer.as_str(),
-                unregistered_issuer.as_str(),
-                admin_type.as_str(),
-                expired.as_str(),
-                wrong_alg.as_str(),
+            for (case, authorization) in [
+                ("non-bearer credentials", "Basic credential"),
+                ("malformed token", "Bearer invalid.jwt.token"),
+                ("forged issuer", forged_issuer.as_str()),
+                ("unknown key", unregistered_issuer.as_str()),
+                ("admin token type", admin_type.as_str()),
+                ("expired token", expired.as_str()),
+                ("public-key HMAC token", wrong_alg.as_str()),
             ] {
                 let rejected = write(&router, method.clone(), &list_id, Some(authorization)).await;
-                assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+                assert_eq!(
+                    rejected.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {case}"
+                );
                 let body = axum::body::to_bytes(rejected.into_body(), usize::MAX)
                     .await
                     .unwrap();
@@ -1228,12 +1236,16 @@ mod tests {
                         "missing_token"
                     } else {
                         "invalid_token"
-                    }
+                    },
+                    "{method} {case}"
                 );
                 let token = authorization
                     .strip_prefix("Bearer ")
                     .unwrap_or(authorization);
-                assert!(!String::from_utf8_lossy(&body).contains(token));
+                assert!(
+                    !String::from_utf8_lossy(&body).contains(token),
+                    "{method} {case} exposed a credential in the response"
+                );
             }
         }
 
@@ -1263,7 +1275,7 @@ mod tests {
             admin_type.as_str(),
             expired.as_str(),
             wrong_alg.as_str(),
-            private_pem.as_str(),
+            server_private_pem,
         ] {
             let token = sensitive.strip_prefix("Bearer ").unwrap_or(sensitive);
             assert!(!logs.contains(token), "logs exposed credential material");

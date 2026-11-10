@@ -119,9 +119,12 @@ APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
 cargo run --features sqlite
 ```
 
-The portal backend calls `POST /admin/v1/issuers` with a developer's public
-JWK and owner identity, then reads the assigned issuer and key IDs from the
-response. The developer signs management tokens as described in the
+The portal backend calls `POST /admin/v1/issuers` with the required
+`display_name`, `owner`, `public_key` (a public JWK), and `alg` fields, then
+reads the assigned issuer and key IDs from the response. `expires_at` is
+optional. See the [createIssuer contract](openapi-admin.yaml#L162) and the
+[hosted issuer creation demo](../demo/README.md#hosted-issuer-creation-and-renewal)
+for the request shape. The developer signs management tokens as described in the
 [registry issuer onboarding steps](deployment-runbook.md#onboard-a-registry-issuer).
 For overlap rotation, read the issuer's `ETag`, add the new public key with
 `POST /admin/v1/issuers/{issuer_id}/keys` and `If-Match`, verify writes with
