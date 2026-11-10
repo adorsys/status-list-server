@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from typing import Any, Callable
 
@@ -237,7 +240,7 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertLessEqual(read, self.needs("direct-upgrade"))
         self.assertTrue(self.runs("direct-upgrade", _PRERELEASE_GREEN))
         self.assertFalse(self.runs("direct-upgrade", _FINAL_GREEN))
-        for gate in ("scan_image", "verify_provenance"):
+        for gate in ("image_source", "scan_image", "verify_provenance"):
             with self.subTest(gate=gate):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(**{gate: "failure"})}
                 self.assertFalse(self.runs("direct-upgrade", scenario))
@@ -246,6 +249,46 @@ class DeployReleaseGatingTest(unittest.TestCase):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(direct_upgrade=result)}
                 self.assertFalse(self.runs("promote-tags", scenario))
                 self.assertFalse(self.runs("deploy", {**scenario, **_outcome(promote_tags="skipped")}))
+
+    def test_direct_upgrade_uses_the_source_run_and_verifies_the_previous_image(self) -> None:
+        direct = self.jobs["direct-upgrade"]
+        self.assertIn("image-source", self.needs("direct-upgrade"))
+        steps = {step["name"]: step for step in direct["steps"]}
+        resolve = steps["Resolve verified image digests"]
+        self.assertEqual(resolve["env"]["SOURCE_RUN_ID"], "${{ needs.image-source.outputs.source_run_id }}")
+        self.assertIn('gh run download "$SOURCE_RUN_ID"', resolve["run"])
+        self.assertIn('verify-attestation.sh "${IMAGE_BASE}@${previous_digest}"', resolve["run"])
+        self.assertIn("scripts/select-latest-final.sh", steps["Find last stable release"]["run"])
+
+    @unittest.skipIf(shutil.which("bash") is None, "bash is required")
+    def test_direct_upgrade_command_passes_unmodified_arguments(self) -> None:
+        steps = {step["name"]: step for step in self.jobs["direct-upgrade"]["steps"]}
+        command = steps["Install last release and upgrade to candidate"]["run"]
+        with tempfile.TemporaryDirectory() as directory:
+            for name, value in (
+                ("previous-chart-path", "previous-release/helm/chart"),
+                ("previous-digest", "sha256:previous"),
+                ("candidate-digest.txt", "sha256:candidate"),
+            ):
+                (pathlib.Path(directory) / name).write_text(value + "\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", 'bash() { printf "<%s>\\n" "$@"; }\n' + command],
+                env={"RUNNER_TEMP": directory, "CHART_DIR": "deploy/helm/chart"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "<scripts/test-direct-upgrade.sh>",
+                "<previous-release/helm/chart>",
+                "<deploy/helm/chart>",
+                "<sha256:previous>",
+                "<sha256:candidate>",
+            ],
+        )
 
     def test_promote_tags_lists_every_job_its_condition_reads(self) -> None:
         condition = str(self.jobs["promote-tags"]["if"])

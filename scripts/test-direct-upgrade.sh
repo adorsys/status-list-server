@@ -101,10 +101,12 @@ fi
   echo "::error::The pre-upgrade status list was lost."
   exit 1
 }
-[[ $(psql_in_cluster "SELECT list_count FROM issuers WHERE issuer = 'upgrade-fixture'") == 1 ]] || {
-  echo "::error::The upgraded issuer's list count was not backfilled."
-  exit 1
-}
+if [[ "$quota_present" == f ]]; then
+  [[ $(psql_in_cluster "SELECT list_count FROM issuers WHERE issuer = 'upgrade-fixture'") == 1 ]] || {
+    echo "::error::The upgraded issuer's list count was not backfilled."
+    exit 1
+  }
+fi
 
 if ! pod=$(kubectl get pods -n "$namespace" \
   -l "app.kubernetes.io/instance=$release,app.kubernetes.io/name=status-list-server" -o json \

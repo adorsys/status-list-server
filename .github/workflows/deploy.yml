@@ -596,8 +596,8 @@ jobs:
   direct-upgrade:
     name: Direct Upgrade from Last Release
     runs-on: ubuntu-latest
-    needs: [validate-tag, scan-image, verify-provenance]
-    if: ${{ !cancelled() && github.event_name == 'push' && contains(github.ref_name, '-rc.') && needs.validate-tag.outputs.is_final == 'false' && needs.scan-image.result == 'success' && needs.verify-provenance.result == 'success' }}
+    needs: [validate-tag, image-source, scan-image, verify-provenance]
+    if: ${{ !cancelled() && github.event_name == 'push' && contains(github.ref_name, '-rc.') && needs.validate-tag.outputs.is_final == 'false' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && needs.verify-provenance.result == 'success' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -614,11 +614,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
-          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+          tag=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref' \
+            | sed 's@^refs/tags/@@' | bash scripts/select-latest-final.sh)
+          if [[ -z "$tag" ]]; then
             echo "::error::No stable release tag was found."
             exit 1
-          }
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Checkout last stable release
@@ -657,9 +658,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
         run: |
           set -euo pipefail
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" \
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
             --name image-digest-fscert --dir "$RUNNER_TEMP/candidate-digest"
           candidate_digest=$(cat "$RUNNER_TEMP/candidate-digest/image-digest-fscert.txt")
           previous_ref="${IMAGE_BASE}:${PREVIOUS_TAG#v}-fscert"
@@ -667,13 +669,15 @@ jobs:
           for digest in "$previous_digest" "$candidate_digest"; do
             [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Invalid image digest."; exit 1; }
           done
+          bash scripts/verify-attestation.sh "${IMAGE_BASE}@${previous_digest}" "$GITHUB_REPOSITORY"
           printf '%s\n' "$previous_digest" > "$RUNNER_TEMP/previous-digest"
           printf '%s\n' "$candidate_digest" > "$RUNNER_TEMP/candidate-digest.txt"
 
       - name: Install last release and upgrade to candidate
-        run: bash scripts/test-direct-upgrade.sh \
-          "$(cat "$RUNNER_TEMP/previous-chart-path")" "$CHART_DIR" \
-          "$(cat "$RUNNER_TEMP/previous-digest")" "$(cat "$RUNNER_TEMP/candidate-digest.txt")"
+        run: |
+          bash scripts/test-direct-upgrade.sh \
+            "$(cat "$RUNNER_TEMP/previous-chart-path")" "$CHART_DIR" \
+            "$(cat "$RUNNER_TEMP/previous-digest")" "$(cat "$RUNNER_TEMP/candidate-digest.txt")"
 
       - name: Collect cluster diagnostics on failure
         if: failure()
