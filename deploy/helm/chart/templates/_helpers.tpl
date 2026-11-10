@@ -35,6 +35,24 @@ app.kubernetes.io/name: {{ include "status-list-server-chart.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{- define "status-list-server-chart.globalDomain" -}}
+{{- trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
+{{- end }}
+
+{{/* Ingresses and HTTPRoutes both use these, so their hosts can't drift. */}}
+{{- define "status-list-server-chart.publicHost" -}}
+{{- $domain := include "status-list-server-chart.globalDomain" . }}
+{{- $host := .Values.statuslist.ingress.externalDnsHostname | default "" | lower }}
+{{- if and (eq $host "") $domain }}
+{{- $host = printf "statuslist.%s" $domain }}
+{{- end }}
+{{- $host | default "localhost" }}
+{{- end }}
+
+{{- define "status-list-server-chart.managementHost" -}}
+{{- .Values.statuslist.ingress.management.hostname | default "" | lower | default (include "status-list-server-chart.publicHost" .) }}
+{{- end }}
+
 {{/* Workload Identity trust is keyed on this name; renaming the SA breaks it. */}}
 {{- define "status-list-server-chart.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
