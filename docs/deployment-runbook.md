@@ -112,12 +112,10 @@ admin service when cluster-wide pod access is not acceptable. Set a distinct
 staging must not reuse the production audience. During upgrades, configure the
 admin audience before adding admin principals to the mounted registry.
 
-### Rotate or revoke issuer keys
+### Onboard a registry issuer
 
-Keep the registry in the operator-controlled source used to publish the mount.
-It contains public keys only. Never put an issuer's private key in the registry.
-
-To start a new registry (there is no committed file), create the three-line skeleton:
+Generate a key pair using a trusted local tool. Keep the private key with the
+issuer and export only its public JWK. Start with this `issuers.yaml` file:
 
 ```yaml
 version: 1
@@ -125,8 +123,33 @@ issuers: []
 admins: []
 ```
 
+Add the issuer with
+`cargo xtask issuer add --file issuers.yaml --jwk '<public-jwk-json>' --alg ES256`.
+The command assigns the issuer ID, aggregation ID, and key ID. Give the issuer
+its assigned issuer and key IDs, and keep the private key outside the registry.
+Validate the file with
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml cargo run -- issuer-registry`
+before starting or reloading the server with that file.
+
+The issuer signs a short-lived JWT with header
+`typ: statuslist-management+jwt`, the assigned `kid`, and the registered
+`alg`. Claims include `iss` equal to the assigned issuer ID, integer `iat`
+and `exp`, and a matching `aud` when `APP_MANAGEMENT_AUTH__AUDIENCES` is set.
+The lifetime must not exceed `APP_MANAGEMENT_AUTH__MAX_TOKEN_LIFETIME_SECS`
+(300 seconds by default). Send it as `Authorization: Bearer <token>` to the
+management listener (default `localhost:8001`). A `PUT` to
+`/api/v1/status-lists/{list_id}/statuses` with a fresh UUID and
+`{"statuses":[]}` publishes an empty list. The returned URI is served from
+the public listener. See the [public OpenAPI contract](openapi.yaml) for
+status update requests.
+
+### Rotate or revoke issuer keys
+
+Keep the registry in the operator-controlled source used to publish the mount.
+It contains public keys only. Never put an issuer's private key in the registry.
+
 `cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
-file must exist with at least this structure before you add keys.
+file must exist with at least the structure shown above before you add keys.
 
 For a zero-downtime rotation:
 

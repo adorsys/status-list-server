@@ -1089,6 +1089,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn management_write_routes_enforce_authentication_and_issuer_ownership() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+        use axum::http::header;
+        use std::io::Write;
+
+        struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        async fn write(
+            router: &Router,
+            method: Method,
+            list_id: &str,
+            authorization: Option<&str>,
+        ) -> axum::response::Response {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            if let Some(value) = authorization {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            router
+                .clone()
+                .oneshot(request.body(Body::from(r#"{"statuses":[]}"#)).unwrap())
+                .await
+                .unwrap()
+        }
+
+        let router =
+            two_issuer_management_with(&[("rate_limit.strict_burst_size", "100")], 100).await;
+        let list_id = uuid::Uuid::new_v4().to_string();
+        let private_pem = test_ec_private_pem();
+        let issuer_a = format!(
+            "Bearer {}",
+            issuer_token("issuer-a", "test-key", &private_pem)
+        );
+        let issuer_b = format!(
+            "Bearer {}",
+            issuer_token("issuer-b", "rotation-key", &rotation_private_pem())
+        );
+        let forged_issuer = format!(
+            "Bearer {}",
+            issuer_token("issuer-b", "test-key", &private_pem)
+        );
+        let unregistered_issuer = format!(
+            "Bearer {}",
+            issuer_token("unknown-issuer", "test-key", &private_pem)
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let signing_key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+        let signed = |typ: &str, exp: u64| {
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+            header.typ = Some(typ.into());
+            header.kid = Some("test-key".into());
+            format!(
+                "Bearer {}",
+                jsonwebtoken::encode(
+                    &header,
+                    &serde_json::json!({
+                        "iss":"issuer-a",
+                        "iat":if exp <= now { exp - 120 } else { now },
+                        "exp":exp
+                    }),
+                    &signing_key,
+                )
+                .unwrap()
+            )
+        };
+        let admin_type = signed("statuslist-admin+jwt", now + 300);
+        let expired = signed("statuslist-management+jwt", now - 120);
+        let mut wrong_alg_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        wrong_alg_header.typ = Some("statuslist-management+jwt".into());
+        wrong_alg_header.kid = Some("test-key".into());
+        let wrong_alg = format!(
+            "Bearer {}",
+            jsonwebtoken::encode(
+                &wrong_alg_header,
+                &serde_json::json!({"iss":"issuer-a", "iat":now, "exp":now + 300}),
+                &jsonwebtoken::EncodingKey::from_secret(b"wrong-algorithm"),
+            )
+            .unwrap()
+        );
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(sink.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        for method in [Method::PUT, Method::PATCH] {
+            let missing = write(&router, method.clone(), &list_id, None).await;
+            assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+            let missing_body = axum::body::to_bytes(missing.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&missing_body).unwrap()["error"],
+                "missing_token"
+            );
+
+            for authorization in [
+                "Basic credential",
+                "Bearer invalid.jwt.token",
+                forged_issuer.as_str(),
+                unregistered_issuer.as_str(),
+                admin_type.as_str(),
+                expired.as_str(),
+                wrong_alg.as_str(),
+            ] {
+                let rejected = write(&router, method.clone(), &list_id, Some(authorization)).await;
+                assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+                let body = axum::body::to_bytes(rejected.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    error["error"],
+                    if authorization.starts_with("Basic") {
+                        "missing_token"
+                    } else {
+                        "invalid_token"
+                    }
+                );
+                let token = authorization
+                    .strip_prefix("Bearer ")
+                    .unwrap_or(authorization);
+                assert!(!String::from_utf8_lossy(&body).contains(token));
+            }
+        }
+
+        let published = write(&router, Method::PUT, &list_id, Some(&issuer_a)).await;
+        assert_eq!(published.status(), StatusCode::CREATED);
+        let republish = write(&router, Method::PUT, &list_id, Some(&issuer_b)).await;
+        assert_eq!(republish.status(), StatusCode::CONFLICT);
+        assert!(republish.headers().get(header::LOCATION).is_none());
+        let update = write(&router, Method::PATCH, &list_id, Some(&issuer_b)).await;
+        assert_eq!(update.status(), StatusCode::FORBIDDEN);
+        let update_body = axum::body::to_bytes(update.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&update_body).unwrap()["error"],
+            "issuer_mismatch"
+        );
+        let owner_update = write(&router, Method::PATCH, &list_id, Some(&issuer_a)).await;
+        assert_eq!(owner_update.status(), StatusCode::OK);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("Management JWT rejected"));
+        for sensitive in [
+            issuer_a.as_str(),
+            issuer_b.as_str(),
+            forged_issuer.as_str(),
+            unregistered_issuer.as_str(),
+            admin_type.as_str(),
+            expired.as_str(),
+            wrong_alg.as_str(),
+            private_pem.as_str(),
+        ] {
+            let token = sensitive.strip_prefix("Bearer ").unwrap_or(sensitive);
+            assert!(!logs.contains(token), "logs exposed credential material");
+        }
+    }
+
+    #[tokio::test]
     async fn test_issuers_behind_one_ip_have_independent_write_budgets() {
         use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
 

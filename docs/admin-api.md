@@ -99,3 +99,34 @@ another replica. This reserves historical static identities from hosted use.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.
+
+## Hosted profile local setup
+
+Hosted mode needs a SQL backend and an operator registry containing the portal
+backend's admin principal with `issuers:read` and `issuers:write` scopes. For
+a local single-node trial, use SQLite, the development signing material, and
+a distinct admin audience:
+
+```bash
+APP_SERVER__PROFILE=hosted \
+APP_DATABASE__BACKEND=sqlite \
+APP_DATABASE__URL='sqlite://status-list.db?mode=rwc' \
+APP_DATABASE__POOL__MAX_CONNECTIONS=1 \
+APP_ADMIN_AUTH__AUDIENCES='http://localhost:8002/admin/v1' \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/certs/dev.crt \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
+cargo run --features sqlite
+```
+
+The portal backend calls `POST /admin/v1/issuers` with a developer's public
+JWK and owner identity, then reads the assigned issuer and key IDs from the
+response. The developer signs management tokens as described in the
+[registry issuer onboarding steps](deployment-runbook.md#onboard-a-registry-issuer).
+For overlap rotation, read the issuer's `ETag`, add the new public key with
+`POST /admin/v1/issuers/{issuer_id}/keys` and `If-Match`, verify writes with
+the new key, then revoke the old key with
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` and a fresh `If-Match`.
+The portal backend must bind each developer's login identity to the `owner`
+it submits and restrict issuer reads and writes to that owner; the server
+authenticates the backend as an admin.
