@@ -126,7 +126,8 @@ export ISSUER_KEY
 ISSUER_KEY=$(mktemp "$HOME/.local/share/status-list-server/issuer.XXXXXXXX")
 openssl ecparam -name prime256v1 -genkey -noout -out "$ISSUER_KEY"
 printf 'Private key: %s\n' "$ISSUER_KEY"
-uv run --project demo --locked python - > public.jwk <<'PY'
+mkdir -p issuer-registry
+uv run --project demo --locked python - > issuer-registry/public.jwk <<'PY'
 import json
 import os
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -139,24 +140,25 @@ print(json.dumps({field: jwk[field] for field in ("kty", "crv", "x", "y")}))
 PY
 ```
 
-Start with this `issuers.yaml` file:
+Create `issuer-registry/issuers.yaml` if it does not already exist:
 
-```yaml
-version: 1
-issuers: []
-admins: []
+```bash
+if [ ! -e issuer-registry/issuers.yaml ]; then
+  printf 'version: 1\nissuers: []\nadmins: []\n' > issuer-registry/issuers.yaml
+fi
 ```
 
 Add the issuer with:
 
 ```bash
-cargo xtask issuer add --file issuers.yaml --jwk "$(cat public.jwk)" --alg ES256
+cargo xtask issuer add --file issuer-registry/issuers.yaml \
+  --jwk "$(cat issuer-registry/public.jwk)" --alg ES256
 ```
 
 The command assigns the issuer ID, aggregation ID, and key ID. Give the issuer
 its assigned issuer and key IDs, and keep the private key outside the registry.
 Validate the file with
-`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml cargo run -- issuer-registry`
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml cargo run -- issuer-registry`
 before starting or reloading the server with that file.
 
 The issuer signs a short-lived JWT with header
@@ -172,15 +174,17 @@ the public listener. See the [public OpenAPI contract](openapi.yaml) for
 status update requests.
 
 To publish the first list, copy the generated `id` and `keys[0].kid` from
-`issuers.yaml` into `ISSUER_ID` and `KID` below. Start or reload the server with
-that registry, using the [quick start](../README.md#quick-start) and
-`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml`. If audience validation is
-configured, also export `MANAGEMENT_AUDIENCE` with one accepted audience before
-signing. Keep `ISSUER_KEY` on the issuer's machine and run these commands there:
+`issuer-registry/issuers.yaml` into `ISSUER_ID` and `KID` below. Start or reload
+the server with that registry, using the [quick start](../README.md#quick-start)
+and `APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml`. If audience
+validation is configured, also export `MANAGEMENT_AUDIENCE` with one accepted
+audience before signing. Keep the private key at `ISSUER_KEY` on the issuer's
+machine and run these commands there:
 
 ```bash
 export ISSUER_ID='<generated id>'
 export KID='<generated keys[0].kid>'
+export ISSUER_KEY='<private key path printed above>'
 TOKEN=$(uv run --project demo --locked python - <<'PY'
 import os
 import time

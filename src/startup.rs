@@ -1181,12 +1181,15 @@ mod tests {
         let mut wrong_alg_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         wrong_alg_header.typ = Some("statuslist-management+jwt".into());
         wrong_alg_header.kid = Some("test-key".into());
+        let registered_public_key: serde_json::Value =
+            serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+        let registered_public_key_bytes = serde_json::to_vec(&registered_public_key).unwrap();
         let wrong_alg = format!(
             "Bearer {}",
             jsonwebtoken::encode(
                 &wrong_alg_header,
                 &serde_json::json!({"iss":"issuer-a", "iat":now, "exp":now + 300}),
-                &jsonwebtoken::EncodingKey::from_secret(test_public_jwk().as_bytes()),
+                &jsonwebtoken::EncodingKey::from_secret(&registered_public_key_bytes),
             )
             .unwrap()
         );

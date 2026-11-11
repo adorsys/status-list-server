@@ -113,7 +113,7 @@ APP_DATABASE__BACKEND=sqlite \
 APP_DATABASE__URL='sqlite://status-list.db?mode=rwc' \
 APP_DATABASE__POOL__MAX_CONNECTIONS=1 \
 APP_ADMIN_AUTH__AUDIENCES='http://localhost:8002/admin/v1' \
-APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuers.yaml \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/certs/dev.crt \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
 cargo run --features sqlite
