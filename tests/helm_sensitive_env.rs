@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use status_list_server::config::Config;
+use status_list_server::config::{ClientIpSource, Config};
 
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create test chart directory");
@@ -229,6 +229,42 @@ fn production_chart_requires_an_explicit_management_audience() {
 }
 
 #[test]
+fn production_chart_requires_trusted_proxies_for_forwarded_client_addresses() {
+    for profile in ["production", "prod", " PRODUCTION "] {
+        let Some(output) = render_helm_failure(&[
+            "--set-string",
+            &format!("statuslist.env.APP_ENV={profile}"),
+            "--set-string",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ]) else {
+            return;
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("APP_RATE_LIMIT__TRUSTED_PROXIES is required in production"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for allowed in [
+        [
+            "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ],
+        [
+            "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ],
+    ] {
+        let Some(rendered) = render_helm(&["--set-string", allowed[0], "--set-string", allowed[1]])
+        else {
+            return;
+        };
+        assert!(rendered.contains("kind: Deployment"), "{allowed:?}");
+    }
+}
+
+#[test]
 fn production_chart_requires_an_issuer_registry_volume() {
     for profile in ["production", "prod", " PRODUCTION "] {
         let Some(output) = helm_template_with_registry(
@@ -363,6 +399,10 @@ fn release_production_overlays_supply_the_management_audience() {
     assert_eq!(
         config.management_auth.audiences,
         ["https://statuslist.eudi-adorsys.com/api/v1"]
+    );
+    assert_eq!(
+        config.rate_limit.client_ip_source,
+        Some(ClientIpSource::ConnectInfo)
     );
 }
 
@@ -1361,8 +1401,12 @@ fn hosted_ingress_isolates_admin_with_shared_and_separate_hostnames() {
             "10.244.0.0/16".into()
         )));
         assert!(env.contains(&(
+            "APP_RATE_LIMIT__CLIENT_IP_SOURCE".into(),
+            "rightmost_x_forwarded_for".into()
+        )));
+        assert!(env.contains(&(
             "APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE".into(),
-            "100000000".into()
+            "1000".into()
         )));
         assert!(env.contains(&(
             "APP_SERVER__CERT__STORE__SIGNING_KEY_PATH".into(),
