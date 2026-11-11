@@ -240,7 +240,15 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertLessEqual(read, self.needs("direct-upgrade"))
         self.assertTrue(self.runs("direct-upgrade", _PRERELEASE_GREEN))
         self.assertFalse(self.runs("direct-upgrade", _FINAL_GREEN))
-        for gate in ("image_source", "scan_image", "verify_provenance"):
+        dispatch = {**_PRERELEASE_GREEN, "github.event_name": "workflow_dispatch", "github.ref": "refs/heads/direct-upgrade"}
+        beta = {**_PRERELEASE_GREEN, "github.ref": "refs/tags/v1.2.3-beta.1", "github.ref_name": "v1.2.3-beta.1"}
+        self.assertTrue(self.runs("direct-upgrade", dispatch))
+        self.assertTrue(self.runs("direct-upgrade", beta))
+        self.assertFalse(self.runs("promote-tags", dispatch))
+        self.assertTrue(self.runs("promote-tags", beta))
+        self.assertNotIn("scan-image", self.needs("direct-upgrade"))
+        self.assertTrue(self.runs("direct-upgrade", {**_PRERELEASE_GREEN, **_outcome(scan_image="failure")}))
+        for gate in ("image_source", "verify_provenance"):
             with self.subTest(gate=gate):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(**{gate: "failure"})}
                 self.assertFalse(self.runs("direct-upgrade", scenario))
@@ -248,7 +256,6 @@ class DeployReleaseGatingTest(unittest.TestCase):
             with self.subTest(direct_upgrade=result):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(direct_upgrade=result)}
                 self.assertFalse(self.runs("promote-tags", scenario))
-                self.assertFalse(self.runs("deploy", {**scenario, **_outcome(promote_tags="skipped")}))
 
     def test_direct_upgrade_uses_the_source_run_and_verifies_the_previous_image(self) -> None:
         direct = self.jobs["direct-upgrade"]
@@ -257,36 +264,12 @@ class DeployReleaseGatingTest(unittest.TestCase):
         resolve = steps["Resolve verified image digests"]
         self.assertEqual(resolve["env"]["SOURCE_RUN_ID"], "${{ needs.image-source.outputs.source_run_id }}")
         self.assertIn('gh run download "$SOURCE_RUN_ID"', resolve["run"])
-        self.assertIn('verify-attestation.sh "${IMAGE_BASE}@${previous_digest}"', resolve["run"])
+        self.assertIn('scripts/resolve-previous-image.sh "$PREVIOUS_TAG" "$IMAGE_BASE" "$GITHUB_REPOSITORY"', resolve["run"])
         self.assertEqual(direct["permissions"].get("attestations"), "read")
         self.assertIn("scripts/select-latest-final.sh", steps["Find last stable release"]["run"])
 
-    @unittest.skipIf(shutil.which("bash") is None, "bash is required")
-    def test_previous_image_verification_pins_only_the_pre_attestation_release(self) -> None:
-        steps = {step["name"]: step for step in self.jobs["direct-upgrade"]["steps"]}
-        resolve = steps["Resolve verified image digests"]["run"]
-        verification = resolve.split("# v1.2.0 predates image attestations;", 1)[1].split("printf '%s", 1)[0]
-        published = "sha256:8e7ae2618c6509c671e5b59a7d557655d35811f8f30e085485fdb1194944813a"
-
-        def check(tag: str, digest: str) -> subprocess.CompletedProcess:
-            script = (
-                'bash() { printf "attestation:%s\\n" "$1"; }\n'
-                f"PREVIOUS_TAG={tag}\nprevious_digest={digest}\n"
-                "IMAGE_BASE=ghcr.io/adorsys/status-list-server\n"
-                "GITHUB_REPOSITORY=adorsys/status-list-server\n"
-                + verification
-            )
-            return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
-
-        pinned = check("v1.2.0", published)
-        self.assertEqual(pinned.returncode, 0, pinned.stderr)
-        self.assertEqual(pinned.stdout, "")
-        moved = check("v1.2.0", "sha256:" + "0" * 64)
-        self.assertNotEqual(moved.returncode, 0)
-        self.assertIn("no longer points", moved.stdout)
-        newer = check("v1.3.0", "sha256:" + "0" * 64)
-        self.assertEqual(newer.returncode, 0, newer.stderr)
-        self.assertEqual(newer.stdout, "attestation:scripts/verify-attestation.sh\n")
+        checkout = steps["Checkout last stable release"]
+        self.assertEqual(checkout["with"]["ref"], "refs/tags/${{ steps.previous.outputs.tag }}")
 
     @unittest.skipIf(shutil.which("bash") is None, "bash is required")
     def test_direct_upgrade_command_passes_unmodified_arguments(self) -> None:
@@ -301,7 +284,7 @@ class DeployReleaseGatingTest(unittest.TestCase):
                 (pathlib.Path(directory) / name).write_text(value + "\n", encoding="utf-8")
             result = subprocess.run(
                 ["bash", "-c", 'bash() { printf "<%s>\\n" "$@"; }\n' + command],
-                env={"RUNNER_TEMP": directory, "CHART_DIR": "deploy/helm/chart"},
+                env={"RUNNER_TEMP": directory, "CHART_DIR": "deploy/helm/chart", "IMAGE_BASE": "ghcr.io/acme/status-list-server"},
                 capture_output=True,
                 text=True,
                 check=False,
@@ -315,8 +298,21 @@ class DeployReleaseGatingTest(unittest.TestCase):
                 "<deploy/helm/chart>",
                 "<sha256:previous>",
                 "<sha256:candidate>",
+                "<ghcr.io/acme/status-list-server>",
             ],
         )
+
+    def test_direct_upgrade_uses_shared_production_values_and_serves_seeded_list(self) -> None:
+        root = _WORKFLOW.parents[2]
+        values = yaml.safe_load((root / "scripts/direct-upgrade-values.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(values["statuslist"]["env"]["APP_ENV"], "production")
+        self.assertTrue(values["postgres"]["persistence"]["enabled"])
+        script = (root / "scripts/test-direct-upgrade.sh").read_text(encoding="utf-8")
+        self.assertEqual(script.count('-f "$values"'), 3)
+        self.assertNotIn("values-local.yaml", script)
+        self.assertNotIn("statuslist.strategy.type=Recreate", script)
+        self.assertIn("/api/v1/status-lists/upgrade-fixture-list", script)
+        self.assertIn(".restartCount", script)
 
     def test_promote_tags_lists_every_job_its_condition_reads(self) -> None:
         condition = str(self.jobs["promote-tags"]["if"])

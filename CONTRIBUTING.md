@@ -146,10 +146,12 @@ The normal promotion path is:
 4. Review and merge the release PR into `develop`.
 5. Merge `develop` into `stage`. The RC automation creates
    `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
-   The release workflow first installs the latest stable chart and `fscert` image
-   in a disposable kind cluster, seeds a PostgreSQL database, and upgrades that
-   installation to the candidate chart and image. Migration or readiness failure
-   blocks image tag promotion and the production deployment.
+   After the build and provenance checks, the release workflow installs the
+   latest stable chart and `fscert` image in a disposable kind cluster, seeds a
+   PostgreSQL database, and upgrades that installation to the candidate chart
+   and image. Migration or readiness failure blocks image tag promotion and
+   the production deployment. A manual dispatch on the candidate branch runs
+   this upgrade before cutting an RC without promoting or deploying the image.
    Release-plz ignores RC tags because its `git_only` final-tag match is
    `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
    than the latest final tag, the stage workflow fails before it creates an RC

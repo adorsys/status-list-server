@@ -1,0 +1,60 @@
+# Shared by the released and candidate charts to exercise operator-style upgrades.
+statuslist:
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+  fallbackSecret:
+    enabled: true
+    generatedCertificate:
+      enabled: true
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: local-signing-material
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cert
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+  issuerRegistry:
+    path: /etc/status-list-server/issuers.yaml
+    volume:
+      configMap:
+        name: direct-upgrade-issuers
+  env:
+    APP_ENV: production
+    APP_TELEMETRY__ENVIRONMENT: production
+    APP_SERVER__PUBLIC_BASE_URL: https://upgrade.example.invalid/api/v1
+    APP_MANAGEMENT_AUTH__AUDIENCES: https://upgrade.example.invalid/api/v1
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: connect_info
+
+postgres:
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: standard
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "16.3"
+
+externalSecret:
+  enabled: false
+
+secretStore:
+  enabled: false
+
+opentelemetry-collector:
+  enabled: false

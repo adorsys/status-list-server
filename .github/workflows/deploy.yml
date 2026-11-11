@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - v*.*.*
-  # Dispatch builds and scans but never releases: promote-tags and deploy need a push.
+  # Dispatch builds, scans and tests the direct upgrade without releasing.
   workflow_dispatch:
 
 # A job-level `permissions:` block replaces this default rather than merging with it.
@@ -596,8 +596,8 @@ jobs:
   direct-upgrade:
     name: Direct Upgrade from Last Release
     runs-on: ubuntu-latest
-    needs: [validate-tag, image-source, scan-image, verify-provenance]
-    if: ${{ !cancelled() && github.event_name == 'push' && contains(github.ref_name, '-rc.') && needs.validate-tag.outputs.is_final == 'false' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && needs.verify-provenance.result == 'success' }}
+    needs: [validate-tag, image-source, verify-provenance]
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && needs.validate-tag.outputs.is_final == 'false' && needs.image-source.result == 'success' && needs.verify-provenance.result == 'success' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -626,7 +626,7 @@ jobs:
       - name: Checkout last stable release
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.previous.outputs.tag }}
+          ref: refs/tags/${{ steps.previous.outputs.tag }}
           path: previous-release
           persist-credentials: false
 
@@ -665,20 +665,8 @@ jobs:
           gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
             --name image-digest-fscert --dir "$RUNNER_TEMP/candidate-digest"
           candidate_digest=$(cat "$RUNNER_TEMP/candidate-digest/image-digest-fscert.txt")
-          previous_ref="${IMAGE_BASE}:${PREVIOUS_TAG#v}-fscert"
-          previous_digest=$(docker buildx imagetools inspect "$previous_ref" --format '{{ .Manifest.Digest }}')
-          for digest in "$previous_digest" "$candidate_digest"; do
-            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Invalid image digest."; exit 1; }
-          done
-          # v1.2.0 predates image attestations; require its published fscert digest instead.
-          if [[ "$PREVIOUS_TAG" == v1.2.0 ]]; then
-            [[ "$previous_digest" == sha256:8e7ae2618c6509c671e5b59a7d557655d35811f8f30e085485fdb1194944813a ]] || {
-              echo "::error::The v1.2.0-fscert tag no longer points to its published digest."
-              exit 1
-            }
-          else
-            bash scripts/verify-attestation.sh "${IMAGE_BASE}@${previous_digest}" "$GITHUB_REPOSITORY"
-          fi
+          [[ "$candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Invalid candidate image digest."; exit 1; }
+          previous_digest=$(bash scripts/resolve-previous-image.sh "$PREVIOUS_TAG" "$IMAGE_BASE" "$GITHUB_REPOSITORY")
           printf '%s\n' "$previous_digest" > "$RUNNER_TEMP/previous-digest"
           printf '%s\n' "$candidate_digest" > "$RUNNER_TEMP/candidate-digest.txt"
 
@@ -686,7 +674,8 @@ jobs:
         run: |
           bash scripts/test-direct-upgrade.sh \
             "$(cat "$RUNNER_TEMP/previous-chart-path")" "$CHART_DIR" \
-            "$(cat "$RUNNER_TEMP/previous-digest")" "$(cat "$RUNNER_TEMP/candidate-digest.txt")"
+            "$(cat "$RUNNER_TEMP/previous-digest")" "$(cat "$RUNNER_TEMP/candidate-digest.txt")" \
+            "$IMAGE_BASE"
 
       - name: Collect cluster diagnostics on failure
         if: failure()
@@ -694,7 +683,12 @@ jobs:
           kubectl get pods -n direct-upgrade -o wide || true
           kubectl describe pods -n direct-upgrade || true
           kubectl logs -n direct-upgrade -l app.kubernetes.io/name=status-list-server --tail=150 || true
+          kubectl logs -n direct-upgrade -l app.kubernetes.io/name=status-list-server --previous --tail=150 || true
+          kubectl logs -n direct-upgrade -l app.kubernetes.io/name=status-list-server -c wait-for-db --tail=150 || true
+          kubectl logs -n direct-upgrade -l app.kubernetes.io/name=status-list-server -c wait-for-postgres --tail=150 || true
           kubectl logs -n direct-upgrade -l app.kubernetes.io/name=postgres --tail=150 || true
+          kubectl get events -n direct-upgrade --sort-by=.lastTimestamp || true
+          helm history statuslist -n direct-upgrade || true
 
   promote-tags:
     name: Promote Scanned Digest to Release Tags (${{ matrix.variant.suffix }})
@@ -710,7 +704,7 @@ jobs:
     # Check the event too: workflow_dispatch can run on tag refs.
     # !cancelled() drops the implicit all-needs-succeeded rule, so every gate is spelled out here.
     # ci and helm-checks are listed because image-source does not wait for them. A final tag skips
-    # verify-provenance; this job verifies the RC's digest against the RC's ref instead.
+    # verify-provenance and direct-upgrade; this job verifies the RC's digest against its ref instead.
     if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.ci.result == 'success' && needs.helm-checks.result == 'success' && needs.image-source.result == 'success' && needs.scan-image.result == 'success' && (needs.verify-provenance.result == 'success' || needs.validate-tag.outputs.is_final == 'true') && (needs.direct-upgrade.result == 'success' || needs.validate-tag.outputs.is_final == 'true') }}
     timeout-minutes: 15
     permissions:
