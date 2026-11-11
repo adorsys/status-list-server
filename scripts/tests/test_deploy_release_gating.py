@@ -190,6 +190,12 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertEqual(permissions["pull-requests"], "read")
         self.assertEqual(permissions["security-events"], "write")
 
+    def test_reusable_checks_have_distinct_concurrency_groups(self) -> None:
+        root = _WORKFLOW.parents[2]
+        ci = yaml.safe_load((root / ".github/workflows/CI.yml").read_text(encoding="utf-8"))
+        helm = yaml.safe_load((root / ".github/workflows/helm-checks.yml").read_text(encoding="utf-8"))
+        self.assertNotEqual(ci["concurrency"]["group"], helm["concurrency"]["group"])
+
     def test_final_tags_skip_the_build(self) -> None:
         self.assertFalse(self.runs("build-and-push", _FINAL_GREEN))
         self.assertTrue(self.runs("build-and-push", _PRERELEASE_GREEN))
