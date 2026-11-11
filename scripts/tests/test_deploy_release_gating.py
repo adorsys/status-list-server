@@ -184,6 +184,12 @@ class DeployReleaseGatingTest(unittest.TestCase):
     def test_validate_tag_classifies_final_releases(self) -> None:
         self.assertIn("is_final", self.jobs["validate-tag"].get("outputs", {}))
 
+    def test_reusable_helm_checks_get_the_permissions_they_request(self) -> None:
+        permissions = self.jobs["helm-checks"]["permissions"]
+        self.assertEqual(permissions["contents"], "read")
+        self.assertEqual(permissions["pull-requests"], "read")
+        self.assertEqual(permissions["security-events"], "write")
+
     def test_final_tags_skip_the_build(self) -> None:
         self.assertFalse(self.runs("build-and-push", _FINAL_GREEN))
         self.assertTrue(self.runs("build-and-push", _PRERELEASE_GREEN))

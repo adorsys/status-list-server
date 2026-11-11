@@ -69,9 +69,10 @@ jobs:
     name: Helm Checks
     needs: validate-tag
     uses: ./.github/workflows/helm-checks.yml
-    # helm-checks' kube-linter job needs security-events to upload SARIF.
+    # The changes job reads PR metadata; kube-linter uploads SARIF.
     permissions:
       contents: read
+      pull-requests: read
       security-events: write
 
   # Names the run whose image this run scans and promotes, and the ref that signed it.
