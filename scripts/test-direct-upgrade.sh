@@ -15,6 +15,10 @@ namespace=direct-upgrade
 release=statuslist
 image=$5
 values=scripts/direct-upgrade-values.yaml
+cert_args=(
+  --set-file 'statuslist.fallbackSecret.stringData.statuslist\.crt=test_data/certs/dev.crt'
+  --set-file 'statuslist.fallbackSecret.stringData.statuslist\.key=test_data/certs/dev.key'
+)
 
 for digest in "$previous_digest" "$candidate_digest"; do
   [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
@@ -49,6 +53,7 @@ kubectl create configmap direct-upgrade-issuers -n "$namespace" \
 
 helm install "$release" "$previous_chart" -n "$namespace" \
   -f "$values" \
+  "${cert_args[@]}" \
   --set-string "statuslist.image.repository=$image" \
   --set-string "statuslist.image.digest=$previous_digest" \
   --wait --timeout 5m
@@ -101,6 +106,7 @@ fi
 upgrade_started=$(date +%s)
 helm upgrade "$release" "$candidate_chart" -n "$namespace" \
   -f "$values" \
+  "${cert_args[@]}" \
   --set-string "statuslist.image.repository=$image" \
   --set-string "statuslist.image.digest=$candidate_digest" \
   "${upgrade_args[@]}" \
@@ -114,6 +120,7 @@ if [[ "$quota_present" == f ]]; then
   kubectl exec -n "$namespace" "deployment/$deployment" -- /app/status-list-server list-quota enable
   helm upgrade "$release" "$candidate_chart" -n "$namespace" \
     -f "$values" \
+    "${cert_args[@]}" \
     --set-string "statuslist.image.repository=$image" \
     --set-string "statuslist.image.digest=$candidate_digest" \
     --wait --timeout 5m

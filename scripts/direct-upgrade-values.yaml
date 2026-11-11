@@ -7,7 +7,7 @@ statuslist:
   fallbackSecret:
     enabled: true
     generatedCertificate:
-      enabled: true
+      enabled: false
   secretMounts:
     - name: database-credentials
       secretName: statuslist-secret
