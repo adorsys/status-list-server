@@ -258,7 +258,35 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertEqual(resolve["env"]["SOURCE_RUN_ID"], "${{ needs.image-source.outputs.source_run_id }}")
         self.assertIn('gh run download "$SOURCE_RUN_ID"', resolve["run"])
         self.assertIn('verify-attestation.sh "${IMAGE_BASE}@${previous_digest}"', resolve["run"])
+        self.assertEqual(direct["permissions"].get("attestations"), "read")
         self.assertIn("scripts/select-latest-final.sh", steps["Find last stable release"]["run"])
+
+    @unittest.skipIf(shutil.which("bash") is None, "bash is required")
+    def test_previous_image_verification_pins_only_the_pre_attestation_release(self) -> None:
+        steps = {step["name"]: step for step in self.jobs["direct-upgrade"]["steps"]}
+        resolve = steps["Resolve verified image digests"]["run"]
+        verification = resolve.split("# v1.2.0 predates image attestations;", 1)[1].split("printf '%s", 1)[0]
+        published = "sha256:8e7ae2618c6509c671e5b59a7d557655d35811f8f30e085485fdb1194944813a"
+
+        def check(tag: str, digest: str) -> subprocess.CompletedProcess:
+            script = (
+                'bash() { printf "attestation:%s\\n" "$1"; }\n'
+                f"PREVIOUS_TAG={tag}\nprevious_digest={digest}\n"
+                "IMAGE_BASE=ghcr.io/adorsys/status-list-server\n"
+                "GITHUB_REPOSITORY=adorsys/status-list-server\n"
+                + verification
+            )
+            return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+
+        pinned = check("v1.2.0", published)
+        self.assertEqual(pinned.returncode, 0, pinned.stderr)
+        self.assertEqual(pinned.stdout, "")
+        moved = check("v1.2.0", "sha256:" + "0" * 64)
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn("no longer points", moved.stdout)
+        newer = check("v1.3.0", "sha256:" + "0" * 64)
+        self.assertEqual(newer.returncode, 0, newer.stderr)
+        self.assertEqual(newer.stdout, "attestation:scripts/verify-attestation.sh\n")
 
     @unittest.skipIf(shutil.which("bash") is None, "bash is required")
     def test_direct_upgrade_command_passes_unmodified_arguments(self) -> None:

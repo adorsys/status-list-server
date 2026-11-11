@@ -602,6 +602,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      attestations: read
     steps:
       - name: Checkout release candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -669,7 +670,15 @@ jobs:
           for digest in "$previous_digest" "$candidate_digest"; do
             [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "::error::Invalid image digest."; exit 1; }
           done
-          bash scripts/verify-attestation.sh "${IMAGE_BASE}@${previous_digest}" "$GITHUB_REPOSITORY"
+          # v1.2.0 predates image attestations; require its published fscert digest instead.
+          if [[ "$PREVIOUS_TAG" == v1.2.0 ]]; then
+            [[ "$previous_digest" == sha256:8e7ae2618c6509c671e5b59a7d557655d35811f8f30e085485fdb1194944813a ]] || {
+              echo "::error::The v1.2.0-fscert tag no longer points to its published digest."
+              exit 1
+            }
+          else
+            bash scripts/verify-attestation.sh "${IMAGE_BASE}@${previous_digest}" "$GITHUB_REPOSITORY"
+          fi
           printf '%s\n' "$previous_digest" > "$RUNNER_TEMP/previous-digest"
           printf '%s\n' "$candidate_digest" > "$RUNNER_TEMP/candidate-digest.txt"
 
