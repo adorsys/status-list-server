@@ -213,20 +213,17 @@ impl ReadinessCheck for CertStoreCheck {
     }
 }
 
-/// Checks the files are readable; never parses the key.
+/// Checks the signer can still produce valid, non-expired signing material by delegating to the
+/// same provider the signer uses, so readiness reflects its actual view instead of re-parsing files.
 #[cfg(not(feature = "acme"))]
 pub struct FilesystemCertCheck {
-    cert_path: Option<String>,
-    key_path: Option<String>,
+    provider: Arc<dyn crate::domain::ports::CertificateProvider>,
 }
 
 #[cfg(not(feature = "acme"))]
 impl FilesystemCertCheck {
-    pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self {
-            cert_path: cert_path.filter(|p| !p.trim().is_empty()),
-            key_path: key_path.filter(|p| !p.trim().is_empty()),
-        }
+    pub fn new(provider: Arc<dyn crate::domain::ports::CertificateProvider>) -> Self {
+        Self { provider }
     }
 }
 
@@ -238,29 +235,11 @@ impl ReadinessCheck for FilesystemCertCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        for path in self.cert_path.iter().chain(self.key_path.iter()) {
-            tokio::fs::metadata(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' unavailable: {e}"))?;
-            tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' not readable: {e}"))?;
-        }
-        if let Some(path) = &self.cert_path {
-            let pem = tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| format!("certificate file '{path}' not readable: {e}"))?;
-            let expires_at = crate::outbound::cert::certificate_expiry(&pem)
-                .map_err(|e| format!("certificate file '{path}' invalid: {e}"))?;
-            if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
-                let date = time::OffsetDateTime::from_unix_timestamp(expires_at)
-                    .map_err(|e| format!("certificate file '{path}' has invalid expiry: {e}"))?;
-                return Err(format!("certificate file '{path}' expired at {date}"));
-            }
-        }
-        Ok(())
+        self.provider
+            .signing_material()
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("signing material unavailable: {e}"))
     }
 }
 
@@ -275,8 +254,6 @@ mod tests {
     #[cfg(feature = "acme")]
     use async_trait::async_trait;
     use axum::body::to_bytes;
-    #[cfg(not(feature = "acme"))]
-    use rcgen::{CertificateParams, KeyPair};
     #[cfg(feature = "acme")]
     use std::sync::Once;
     use tower::ServiceExt;
@@ -454,28 +431,31 @@ mod tests {
     }
 
     #[cfg(not(feature = "acme"))]
+    struct ExpiredSigningProvider;
+
+    #[cfg(not(feature = "acme"))]
+    #[async_trait::async_trait]
+    impl crate::domain::ports::CertificateProvider for ExpiredSigningProvider {
+        async fn signing_material(
+            &self,
+        ) -> Result<
+            Arc<crate::domain::ports::SigningMaterial>,
+            crate::domain::models::status_list::StatusListError,
+        > {
+            Err(
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Other, "signing certificate expired"),
+                )),
+            )
+        }
+    }
+
+    #[cfg(not(feature = "acme"))]
     #[tokio::test]
-    async fn file_certificate_readiness_fails_after_expiry() {
-        let path = std::env::temp_dir().join(format!(
-            "statuslist-expired-ready-{}-{}.crt",
-            std::process::id(),
-            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-        ));
-        let key = KeyPair::generate().expect("key");
-        let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
-        params.not_before = time::OffsetDateTime::UNIX_EPOCH;
-        params.not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(1);
-        tokio::fs::write(&path, params.self_signed(&key).expect("cert").pem())
-            .await
-            .expect("write cert");
-        let check = FilesystemCertCheck::new(Some(path.to_string_lossy().into_owned()), None);
+    async fn certificate_readiness_fails_when_signing_material_is_unavailable() {
+        let check = FilesystemCertCheck::new(Arc::new(ExpiredSigningProvider));
         let result = check.check().await;
-        tokio::fs::remove_file(&path).await.expect("remove cert");
-        assert!(
-            result
-                .expect_err("expired cert should fail")
-                .contains("expired at")
-        );
+        assert!(result.is_err());
     }
 
     #[cfg(feature = "acme")]

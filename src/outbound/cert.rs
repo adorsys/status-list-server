@@ -92,13 +92,7 @@ impl ReloadingCertificateProvider {
 #[async_trait]
 impl CertificateProvider for ReloadingCertificateProvider {
     async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError> {
-        let expires_at = self.expires_at.load(Ordering::Relaxed);
-        if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
-            return Err(invalid_data(format!(
-                "signing certificate expired at {}",
-                time::OffsetDateTime::from_unix_timestamp(expires_at).map_err(invalid_data)?
-            )));
-        }
+        ensure_not_expired(self.expires_at.load(Ordering::Relaxed))?;
         Ok(self.active.load_full())
     }
 }
@@ -144,12 +138,7 @@ async fn load_and_validate_signing_material(
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let (signing_key, expires_at) =
         validate_signing_material_with_expiry(&cert_pem, &signing_key_pem)?;
-    if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
-        return Err(invalid_data(format!(
-            "signing certificate expired at {}",
-            time::OffsetDateTime::from_unix_timestamp(expires_at).map_err(invalid_data)?
-        )));
-    }
+    ensure_not_expired(expires_at)?;
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
     Ok((
         SigningMaterial::new(Some(certificate_chain), Arc::new(signing_key))?,
@@ -165,11 +154,14 @@ fn invalid_data(err: impl std::fmt::Display) -> StatusListError {
 }
 
 #[cfg(not(feature = "acme"))]
-pub(crate) fn certificate_expiry(cert_pem: &str) -> Result<i64, StatusListError> {
-    let (_, block) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(invalid_data)?;
-    let (_, certificate) =
-        x509_parser::parse_x509_certificate(&block.contents).map_err(invalid_data)?;
-    Ok(certificate.validity().not_after.timestamp())
+pub(crate) fn ensure_not_expired(expires_at: i64) -> Result<(), StatusListError> {
+    if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
+        let when = time::OffsetDateTime::from_unix_timestamp(expires_at).map_err(invalid_data)?;
+        return Err(invalid_data(format!(
+            "signing certificate expired at {when}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "acme"))]
@@ -325,6 +317,14 @@ mod tests {
         )
         .expect_err("mismatched cert/key should fail");
         assert!(!err.to_string().contains("PRIVATE KEY"));
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[test]
+    fn ensure_not_expired_rejects_past_and_accepts_future() {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        ensure_not_expired(now - 1).expect_err("a past expiry must be rejected");
+        ensure_not_expired(now + 3600).expect("a future expiry must be accepted");
     }
 
     #[cfg(not(feature = "acme"))]
