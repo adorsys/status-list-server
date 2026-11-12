@@ -79,7 +79,7 @@ INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) VALUES 
 );
 INSERT INTO credentials (issuer, public_key)
 SELECT 'upgrade-load-' || n,
-  '{"kty":"EC","crv":"P-256","alg":"ES256","kid":"upgrade-fixture-key","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}'
+  format('{"kty":"EC","crv":"P-256","alg":"ES256","kid":"upgrade-load-key-%s","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}', n)::json
 FROM generate_series(1, 3) AS n;
 INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at)
 SELECT 'upgrade-load-' || issuer_n || '-' || list_n,
@@ -91,6 +91,10 @@ FROM generate_series(1, 3) AS issuer_n
 CROSS JOIN generate_series(1, 1000) AS list_n;
 SQL
 )"
+[[ $(psql_in_cluster "SELECT COUNT(*) = 4 AND COUNT(DISTINCT public_key->>'kid') = 4 FROM credentials WHERE issuer LIKE 'upgrade-%'") == t ]] || {
+  echo "::error::Pre-upgrade credential key IDs are not distinct."
+  exit 1
+}
 if [[ "$quota_present" == t ]]; then
   psql_in_cluster "UPDATE issuers SET list_count = 1 WHERE issuer = 'upgrade-fixture'"
   psql_in_cluster "UPDATE issuers SET list_count = 1000 WHERE issuer LIKE 'upgrade-load-%'"
