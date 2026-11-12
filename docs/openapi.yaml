@@ -140,7 +140,7 @@ info:
       a stale value returns `412 precondition_failed`, and a missing one
       returns `428 precondition_required`. Live usage counts and derived
       expiry state do not invalidate hosted issuer validators. `createIssuer`
-      is exempt because a new issuer has no version yet.
+      is exempt because a new issuer has no version.
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
