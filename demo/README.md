@@ -9,7 +9,8 @@ and a live server. The setup works on macOS, Linux, and Windows.
 Set `MANAGEMENT_AUDIENCE` to an audience accepted by the target server; the
 local default is `status-list-server-management`. Tokens use the required
 management type, registered key ID, and a five-minute lifetime. The RSA example
-uses PS256.
+uses PS256. Management writes require exactly one Authorization header;
+duplicate headers return `401 invalid_token`.
 
 You'll find the following scenarios in the `./workflows` directory:
 
@@ -195,8 +196,9 @@ must never be used outside local development.
 ## Admin issuer reads
 
 Configure an admin principal, `issuers:read`, and a distinct admin audience as
-explained in the [operator guide](../docs/admin-api.md). Obtain a signed admin
-token from your operator tooling. From the `demo` directory, run:
+explained in the [operator guide](../docs/admin-api.md). For a local trial,
+follow its key and token example; other deployments use operator tooling.
+From the `demo` directory, run:
 
 ```bash
 uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002

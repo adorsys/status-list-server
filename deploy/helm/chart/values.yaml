@@ -134,22 +134,19 @@ statuslist:
     # Token lifetimes in seconds; TTL must stay below EXP.
     APP_STATUS_LIST__TOKEN_EXP_SECS: "900"
     APP_STATUS_LIST__TOKEN_TTL_SECS: "300"
-    # Per client IP. STRICT counts rejected management authentications only and
-    # never refuses a request that authenticates; verified issuers are limited by
-    # their tier (APP_TIERS__*). STRICT keys on the peer address; set
-    # TRUSTED_PROXIES to the ingress controller's addresses (CIDRs) so it keys on
-    # the client from X-Forwarded-For instead. Without it every client behind the
-    # ingress shares one budget of rejected authentications.
-    # ADMISSION bounds every management request per client before its token is
-    # checked; the burst must be at least APP_TIERS__STANDARD__WRITE_BURST_SIZE.
+    # Per client address: a burst, then one request per period.
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
+    # Production renders fail until this lists the ingress controller's CIDRs.
     # APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.0.0/8"
     APP_RATE_LIMIT__STRICT_BURST_SIZE: "10"
     APP_RATE_LIMIT__STRICT_PERIOD_SECS: "60"
+    # Must be at least APP_TIERS__STANDARD__WRITE_BURST_SIZE.
     APP_RATE_LIMIT__ADMISSION_BURST_SIZE: "1000"
     APP_RATE_LIMIT__ADMISSION_PER_SECOND: "100"
-    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100"
-    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "60"
-    # Admin issuer API, per peer IP: burst 100, one request replenished each second.
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"
+    # May be a fraction of a second.
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "0.005"
+    # Admin issuer API, per client address: burst 100, one request replenished each second.
     APP_RATE_LIMIT__ADMIN_BURST_SIZE: "100"
     APP_RATE_LIMIT__ADMIN_PERIOD_SECS: "1"
     APP_LIMITS__MAX_BODY_SIZE_BYTES: "2097152"

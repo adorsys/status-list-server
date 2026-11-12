@@ -183,14 +183,15 @@ operator-configurable through environment variables prefixed with `APP_`.
 ### Rate-limiting tiers (`APP_RATE_LIMIT__*`)
 
 Token buckets (`governor`) are applied per route group, with each tier keyed
-and tuned independently:
+and tuned independently. Each bucket allows a burst, then one request per
+period, and every tier is keyed on the client address:
 
-| Tier           | Routes                                                          | Key                                                         | Tunables (defaults)                                           |
-| -------------- | --------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| **writes**     | every authenticated management route: `PUT`/`PATCH`             | peer IP, or behind `trusted_proxies` the rightmost          | `strict_burst_size` (10), `strict_period_secs` (60s)          |
-|                | `.../statuses`, `POST .../allocations`, `GET /api/v1/credentials` | untrusted `X-Forwarded-For` entry                         |                                                               |
-| **permissive** | `GET /api/v1/aggregation/{aggregation_id}`,                     | peer IP (`PeerIpKeyExtractor`)                              | `permissive_burst_size` (100), `permissive_period_secs` (60s) |
-|                | `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}` |                                                             |                                                               |
+| Tier           | Routes                                                                                                              | Defaults                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **writes**     | every authenticated management route: `PUT`/`PATCH .../statuses`, `POST .../allocations`, `GET /api/v1/credentials` | `strict_burst_size` 10, then one every `strict_period_secs` (60 s)             |
+| **admission**  | the same routes, before `auth`                                                                                      | `admission_burst_size` 1000, then `admission_per_second` 100 (one every 10 ms) |
+| **permissive** | `GET /api/v1/aggregation/{aggregation_id}`, `GET /api/v1/aggregation`, `GET /api/v1/status-lists/{list_id}`         | `permissive_burst_size` 1000, then one every `permissive_period_secs` (5 ms)   |
+| **admin**      | authenticated `/admin/v1` routes on the admin listener                                                              | `admin_burst_size` 100, then one every `admin_period_secs` (1 s)               |
 
 The writes tier is a gate around the `auth` middleware that counts
 **rejected authentications** only. Each request `auth` answers with `401`
@@ -211,20 +212,32 @@ startup fails unless `admission_burst_size` is at least
 `tiers.standard.write_burst_size`, so it never refuses a single standard
 issuer before that issuer's own budget does.
 
-The writes gate keys on the TCP peer address. Only when the peer is listed
-in `rate_limit.trusted_proxies` (`APP_RATE_LIMIT__TRUSTED_PROXIES`, a
-comma-separated list of addresses or CIDR networks, empty by default) does it
-read `X-Forwarded-For`, from the right: it skips entries that are themselves
-trusted proxies and keys on the first one that is not. That entry was
-appended by a trusted proxy, so a client cannot choose it; anything a client
-puts further left is ignored, as are `X-Real-Ip` and `Forwarded`. An
-unparsable entry ends the walk at the nearest trusted address.
+The client address comes from `rate_limit.client_ip_source`
+(`APP_RATE_LIMIT__CLIENT_IP_SOURCE`), which production must set.
+`connect_info` keys on the TCP peer. `rightmost_x_forwarded_for` reads
+`X-Forwarded-For` only when the peer is listed in `rate_limit.trusted_proxies`
+(`APP_RATE_LIMIT__TRUSTED_PROXIES`, a comma-separated list of addresses or CIDR
+networks), from the right: it skips entries that are themselves trusted
+proxies and keys on the first one that is not. That entry was appended by a
+trusted proxy, so a client cannot choose it; anything a client puts further
+left is ignored, as are `X-Real-Ip` and `Forwarded`. Every `X-Forwarded-For`
+header line counts, in order, and an unparsable entry, including one that
+carries a port, ends the walk at the nearest trusted address. IPv6 addresses are
+keyed by their /64, since one subscriber usually holds a whole /64.
 
-Behind an ingress or load balancer, list its addresses (for example the pod
-CIDR of the ingress controller). Otherwise every client shares the ingress
-address, and so one budget of rejected authentications. The first
+Production refuses to start without a source, or with
+`rightmost_x_forwarded_for` and no trusted proxies. Every environment refuses
+`connect_info` with trusted proxies listed. Outside production an unset source
+is `rightmost_x_forwarded_for` when `trusted_proxies` lists proxies and
+`connect_info` otherwise.
+
+Behind an ingress or load balancer, use `rightmost_x_forwarded_for` and list
+its addresses (for example the pod CIDR of the ingress controller). Otherwise
+every client shares the ingress address, and so every budget. The first
 `X-Forwarded-For` received from an untrusted peer is logged as a warning.
-Clients behind one NAT address still share the gate.
+Clients behind one NAT address still share their buckets. Idle buckets are
+dropped every 60 seconds, and the `rate_limiter_keys` gauge reports how many
+each limiter still holds, labelled by `limiter`.
 
 The order on management routes is: writes gate (admission, then `auth`,
 then failure accounting), issuer limit, handler. When any bucket is

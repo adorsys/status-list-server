@@ -34,11 +34,9 @@ statuslist:
     APP_MANAGEMENT_AUTH__AUDIENCES: ""
     # Set a site-specific value distinct from the management audience.
     APP_ADMIN_AUTH__AUDIENCES: ""
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
     # Set the dedicated controller pods' addresses or CIDR in the site overlay.
     APP_RATE_LIMIT__TRUSTED_PROXIES: ""
-    # Public reads share one bucket per controller pod, so raise it for the edge limit.
-    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "100000000"
-    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "1"
   issuerRegistry:
     volume:
       configMap:

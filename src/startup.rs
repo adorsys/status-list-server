@@ -21,7 +21,6 @@ use tokio::sync::watch;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
-    key_extractor::PeerIpKeyExtractor,
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -37,7 +36,8 @@ use crate::server::handlers::{
     get_status_list, publish_status_route, update_status_route,
 };
 use crate::server::rate_limit::{
-    AuthFailureGate, auth_failure_gate, governor_error_response, issuer_rate_limit,
+    AuthFailureGate, ClientAddress, ClientKeyExtractor, auth_failure_gate, governor_error_response,
+    issuer_rate_limit, spawn_governor_pruner,
 };
 use crate::server::{
     AppState,
@@ -71,29 +71,14 @@ impl HttpServer {
         let (auth_gate, permissive_governor, admin_governor) =
             build_governor_configs(&config.rate_limit)?;
         AuthFailureGate::spawn_pruner(&auth_gate);
+        spawn_governor_pruner(permissive_governor.limiter(), "public");
+        spawn_governor_pruner(admin_governor.limiter(), "admin");
 
-        let public_router = with_listener_name(
-            with_common_layers(
-                public_routes(permissive_governor)
-                    // Public only: admin and management have no browser clients,
-                    // and no web page should be able to read /metrics on a dev machine.
-                    .layer(
-                        CorsLayer::new()
-                            .allow_methods([Method::GET, Method::OPTIONS])
-                            .allow_origin(Any)
-                            .allow_headers(Any),
-                    ),
-                config,
-            ),
-            "public",
-        )
-        .with_state(state.clone());
+        let public_router = build_public_router(config, public_routes(permissive_governor))
+            .with_state(state.clone());
 
-        let management_router = with_listener_name(
-            with_common_layers(management_routes(state.clone(), auth_gate), config),
-            "management",
-        )
-        .with_state(state.clone());
+        let management_router =
+            build_management_router(config, state.clone(), auth_gate).with_state(state.clone());
 
         let admin_router = with_listener_name(
             with_common_layers(
@@ -242,6 +227,35 @@ fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppSt
         .layer(DefaultBodyLimit::disable())
 }
 
+fn build_management_router(
+    config: &Config,
+    state: AppState,
+    auth_gate: Arc<AuthFailureGate>,
+) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(management_routes(state, auth_gate), config),
+        "management",
+    )
+}
+
+fn build_public_router(config: &Config, router: Router<AppState>) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(
+            router
+                // Public only: admin and management have no browser clients,
+                // and no web page should be able to read /metrics on a dev machine.
+                .layer(
+                    CorsLayer::new()
+                        .allow_methods([Method::GET, Method::OPTIONS])
+                        .allow_origin(Any)
+                        .allow_headers(Any),
+                ),
+            config,
+        ),
+        "public",
+    )
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -266,11 +280,9 @@ async fn shutdown_signal() {
     }
 }
 
-type GovernorPolicies = (
-    Arc<AuthFailureGate>,
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-);
+type ClientGovernor = Arc<GovernorConfig<ClientKeyExtractor, NoOpMiddleware>>;
+
+type GovernorPolicies = (Arc<AuthFailureGate>, ClientGovernor, ClientGovernor);
 
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
@@ -285,15 +297,16 @@ fn build_governor_configs(
         .ok_or_else(|| {
             eyre!("management authentication gate requires non-zero burst_size and period")
         })?;
-    let auth_gate = Arc::new(AuthFailureGate::new(
-        admission,
-        failures,
+    let client = Arc::new(ClientAddress::new(
+        config.resolved_client_ip_source(),
         config.trusted_proxy_networks()?,
     ));
+    let auth_gate = Arc::new(AuthFailureGate::new(admission, failures, client.clone()));
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
-            .period(Duration::from_secs(config.permissive_period_secs))
+            .period(config.permissive_period)
+            .key_extractor(ClientKeyExtractor(client.clone()))
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
@@ -301,7 +314,7 @@ fn build_governor_configs(
         GovernorConfigBuilder::default()
             .burst_size(config.admin_burst_size)
             .period(Duration::from_secs(config.admin_period_secs))
-            .key_extractor(PeerIpKeyExtractor)
+            .key_extractor(ClientKeyExtractor(client))
             .finish()
             .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
     );
@@ -309,9 +322,7 @@ fn build_governor_configs(
 }
 
 /// Internet-facing: never register management or admin routes here.
-fn public_routes(
-    permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+fn public_routes(permissive_governor: ClientGovernor) -> Router<AppState> {
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
@@ -359,7 +370,7 @@ fn admin_routes(
     state: AppState,
     config: &Config,
     registry: Registry,
-    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    admin_governor: ClientGovernor,
 ) -> Router<AppState> {
     let admin_api = Router::new()
         .route(
@@ -385,10 +396,7 @@ fn admin_routes(
 /// issuer and revoke one of its keys, as `PATCH` operations on the admin
 /// issuer API. Mounted only when the hosted profile provides the lifecycle
 /// service, so the routes are structurally absent in the private profile.
-fn hosted_admin_routes(
-    state: AppState,
-    admin_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+fn hosted_admin_routes(state: AppState, admin_governor: ClientGovernor) -> Router<AppState> {
     if state.hosted_lifecycle_service.is_none() {
         return Router::new();
     }
@@ -405,8 +413,8 @@ fn hosted_admin_routes(
             "/admin/v1/issuers/{issuer_id}/keys/{kid}",
             patch(crate::server::handlers::hosted_lifecycle::revoke_issuer_key),
         )
-        .route_layer(from_fn_with_state(state, admin_auth))
         .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response))
+        .route_layer(from_fn_with_state(state, admin_auth))
 }
 
 /// Must stay outside CatchPanicLayer so panics still count as 5xx.
@@ -990,6 +998,16 @@ mod tests {
         burst: u32,
         issuer_b_tier: &str,
     ) -> Router {
+        two_issuer_routers_tiered(overrides, burst, issuer_b_tier)
+            .await
+            .0
+    }
+
+    async fn two_issuer_routers_tiered(
+        overrides: &[(&str, &str)],
+        burst: u32,
+        issuer_b_tier: &str,
+    ) -> (Router, Router) {
         use crate::server::auth::tests::{rotation_public_jwk, test_public_jwk};
 
         let config = Config::load_from_overrides(overrides).unwrap();
@@ -1013,7 +1031,10 @@ mod tests {
         state.set_issuer_registry(Arc::new(
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
         ));
-        management_with_budgets(&config, state, burst)
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let public =
+            build_public_router(&config, public_routes(permissive)).with_state(state.clone());
+        (management_with_budgets(&config, state, burst), public)
     }
 
     /// Management routes over `state` with the standard write burst set to
@@ -1030,7 +1051,7 @@ mod tests {
         state.issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(
             &state.tiers,
         ));
-        management_routes(state.clone(), auth_gate).with_state(state)
+        build_management_router(config, state.clone(), auth_gate).with_state(state)
     }
 
     /// One client IP for every request, as behind a shared NAT or proxy.
@@ -1086,6 +1107,465 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"], "too_many_requests");
+    }
+
+    mod security {
+        use super::*;
+
+        struct SecurityTokens {
+            issuer_a: String,
+            issuer_b: String,
+            forged: String,
+            unknown: String,
+            admin_type: String,
+            expired: String,
+            hmac: String,
+            none: String,
+        }
+
+        fn security_tokens() -> SecurityTokens {
+            use crate::server::auth::tests::{
+                rotation_private_pem, test_ec_private_pem, test_public_jwk,
+            };
+            use base64::Engine;
+
+            let private_pem = test_ec_private_pem();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+            let signed = |typ: &str, exp: u64| {
+                let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+                header.typ = Some(typ.into());
+                header.kid = Some("test-key".into());
+                format!("Bearer {}", jsonwebtoken::encode(
+                &header,
+                &serde_json::json!({"iss":"issuer-a","iat":if exp <= now { exp - 120 } else { now },"exp":exp}),
+                &key,
+            ).unwrap())
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+            header.typ = Some("statuslist-management+jwt".into());
+            header.kid = Some("test-key".into());
+            let public: serde_json::Value =
+                serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+            let hmac = format!(
+                "Bearer {}",
+                jsonwebtoken::encode(
+                    &header,
+                    &serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300}),
+                    &jsonwebtoken::EncodingKey::from_secret(&serde_json::to_vec(&public).unwrap()),
+                )
+                .unwrap()
+            );
+            let encode = |value: serde_json::Value| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&value).unwrap())
+            };
+            let none = format!(
+                "Bearer {}.{}.",
+                encode(
+                    serde_json::json!({"alg":"none","typ":"statuslist-management+jwt","kid":"test-key"})
+                ),
+                encode(serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300})),
+            );
+            SecurityTokens {
+                issuer_a: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-a", "test-key", &private_pem)
+                ),
+                issuer_b: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "rotation-key", &rotation_private_pem())
+                ),
+                forged: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "test-key", &private_pem)
+                ),
+                unknown: format!(
+                    "Bearer {}",
+                    issuer_token(
+                        "unknown-issuer",
+                        "unknown-key",
+                        include_str!("../test_data/ec-private.pem")
+                    )
+                ),
+                admin_type: signed("statuslist-admin+jwt", now + 300),
+                expired: signed("statuslist-management+jwt", now - 120),
+                hmac,
+                none,
+            }
+        }
+
+        struct SecurityCase {
+            name: &'static str,
+            headers: Vec<axum::http::HeaderValue>,
+            error: &'static str,
+        }
+
+        fn security_cases(tokens: &SecurityTokens) -> Vec<SecurityCase> {
+            use axum::http::HeaderValue;
+            let one = |name, value: &str, error| SecurityCase {
+                name,
+                headers: vec![HeaderValue::from_str(value).unwrap()],
+                error,
+            };
+            vec![
+                one("Basic", "Basic credential", "missing_token"),
+                one("malformed", "Bearer invalid.jwt.token", "invalid_token"),
+                one("forged issuer", &tokens.forged, "invalid_token"),
+                one("unknown key", &tokens.unknown, "invalid_token"),
+                one("admin type", &tokens.admin_type, "invalid_token"),
+                one("expired", &tokens.expired, "invalid_token"),
+                one("public-key HMAC", &tokens.hmac, "invalid_token"),
+                one("alg none", &tokens.none, "invalid_token"),
+                one("empty Bearer", "Bearer ", "invalid_token"),
+                SecurityCase {
+                    name: "duplicate headers",
+                    headers: vec![
+                        HeaderValue::from_static("Bearer invalid.jwt.token"),
+                        HeaderValue::from_str(&tokens.issuer_a).unwrap(),
+                    ],
+                    error: "invalid_token",
+                },
+                SecurityCase {
+                    name: "non-UTF8 header",
+                    headers: vec![
+                        HeaderValue::from_bytes(b"Bearer sensitive-fragment\xff").unwrap(),
+                    ],
+                    error: "missing_token",
+                },
+            ]
+        }
+
+        async fn security_write(
+            router: &Router,
+            method: Method,
+            list_id: &str,
+            headers: &[axum::http::HeaderValue],
+            body: &'static str,
+            client: u8,
+        ) -> axum::response::Response {
+            use axum::http::header;
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, client)),
+                    12345,
+                )));
+            for value in headers {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            router
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn security_read(router: &Router, list_id: &str) -> axum::response::Response {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}"))
+                        .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            12345,
+                        )))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        async fn response_json(response: axum::response::Response) -> serde_json::Value {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        fn authorization(value: &str) -> Vec<axum::http::HeaderValue> {
+            vec![axum::http::HeaderValue::from_str(value).unwrap()]
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_reject_invalid_credentials() {
+            use axum::http::header;
+            let router = two_issuer_management_with(&[], 100).await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            for method in [Method::PUT, Method::PATCH] {
+                let missing = security_write(
+                    &router,
+                    method.clone(),
+                    &list_id,
+                    &[],
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(
+                    missing.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} missing"
+                );
+                assert_eq!(missing.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                assert_eq!(response_json(missing).await["error"], "missing_token");
+                for (index, case) in security_cases(&tokens).iter().enumerate() {
+                    let rejected = security_write(
+                        &router,
+                        method.clone(),
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(
+                        rejected.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {}",
+                        case.name
+                    );
+                    let challenge = if case.error == "missing_token" {
+                        "Bearer"
+                    } else {
+                        "Bearer error=\"invalid_token\""
+                    };
+                    assert_eq!(
+                        rejected.headers()[header::WWW_AUTHENTICATE],
+                        challenge,
+                        "{method} {}",
+                        case.name
+                    );
+                    let body = axum::body::to_bytes(rejected.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(error["error"], case.error, "{method} {}", case.name);
+                    let body = String::from_utf8_lossy(&body);
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !body.contains(marker),
+                                    "{method} {} exposed a credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_preserve_issuer_ownership() {
+            use axum::http::header;
+            let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            let published = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                1,
+            )
+            .await;
+            assert_eq!(published.status(), StatusCode::CREATED);
+            let location = published.headers()[header::LOCATION].clone();
+            let initial = security_read(&public, &list_id).await;
+            assert_eq!(initial.status(), StatusCode::OK);
+            let etag = initial.headers()[header::ETAG].clone();
+            let body = axum::body::to_bytes(initial.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let owner_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                2,
+            )
+            .await;
+            assert_eq!(owner_republish.status(), StatusCode::CONFLICT);
+            assert_eq!(owner_republish.headers()[header::LOCATION], location);
+            assert_eq!(
+                response_json(owner_republish).await["error"],
+                "status_list_already_exists"
+            );
+            let other_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                r#"{"statuses":[]}"#,
+                3,
+            )
+            .await;
+            assert_eq!(other_republish.status(), StatusCode::CONFLICT);
+            assert!(other_republish.headers().get(header::LOCATION).is_none());
+            assert_eq!(
+                response_json(other_republish).await["error"],
+                "status_list_already_exists"
+            );
+
+            let change = r#"{"statuses":[{"index":0,"status":1}]}"#;
+            let other_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                change,
+                4,
+            )
+            .await;
+            assert_eq!(other_update.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response_json(other_update).await["error"],
+                "issuer_mismatch"
+            );
+            let after_other = security_read(&public, &list_id).await;
+            assert_eq!(after_other.status(), StatusCode::OK);
+            assert_eq!(after_other.headers()[header::ETAG], etag);
+            assert_eq!(
+                axum::body::to_bytes(after_other.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+
+            let owner_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                change,
+                5,
+            )
+            .await;
+            assert_eq!(owner_update.status(), StatusCode::OK);
+            let after_owner = security_read(&public, &list_id).await;
+            assert_eq!(after_owner.status(), StatusCode::OK);
+            assert_ne!(after_owner.headers()[header::ETAG], etag);
+            assert_ne!(
+                axum::body::to_bytes(after_owner.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+        }
+
+        #[tokio::test]
+        async fn management_and_public_routes_do_not_log_credentials_or_signing_key() {
+            use std::io::Write;
+            use tracing::instrument::WithSubscriber;
+            struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+            impl Write for LogWriter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || LogWriter(sink.clone()))
+                .finish();
+            async {
+                tracing::trace!("security log capture ready");
+                let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+                let tokens = security_tokens();
+                let cases = security_cases(&tokens);
+                let list_id = uuid::Uuid::new_v4().to_string();
+                let published = security_write(
+                    &management,
+                    Method::PUT,
+                    &list_id,
+                    &authorization(&tokens.issuer_a),
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(published.status(), StatusCode::CREATED);
+                for (index, case) in cases.iter().enumerate() {
+                    let response = security_write(
+                        &management,
+                        Method::PATCH,
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{}", case.name);
+                }
+                let public_response = security_read(&public, &list_id).await;
+                assert_eq!(public_response.status(), StatusCode::OK);
+                let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+                assert!(logs.contains("security log capture ready"));
+                assert!(logs.contains("Management JWT rejected"));
+                for sensitive in [
+                    &tokens.issuer_a,
+                    &tokens.forged,
+                    &tokens.unknown,
+                    &tokens.admin_type,
+                    &tokens.expired,
+                    &tokens.hmac,
+                    &tokens.none,
+                ] {
+                    let token = sensitive.strip_prefix("Bearer ").unwrap_or(sensitive);
+                    assert!(!logs.contains(token), "logs exposed credential material");
+                }
+                for case in &cases {
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !logs.contains(marker),
+                                    "logs exposed {} credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(!logs.contains("sensitive-fragment"));
+                for line in include_str!("../test_data/ec-private.pem").lines() {
+                    if line.len() > 40 {
+                        assert!(!logs.contains(line), "logs exposed signing key");
+                    }
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -1534,48 +2014,213 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    fn one_request_budget(overrides: &[(&str, &str)]) -> Config {
+        let mut overrides = overrides.to_vec();
+        overrides.extend([
+            ("rate_limit.permissive_burst_size", "1"),
+            ("rate_limit.permissive_period_secs", "600"),
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ]);
+        Config::load_from_overrides(&overrides).unwrap()
+    }
+
+    async fn public_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        let config = one_request_budget(overrides);
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        public_routes(permissive).with_state(state)
+    }
+
+    async fn admin_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        let config = one_request_budget(overrides);
+        let (_, _, admin_governor) = build_governor_configs(&config.rate_limit).unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = admin_registry(&["issuers:read"]);
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+        admin_routes(
+            state.clone(),
+            &config,
+            prometheus::Registry::new(),
+            admin_governor,
+        )
+        .with_state(state)
+    }
+
+    fn admin_registry(
+        scopes: &[&str],
+    ) -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
+        let jwk: serde_json::Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let yaml = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{
+                "id": "admin-1",
+                "scopes": scopes,
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": jwk}],
+            }],
+        }))
+        .unwrap();
+        Arc::new(crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap())
+    }
+
+    fn admin_token() -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("statuslist-admin+jwt".into());
+        header.kid = Some("test-key".into());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+            crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+        )
+        .unwrap();
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "iss": "admin-1",
+                "iat": now,
+                "exp": now + 300,
+                "aud": ["status-list-server-admin"],
+            }),
+            &secret,
+        )
+        .unwrap()
+    }
+
+    async fn get_via(
+        router: &Router,
+        uri: &str,
+        bearer: Option<&str>,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(SocketAddr::new(peer, 12345)));
+        if let Some(token) = bearer {
+            request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn public_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let uri = format!("{API_V1_PREFIX}/aggregation");
+        get_via(router, &uri, None, peer, forwarded_for).await
+    }
+
+    async fn admin_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let token = admin_token();
+        get_via(
+            router,
+            "/admin/v1/issuers",
+            Some(&token),
+            peer,
+            forwarded_for,
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn test_smart_ip_governor_independent_buckets_per_ip() {
-        use tower_governor::key_extractor::SmartIpKeyExtractor;
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_public_limiter() {
+        let public = public_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
 
-        async fn handler() -> impl IntoResponse {
-            "ok"
-        }
-
-        let governor = Arc::new(
-            GovernorConfigBuilder::default()
-                .burst_size(1)
-                .period(Duration::from_secs(600))
-                .key_extractor(SmartIpKeyExtractor)
-                .finish()
-                .expect("non-zero burst/period"),
+        assert_ne!(
+            public_read(&public, attacker, None).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
         );
+        assert_contract_429(public_read(&public, attacker, Some("203.0.113.1")).await).await;
+    }
 
-        let router = Router::new()
-            .route("/write", axum::routing::put(handler))
-            .layer(GovernorLayer::new(governor))
-            .with_state(());
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_public_bucket() {
+        let public = public_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-        fn make_request(ip: IpAddr) -> Request<Body> {
-            Request::builder()
-                .method(Method::PUT)
-                .uri("/write")
-                .extension(axum::extract::ConnectInfo(SocketAddr::new(ip, 12345)))
-                .body(Body::empty())
-                .unwrap()
-        }
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, proxy, Some("192.0.2.99, 203.0.113.1")).await)
+            .await;
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
-        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    #[tokio::test]
+    async fn test_ipv6_clients_in_one_slash_64_share_a_public_bucket() {
+        let public = public_with_one_request(&[]).await;
+        let ip = |value: &str| value.parse::<IpAddr>().unwrap();
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:2::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, ip("2001:db8:1:2::ffff"), None).await).await;
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:3::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
-        let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    #[tokio::test]
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_admin_limiter() {
+        let admin = admin_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            admin_read(&admin, attacker, None).await.status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, attacker, Some("203.0.113.1")).await).await;
+    }
+
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_admin_bucket() {
+        let admin = admin_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, proxy, Some("192.0.2.99, 203.0.113.1")).await).await;
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -1883,57 +2528,10 @@ mod tests {
             }
         }
 
-        fn admin_registry() -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
-            let public_jwk: serde_json::Value =
-                serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
-            let yaml = serde_saphyr::to_string(&serde_json::json!({
-                "version": 1,
-                "issuers": [],
-                "admins": [{
-                    "id": "admin-1",
-                    "scopes": ["issuers:write"],
-                    "keys": [{
-                        "kid": "test-key",
-                        "alg": "ES256",
-                        "jwk": public_jwk,
-                    }],
-                }],
-            }))
-            .unwrap();
-            Arc::new(
-                crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap(),
-            )
-        }
-
-        fn admin_token() -> String {
-            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
-            header.typ = Some("statuslist-admin+jwt".into());
-            header.kid = Some("test-key".into());
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let secret = jsonwebtoken::EncodingKey::from_ec_pem(
-                crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
-            )
-            .unwrap();
-            jsonwebtoken::encode(
-                &header,
-                &serde_json::json!({
-                    "iss": "admin-1",
-                    "iat": now,
-                    "exp": now + 300,
-                    "aud": ["status-list-server-admin"],
-                }),
-                &secret,
-            )
-            .unwrap()
-        }
-
         let config = Config::load_from_overrides(&[]).unwrap();
         let (auth_gate, permissive, admin_governor) =
             build_governor_configs(&config.rate_limit).unwrap();
-        let registry = admin_registry();
+        let registry = admin_registry(&["issuers:write"]);
         let mut hosted = crate::test_utils::test_app_state(None).await;
         hosted.admin_registry = registry.clone();
         hosted.admin_auth = crate::server::AdminAuthConfig {
@@ -2056,20 +2654,17 @@ mod tests {
         let (_, _, governor) = build_governor_configs(&limited_config.rate_limit).unwrap();
         let limited =
             hosted_admin_routes(hosted_for_limit.clone(), governor).with_state(hosted_for_limit);
-        let uri = "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into();
+        let uri = "/admin/v1/issuers/00000000-0000-4000-8000-000000000001";
         let body = r#"{"state":"suspended"}"#;
-        let first = send(limited.clone(), uri, Some(&token), body)
+        let rejected = send(limited.clone(), uri.into(), Some("not-a-jwt"), body)
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let first = send(limited.clone(), uri.into(), Some(&token), body)
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::PRECONDITION_REQUIRED);
-        let second = send(
-            limited,
-            "/admin/v1/issuers/00000000-0000-4000-8000-000000000001".into(),
-            Some(&token),
-            body,
-        )
-        .await
-        .unwrap();
+        let second = send(limited, uri.into(), Some(&token), body).await.unwrap();
         assert_contract_429(second).await;
     }
 
@@ -2082,43 +2677,10 @@ mod tests {
             ("rate_limit.admin_period_secs", "600"),
         ])
         .unwrap();
-        let jwk: serde_json::Value =
-            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
-        let registry = serde_saphyr::to_string(&serde_json::json!({
-            "version": 1,
-            "issuers": [],
-            "admins": [{
-                "id": "read-admin",
-                "scopes": ["issuers:read"],
-                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": jwk}],
-            }],
-        }))
-        .unwrap();
         let mut state = crate::test_utils::test_app_state(None).await;
-        state.admin_registry = Arc::new(
-            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
-        );
+        state.admin_registry = admin_registry(&["issuers:read"]);
         state.admin_auth.audiences = vec!["status-list-server-admin".into()];
-
-        let mut token_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
-        token_header.typ = Some("statuslist-admin+jwt".into());
-        token_header.kid = Some("test-key".into());
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        let secret = jsonwebtoken::EncodingKey::from_ec_pem(
-            crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
-        )
-        .unwrap();
-        let token = jsonwebtoken::encode(
-            &token_header,
-            &serde_json::json!({
-                "iss": "read-admin",
-                "iat": now,
-                "exp": now + 300,
-                "aud": ["status-list-server-admin"],
-            }),
-            &secret,
-        )
-        .unwrap();
+        let token = admin_token();
 
         for (uri, expected_first) in [
             ("/admin/v1/issuers", StatusCode::OK),
@@ -2127,10 +2689,10 @@ mod tests {
             let (_, _, governor) = build_governor_configs(&config.rate_limit).unwrap();
             let router = admin_routes(state.clone(), &config, Registry::new(), governor)
                 .with_state(state.clone());
-            let request = || {
+            let request = |bearer: &str| {
                 Request::builder()
                     .uri(uri)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
                     .extension(axum::extract::ConnectInfo(SocketAddr::new(
                         IpAddr::V4(Ipv4Addr::LOCALHOST),
                         12345,
@@ -2138,9 +2700,11 @@ mod tests {
                     .body(Body::empty())
                     .unwrap()
             };
-            let first = router.clone().oneshot(request()).await.unwrap();
+            let rejected = router.clone().oneshot(request("not-a-jwt")).await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+            let first = router.clone().oneshot(request(&token)).await.unwrap();
             assert_eq!(first.status(), expected_first);
-            let second = router.clone().oneshot(request()).await.unwrap();
+            let second = router.clone().oneshot(request(&token)).await.unwrap();
             assert_contract_429(second).await;
         }
     }
