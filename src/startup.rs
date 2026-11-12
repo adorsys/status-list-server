@@ -72,8 +72,8 @@ impl HttpServer {
             build_governor_configs(&config.rate_limit)?;
         AuthFailureGate::spawn_pruner(&auth_gate);
 
-        let public_router =
-            build_public_router(config, permissive_governor).with_state(state.clone());
+        let public_router = build_public_router(config, public_routes(permissive_governor))
+            .with_state(state.clone());
 
         let management_router =
             build_management_router(config, state.clone(), auth_gate).with_state(state.clone());
@@ -236,13 +236,10 @@ fn build_management_router(
     )
 }
 
-fn build_public_router(
-    config: &Config,
-    permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+fn build_public_router(config: &Config, router: Router<AppState>) -> Router<AppState> {
     with_listener_name(
         with_common_layers(
-            public_routes(permissive_governor)
+            router
                 // Public only: admin and management have no browser clients,
                 // and no web page should be able to read /metrics on a dev machine.
                 .layer(
@@ -1039,7 +1036,8 @@ mod tests {
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
         ));
         let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
-        let public = build_public_router(&config, permissive).with_state(state.clone());
+        let public =
+            build_public_router(&config, public_routes(permissive)).with_state(state.clone());
         (management_with_budgets(&config, state, burst), public)
     }
 
