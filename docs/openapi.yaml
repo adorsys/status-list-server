@@ -1411,7 +1411,9 @@ components:
             error_description: "too many statuses in request: 6000 > 5000"
 
     Unauthorized:
-      description: Missing or invalid authentication token
+      description: |
+        Missing or invalid authentication token. Multiple Authorization
+        headers are rejected as `invalid_token`.
       headers:
         WWW-Authenticate:
           description: '`Bearer` for a missing token, or `Bearer error="invalid_token"` for an invalid token.'
@@ -1475,9 +1477,10 @@ components:
 
         `status_list_already_exists` — a list with this `list_id` is already
         published. **Retrying will never succeed**; choose a different `list_id`
-        or update the existing list instead. When the stored list can be read, a
-        `Location` header carries its canonical URI (the same `sub` the list
-        already uses), so a racing publisher can adopt it instead of guessing.
+        or update the existing list instead. When the caller owns the stored
+        list, a `Location` header carries its canonical URI (the same `sub` the
+        list already uses), so a racing publisher can adopt its own list
+        without exposing another issuer's URI.
 
         `write_contention` — the write lost a lock race inside the database
         (deadlock or lock-wait timeout) and was rolled back. Nothing was created,
@@ -1488,8 +1491,8 @@ components:
         Location:
           description: |
             Present only for `status_list_already_exists`, when the stored list
-            is readable: the canonical URI of the existing list — the `sub` the
-            list already uses.
+            is owned by the caller: the canonical URI of the existing list —
+            the `sub` the list already uses.
           required: false
           schema:
             type: string

@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests.",
+    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests. Send exactly one Authorization header on management writes; duplicate headers return 401 invalid_token.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,

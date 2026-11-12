@@ -39,9 +39,9 @@ These files are public test fixtures for local development only.
 
 The server binds to `http://localhost:8000` with no database or cloud configuration required.
 This is the `private` profile. It starts without trusted issuers until you add
-an operator registry; follow the [deployment runbook](docs/deployment-runbook.md#onboard-a-registry-issuer)
+an operator registry; follow the [local issuer onboarding guide](docs/issuer-onboarding.md#onboard-a-registry-issuer)
 to publish a list. The `hosted` profile also requires a SQL backend and an
-admin principal; see the [admin API guide](docs/admin-api.md#hosted-profile-local-setup).
+admin principal; see the [hosted onboarding steps](docs/issuer-onboarding.md#onboard-a-hosted-issuer).
 
 Verify that the service is running:
 
