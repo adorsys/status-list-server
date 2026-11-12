@@ -18,11 +18,13 @@
     },
     "tokenSigningCertificate": {
       "type": "object",
-      "description": "Optional cert-manager Certificate for a dedicated token-signing Secret. Requires the cert-manager CRD and named ClusterIssuer.",
+      "description": "Optional cert-manager Certificate for a dedicated token-signing Secret. Requires the cert-manager CRD and a named issuer.",
       "properties": {
         "enabled": { "type": "boolean" },
         "dnsName": { "type": "string" },
         "issuerName": { "type": "string" },
+        "issuerKind": { "type": "string", "description": "cert-manager issuerRef.kind. Defaults to ClusterIssuer." },
+        "issuerGroup": { "type": "string", "description": "cert-manager issuerRef.group. Defaults to cert-manager.io; override for an external issuer such as a step-issuer." },
         "renewBefore": { "type": "string", "description": "Renewal lead time, such as 720h (30 days)." }
       }
     },

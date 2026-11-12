@@ -17,7 +17,11 @@ podAnnotations: {}
 tokenSigningCertificate:
   enabled: false
   dnsName: ""
+  # cert-manager issuerRef: name is required; kind/group default below. Override them for a
+  # non-cluster issuer (e.g. a step-ca / step-issuer or a Vault-backed issuer).
   issuerName: ""
+  issuerKind: ClusterIssuer
+  issuerGroup: cert-manager.io
   renewBefore: 720h
 
 statuslist:

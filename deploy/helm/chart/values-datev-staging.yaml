@@ -1,5 +1,12 @@
 # Existing EKS release, applied after the AWS and production overlays.
 statuslist:
+  # The in-memory cache is local to each pod and this profile has no Redis:
+  # keep a single replica and never overlap old and new pods across a release.
+  replicaCount: 1
+  strategy:
+    type: Recreate
+  env:
+    APP_CACHE__BACKEND: memory
   secretMounts:
     - name: database-credentials
       secretName: statuslist-secret
@@ -26,3 +33,7 @@ tokenSigningCertificate:
   enabled: true
   dnsName: statuslist.eudi-adorsys.com
   issuerName: letsencrypt-prod
+
+autoscaling:
+  # One replica, no Redis: the HPA has nothing to scale.
+  enabled: false

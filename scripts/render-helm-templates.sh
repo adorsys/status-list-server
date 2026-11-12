@@ -107,7 +107,7 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml --
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" "${RENDER_TEMP}/rendered/aws/status-list-server/templates/deployment.yaml"; then
   echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
 fi
-helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist-production --output-dir "${RENDER_TEMP}/rendered/datev-staging"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist --output-dir "${RENDER_TEMP}/rendered/datev-staging"
 DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
 DATEV_SECRET_STORE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/secret-store.yaml"

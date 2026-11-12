@@ -370,7 +370,7 @@ fn release_production_overlays_supply_the_management_audience() {
         .arg(&chart_dir)
         .args(["-f", "deploy/helm/chart/values-aws.yaml"])
         .args(["-f", "deploy/helm/chart/values-production.yaml"])
-        .args(["--namespace", "statuslist-production"])
+        .args(["--namespace", "statuslist"])
         .args([
             "--set",
             "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers",

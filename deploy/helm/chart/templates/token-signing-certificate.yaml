@@ -19,7 +19,10 @@ spec:
     - {{ .Values.tokenSigningCertificate.dnsName | quote }}
   issuerRef:
     name: {{ .Values.tokenSigningCertificate.issuerName | quote }}
-    kind: ClusterIssuer
+    kind: {{ .Values.tokenSigningCertificate.issuerKind | default "ClusterIssuer" | quote }}
+    {{- with .Values.tokenSigningCertificate.issuerGroup }}
+    group: {{ . | quote }}
+    {{- end }}
   privateKey:
     algorithm: ECDSA
     size: 256

@@ -22,7 +22,7 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
-  HELM_NAMESPACE: statuslist-production
+  HELM_NAMESPACE: statuslist
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
   REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
@@ -792,6 +792,15 @@ jobs:
       IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
       SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
       SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
+      # One values list shared by the preflight helm template and the helm upgrade, so the
+      # Certificate rendered here can never drift from the one Helm later manages. Uses the
+      # literal chart path: a job `env:` value is not re-expanded by the shell.
+      HELM_VALUES_ARGS: |
+        -f deploy/helm/chart/values-aws.yaml
+        -f deploy/helm/chart/values-production.yaml
+        -f deploy/helm/chart/values-fscert.yaml
+        -f deploy/helm/chart/values-datev-staging.yaml
+        --set statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -878,19 +887,11 @@ jobs:
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
-          if helm status "${{ env.HELM_RELEASE_NAME }}" -n statuslist >/dev/null 2>&1; then
-            echo "::error::A statuslist release is still active in the statuslist namespace; reconcile the duplicate Ingress and database before deploying to $NAMESPACE."
-            exit 1
-          fi
           kubectl auth can-i create certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
           kubectl auth can-i patch certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
           helm template "${{ env.HELM_RELEASE_NAME }}" "$CHART_DIR" \
             --namespace "$NAMESPACE" \
-            -f "$CHART_DIR"/values-aws.yaml \
-            -f "$CHART_DIR"/values-production.yaml \
-            -f "$CHART_DIR"/values-fscert.yaml \
-            -f "$CHART_DIR"/values-datev-staging.yaml \
-            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
+            $HELM_VALUES_ARGS \
             --show-only templates/token-signing-certificate.yaml | kubectl apply -f -
           kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
             --for=condition=Ready --timeout=10m
@@ -957,11 +958,7 @@ jobs:
           # A clean-looking rollback can still leave migration records the old release cannot start on.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            -f "$CHART_DIR"/values-aws.yaml \
-            -f "$CHART_DIR"/values-production.yaml \
-            -f "$CHART_DIR"/values-fscert.yaml \
-            -f "$CHART_DIR"/values-datev-staging.yaml \
-            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
+            $HELM_VALUES_ARGS \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
@@ -1049,9 +1046,6 @@ jobs:
           }
 
           await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
-
-          kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
-            --for=condition=Ready --timeout=2m
 
           rollback_done=1
 

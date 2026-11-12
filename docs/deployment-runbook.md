@@ -830,7 +830,7 @@ include that configured value in their management tokens' `aud` claim.
 
 The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`,
 `values-fscert.yaml`, and `values-datev-staging.yaml`, in that order, in the
-existing `statuslist-production` namespace.
+existing `statuslist` namespace.
 The last overlay selects the `fscert` image and the in-memory cache, disables
 autoscaling, and runs one application replica. The in-memory cache is local to
 that pod, so status updates invalidate the cache used by subsequent reads. Its
@@ -850,15 +850,13 @@ an integration environment before treating #733's Datev parity criterion as met.
 ### Existing EKS release with file-backed signing
 
 Before the first switch, check whether the existing `statuslist` Helm release
-in `statuslist-production`
+in `statuslist`
 owns Redis HA resources. Redis is not part of this chart or the EKS file-backed
 profile, so upgrading a release that owns Redis will remove those resources.
 Review any other consumers before that upgrade, and do not switch the image
 until the signing material and the chart's prerequisites are ready. The workflow
 creates the signing Certificate and waits for Ready before upgrading the release.
-It checks that a second `statuslist` release is not running in the `statuslist`
-namespace, where it would compete for the same Ingress host. This profile
-keeps `Recreate` for every deployment. Later upgrades must avoid
+This profile keeps `Recreate` for every deployment. Later upgrades must avoid
 overlapping application pods:
 each pod has its own in-memory status-list cache, so a write on one pod cannot
 invalidate a cached list on another. **Expect a brief service outage on every
@@ -872,7 +870,7 @@ ExternalSecret writes it to `statuslist-secret` as both `database-password` and
 into the application Secret by the new profile.
 
 Before the first upgrade, inspect the existing store with
-`kubectl get secretstore statuslist-secret-store -n statuslist-production -o yaml`.
+`kubectl get secretstore statuslist-secret-store -n statuslist -o yaml`.
 Verify Helm release ownership, the AWS provider configuration, and whether ESO
 uses controller identity or explicit credentials. The chart renders the store
 without an `auth` block, so its controller identity must still be able to read
@@ -891,9 +889,8 @@ must update their pin when cert-manager rotates the key. Verify that cert-manage
 and this ClusterIssuer are available before
 upgrading. cert-manager writes `tls.crt` and `tls.key` to the Secret; the pod
 mounts them as `statuslist.crt` and `statuslist.key`. Do not reuse the
-`statuslist-tls` ingress Secret for token signing. Preserve verification
-material for tokens issued before the switch until they expire. Verify
-`kubectl get certificate statuslist-token-signing -n statuslist-production` reports Ready
+`statuslist-tls` ingress Secret for token signing. Verify
+`kubectl get certificate statuslist-token-signing -n statuslist` reports Ready
 and check the certificate-expiry alerts after deployment.
 
 The public ACME certificate has the `serverAuth` extended key usage, as the
