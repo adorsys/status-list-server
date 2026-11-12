@@ -362,7 +362,7 @@
               ]
             }
           },
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": { "type": ["string", "null"] }
         },
         "aws": {
           "type": "object",

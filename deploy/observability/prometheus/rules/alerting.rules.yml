@@ -242,7 +242,7 @@ groups:
           service: status-list-server
           sli: cert_renewal
         annotations:
-          summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+          summary: "Certificate expires within 14 days"
           description: "time to expiry is {{ $value }}s"
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"

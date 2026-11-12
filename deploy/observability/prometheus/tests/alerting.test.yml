@@ -259,7 +259,7 @@ tests:
               namespace: "ns1"
               otel_scope_name: "status-list-server"
             exp_annotations:
-              summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+              summary: "Certificate expires within 14 days"
               description: "time to expiry is 600000s"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
