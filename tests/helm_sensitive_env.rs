@@ -1001,7 +1001,8 @@ fn rendered_chart_rejects_integer_env_values() {
     };
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("got number, want string")
+        stderr.contains("got number, want null or string")
+            || stderr.contains("got number, want string")
             || stderr.contains("Expected: string, given: integer"),
         "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema, or Helm renders 2592000 as 2.592e+06 and the u64 parse fails: {stderr}"
     );
