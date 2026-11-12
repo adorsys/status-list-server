@@ -19,7 +19,7 @@ fixed window is `0/0 = NaN` whenever no renewal happened in the window and can
 never fire reliably.
 
 The firing alerts therefore watch the **continuous** `cert_time_to_expiry_seconds`
-gauge. The file-backed signer records it every minute, so it drops toward 0
+gauge. The file-backed signer reports it at scrape time, so it drops toward 0
 while renewals fail to keep the certificate fresh. When it crosses the interval
 thresholds, the certificate needs attention.
 

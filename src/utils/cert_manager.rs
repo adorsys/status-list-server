@@ -39,6 +39,7 @@ use x509_parser::pem::Pem as X509Pem;
 
 use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient};
 use crate::domain::ports::SigningMaterial;
+use crate::utils::metrics::CERT_TIME_TO_EXPIRY_METRIC;
 
 use opentelemetry::{
     global,
@@ -48,7 +49,6 @@ use opentelemetry::{
 const RENEWAL_ATTEMPTS_METRIC: &str = "cert_renewal_attempts";
 const RENEWAL_SUCCESSES_METRIC: &str = "cert_renewal_successes";
 const RENEWAL_FAILURES_METRIC: &str = "cert_renewal_failures";
-const TIME_TO_EXPIRY_METRIC: &str = "cert_time_to_expiry_seconds";
 const LAST_SUCCESSFUL_RENEWAL_METRIC: &str = "cert_last_successful_renewal_timestamp";
 
 #[derive(Clone, Debug)]
@@ -77,7 +77,7 @@ impl Default for CertManagerMetrics {
                 .with_description("Total number of failed certificate renewals")
                 .build(),
             time_to_expiry: meter
-                .i64_gauge(TIME_TO_EXPIRY_METRIC)
+                .i64_gauge(CERT_TIME_TO_EXPIRY_METRIC)
                 .with_description("Time remaining until the current certificate expires")
                 .build(),
             last_successful_renewal: meter

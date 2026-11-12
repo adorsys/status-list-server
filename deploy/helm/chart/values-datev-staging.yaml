@@ -1,15 +1,5 @@
 # Existing EKS release, applied after the AWS and production overlays.
 statuslist:
-  # The memory cache is local to each pod; keep this profile on one replica.
-  replicaCount: 1
-  strategy:
-    type: Recreate
-  image:
-    variant: fscert
-  aws:
-    mountCredentials: false
-  env:
-    APP_CACHE__BACKEND: memory
   secretMounts:
     - name: database-credentials
       secretName: statuslist-secret
@@ -31,9 +21,6 @@ statuslist:
       fileEnv:
         APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
         APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
-
-autoscaling:
-  enabled: false
 
 tokenSigningCertificate:
   enabled: true

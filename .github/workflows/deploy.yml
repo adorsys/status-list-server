@@ -22,7 +22,7 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
-  HELM_NAMESPACE: statuslist
+  HELM_NAMESPACE: statuslist-production
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
   REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
@@ -874,6 +874,27 @@ jobs:
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build "$CHART_DIR"
 
+      - name: Prepare token-signing certificate before switching pods
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          if helm status "${{ env.HELM_RELEASE_NAME }}" -n statuslist >/dev/null 2>&1; then
+            echo "::error::A statuslist release is still active in the statuslist namespace; reconcile the duplicate Ingress and database before deploying to $NAMESPACE."
+            exit 1
+          fi
+          kubectl auth can-i create certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
+          kubectl auth can-i patch certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
+          helm template "${{ env.HELM_RELEASE_NAME }}" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            -f "$CHART_DIR"/values-aws.yaml \
+            -f "$CHART_DIR"/values-production.yaml \
+            -f "$CHART_DIR"/values-fscert.yaml \
+            -f "$CHART_DIR"/values-datev-staging.yaml \
+            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
+            --show-only templates/token-signing-certificate.yaml | kubectl apply -f -
+          kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
+            --for=condition=Ready --timeout=10m
+
       - name: Deploy chart
         id: deploy-chart
         # :? on the digest: empty would silently deploy the mutable tag, and helm's error points elsewhere.
@@ -938,6 +959,7 @@ jobs:
             --namespace ${{ env.HELM_NAMESPACE }} \
             -f "$CHART_DIR"/values-aws.yaml \
             -f "$CHART_DIR"/values-production.yaml \
+            -f "$CHART_DIR"/values-fscert.yaml \
             -f "$CHART_DIR"/values-datev-staging.yaml \
             --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
             --wait \
@@ -983,7 +1005,7 @@ jobs:
             if [ -f "$PREV_REVISION_FILE" ]; then
               prev_rev=$(cat "$PREV_REVISION_FILE")
             fi
-            echo "::warning::ESO verification failed; restoring the previous release state"
+            echo "::warning::Secret or certificate verification failed; restoring the previous release state"
             if [ -n "$prev_rev" ]; then
               if ! helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m; then
                 echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"

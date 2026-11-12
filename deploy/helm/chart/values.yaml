@@ -18,6 +18,7 @@ tokenSigningCertificate:
   enabled: false
   dnsName: ""
   issuerName: ""
+  renewBefore: 720h
 
 statuslist:
   enabled: true

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 #[cfg(not(feature = "acme"))]
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 #[cfg(not(feature = "acme"))]
-use opentelemetry::{global, metrics::Gauge};
+use opentelemetry::{global, metrics::ObservableGauge};
 use std::sync::Arc;
 #[cfg(not(feature = "acme"))]
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -14,6 +14,8 @@ use crate::domain::{
     ports::{CertificateProvider, SigningMaterial},
 };
 use crate::utils::crypto::SigningKey;
+#[cfg(not(feature = "acme"))]
+use crate::utils::metrics::CERT_TIME_TO_EXPIRY_METRIC;
 
 #[cfg(feature = "acme")]
 #[derive(Clone)]
@@ -45,7 +47,7 @@ impl CertificateProvider for AcmeCertificateProvider {
 pub struct ReloadingCertificateProvider {
     active: Arc<ArcSwap<SigningMaterial>>,
     expires_at: Arc<AtomicI64>,
-    expiry_gauge: Gauge<i64>,
+    _expiry_gauge: ObservableGauge<i64>,
 }
 
 #[cfg(not(feature = "acme"))]
@@ -54,28 +56,21 @@ impl ReloadingCertificateProvider {
         let (material, expires_at) =
             load_and_validate_signing_material(&cert_path, &key_path).await?;
         let expires_at = Arc::new(AtomicI64::new(expires_at));
+        let observed = Arc::downgrade(&expires_at);
         let expiry_gauge = global::meter("status-list-server")
-            .i64_gauge("cert_time_to_expiry_seconds")
+            .i64_observable_gauge(CERT_TIME_TO_EXPIRY_METRIC)
             .with_description("Time remaining until the current certificate expires")
+            .with_callback(move |observer| {
+                if let Some(expires_at) = observed.upgrade() {
+                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                    observer.observe(expires_at.load(Ordering::Relaxed).saturating_sub(now), &[]);
+                }
+            })
             .build();
-        record_expiry(&expiry_gauge, expires_at.load(Ordering::Relaxed));
-        let task_expiry = Arc::downgrade(&expires_at);
-        let task_gauge = expiry_gauge.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let Some(expires_at) = task_expiry.upgrade() else {
-                    break;
-                };
-                record_expiry(&task_gauge, expires_at.load(Ordering::Relaxed));
-            }
-        });
         Ok(Self {
             active: Arc::new(ArcSwap::from_pointee(material)),
             expires_at,
-            expiry_gauge,
+            _expiry_gauge: expiry_gauge,
         })
     }
 
@@ -89,7 +84,6 @@ impl ReloadingCertificateProvider {
             load_and_validate_signing_material(cert_path, key_path).await?;
         self.active.store(Arc::new(material));
         self.expires_at.store(expires_at, Ordering::Relaxed);
-        record_expiry(&self.expiry_gauge, expires_at);
         Ok(())
     }
 }
@@ -98,6 +92,13 @@ impl ReloadingCertificateProvider {
 #[async_trait]
 impl CertificateProvider for ReloadingCertificateProvider {
     async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError> {
+        let expires_at = self.expires_at.load(Ordering::Relaxed);
+        if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
+            return Err(invalid_data(format!(
+                "signing certificate expired at {}",
+                time::OffsetDateTime::from_unix_timestamp(expires_at).map_err(invalid_data)?
+            )));
+        }
         Ok(self.active.load_full())
     }
 }
@@ -141,13 +142,13 @@ async fn load_and_validate_signing_material(
     let signing_key_pem = tokio::fs::read_to_string(key_path)
         .await
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
-    let signing_key = validate_signing_material(&cert_pem, &signing_key_pem)?;
-    let expires_at = certificate_expiry(&cert_pem)?;
+    let (signing_key, expires_at) =
+        validate_signing_material_with_expiry(&cert_pem, &signing_key_pem)?;
     if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
-        return Err(StatusListError::Backend(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "signing certificate has expired",
-        ))));
+        return Err(invalid_data(format!(
+            "signing certificate expired at {}",
+            time::OffsetDateTime::from_unix_timestamp(expires_at).map_err(invalid_data)?
+        )));
     }
     let certificate_chain = pem_chain_to_base64_der(&cert_pem)?;
     Ok((
@@ -156,28 +157,18 @@ async fn load_and_validate_signing_material(
     ))
 }
 
-#[cfg(not(feature = "acme"))]
-fn record_expiry(gauge: &Gauge<i64>, expires_at: i64) {
-    gauge.record(
-        expires_at.saturating_sub(time::OffsetDateTime::now_utc().unix_timestamp()),
-        &[],
-    );
+fn invalid_data(err: impl std::fmt::Display) -> StatusListError {
+    StatusListError::Backend(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        err.to_string(),
+    )))
 }
 
 #[cfg(not(feature = "acme"))]
-fn certificate_expiry(cert_pem: &str) -> Result<i64, StatusListError> {
-    let (_, block) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(|err| {
-        StatusListError::Backend(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            err.to_string(),
-        )))
-    })?;
-    let (_, certificate) = x509_parser::parse_x509_certificate(&block.contents).map_err(|err| {
-        StatusListError::Backend(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            err.to_string(),
-        )))
-    })?;
+pub(crate) fn certificate_expiry(cert_pem: &str) -> Result<i64, StatusListError> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(invalid_data)?;
+    let (_, certificate) =
+        x509_parser::parse_x509_certificate(&block.contents).map_err(invalid_data)?;
     Ok(certificate.validity().not_after.timestamp())
 }
 
@@ -207,22 +198,19 @@ pub(crate) fn validate_signing_material(
     cert_pem: &str,
     signing_key_pem: &str,
 ) -> Result<SigningKey, StatusListError> {
+    validate_signing_material_with_expiry(cert_pem, signing_key_pem).map(|(key, _)| key)
+}
+
+fn validate_signing_material_with_expiry(
+    cert_pem: &str,
+    signing_key_pem: &str,
+) -> Result<(SigningKey, i64), StatusListError> {
     let signing_key = SigningKey::from_pem(signing_key_pem)
         .map_err(|err| StatusListError::Backend(Box::new(err)))?;
     let (_, cert_pem_block) =
-        x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(|err| {
-            StatusListError::Backend(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                err.to_string(),
-            )))
-        })?;
+        x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).map_err(invalid_data)?;
     let (_, certificate) = x509_parser::parse_x509_certificate(cert_pem_block.contents.as_ref())
-        .map_err(|err| {
-            StatusListError::Backend(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                err.to_string(),
-            )))
-        })?;
+        .map_err(invalid_data)?;
     // Both sides are the raw key bits, not SPKI DER, so they compare directly.
     let cert_public_key = certificate.public_key().subject_public_key.data.as_ref();
     let key_public_key = signing_key.public_key_bytes();
@@ -232,7 +220,7 @@ pub(crate) fn validate_signing_material(
             "certificate public key does not match signing key",
         ))));
     }
-    Ok(signing_key)
+    Ok((signing_key, certificate.validity().not_after.timestamp()))
 }
 
 #[cfg(test)]
@@ -342,6 +330,7 @@ mod tests {
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn malformed_reload_keeps_last_known_good_material() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let dir = TempDir::new();
         let cert_path = dir.path().join("tls.crt");
         let key_path = dir.path().join("tls.key");
@@ -391,6 +380,7 @@ mod tests {
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn expired_reload_keeps_last_known_good_material() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let dir = TempDir::new();
         let cert_path = dir.path().join("statuslist.crt");
         let key_path = dir.path().join("statuslist.key");
@@ -464,6 +454,7 @@ mod tests {
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn expired_certificate_is_rejected_on_startup() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let dir = TempDir::new();
         let cert_path = dir.path().join("statuslist.crt");
         let key_path = dir.path().join("statuslist.key");
@@ -516,11 +507,17 @@ mod tests {
             registry
                 .gather()
                 .into_iter()
-                .find(|family| family.name().contains("cert_time_to_expiry_seconds"))
+                .find(|family| family.name() == CERT_TIME_TO_EXPIRY_METRIC)
                 .and_then(|family| {
                     family
                         .get_metric()
-                        .first()
+                        .iter()
+                        .find(|metric| {
+                            metric.get_label().iter().any(|label| {
+                                label.name() == "otel_scope_name"
+                                    && label.value() == "status-list-server"
+                            })
+                        })
                         .map(|metric| metric.get_gauge().value())
                 })
                 .expect("expiry gauge")
@@ -558,6 +555,13 @@ mod tests {
             let first = gauge_value();
             assert!(first > 29.0 * 86_400.0);
 
+            provider.expires_at.store(
+                (now + time::Duration::days(90)).unix_timestamp(),
+                Ordering::Relaxed,
+            );
+            let observed = gauge_value();
+            assert!(observed > first + 50.0 * 86_400.0);
+
             tokio::fs::write(&cert_path, certificate(60))
                 .await
                 .expect("write renewed certificate");
@@ -568,13 +572,36 @@ mod tests {
                 )
                 .await
                 .expect("reload");
-            assert!(gauge_value() > first + 20.0 * 86_400.0);
+            assert!(gauge_value() < observed - 20.0 * 86_400.0);
         });
     }
 
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
+    async fn filesystem_provider_stops_signing_when_active_certificate_expires() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
+        let dir = TempDir::new();
+        let cert_path = dir.path().join("tls.crt");
+        let key_path = dir.path().join("tls.key");
+        let (cert, key) = matching_cert_and_key();
+        tokio::fs::write(&cert_path, cert)
+            .await
+            .expect("write cert");
+        tokio::fs::write(&key_path, key).await.expect("write key");
+        let provider = ReloadingCertificateProvider::from_files(
+            cert_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .expect("provider");
+        provider.expires_at.store(0, Ordering::Relaxed);
+        assert!(provider.signing_material().await.is_err());
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
     async fn successful_reload_swaps_certificate_and_key_atomically() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let dir = TempDir::new();
         let cert_path = dir.path().join("tls.crt");
         let key_path = dir.path().join("tls.key");
@@ -627,6 +654,7 @@ mod tests {
     #[cfg(not(feature = "acme"))]
     #[tokio::test]
     async fn filesystem_provider_exports_base64_der_chain_parts() {
+        let _metrics_guard = crate::utils::metrics::metrics_test_lock();
         let dir = TempDir::new();
         let cert_path = dir.path().join("tls.crt");
         let key_path = dir.path().join("tls.key");

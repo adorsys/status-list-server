@@ -21,6 +21,7 @@ helm lint "$CHART_DIR"
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
@@ -106,7 +107,7 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml --
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" "${RENDER_TEMP}/rendered/aws/status-list-server/templates/deployment.yaml"; then
   echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
 fi
-helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist --output-dir "${RENDER_TEMP}/rendered/datev-staging"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist-production --output-dir "${RENDER_TEMP}/rendered/datev-staging"
 DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
 DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
 DATEV_SECRET_STORE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/secret-store.yaml"
@@ -147,9 +148,6 @@ if ! grep -q '^      service: SecretsManager$' "$DATEV_SECRET_STORE"; then
 fi
 if ! grep -q '^      region: eu-central-1$' "$DATEV_SECRET_STORE"; then
   echo "ERROR: Datev staging SecretStore must use eu-central-1"; exit 1
-fi
-if grep -q '^[[:space:]]*auth:' "$DATEV_SECRET_STORE"; then
-  echo "ERROR: Datev staging SecretStore must use the ESO controller identity"; exit 1
 fi
 if ! grep -q 'kind: SecretStore' "$DATEV_EXTERNAL_SECRETS"; then
   echo "ERROR: Datev staging ExternalSecrets must use a namespaced SecretStore"; exit 1

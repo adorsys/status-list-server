@@ -248,6 +248,18 @@ impl ReadinessCheck for FilesystemCertCheck {
                 .await
                 .map_err(|e| format!("cert store file '{path}' not readable: {e}"))?;
         }
+        if let Some(path) = &self.cert_path {
+            let pem = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| format!("certificate file '{path}' not readable: {e}"))?;
+            let expires_at = crate::outbound::cert::certificate_expiry(&pem)
+                .map_err(|e| format!("certificate file '{path}' invalid: {e}"))?;
+            if expires_at <= time::OffsetDateTime::now_utc().unix_timestamp() {
+                let date = time::OffsetDateTime::from_unix_timestamp(expires_at)
+                    .map_err(|e| format!("certificate file '{path}' has invalid expiry: {e}"))?;
+                return Err(format!("certificate file '{path}' expired at {date}"));
+            }
+        }
         Ok(())
     }
 }
@@ -263,6 +275,8 @@ mod tests {
     #[cfg(feature = "acme")]
     use async_trait::async_trait;
     use axum::body::to_bytes;
+    #[cfg(not(feature = "acme"))]
+    use rcgen::{CertificateParams, KeyPair};
     #[cfg(feature = "acme")]
     use std::sync::Once;
     use tower::ServiceExt;
@@ -437,6 +451,31 @@ mod tests {
             );
             assert_eq!(response_body(resp).await, "NOT_READY");
         }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn file_certificate_readiness_fails_after_expiry() {
+        let path = std::env::temp_dir().join(format!(
+            "statuslist-expired-ready-{}-{}.crt",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        params.not_before = time::OffsetDateTime::UNIX_EPOCH;
+        params.not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(1);
+        tokio::fs::write(&path, params.self_signed(&key).expect("cert").pem())
+            .await
+            .expect("write cert");
+        let check = FilesystemCertCheck::new(Some(path.to_string_lossy().into_owned()), None);
+        let result = check.check().await;
+        tokio::fs::remove_file(&path).await.expect("remove cert");
+        assert!(
+            result
+                .expect_err("expired cert should fail")
+                .contains("expired at")
+        );
     }
 
     #[cfg(feature = "acme")]

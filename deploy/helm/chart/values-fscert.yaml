@@ -1,0 +1,22 @@
+# Reusable file-backed signer profile. Supply certificate/key mounts for each environment.
+statuslist:
+  # The memory cache is local to each pod; keep this profile on one replica.
+  replicaCount: 1
+  strategy:
+    type: Recreate
+  image:
+    variant: fscert
+  aws:
+    mountCredentials: false
+  env:
+    APP_CACHE__BACKEND: memory
+    APP_SERVER__CERT__EMAIL: null
+    APP_SERVER__CERT__ORGANIZATION: null
+    APP_SERVER__CERT__DNS__PROVIDER: null
+    APP_SERVER__CERT__ACME_DIRECTORY_URL: null
+    APP_SERVER__CERT__EKU: null
+    APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: null
+
+autoscaling:
+  enabled: false
+

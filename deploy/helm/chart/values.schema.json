@@ -22,7 +22,8 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "dnsName": { "type": "string" },
-        "issuerName": { "type": "string" }
+        "issuerName": { "type": "string" },
+        "renewBefore": { "type": "string", "description": "Renewal lead time, such as 720h (30 days)." }
       }
     },
     "podAnnotations": {
