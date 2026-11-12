@@ -33,6 +33,16 @@ in the list. Do not interpret the URL or possession of a token as permission to
 write or to administer an issuer. Management JWTs have their own required type,
 issuer ownership, audience, lifetime, and registered public-key checks.
 
+## Portal ownership
+
+In the hosted profile, an admin principal with `issuers:write` can create or
+change any portal issuer, regardless of its `owner` value. The Status List
+Server authenticates that admin principal but does not authenticate individual
+portal users. The portal backend must bind each user's login identity to the
+`owner` it submits and restrict issuer reads and writes to that owner. Server
+tests can verify issuer-to-list ownership on management routes; isolation
+between portal users depends on the portal backend and its own tests.
+
 ## Rotation
 
 Filesystem deployments load the signing key and chain from the configured store

@@ -112,21 +112,21 @@ admin service when cluster-wide pod access is not acceptable. Set a distinct
 staging must not reuse the production audience. During upgrades, configure the
 admin audience before adding admin principals to the mounted registry.
 
+### Onboard a registry issuer
+
+For local key generation, registry setup, and a first authenticated publish, use
+the [local issuer onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer).
+For hosted issuers, see the [hosted onboarding steps](issuer-onboarding.md#onboard-a-hosted-issuer).
+
 ### Rotate or revoke issuer keys
 
 Keep the registry in the operator-controlled source used to publish the mount.
 It contains public keys only. Never put an issuer's private key in the registry.
 
-To start a new registry (there is no committed file), create the three-line skeleton:
-
-```yaml
-version: 1
-issuers: []
-admins: []
-```
-
 `cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
-file must exist with at least this structure before you add keys.
+file must exist with at least the structure in the
+[local onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer)
+before you add keys.
 
 For a zero-downtime rotation:
 
