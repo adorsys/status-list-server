@@ -397,6 +397,15 @@ pub async fn auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AuthenticationError> {
+    if request
+        .headers()
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .count()
+        > 1
+    {
+        return Err(invalid_auth(None, None, "multiple Authorization headers"));
+    }
     let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
