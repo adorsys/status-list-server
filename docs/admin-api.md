@@ -40,7 +40,7 @@ same `401 invalid_token` body. A valid admin without `issuers:read` receives
 `403 insufficient_scope` with the required scope in `WWW-Authenticate`.
 Successful responses use `Cache-Control: no-store`; API errors use
 `Cache-Control: no-store, max-age=0`.
-The admin issuer API has a separate per-peer-IP budget, configured by
+The admin issuer API has a separate per-client-address budget, configured by
 `APP_RATE_LIMIT__ADMIN_BURST_SIZE` (default 100) and
 `APP_RATE_LIMIT__ADMIN_PERIOD_SECS` (default 1 second per replenished request).
 Excess reads or writes return JSON `429 too_many_requests` with `Retry-After`.

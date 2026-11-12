@@ -13,18 +13,22 @@
 {{- if and (has $telemetryEnv (list "production" "prod")) (empty $audiences) }}
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
 {{- end }}
+{{- $trustedProxies := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES | default "")) "" }}
 {{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
 {{- $adminAudience := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_ADMIN_AUTH__AUDIENCES | default "")) "" }}
 {{- if empty $adminAudience }}
 {{- fail "hosted deployment requires statuslist.env.APP_ADMIN_AUTH__AUDIENCES; use a distinct admin audience" }}
 {{- end }}
-{{- $trustedProxies := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES | default "")) "" }}
 {{- if and .Values.statuslist.ingress.enabled .Values.statuslist.ingress.management.enabled (empty $trustedProxies) }}
 {{- fail "hosted management ingress requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES for the dedicated controller pods" }}
 {{- end }}
 {{- end }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}
 {{- fail "statuslist.issuerRegistry.volume is required in production" }}
+{{- end }}
+{{- $clientIpSource := trim (toString (.Values.statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE | default "")) }}
+{{- if and (has $telemetryEnv (list "production" "prod")) (eq $clientIpSource "rightmost_x_forwarded_for") (empty $trustedProxies) }}
+{{- fail "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES is required in production with APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for, the chart default: list the ingress or gateway pod addresses (CIDRs), or set APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info if the pods see client addresses directly" }}
 {{- end }}
 {{- if and .Values.externalSecret.enabled .Values.statuslist.fallbackSecret.enabled }}
 {{- fail "externalSecret.enabled and statuslist.fallbackSecret.enabled cannot both be true: choose either External Secrets Operator or the fallback Secret for secret delivery, not both" }}
