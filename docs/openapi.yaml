@@ -3,9 +3,6 @@ info:
   title: Status List Server
   version: 0.1.0
   description: |
-    Protected issuer reads on the admin listener are documented separately in
-    [the Admin API contract](./openapi-admin.yaml).
-
     REST API for the Status List Server.
 
     This service implements the
@@ -98,6 +95,60 @@ info:
     configuration; operators who lower a bound via configuration should treat
     the documented schema maximums as defaults, not guarantees.
 
+    ## Admin API
+
+    Operators and onboarding services use the admin API to list, query and
+    manage issuers.
+
+    ### Where it is served
+
+    Only on the **admin listener** (`server.admin.host` and
+    `server.admin.port`), in both deployment profiles. The admin listener is
+    never routed from an ingress. Its callers are operators and the developer
+    portal's backend.
+
+    ### Authentication and authorization
+
+    Every operation requires an admin token (`AdminBearer`). Scopes come from
+    the principal's entry in the issuer registry file, never from the token:
+
+    | Scope | Grants |
+    |---|---|
+    | `issuers:read` | `listIssuers`, `getIssuer` |
+    | `issuers:write` | every operation that changes state |
+
+    ### Two kinds of issuer
+
+    `source: static` issuers come from the registry file. The API reports
+    them but never changes them: every write returns
+    `409 issuer_managed_by_configuration`. `source: portal` issuers exist only
+    in the `hosted` profile. In the `private` profile, creating one returns
+    `409 dynamic_issuers_disabled`.
+
+    ### Conventions
+
+    - Errors use the same `ErrorResponse` envelope as the other listeners:
+      `{"error": "<code>", "error_description": "<text>"}`. Branch on
+      `error`; `error_description` wording is not part of the contract.
+    - Every success response carries `Cache-Control: no-store`; errors carry
+      `Cache-Control: no-store, max-age=0`.
+    - Instants are Unix timestamps in seconds (UTC).
+    - Hosted issuer detail responses have an `ETag` and `Issuer-Version`
+      derived from the persisted issuer version. Static issuer detail ETags
+      cover the complete representation.
+      Mutations accept `If-Issuer-Version` or `If-Match` with the detail ETag;
+      a stale value returns `412 precondition_failed`, and a missing one
+      returns `428 precondition_required`. Live usage counts and derived
+      expiry state do not invalidate hosted issuer validators. `createIssuer`
+      is exempt because a new issuer has no version yet.
+    - Request bodies reject unknown members. A caller-supplied `id`,
+      `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
+      writable) is a `400 invalid_input`.
+    - Authenticated requests from one client address share a budget per
+      replica (`APP_RATE_LIMIT__ADMIN_*`): a burst, then one request
+      per period. Past it, the server answers `429 too_many_requests` with
+      `Retry-After`.
+
   contact:
     name: adorsys Status List Server
     url: https://github.com/adorsys/status-list-server
@@ -115,6 +166,10 @@ servers:
 
 security:
   - BearerAuth: []
+
+tags:
+  - name: issuers
+    description: Issuer registry, listing and lifecycle.
 
 paths:
   /:
@@ -931,6 +986,502 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  /admin/v1/issuers:
+    servers:
+      - url: "{scheme}://{host}:{port}"
+        description: Admin listener (private network only)
+        variables:
+          scheme:
+            enum: [http, https]
+            default: http
+          host:
+            default: localhost
+            description: "`server.admin.host`"
+          port:
+            default: "8002"
+            description: "`server.admin.port`"
+    get:
+      operationId: listIssuers
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: List issuers
+      description: |
+        Static and portal issuers together, ordered by `id` ascending, one
+        bounded page per request. The opaque cursor keeps independent positions
+        for static and portal issuers so database collation cannot mix their
+        ordering. Requires `issuers:read`.
+
+        Pass `next_cursor` back as `cursor` to read the next page with the same
+        filters. A full walk returns every matching issuer present at the start
+        that remains present and matching when its page is read, exactly once.
+        A concurrently added issuer after its source position may appear once;
+        an issuer inserted before that source position is observed on a new walk.
+      parameters:
+        - name: source
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/IssuerSource"
+        - name: tier
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/IssuerTier"
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/IssuerState"
+        - name: owner
+          in: query
+          required: false
+          description: Only issuers owned by this portal account (`<provider>|<subject>`).
+          schema:
+            $ref: "#/components/schemas/Owner"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque `next_cursor` from the previous page. Never construct or modify it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of issuers.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+            Link:
+              description: '`<…>; rel="next"` (RFC 8288) while a next page exists.'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuerPage"
+        "400":
+          $ref: "#/components/responses/InvalidQuery"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
+    post:
+      operationId: createIssuer
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: Create a portal (sandbox) issuer
+      description: |
+        Creates a `source: portal`, `tier: sandbox` issuer with one key.
+        The server assigns `id` and `aggregation_id` (UUIDv4) and the `kid`
+        (RFC 7638 thumbprint of `public_key`). Requires `issuers:write` and
+        the `hosted` profile.
+
+        `expires_at` defaults to now plus the sandbox tier's maximum lifetime
+        (30 days by default) and must be in
+        (now, now + tiers.sandbox.max_lifetime_secs].
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIssuerRequest"
+      responses:
+        "201":
+          description: Issuer created.
+          headers:
+            Location:
+              $ref: "#/components/headers/IssuerLocation"
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issuer"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "409":
+          description: |
+            `dynamic_issuers_disabled`: the server runs the `private`
+            profile. `key_material_in_use`: `public_key` is already
+            registered for another issuer or admin.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "dynamic_issuers_disabled"
+                error_description: "portal issuers are only available in the hosted profile"
+        "413":
+          $ref: "#/components/responses/AdminPayloadTooLarge"
+        "422":
+          description: "`invalid_public_jwk` or `invalid_expiry`."
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
+  /admin/v1/issuers/{issuer_id}:
+    servers:
+      - url: "{scheme}://{host}:{port}"
+        description: Admin listener (private network only)
+        variables:
+          scheme:
+            enum: [http, https]
+            default: http
+          host:
+            default: localhost
+            description: "`server.admin.host`"
+          port:
+            default: "8002"
+            description: "`server.admin.port`"
+    parameters:
+      - $ref: "#/components/parameters/IssuerId"
+    get:
+      operationId: getIssuer
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: Get one issuer
+      description: Requires `issuers:read`.
+      responses:
+        "200":
+          description: The issuer, its keys and its quota usage.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issuer"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          $ref: "#/components/responses/IssuerNotFound"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
+    patch:
+      operationId: updateIssuer
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: Suspend, resume or renew a portal issuer
+      description: |
+        Changes exactly one thing: `state` (`suspended` or `active`) or
+        `expires_at`. Requires `issuers:write` and `If-Issuer-Version` or
+        `If-Match`.
+
+        `state: active` lifts a suspension only. An issuer past `expires_at`
+        stays `expired` until renewed. Renewal accepts a Unix timestamp in
+        (now, now + tiers.sandbox.max_lifetime_secs], including for an expired
+        issuer. The default maximum lifetime is 30 days. Suspension takes
+        effect on the next management request on every replica.
+        Portal issuers with the `standard` tier do not expire and reject renewal.
+      parameters:
+        - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateIssuerRequest"
+      responses:
+        "200":
+          description: The updated issuer.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issuer"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          $ref: "#/components/responses/IssuerNotFound"
+        "409":
+          description: |
+            `issuer_managed_by_configuration`: the issuer is static.
+            `write_contention`: a concurrent database writer held a lock; retry.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "422":
+          description: "`invalid_expiry`: `expires_at` is outside the sandbox lifetime window, or this issuer tier does not support renewal."
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_expiry"
+                error_description: "expires_at exceeds the sandbox tier's 30-day maximum"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
+  /admin/v1/issuers/{issuer_id}/keys:
+    servers:
+      - url: "{scheme}://{host}:{port}"
+        description: Admin listener (private network only)
+        variables:
+          scheme:
+            enum: [http, https]
+            default: http
+          host:
+            default: localhost
+            description: "`server.admin.host`"
+          port:
+            default: "8002"
+            description: "`server.admin.port`"
+    parameters:
+      - $ref: "#/components/parameters/IssuerId"
+    post:
+      operationId: addIssuerKey
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: Add a key to a portal issuer
+      description: |
+        Adds an `active` key, for example to start a rotation overlap. The
+        server assigns `kid` (RFC 7638 thumbprint). The number of non-revoked
+        keys may not exceed the tier's `max_keys`. Requires `issuers:write`
+        and `If-Issuer-Version` or `If-Match`.
+      parameters:
+        - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddIssuerKeyRequest"
+      responses:
+        "201":
+          description: Key added.
+          headers:
+            Location:
+              description: "`/admin/v1/issuers/{issuer_id}/keys/{kid}`"
+              schema:
+                type: string
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuerKey"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          $ref: "#/components/responses/IssuerNotFound"
+        "409":
+          description: |
+            `issuer_managed_by_configuration`: the issuer is static.
+            `key_limit_reached`: the tier's `max_keys` non-revoked keys
+            already exist; revoke one first. `key_material_in_use`: the key
+            is already registered for any issuer or admin. `write_contention`:
+            a concurrent database writer held a lock; retry.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "key_limit_reached"
+                error_description: "the sandbox tier allows 2 keys; revoke one first"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "413":
+          $ref: "#/components/responses/AdminPayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableKey"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
+  /admin/v1/issuers/{issuer_id}/keys/{kid}:
+    servers:
+      - url: "{scheme}://{host}:{port}"
+        description: Admin listener (private network only)
+        variables:
+          scheme:
+            enum: [http, https]
+            default: http
+          host:
+            default: localhost
+            description: "`server.admin.host`"
+          port:
+            default: "8002"
+            description: "`server.admin.port`"
+    parameters:
+      - $ref: "#/components/parameters/IssuerId"
+      - name: kid
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+    patch:
+      operationId: revokeIssuerKey
+      tags: [issuers]
+      security:
+        - AdminBearer: []
+      summary: Revoke a key of a portal issuer
+      description: |
+        Revocation is permanent and takes effect on the next management
+        request on every replica. Revoking an already revoked key returns
+        `200` unchanged. Revoking the last active key is allowed: the issuer
+        then cannot write until a new key is added. Requires `issuers:write`
+        and `If-Issuer-Version` or `If-Match`.
+      parameters:
+        - $ref: "#/components/parameters/IfIssuerVersion"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateIssuerKeyRequest"
+      responses:
+        "200":
+          description: The key, now revoked.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Issuer-Version:
+              $ref: "#/components/headers/IssuerVersion"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuerKey"
+        "400":
+          $ref: "#/components/responses/InvalidInput"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "403":
+          $ref: "#/components/responses/InsufficientScope"
+        "404":
+          description: "`issuer_not_found` or `key_not_found`."
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "key_not_found"
+                error_description: "the issuer has no key with this kid"
+        "409":
+          description: |
+            `issuer_managed_by_configuration`: the issuer is static.
+            `write_contention`: a concurrent database writer held a lock; retry.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "429":
+          $ref: "#/components/responses/AdminTooManyRequests"
+        "500":
+          $ref: "#/components/responses/AdminInternalServerError"
+        "503":
+          $ref: "#/components/responses/AdminServiceUnavailable"
+
 components:
   securitySchemes:
     BearerAuth:
@@ -956,6 +1507,24 @@ components:
         returns a retryable `503 service_unavailable` (with `Retry-After`)
         rather than a `401`, so a transient backend fault is never mistaken for
         a bad key.
+
+    AdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A JWT signed with an admin key listed under `admins` in the issuer
+        registry file:
+
+        - header `typ` = `statuslist-admin+jwt` (RFC 8725 §3.11), `kid`
+          required, `alg` one of `ES256`, `ES384`, `EdDSA`, `PS256` and equal
+          to the key's registered `alg`;
+        - claims `iss` (the admin principal id), `aud` (one of
+          `admin_auth.audiences`), `iat` and `exp` required, with
+          `exp - iat` at most `admin_auth.max_token_lifetime_secs`
+          (default 300);
+        - a management token (`statuslist-management+jwt`) is never
+          accepted here (RFC 8725 §3.12).
 
   schemas:
     IssuerIdentityResponse:
@@ -1243,6 +1812,207 @@ components:
             present; `null` on the last page.
           example: "djE6OGU0ZWJiNGEtZGQ3OS00OThmLWFjOTctOTY2ZjIyODg0MDM3"
 
+    IssuerSource:
+      type: string
+      enum: [static, portal]
+      description: "`static`: from the registry file, read-only here. `portal`: created through this API."
+    IssuerTier:
+      type: string
+      enum: [standard, sandbox]
+    IssuerState:
+      type: string
+      enum: [active, suspended, expired]
+      description: |
+        Derived, in this order: `suspended` when suspended through this API
+        or `disabled: true` in the registry file; `expired` when `expires_at`
+        is in the past; otherwise `active`. Only `active` issuers can write.
+    Owner:
+      type: string
+      description: Portal account that owns the issuer, as `<provider>|<subject>` from the OIDC login.
+      minLength: 3
+      maxLength: 255
+      pattern: "^[a-z0-9-]+\\|.+$"
+      example: "github|5821374"
+    UnixTime:
+      type: integer
+      format: int64
+      minimum: 0
+
+    Issuer:
+      type: object
+      required: [id, aggregation_id, source, tier, state, owner, created_at, expires_at, keys, usage]
+      properties:
+        id:
+          type: string
+          description: Issuer id, the `iss` of its management tokens. UUIDv4 for portal issuers.
+          example: "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
+        aggregation_id:
+          type: string
+          format: uuid
+          description: Public id used in `aggregation_uri`. Immutable.
+          example: "0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        aggregation_uri:
+          type: string
+          format: uri
+          description: Absent when status list tokens carry no `aggregation_uri`.
+          example: "https://status.example.com/api/v1/aggregation/0b8ef1c4-3c6a-4d2e-9f1a-5b7c9d2e4f60"
+        display_name:
+          type: [string, "null"]
+          maxLength: 100
+          example: "Acme Wallet Issuer"
+        source:
+          $ref: "#/components/schemas/IssuerSource"
+        tier:
+          $ref: "#/components/schemas/IssuerTier"
+        state:
+          $ref: "#/components/schemas/IssuerState"
+        owner:
+          description: "`null` for static issuers."
+          oneOf:
+            - $ref: "#/components/schemas/Owner"
+            - type: "null"
+        created_at:
+          description: "`null` for static issuers, which have no creation record."
+          oneOf:
+            - $ref: "#/components/schemas/UnixTime"
+            - type: "null"
+        expires_at:
+          description: "`null` when the issuer never expires (static issuers, `standard` tier)."
+          oneOf:
+            - $ref: "#/components/schemas/UnixTime"
+            - type: "null"
+        keys:
+          type: array
+          description: Every key, including revoked ones, newest first.
+          items:
+            $ref: "#/components/schemas/IssuerKey"
+        usage:
+          $ref: "#/components/schemas/IssuerUsage"
+
+    IssuerKey:
+      type: object
+      required: [kid, alg, state, not_before, not_after, created_at, public_key]
+      description: |
+        A key accepts tokens only while `state` is `active` and the current
+        time is within `[not_before, not_after]`.
+      properties:
+        kid:
+          type: string
+          example: "QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M"
+        alg:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
+        state:
+          type: string
+          enum: [active, reserved, revoked]
+        not_before:
+          oneOf:
+            - $ref: "#/components/schemas/UnixTime"
+            - type: "null"
+        not_after:
+          oneOf:
+            - $ref: "#/components/schemas/UnixTime"
+            - type: "null"
+        created_at:
+          description: "`null` for keys of static issuers."
+          oneOf:
+            - $ref: "#/components/schemas/UnixTime"
+            - type: "null"
+        public_key:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/publicJwk"
+
+    IssuerUsage:
+      type: object
+      required: [lists, lists_limit, keys, keys_limit]
+      description: |
+        Current use against the limits of the issuer's tier. `lists_limit` is
+        the tier's `max_lists` and `keys_limit` its `max_keys`.
+      properties:
+        lists:
+          type: integer
+          minimum: 0
+          example: 3
+        lists_limit:
+          type: integer
+          minimum: 1
+          example: 10
+        keys:
+          type: integer
+          minimum: 0
+          description: |
+            Keys counted against `keys_limit`: active keys whose `not_after`
+            has not passed, including keys staged for rotation.
+          example: 1
+        keys_limit:
+          type: integer
+          minimum: 1
+          example: 5
+
+    IssuerPage:
+      type: object
+      required: [issuers, next_cursor]
+      properties:
+        issuers:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Issuer"
+        next_cursor:
+          type: [string, "null"]
+          description: Cursor for the next page; `null` on the last page.
+
+    CreateIssuerRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, owner, public_key, alg]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        owner:
+          $ref: "#/components/schemas/Owner"
+        public_key:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/publicJwk"
+        alg:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
+        expires_at:
+          $ref: "#/components/schemas/UnixTime"
+
+    AddIssuerKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [public_key, alg]
+      properties:
+        public_key:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/publicJwk"
+        alg:
+          $ref: "./schemas/issuers.v1.schema.json#/$defs/key/properties/alg"
+
+    UpdateIssuerRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [active, suspended]
+        - type: object
+          additionalProperties: false
+          required: [expires_at]
+          properties:
+            expires_at:
+              $ref: "#/components/schemas/UnixTime"
+
+    UpdateIssuerKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          const: revoked
+
     ErrorResponse:
       type: object
       description: |
@@ -1280,10 +2050,13 @@ components:
             - invalid_token
             # 403
             - issuer_mismatch
+            - insufficient_scope
             # 404
             - status_list_not_found
             - historical_status_list_not_found
             - aggregation_not_found
+            - issuer_not_found
+            - key_not_found
             # 406
             - invalid_accept_header
             # 409
@@ -1295,10 +2068,20 @@ components:
             - allocation_exhausted
             - write_contention
             - paging_required
+            - issuer_managed_by_configuration
+            - dynamic_issuers_disabled
+            - key_limit_reached
+            - key_material_in_use
+            # 412
+            - precondition_failed
             # 413
             - payload_too_large
             # 422
             - status_too_large
+            - unsupported_algorithm
+            - invalid_expiry
+            # 428
+            - precondition_required
             # 429
             - too_many_requests
             # 500 / 503
@@ -1343,6 +2126,69 @@ components:
       schema:
         type: string
         example: 'W/"3b1f..."'
+
+    IssuerId:
+      name: issuer_id
+      in: path
+      required: true
+      description: The issuer `id`, percent-encoded. Not the `aggregation_id`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    IfIssuerVersion:
+      name: If-Issuer-Version
+      in: header
+      required: false
+      description: The current `Issuer-Version` returned by the issuer detail endpoint. Required when `If-Match` is absent; send this header or `If-Match`, never both.
+      schema:
+        type: string
+        example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: The quoted detail `ETag`. Required when `If-Issuer-Version` is absent; send this header or `If-Issuer-Version`, never both.
+      schema:
+        type: string
+        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
+
+  headers:
+    CacheControl:
+      description: Success responses use `no-store`; errors use `no-store, max-age=0`.
+      schema:
+        type: string
+        enum: [no-store, "no-store, max-age=0"]
+    ETag:
+      description: |
+        For hosted issuers, an opaque validator derived from the persisted
+        issuer version; usage and derived expiry do not change it. For static
+        issuers, a digest of the complete representation. Send a hosted issuer
+        ETag in `If-Match` for lifecycle mutations.
+      schema:
+        type: string
+        example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
+    IssuerVersion:
+      description: |
+        Opaque version of writable issuer metadata, lifecycle, and key state.
+        It excludes usage and derived expiry state, so ordinary list publishes
+        do not invalidate a mutation precondition. Send it in
+        `If-Issuer-Version` for mutations.
+      schema:
+        type: string
+        example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    IssuerLocation:
+      description: "`/admin/v1/issuers/{id}` of the created issuer."
+      schema:
+        type: string
+        example: "/admin/v1/issuers/6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00"
+    WwwAuthenticate:
+      description: |
+        RFC 6750 §3 challenge. `Bearer` alone when no token was sent;
+        `Bearer error="invalid_token"` when a token was sent and rejected.
+      schema:
+        type: string
+        example: 'Bearer error="invalid_token"'
 
   responses:
     AggregationPage:
@@ -1715,3 +2561,187 @@ components:
           example:
             error: "internal_error"
             error_description: "The server encountered an unexpected error."
+
+    InvalidQuery:
+      description: "`invalid_query`: a filter, `limit` or `cursor` is invalid."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "invalid_query"
+            error_description: "limit must be between 1 and 100"
+    InvalidInput:
+      description: |
+        `invalid_input`: the body is not valid JSON, misses a required
+        member, contains a member the caller may not set, sends both issuer
+        precondition headers, or the issuer path parameter is not valid UTF-8.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "invalid_input"
+            error_description: "unknown field `tier`"
+    AdminUnauthorized:
+      description: |
+        `missing_token` when no bearer token was sent. `invalid_token` for
+        every rejected token, whatever the reason (unknown `kid`, bad
+        signature, wrong `typ` or `aud`, expired, revoked key, disabled
+        principal); the reason is logged server-side only.
+      headers:
+        WWW-Authenticate:
+          $ref: "#/components/headers/WwwAuthenticate"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "invalid_token"
+            error_description: "Invalid authentication token"
+    InsufficientScope:
+      description: "`insufficient_scope`: valid admin token, but its principal lacks the scope (RFC 6750 §3.1)."
+      headers:
+        WWW-Authenticate:
+          description: 'For example `Bearer error="insufficient_scope", scope="issuers:write"`.'
+          schema:
+            type: string
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "insufficient_scope"
+            error_description: "issuers:write is required"
+    IssuerNotFound:
+      description: "`issuer_not_found`: no issuer has this id."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "issuer_not_found"
+            error_description: "no issuer has this id"
+    ManagedByConfiguration:
+      description: "`issuer_managed_by_configuration`: the issuer is static; change the registry file instead."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "issuer_managed_by_configuration"
+            error_description: "static issuers are changed through the registry file"
+    PreconditionFailed:
+      description: "`precondition_failed`: the supplied issuer validator is stale."
+      headers:
+        ETag:
+          $ref: "#/components/headers/ETag"
+        Issuer-Version:
+          $ref: "#/components/headers/IssuerVersion"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "precondition_failed"
+            error_description: "the issuer changed; re-read it and retry"
+    PreconditionRequired:
+      description: "`precondition_required`: both `If-Issuer-Version` and `If-Match` are missing."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "precondition_required"
+            error_description: "send If-Issuer-Version or If-Match from the issuer detail response"
+    AdminPayloadTooLarge:
+      description: "`payload_too_large`: the body exceeds `limits.max_body_size_bytes`."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "payload_too_large"
+    UnprocessableKey:
+      description: |
+        `invalid_public_jwk`: not a public key the registry accepts
+        (symmetric, private members, wrong curve, RSA modulus under 2048
+        bits). `unsupported_algorithm`: `alg` is outside the allowlist or
+        does not match the key type.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "invalid_public_jwk"
+            error_description: "private key members are not accepted"
+    AdminTooManyRequests:
+      description: "`too_many_requests`: this client address has spent its admin request budget."
+      headers:
+        Retry-After:
+          description: Seconds until the budget admits another request.
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "too_many_requests"
+            error_description: "Too many requests from this address"
+    AdminInternalServerError:
+      description: "`internal_error`."
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "internal_error"
+    AdminServiceUnavailable:
+      description: "`service_unavailable`: the issuer store is unreachable. Retry later."
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "service_unavailable"

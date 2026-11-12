@@ -1,5 +1,5 @@
 //! Admin issuer writes guarded by the `issuers:write` scope. Mutations of
-//! existing issuers use optimistic preconditions (docs/openapi-admin.yaml).
+//! existing issuers use optimistic preconditions (docs/openapi.yaml).
 
 use axum::{
     Extension, Json,
