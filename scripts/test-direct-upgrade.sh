@@ -208,6 +208,10 @@ if [[ "$issuers_present" == t && "$aggregation_first" != "$aggregation_before" ]
   echo "::error::The pre-upgrade aggregation ID changed."
   exit 1
 fi
+node scripts/generate-direct-upgrade-fixture.js registry "$fixture_dir" "$aggregation_first"
+kubectl create configmap direct-upgrade-issuers -n "$namespace" \
+  --from-file="issuers.yaml=$fixture_dir/issuers.yaml" --dry-run=client -o yaml \
+  | kubectl apply -f -
 
 if [[ "$quota_present" == f ]]; then
   kubectl exec -n "$namespace" "pod/$pod" -- /app/status-list-server list-quota recount
@@ -264,6 +268,13 @@ if [[ "$quota_present" == f ]]; then
   }
 fi
 
+kubectl rollout restart "deployment/$deployment" -n "$namespace"
+kubectl rollout status "deployment/$deployment" -n "$namespace" --timeout 2m
+assert_candidate_ready
+[[ $(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'") == "$aggregation_first" ]] || {
+  echo "::error::The aggregation ID changed after candidate restart."
+  exit 1
+}
 node scripts/generate-direct-upgrade-fixture.js token "$fixture_dir"
 kubectl port-forward -n "$namespace" "pod/$pod" 18081:8001 > "$fixture_dir/management-forward.log" 2>&1 &
 port_forward_pid=$!
@@ -281,13 +292,6 @@ port_forward_pid=
 [[ "$http_status" == 200 ]] || { echo "::error::Migrated issuer could not authenticate (HTTP ${http_status:-none})."; exit 1; }
 jq -e --arg id "$aggregation_first" '.aggregation_id == $id' "$fixture_dir/credentials-response" > /dev/null || {
   echo "::error::Management endpoint returned the wrong aggregation ID."
-  exit 1
-}
-kubectl rollout restart "deployment/$deployment" -n "$namespace"
-kubectl rollout status "deployment/$deployment" -n "$namespace" --timeout 2m
-assert_candidate_ready
-[[ $(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'") == "$aggregation_first" ]] || {
-  echo "::error::The aggregation ID changed after candidate restart."
   exit 1
 }
 # Observe a full liveness interval after Ready before accepting the restart count.
