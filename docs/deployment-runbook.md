@@ -864,6 +864,18 @@ invalidate a cached list on another. **Expect a brief service outage on every
 release**, including RC and final deployments, while the old pod stops and the
 new one becomes ready. Plan deployments around integrator traffic.
 
+The first upgrade must reconcile the rollout strategy in place: the live
+Deployment was created without a `strategy`, so the API server defaulted it to
+`RollingUpdate`, and Helm v4's server-side apply rejects switching straight to
+`Recreate` while that `rollingUpdate` block is still present. The workflow
+patches `spec.strategy` to `{type: Recreate}` before upgrading (it does not touch
+the pod template, so nothing restarts):
+
+```bash
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+```
+
 The existing AWS Secrets Manager entry `statuslist-secret` supplies
 `POSTGRES_PASSWORD` to the namespaced `statuslist-secret-store`. The chart's
 ExternalSecret writes it to `statuslist-secret` as both `database-password` and

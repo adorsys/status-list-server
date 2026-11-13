@@ -902,6 +902,22 @@ jobs:
           kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
             --for=condition=Ready --timeout=10m
 
+      - name: Reconcile rollout strategy before upgrade
+        # The live Deployment was created without a strategy, so the API server defaulted it to
+        # RollingUpdate (including its rollingUpdate block). Helm v4 applies server-side, and
+        # switching to strategy type Recreate then conflicts with that leftover block ("may not be
+        # specified when strategy type is 'Recreate'"). Replace the strategy in place first; this
+        # touches only spec.strategy, not the pod template, so nothing restarts.
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          if kubectl get deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "$NAMESPACE" >/dev/null 2>&1; then
+            kubectl patch deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "$NAMESPACE" --type=json \
+              -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+          fi
+
       - name: Deploy chart
         id: deploy-chart
         # :? on the digest: empty would silently deploy the mutable tag, and helm's error points elsewhere.
