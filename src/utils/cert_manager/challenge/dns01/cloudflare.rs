@@ -13,14 +13,8 @@ use crate::cert_manager::challenge::ChallengeError;
 const PROVIDER: &str = "cloudflare";
 const DEFAULT_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
-/// A DNS provider for Cloudflare, authenticated with an API token.
-///
-/// The token needs the `Zone.Zone:Read` and `Zone.DNS:Edit` permissions.
-/// Cloudflare gives no synchronous guarantee that a change is served by its
-/// authoritative name servers when the API call returns, but propagation is
-/// empirically sub-second to a few seconds; we knowingly accept that small
-/// residual race instead of polling, since Cloudflare exposes no
-/// change-status API to confirm it.
+/// The token needs Zone.Zone:Read and Zone.DNS:Edit.
+/// No change-status API, so we accept the short propagation race instead of polling.
 pub struct CloudflareDnsProvider {
     client: Client,
     api_token: SecretString,
@@ -28,7 +22,6 @@ pub struct CloudflareDnsProvider {
     zones: RwLock<Option<Vec<ZoneInfo>>>,
 }
 
-/// Response envelope shared by all Cloudflare API endpoints
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
     success: bool,
@@ -80,7 +73,7 @@ impl CloudflareDnsProvider {
         }
     }
 
-    /// Override the API base URL (used in tests)
+    /// For tests.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = api_base.into().trim_end_matches('/').to_string();
         self
@@ -124,7 +117,6 @@ impl CloudflareDnsProvider {
         Ok(body)
     }
 
-    // Find the zone for the given domain and return its ID
     async fn find_zone(&self, domain: &str) -> Result<String, ChallengeError> {
         self.try_cache_zones().await?;
 
@@ -141,7 +133,6 @@ impl CloudflareDnsProvider {
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
-        // Check if zones are already cached
         let read_guard = self.zones.read().await;
         if read_guard.is_some() {
             return Ok(());
@@ -151,7 +142,6 @@ impl CloudflareDnsProvider {
         let mut all_zones = Vec::new();
         let mut page = 1;
 
-        // try to get all zones
         loop {
             let url = format!("{}/zones", self.api_base);
             let page_param = page.to_string();
@@ -163,7 +153,6 @@ impl CloudflareDnsProvider {
                 all_zones.push(ZoneInfo::new(zone.name, zone.id));
             }
 
-            // Check if there are more pages
             match body.result_info {
                 Some(info) if info.page < info.total_pages => page = info.page + 1,
                 _ => break,
@@ -174,7 +163,6 @@ impl CloudflareDnsProvider {
         Ok(())
     }
 
-    // Find the IDs of TXT records matching the given name and value
     async fn find_txt_records(
         &self,
         zone_id: &str,
@@ -344,7 +332,6 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        // No DELETE mocks: any delete request would fail the test
 
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
@@ -389,7 +376,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // The zone from the second page must be found
         provider(&server)
             .delete_txt_record("status.example.com", "digest-value")
             .await

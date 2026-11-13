@@ -5,7 +5,7 @@
 
 use arc_swap::ArcSwap;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -21,6 +21,7 @@ use thiserror::Error;
 use crate::domain::models::credential::{
     AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
 };
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::ports::{IssuerDirectory, IssuerKeyResolver};
 
 const REGISTRY_SCHEMA: &str = include_str!("../../../docs/schemas/issuers.v1.schema.json");
@@ -35,6 +36,8 @@ pub enum RegistryError {
     },
     #[error("failed to parse issuer registry YAML: {0}")]
     Parse(#[from] serde_saphyr::Error),
+    #[error("failed to serialize issuer registry YAML: {0}")]
+    Serialize(#[from] serde_saphyr::SerializeError),
     #[error("issuer registry schema validation failed: {0}")]
     Schema(String),
     #[error("issuer registry semantic validation failed: {0}")]
@@ -52,6 +55,11 @@ pub struct IssuerRegistry {
     pub issuers: Vec<IssuerEntry>,
     #[serde(default)]
     pub admins: Vec<AdminEntry>,
+    /// Public key records retained after a static key is removed. They are
+    /// never trusted for authentication, but permanently reserve the key id
+    /// and material in the durable revocation history.
+    #[serde(default)]
+    pub revoked_keys: Vec<Arc<RegistryKey>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,8 +68,8 @@ pub struct IssuerEntry {
     pub aggregation_id: uuid::Uuid,
     #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default = "default_tier")]
-    pub tier: String,
+    #[serde(default)]
+    pub tier: IssuerTier,
     #[serde(default)]
     pub disabled: bool,
     pub keys: Vec<Arc<RegistryKey>>,
@@ -94,6 +102,8 @@ pub struct ValidatedRegistry {
     keys: HashMap<String, Arc<ResolvedKey>>,
     issuer_aggregations: HashMap<String, AggregationId>,
     aggregation_issuers: HashMap<AggregationId, String>,
+    materials: HashSet<String>,
+    revoked_kids: HashSet<String>,
 }
 
 /// Atomically replaceable, last-known-good registry used by request handlers.
@@ -103,6 +113,9 @@ pub struct RegistryHandle {
     active: ArcSwap<ValidatedRegistry>,
     aggregation_history: Mutex<AggregationHistory>,
     reload_failures: AtomicU64,
+    write_lock: tokio::sync::Mutex<()>,
+    /// Tier key limits every candidate must respect before it is activated.
+    key_limits: Option<Arc<Tiers>>,
 }
 
 #[derive(Debug, Default)]
@@ -145,7 +158,20 @@ impl RegistryHandle {
             }),
             reload_failures: AtomicU64::new(0),
             active: ArcSwap::from_pointee(registry),
+            write_lock: tokio::sync::Mutex::new(()),
+            key_limits: None,
         }
+    }
+
+    pub async fn write_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().await
+    }
+
+    /// Enforce each tier's `max_keys` on every candidate, the loaded registry
+    /// included, through [`Self::validate_candidate`].
+    pub fn with_key_limits(mut self, tiers: Arc<Tiers>) -> Self {
+        self.key_limits = Some(tiers);
+        self
     }
 
     pub fn snapshot(&self) -> Arc<ValidatedRegistry> {
@@ -218,6 +244,10 @@ impl RegistryHandle {
                 )));
             }
         }
+        drop(history);
+        if let Some(tiers) = &self.key_limits {
+            registry.validate_key_limits(tiers, time::OffsetDateTime::now_utc())?;
+        }
         Ok(())
     }
 
@@ -226,8 +256,9 @@ impl RegistryHandle {
     }
 }
 
+#[async_trait::async_trait]
 impl IssuerKeyResolver for RegistryHandle {
-    fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
+    async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError> {
         self.resolve_with_reason(kid)
     }
 }
@@ -244,7 +275,85 @@ impl IssuerDirectory for RegistryHandle {
     }
 }
 
+impl IssuerEntry {
+    /// Keys that still count against the tier's `max_keys`: every key whose
+    /// validity window has not ended, including keys staged for rotation.
+    pub fn active_key_count(&self, now: time::OffsetDateTime) -> usize {
+        self.keys
+            .iter()
+            .filter(|key| parsed_window(key.not_after.as_deref()).is_none_or(|end| now < end))
+            .count()
+    }
+}
+
 impl IssuerRegistry {
+    /// Convert durable legacy credential rows into an operator-reviewed registry draft.
+    pub fn export_legacy_issuers(
+        credentials: impl IntoIterator<Item = (String, String, Value)>,
+    ) -> Result<String, RegistryError> {
+        let mut issuers = Vec::new();
+        let mut errors = Vec::new();
+        for (id, aggregation_id, key) in credentials {
+            let mut issuer_errors = Vec::new();
+            if uuid::Uuid::parse_str(&aggregation_id).is_err() {
+                issuer_errors.push(format!("issuer `{id}` has an invalid aggregation ID"));
+            }
+            let jwk: Option<jsonwebtoken::jwk::Jwk> = match serde_json::from_value(key.clone()) {
+                Ok(jwk) => Some(jwk),
+                Err(err) => {
+                    issuer_errors.push(format!("issuer `{id}` has an invalid public JWK: {err}"));
+                    None
+                }
+            };
+            let kid = jwk.and_then(|jwk| {
+                match jwk.thumbprint(jsonwebtoken::jwk::ThumbprintHash::SHA256) {
+                    Ok(kid) => Some(kid),
+                    Err(err) => {
+                        issuer_errors.push(format!("issuer `{id}` JWK thumbprint failed: {err}"));
+                        None
+                    }
+                }
+            });
+            let alg = key.get("alg").and_then(Value::as_str).map(str::to_owned);
+            if alg.is_none() {
+                issuer_errors.push(format!("issuer `{id}` public key has no alg"));
+            }
+            let mut public_key = key;
+            if let Some(object) = public_key.as_object_mut() {
+                for field in ["kid", "alg", "use", "key_ops"] {
+                    object.remove(field);
+                }
+            } else {
+                issuer_errors.push(format!("issuer `{id}` public key is not an object"));
+            }
+            if !issuer_errors.is_empty() {
+                errors.extend(issuer_errors);
+                continue;
+            }
+            if let (Some(kid), Some(alg)) = (kid, alg) {
+                issuers.push(serde_json::json!({
+                    "id": id,
+                    "aggregation_id": aggregation_id,
+                    "tier": "standard",
+                    "keys": [{"kid": kid, "alg": alg, "jwk": public_key}],
+                }));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(RegistryError::Semantic(format!(
+                "issuer export found {} problem(s):\n - {}",
+                errors.len(),
+                errors.join("\n - ")
+            )));
+        }
+        serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": issuers,
+            "admins": [],
+        }))
+        .map_err(RegistryError::Serialize)
+    }
+
     pub fn from_file(path: impl AsRef<Path>) -> Result<ValidatedRegistry, RegistryError> {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|source| RegistryError::Read {
@@ -281,6 +390,7 @@ impl IssuerRegistry {
                         principal: Principal::Issuer {
                             id: issuer.id.clone(),
                             aggregation_id,
+                            tier: issuer.tier,
                         },
                         public_key: Arc::new(validated_public_key(key)?),
                         enabled: !issuer.disabled,
@@ -307,12 +417,35 @@ impl IssuerRegistry {
             }
         }
 
-        Ok(ValidatedRegistry {
+        let revoked_kids = registry
+            .revoked_keys
+            .iter()
+            .map(|key| key.kid.clone())
+            .collect();
+        let validated = ValidatedRegistry {
             registry,
             fingerprint: hex::encode(Sha256::digest(content.as_bytes())),
             keys,
             issuer_aggregations,
             aggregation_issuers,
+            materials: HashSet::new(),
+            revoked_kids,
+        };
+        Ok(ValidatedRegistry {
+            materials: validated
+                .all_principal_keys()
+                .into_iter()
+                .map(|(_, _, material)| material)
+                .chain(
+                    validated
+                        .registry
+                        .revoked_keys
+                        .iter()
+                        .map(|key| canonical_public_material(&key.jwk))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .collect(),
+            ..validated
         })
     }
 }
@@ -323,6 +456,14 @@ impl ValidatedRegistry {
     }
     pub fn resolve(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
         self.keys.get(kid).cloned()
+    }
+
+    /// Resolve a key only when its registry principal is an admin.
+    pub fn resolve_admin_key(&self, kid: &str) -> Option<Arc<ResolvedKey>> {
+        self.keys
+            .get(kid)
+            .filter(|key| matches!(&key.principal, Principal::Admin { .. }))
+            .cloned()
     }
 
     /// Resolve a key that is active at the supplied Unix timestamp.
@@ -372,6 +513,10 @@ impl ValidatedRegistry {
         self.registry.admins.iter().find(|admin| admin.id == id)
     }
 
+    pub fn admins(&self) -> &[AdminEntry] {
+        &self.registry.admins
+    }
+
     pub fn has_admin_scope(&self, id: &str, scope: &str) -> bool {
         self.admin(id)
             .is_some_and(|admin| !admin.disabled && admin.scopes.iter().any(|value| value == scope))
@@ -379,6 +524,90 @@ impl ValidatedRegistry {
 
     pub fn key_count(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Every (principal id, kid, key material) across issuers and admins, so
+    /// cross-source uniqueness checks cannot miss admin credentials. Key
+    /// material is the canonical per-type string (RFC 7638 §7).
+    pub fn all_principal_keys(&self) -> Vec<(&str, &str, String)> {
+        let mut out = Vec::new();
+        for issuer in &self.registry.issuers {
+            for key in &issuer.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((issuer.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        for admin in &self.registry.admins {
+            for key in &admin.keys {
+                if let Ok(material) =
+                    crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                {
+                    out.push((admin.id.as_str(), key.kid.as_str(), material));
+                }
+            }
+        }
+        out
+    }
+
+    /// Revoked key identifiers and normalized public-key materials from this
+    /// registry snapshot, ready to persist in the shared trust store.
+    pub fn revoked_keys(
+        &self,
+    ) -> Result<Vec<crate::domain::ports::StaticKeyRevocation>, RegistryError> {
+        self.registry
+            .revoked_keys
+            .iter()
+            .map(|key| {
+                let material = crate::domain::models::credential::canonical_jwk_material(&key.jwk)
+                    .map_err(|error| RegistryError::Semantic(error.to_string()))?;
+                Ok(crate::domain::ports::StaticKeyRevocation {
+                    kid: key.kid.clone(),
+                    material,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether any principal (issuer or admin) carries this id.
+    pub fn has_principal_id(&self, id: &str) -> bool {
+        self.registry.issuers.iter().any(|i| i.id == id)
+            || self.registry.admins.iter().any(|a| a.id == id)
+    }
+
+    /// Whether any principal's key material matches `material`. Precomputed in
+    /// `from_yaml`, so the resolver's per-request recheck is O(1).
+    pub fn has_key_material(&self, material: &str) -> bool {
+        self.materials.contains(material)
+    }
+
+    /// Whether the current static registry reserves this revoked key id.
+    pub fn has_revoked_kid(&self, kid: &str) -> bool {
+        self.revoked_kids.contains(kid)
+    }
+
+    /// Rejects a registry in which an issuer holds more keys than its tier's
+    /// `max_keys`. Keys only stop counting when `not_after` passes, so a
+    /// registry accepted at `now` stays within the limit afterwards.
+    pub fn validate_key_limits(
+        &self,
+        tiers: &Tiers,
+        now: time::OffsetDateTime,
+    ) -> Result<(), RegistryError> {
+        for issuer in &self.registry.issuers {
+            let keys = issuer.active_key_count(now);
+            let max_keys = tiers.get(issuer.tier).max_keys;
+            if keys > max_keys {
+                return Err(RegistryError::Semantic(format!(
+                    "issuer `{}` holds {keys} keys whose `not_after` has not passed, more than \
+                     tiers.{}.max_keys ({max_keys})",
+                    issuer.id, issuer.tier
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -398,6 +627,34 @@ fn validate_schema(value: &Value) -> Result<(), RegistryError> {
         return Err(RegistryError::Schema(error.to_string()));
     }
     Ok(())
+}
+
+pub(crate) fn validate_hosted_key(
+    kid: &str,
+    alg: &str,
+    jwk: Value,
+) -> Result<PublicJwk, RegistryError> {
+    let schema: Value = serde_json::from_str(REGISTRY_SCHEMA)
+        .map_err(|err| RegistryError::SchemaDefinition(err.to_string()))?;
+    let key_schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/key",
+        "$defs": schema["$defs"],
+    });
+    let compiled = jsonschema::validator_for(&key_schema)
+        .map_err(|err| RegistryError::SchemaDefinition(err.to_string()))?;
+    let key = RegistryKey {
+        kid: kid.to_owned(),
+        alg: alg.to_owned(),
+        jwk,
+        not_before: None,
+        not_after: None,
+    };
+    let value = serde_json::json!({"kid": kid, "alg": alg, "jwk": key.jwk});
+    if let Some(error) = compiled.iter_errors(&value).next() {
+        return Err(RegistryError::Schema(error.to_string()));
+    }
+    validated_public_key(&key)
 }
 
 fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
@@ -440,6 +697,12 @@ fn validate_semantics(registry: &IssuerRegistry) -> Result<(), RegistryError> {
             &mut materials,
         )?;
     }
+    validate_keys(
+        "revoked_keys",
+        registry.revoked_keys.iter().map(Arc::as_ref),
+        &mut keys,
+        &mut materials,
+    )?;
     Ok(())
 }
 
@@ -576,66 +839,11 @@ fn validate_ec_point(jwk: &Value) -> Result<(), RegistryError> {
     Ok(())
 }
 
+/// Canonical string form of a JWK's normalized key parameters (RFC 7638 §7),
+/// per-type members decoded and rendered byte-for-byte, member order ignored.
+/// Uniqueness checks compare this, never a thumbprint.
 fn canonical_public_material(jwk: &Value) -> Result<String, RegistryError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let object = jwk
-        .as_object()
-        .ok_or_else(|| RegistryError::Semantic("JWK must be an object".into()))?;
-    let kty = object
-        .get("kty")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RegistryError::Semantic("JWK is missing kty".into()))?;
-    let string = |field: &str| {
-        object
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| RegistryError::Semantic(format!("JWK is missing {field}")))
-    };
-    let decode = |field: &str| {
-        URL_SAFE_NO_PAD
-            .decode(string(field)?)
-            .map_err(|error| RegistryError::Semantic(format!("invalid JWK {field}: {error}")))
-    };
-    match kty {
-        "EC" => Ok(format!(
-            "EC|{}|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?),
-            hex::encode(decode("y")?)
-        )),
-        "RSA" => {
-            let mut modulus = decode("n")?;
-            let mut exponent = decode("e")?;
-            let first_modulus_byte = modulus
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(modulus.len());
-            let first_exponent_byte = exponent
-                .iter()
-                .position(|byte| *byte != 0)
-                .unwrap_or(exponent.len());
-            modulus.drain(..first_modulus_byte);
-            exponent.drain(..first_exponent_byte);
-            Ok(format!(
-                "RSA|{}|{}",
-                hex::encode(modulus),
-                hex::encode(exponent)
-            ))
-        }
-        "OKP" => Ok(format!(
-            "OKP|{}|{}",
-            string("crv")?,
-            hex::encode(decode("x")?)
-        )),
-        _ => Err(RegistryError::Semantic(format!(
-            "unsupported JWK kty `{kty}`"
-        ))),
-    }
-}
-
-fn default_tier() -> String {
-    "standard".to_string()
+    crate::domain::models::credential::canonical_jwk_material(jwk).map_err(RegistryError::Semantic)
 }
 
 fn key_is_active(key: &RegistryKey, now: time::OffsetDateTime) -> bool {
@@ -671,6 +879,97 @@ mod tests {
     }
 
     #[test]
+    fn resolved_issuer_keys_carry_the_registry_tier() {
+        let kid = "QoRTRSkzlInq0eOmPqJwmZ5OS9pxkN_SIf5KgZP2F8M";
+        let tier_of = |yaml: &str| match IssuerRegistry::from_yaml(yaml)
+            .unwrap()
+            .resolve(kid)
+            .unwrap()
+            .principal
+        {
+            Principal::Issuer { tier, .. } => tier,
+            Principal::Admin { .. } => panic!("expected an issuer key"),
+        };
+        assert_eq!(tier_of(VALID), IssuerTier::Standard);
+        assert_eq!(
+            tier_of(&VALID.replace("tier: standard", "tier: sandbox")),
+            IssuerTier::Sandbox
+        );
+        assert_eq!(
+            tier_of(&VALID.replace("    tier: standard\n", "")),
+            IssuerTier::Standard
+        );
+    }
+
+    #[test]
+    fn rejects_an_issuer_holding_more_keys_than_its_tier_allows() {
+        let at = |rfc3339: &str| {
+            time::OffsetDateTime::parse(rfc3339, &time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        // The first example issuer holds two keys until 2026-11-15.
+        let registry = IssuerRegistry::from_yaml(VALID).unwrap();
+        let mut tiers = crate::test_utils::test_tiers();
+        tiers.standard.max_keys = 2;
+        assert!(
+            registry
+                .validate_key_limits(&tiers, at("2026-10-20T00:00:00Z"))
+                .is_ok()
+        );
+
+        tiers.standard.max_keys = 1;
+        let err = registry
+            .validate_key_limits(&tiers, at("2026-10-20T00:00:00Z"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tiers.standard.max_keys (1)"), "{err}");
+        // Once the retiring key's `not_after` passes it no longer counts.
+        assert!(
+            registry
+                .validate_key_limits(&tiers, at("2026-11-15T00:00:00Z"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_tier() {
+        let yaml = VALID.replace("tier: standard", "tier: premium");
+        assert!(IssuerRegistry::from_yaml(&yaml).is_err());
+    }
+
+    #[test]
+    fn active_key_count_excludes_ended_keys() {
+        let registry = IssuerRegistry::from_yaml(VALID).unwrap();
+        let issuer = registry
+            .issuer("6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00")
+            .unwrap();
+        let at = |rfc3339: &str| {
+            time::OffsetDateTime::parse(rfc3339, &time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        // A key staged for rotation already counts; one past `not_after` does not.
+        assert_eq!(issuer.active_key_count(at("2026-10-01T00:00:00Z")), 2);
+        assert_eq!(issuer.active_key_count(at("2026-11-15T00:00:00Z")), 1);
+    }
+
+    #[test]
+    fn legacy_export_reports_every_invalid_key() {
+        let mut key: Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        key.as_object_mut().unwrap().remove("alg");
+        let error = IssuerRegistry::export_legacy_issuers([
+            ("issuer-one".into(), "invalid-id".into(), key.clone()),
+            ("issuer-two".into(), uuid::Uuid::new_v4().to_string(), key),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("issuer-one"));
+        assert!(error.contains("issuer-two"));
+        assert!(error.contains("issuer `issuer-one` has an invalid aggregation ID"));
+        assert!(error.contains("3 problem(s)"));
+    }
+
+    #[test]
     fn rejects_duplicate_kids() {
         let yaml = VALID.replace(
             "CO8SkimGYd7niQ8KCHGbmaO7KFA3ZvNwwYLTYLqyaZ8",
@@ -678,6 +977,37 @@ mod tests {
         );
         let error = IssuerRegistry::from_yaml(&yaml).unwrap_err();
         assert!(error.to_string().contains("duplicate kid"));
+    }
+
+    #[test]
+    fn static_key_tombstone_reserves_its_kid_and_material() {
+        let mut document: Value = serde_saphyr::from_str(VALID).unwrap();
+        let revoked = document["issuers"][0]["keys"][0].take();
+        document["issuers"][0]["keys"] =
+            serde_json::json!([document["issuers"][0]["keys"][1].take()]);
+        document["revoked_keys"] = serde_json::json!([revoked.clone()]);
+
+        let yaml = serde_saphyr::to_string(&document).unwrap();
+        let registry = IssuerRegistry::from_yaml(&yaml).unwrap();
+        let kid = revoked["kid"].as_str().unwrap();
+        let material = canonical_public_material(&revoked["jwk"]).unwrap();
+        assert!(registry.resolve(kid).is_none());
+        assert!(registry.has_revoked_kid(kid));
+        assert!(registry.has_key_material(&material));
+
+        let mut reuses_kid = document.clone();
+        reuses_kid["issuers"][0]["keys"] = serde_json::json!([revoked.clone()]);
+        let error =
+            IssuerRegistry::from_yaml(&serde_saphyr::to_string(&reuses_kid).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("duplicate kid"));
+
+        let mut reuses_material = document;
+        let mut other_key = revoked;
+        other_key["kid"] = Value::String("different-kid".into());
+        reuses_material["issuers"][0]["keys"] = serde_json::json!([other_key]);
+        let error = IssuerRegistry::from_yaml(&serde_saphyr::to_string(&reuses_material).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("key material is reused"));
     }
 
     #[test]
@@ -753,6 +1083,36 @@ mod tests {
         std::fs::write(file.path(), "version: invalid").unwrap();
         assert!(handle.reload().is_err());
         assert_eq!(handle.snapshot().key_count(), 3);
+    }
+
+    #[test]
+    fn handle_with_key_limits_refuses_a_registry_over_its_tier_key_limit() {
+        let issuer = "6f1c2a9e-0b7d-4c1e-9a53-2f8d7e4b1c00";
+        // Without `not_after` both of the issuer's keys count at any time.
+        let two_keys = VALID.replace("        not_after: \"2026-11-15T00:00:00Z\"\n", "");
+        let mut tiers = crate::test_utils::test_tiers();
+        tiers.standard.max_keys = 2;
+        tiers.sandbox.max_keys = 1;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &two_keys).unwrap();
+        let handle = RegistryHandle::load(file.path())
+            .unwrap()
+            .with_key_limits(Arc::new(tiers));
+        handle.validate_candidate(&handle.snapshot()).unwrap();
+
+        std::fs::write(
+            file.path(),
+            two_keys.replace("tier: standard", "tier: sandbox"),
+        )
+        .unwrap();
+        let err = handle.reload().unwrap_err().to_string();
+        assert!(err.contains("tiers.sandbox.max_keys (1)"), "{err}");
+        assert_eq!(
+            handle.snapshot().issuer(issuer).unwrap().tier,
+            IssuerTier::Standard,
+            "a refused reload keeps the previous registry"
+        );
     }
 
     #[test]

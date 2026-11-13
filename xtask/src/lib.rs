@@ -10,7 +10,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{OptionExt, Result, WrapErr, bail, ensure};
 use sha2::{Digest, Sha256};
 
-/// Parses and executes an xtask command.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let workspace = workspace_root()?;
@@ -111,6 +110,16 @@ enum IssuerTask {
         #[arg(long, default_value = "ES256")]
         alg: String,
     },
+    /// Export stored issuer identities as a registry draft.
+    Export {
+        #[arg(long)]
+        database_url: Option<String>,
+        #[arg(long, default_value = "issuers.yaml")]
+        output: PathBuf,
+        /// Replace the output file if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn issuer_command(command: IssuerTask) -> Result<()> {
@@ -167,6 +176,38 @@ fn issuer_command(command: IssuerTask) -> Result<()> {
                 .ok_or_eyre("issuer keys must be a sequence")?
                 .push(key.clone());
             write_registry_yaml(&file, root, RegistryInsertion::Key { issuer_index, key })
+        }
+        IssuerTask::Export {
+            database_url,
+            output,
+            force,
+        } => {
+            let workspace = workspace_root()?;
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut command = Command::new(cargo);
+            command.args([
+                "run",
+                "--quiet",
+                "--features",
+                "postgres,mysql,sqlite",
+                "--bin",
+                "status-list-server",
+                "--",
+                "issuer-export",
+            ]);
+            if let Some(database_url) = database_url {
+                command.arg("--database-url").arg(database_url);
+            }
+            command.arg("--output").arg(&output);
+            if force {
+                command.arg("--force");
+            }
+            let status = command
+                .current_dir(workspace)
+                .status()
+                .wrap_err("run issuer registry exporter")?;
+            ensure!(status.success(), "issuer registry export failed");
+            Ok(())
         }
     }
 }
@@ -647,8 +688,7 @@ fn lint_specs() -> [(&'static str, CommandSpec); 4] {
             ),
         ),
         ("audit", CommandSpec::new("cargo", ["audit"])),
-        // Invoke the plugin binary directly. Older cargo-machete releases parse
-        // nested `cargo machete` arguments as paths when xtask itself is run by Cargo.
+        // Call cargo-machete directly: older releases misparse args when nested under Cargo.
         (
             "machete",
             CommandSpec::new("cargo-machete", ["--with-metadata"]),

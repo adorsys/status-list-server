@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{collections::HashMap, fmt, marker::PhantomData};
+use std::{collections::HashMap, fmt, marker::PhantomData, num::NonZeroU32, time::Duration};
 
 use config::builder::DefaultState;
 use config::{Config as ConfigLib, ConfigBuilder, ConfigError, Environment};
@@ -9,6 +9,7 @@ use serde_aux::field_attributes::deserialize_vec_from_string_or_vec;
 use url::Url;
 
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
+use crate::domain::models::tier::{TierLimits, Tiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,13 +49,10 @@ impl DatabaseBackend {
         }
     }
 
-    /// Returns a human-readable description of the expected URL scheme(s).
     pub fn expected_scheme_description(&self) -> &'static str {
         self.scheme().description
     }
 
-    /// Returns the lowercase name matching the config value (`"memory"`, `"postgres"`,
-    /// `"mysql"`, `"sqlite"`), useful for user-facing messages.
     pub fn as_str(&self) -> &'static str {
         match self {
             DatabaseBackend::Memory => "memory",
@@ -64,12 +62,36 @@ impl DatabaseBackend {
         }
     }
 
-    /// Validates that the given URL matches the expected scheme for this backend.
     pub fn validate_url_scheme(&self, url: &str) -> bool {
         self.scheme()
             .prefixes
             .iter()
             .any(|prefix| url.starts_with(prefix))
+    }
+}
+
+/// Deployment profile (ADR 0002). In the `private` profile only issuers listed
+/// in the operator registry are trusted. In the `hosted` profile the server
+/// also trusts issuer keys held in the SQL hosted issuer store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerProfile {
+    #[default]
+    Private,
+    Hosted,
+}
+
+impl ServerProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServerProfile::Private => "private",
+            ServerProfile::Hosted => "hosted",
+        }
+    }
+
+    /// Whether the hosted deployment profile is selected.
+    pub fn is_hosted(self) -> bool {
+        self == ServerProfile::Hosted
     }
 }
 
@@ -90,16 +112,10 @@ impl CacheBackend {
     }
 }
 
-/// Recognized values of the APP_ENV environment variable
 pub const ENV_PRODUCTION: &str = "production";
 pub const ENV_DEVELOPMENT: &str = "development";
 
-/// Normalize the raw `APP_ENV` environment variable to the canonical
-/// [`ENV_PRODUCTION`] or [`ENV_DEVELOPMENT`] value. Any casing, surrounding
-/// whitespace, and both `production`/`prod` count as a production profile;
-/// anything else is treated as development. Callers outside config that need
-/// the deployment profile must use this rather than comparing the raw value,
-/// so the guard matches what config itself decided.
+/// Use this instead of reading `APP_ENV` directly so callers agree with config.
 pub fn normalize_app_env() -> &'static str {
     match classify_app_env(&std::env::var("APP_ENV").unwrap_or_default()) {
         TelemetryEnvironment::Production => ENV_PRODUCTION,
@@ -107,16 +123,7 @@ pub fn normalize_app_env() -> &'static str {
     }
 }
 
-/// The single authoritative mapping from a raw `APP_ENV`-style value to a
-/// [`TelemetryEnvironment`].
-///
-/// It is lenient by design: the value is trimmed and matched case-insensitively,
-/// and anything that is not an explicit production spelling (including an unset
-/// or empty value) falls back to development. Production accepts both
-/// `production` and `prod`; this is the one place that spelling decision lives.
-///
-/// Prefer this over comparing a raw `APP_ENV` string against a literal, which
-/// silently misses `prod`/`PROD`/`Production` spellings.
+/// The only place that decides which `APP_ENV` spellings mean production.
 pub fn classify_app_env(raw: &str) -> TelemetryEnvironment {
     match raw.trim().to_ascii_lowercase().as_str() {
         "production" | "prod" => TelemetryEnvironment::Production,
@@ -136,35 +143,161 @@ pub struct Config {
     pub token_bytes_cache: TokenBytesCacheConfig,
     pub status_list: StatusListConfig,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
     pub rate_limit: RateLimitConfig,
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub tiers: TiersConfig,
     pub telemetry: TelemetryConfig,
     pub watcher: WatcherConfig,
 }
 
-/// Background file-watcher configuration for rotated mounted secrets.
+/// Watches mounted secret files for rotation.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatcherConfig {
     pub poll_interval_secs: u64,
 }
 
-/// Rate-limit configuration with strict (writes) and permissive (reads) tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientIpSource {
+    ConnectInfo,
+    RightmostXForwardedFor,
+}
+
+/// Per-client rate limits. `strict_*` is the management authentication
+/// gate, which counts rejected authentications only; `admission_*` bounds every
+/// management request before `auth` does any work; `permissive_*` covers
+/// public reads; `admin_*` covers the admin issuer API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub strict_burst_size: u32,
     pub strict_period_secs: u64,
+    pub admission_burst_size: u32,
+    pub admission_per_second: u32,
     pub permissive_burst_size: u32,
-    pub permissive_period_secs: u64,
+    /// Set as `permissive_period_secs`, which may be a fraction of a second.
+    #[serde(
+        rename = "permissive_period_secs",
+        deserialize_with = "deserialize_permissive_period"
+    )]
+    pub permissive_period: Duration,
+    pub admin_burst_size: u32,
+    pub admin_period_secs: u64,
+    /// Proxies (IP addresses or CIDR networks) whose `X-Forwarded-For` the
+    /// rate limits believe with `rightmost_x_forwarded_for`.
+    #[serde(default, deserialize_with = "deserialize_trimmed_list")]
+    pub trusted_proxies: Vec<String>,
+    /// Required in production; unset elsewhere, it follows `trusted_proxies`.
+    #[serde(default)]
+    pub client_ip_source: Option<ClientIpSource>,
 }
 
-/// Hard bounds on incoming requests and persisted status lists.
+impl RateLimitConfig {
+    pub(crate) fn resolved_client_ip_source(&self) -> ClientIpSource {
+        self.client_ip_source
+            .unwrap_or(if self.trusted_proxies.is_empty() {
+                ClientIpSource::ConnectInfo
+            } else {
+                ClientIpSource::RightmostXForwardedFor
+            })
+    }
+
+    fn validate_client_ip_source(
+        &self,
+        environment: TelemetryEnvironment,
+    ) -> Result<(), ConfigError> {
+        let message = match self.client_ip_source {
+            None if environment.is_production() => {
+                "rate_limit.client_ip_source is required in production: set \
+                 APP_RATE_LIMIT__CLIENT_IP_SOURCE to connect_info when clients connect to this \
+                 server directly, or to rightmost_x_forwarded_for and list the proxies in front \
+                 of it in APP_RATE_LIMIT__TRUSTED_PROXIES"
+            }
+            Some(ClientIpSource::RightmostXForwardedFor)
+                if environment.is_production() && self.trusted_proxies.is_empty() =>
+            {
+                "rate_limit.client_ip_source=rightmost_x_forwarded_for needs \
+                 rate_limit.trusted_proxies in production: list the proxies in front of this \
+                 server in APP_RATE_LIMIT__TRUSTED_PROXIES, or set \
+                 APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info when clients connect directly"
+            }
+            Some(ClientIpSource::ConnectInfo) if !self.trusted_proxies.is_empty() => {
+                "rate_limit.trusted_proxies has no effect with \
+                 rate_limit.client_ip_source=connect_info, which never reads X-Forwarded-For: \
+                 set it to rightmost_x_forwarded_for, or clear APP_RATE_LIMIT__TRUSTED_PROXIES"
+            }
+            _ => return Ok(()),
+        };
+        Err(ConfigError::Message(message.to_string()))
+    }
+
+    /// `trusted_proxies`, parsed. Loading fails when any entry is malformed.
+    pub(crate) fn trusted_proxy_networks(&self) -> Result<Vec<ipnet::IpNet>, ConfigError> {
+        self.trusted_proxies
+            .iter()
+            .map(|value| {
+                value
+                    .parse::<ipnet::IpNet>()
+                    .or_else(|_| {
+                        // A bare address is a single host. An IPv4-mapped one
+                        // is stored as IPv4, as peers are compared.
+                        value
+                            .parse::<std::net::IpAddr>()
+                            .map(|ip| ipnet::IpNet::from(ip.to_canonical()))
+                    })
+                    .map_err(|_| {
+                        ConfigError::Message(format!(
+                            "rate_limit.trusted_proxies: `{value}` is not an IP address or CIDR network"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    /// The admission bound is shared by every issuer behind one address, so it
+    /// must never refuse a lone standard issuer before its own budget does.
+    fn validate_admission(&self, standard: &TierLimits) -> Result<(), ConfigError> {
+        if self.admission_burst_size == 0 || self.admission_per_second == 0 {
+            return Err(ConfigError::Message(
+                "rate_limit.admission_burst_size and rate_limit.admission_per_second must be \
+                 greater than 0"
+                    .to_string(),
+            ));
+        }
+        if self.admission_burst_size < standard.write_burst_size.get() {
+            return Err(ConfigError::Message(format!(
+                "rate_limit.admission_burst_size ({}) must be at least \
+                 tiers.standard.write_burst_size ({})",
+                self.admission_burst_size, standard.write_burst_size
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_permissive_period<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    Duration::try_from_secs_f64(value)
+        .ok()
+        .filter(|period| value.is_finite() && value > 0.0 && !period.is_zero())
+        .ok_or_else(|| {
+            serde::de::Error::custom(
+                "rate_limit.permissive_period_secs must be a finite number of seconds above 0 \
+                 that does not round to zero nanoseconds",
+            )
+        })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LimitsConfig {
     pub max_body_size_bytes: usize,
     pub max_status_index: i32,
     pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
-    /// Maximum status lists one issuer may publish.
     pub max_lists_per_issuer: u64,
     /// Lets pods start with the quota off while upgrading from a release without it.
     pub list_quota_transition: bool,
@@ -191,6 +324,246 @@ impl LimitsConfig {
     }
 }
 
+/// Per-tier issuer limits (`tiers.standard.*`, `tiers.sandbox.*`). Unset
+/// values take the tier's default; see [`TiersConfig::resolve`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TiersConfig {
+    #[serde(default)]
+    pub standard: TierConfig,
+    #[serde(default)]
+    pub sandbox: TierConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TierConfig {
+    #[serde(default)]
+    pub max_lists: Option<u64>,
+    #[serde(default)]
+    pub max_status_index: Option<i32>,
+    #[serde(default)]
+    pub max_statuses_per_request: Option<usize>,
+    #[serde(default)]
+    pub max_keys: Option<usize>,
+    #[serde(default)]
+    pub write_burst_size: Option<u32>,
+    #[serde(default)]
+    pub write_period_secs: Option<u64>,
+    #[serde(default)]
+    pub max_lifetime_secs: Option<u64>,
+}
+
+const STANDARD_MAX_KEYS: usize = 5;
+const STANDARD_WRITE_BURST_SIZE: u32 = 100;
+const STANDARD_WRITE_PERIOD_SECS: u64 = 1;
+const SANDBOX_MAX_LISTS: u64 = 10;
+const SANDBOX_MAX_STATUS_INDEX: i32 = 10_000;
+const SANDBOX_MAX_STATUSES_PER_REQUEST: usize = 1_000;
+const SANDBOX_MAX_KEYS: usize = 2;
+const SANDBOX_WRITE_BURST_SIZE: u32 = 10;
+const SANDBOX_WRITE_PERIOD_SECS: u64 = 6;
+const SANDBOX_MAX_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+
+impl TiersConfig {
+    /// Fill defaults and check that every tier stays within the global
+    /// `limits.*` caps and that sandbox is never looser than standard.
+    ///
+    /// Standard defaults to the `limits.*` values. Unset sandbox values are
+    /// clamped to the resolved standard value so lowering a global cap never
+    /// makes a default invalid; explicitly set values are validated, never
+    /// clamped.
+    pub fn resolve(&self, limits: &LimitsConfig) -> Result<Tiers, ConfigError> {
+        if self.standard.max_lifetime_secs.is_some() {
+            return Err(ConfigError::Message(
+                "tiers.standard.max_lifetime_secs is not supported".into(),
+            ));
+        }
+        let sandbox_max_lifetime_secs = self
+            .sandbox
+            .max_lifetime_secs
+            .unwrap_or(SANDBOX_MAX_LIFETIME_SECS);
+        if sandbox_max_lifetime_secs == 0
+            || sandbox_max_lifetime_secs > i64::MAX as u64
+            || time::OffsetDateTime::now_utc()
+                .checked_add(time::Duration::seconds(sandbox_max_lifetime_secs as i64))
+                .is_none()
+        {
+            return Err(ConfigError::Message(
+                "tiers.sandbox.max_lifetime_secs must be a positive, representable lifetime".into(),
+            ));
+        }
+        let standard = RawTier {
+            max_lists: self
+                .standard
+                .max_lists
+                .unwrap_or(limits.max_lists_per_issuer),
+            max_status_index: self
+                .standard
+                .max_status_index
+                .unwrap_or(limits.max_status_index),
+            max_statuses_per_request: self
+                .standard
+                .max_statuses_per_request
+                .unwrap_or(limits.max_statuses_per_request),
+            max_keys: self.standard.max_keys.unwrap_or(STANDARD_MAX_KEYS),
+            write_burst_size: self
+                .standard
+                .write_burst_size
+                .unwrap_or(STANDARD_WRITE_BURST_SIZE),
+            write_period_secs: self
+                .standard
+                .write_period_secs
+                .unwrap_or(STANDARD_WRITE_PERIOD_SECS),
+        };
+        let sandbox = RawTier {
+            max_lists: self
+                .sandbox
+                .max_lists
+                .unwrap_or(SANDBOX_MAX_LISTS.min(standard.max_lists)),
+            max_status_index: self
+                .sandbox
+                .max_status_index
+                .unwrap_or(SANDBOX_MAX_STATUS_INDEX.min(standard.max_status_index)),
+            max_statuses_per_request: self
+                .sandbox
+                .max_statuses_per_request
+                .unwrap_or(SANDBOX_MAX_STATUSES_PER_REQUEST.min(standard.max_statuses_per_request)),
+            max_keys: self
+                .sandbox
+                .max_keys
+                .unwrap_or(SANDBOX_MAX_KEYS.min(standard.max_keys)),
+            write_burst_size: self
+                .sandbox
+                .write_burst_size
+                .unwrap_or(SANDBOX_WRITE_BURST_SIZE.min(standard.write_burst_size)),
+            write_period_secs: self
+                .sandbox
+                .write_period_secs
+                .unwrap_or(SANDBOX_WRITE_PERIOD_SECS.max(standard.write_period_secs)),
+        };
+
+        standard.validate_caps("standard", limits)?;
+        sandbox.validate_caps("sandbox", limits)?;
+        sandbox.validate_within(&standard)?;
+
+        Ok(Tiers {
+            standard: standard.into_limits(),
+            sandbox: sandbox.into_limits(),
+            sandbox_max_lifetime: Duration::from_secs(sandbox_max_lifetime_secs),
+        })
+    }
+}
+
+struct RawTier {
+    max_lists: u64,
+    max_status_index: i32,
+    max_statuses_per_request: usize,
+    max_keys: usize,
+    write_burst_size: u32,
+    write_period_secs: u64,
+}
+
+impl RawTier {
+    fn validate_caps(&self, tier: &str, limits: &LimitsConfig) -> Result<(), ConfigError> {
+        let positive = [
+            ("max_lists", self.max_lists > 0),
+            ("max_status_index", self.max_status_index > 0),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request > 0,
+            ),
+            ("max_keys", self.max_keys > 0),
+            ("write_burst_size", self.write_burst_size > 0),
+            ("write_period_secs", self.write_period_secs > 0),
+        ];
+        if let Some((key, _)) = positive.iter().find(|(_, ok)| !ok) {
+            return Err(ConfigError::Message(format!(
+                "tiers.{tier}.{key} must be greater than 0"
+            )));
+        }
+        let caps = [
+            (
+                "max_lists",
+                self.max_lists,
+                "limits.max_lists_per_issuer",
+                limits.max_lists_per_issuer,
+            ),
+            (
+                "max_status_index",
+                self.max_status_index as u64,
+                "limits.max_status_index",
+                limits.max_status_index.max(0) as u64,
+            ),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request as u64,
+                "limits.max_statuses_per_request",
+                limits.max_statuses_per_request as u64,
+            ),
+        ];
+        for (key, value, cap_key, cap) in caps {
+            if value > cap {
+                return Err(ConfigError::Message(format!(
+                    "tiers.{tier}.{key} ({value}) must not exceed {cap_key} ({cap})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_within(&self, standard: &RawTier) -> Result<(), ConfigError> {
+        let not_above = [
+            ("max_lists", self.max_lists, standard.max_lists),
+            (
+                "max_status_index",
+                self.max_status_index as u64,
+                standard.max_status_index as u64,
+            ),
+            (
+                "max_statuses_per_request",
+                self.max_statuses_per_request as u64,
+                standard.max_statuses_per_request as u64,
+            ),
+            ("max_keys", self.max_keys as u64, standard.max_keys as u64),
+            (
+                "write_burst_size",
+                u64::from(self.write_burst_size),
+                u64::from(standard.write_burst_size),
+            ),
+        ];
+        for (key, sandbox, standard) in not_above {
+            if sandbox > standard {
+                return Err(ConfigError::Message(format!(
+                    "tiers.sandbox.{key} ({sandbox}) must not exceed tiers.standard.{key} \
+                     ({standard})"
+                )));
+            }
+        }
+        // A longer period replenishes more slowly, so sandbox must not be shorter.
+        if self.write_period_secs < standard.write_period_secs {
+            return Err(ConfigError::Message(format!(
+                "tiers.sandbox.write_period_secs ({}) must not be shorter than \
+                 tiers.standard.write_period_secs ({})",
+                self.write_period_secs, standard.write_period_secs
+            )));
+        }
+        Ok(())
+    }
+
+    fn into_limits(self) -> TierLimits {
+        TierLimits {
+            max_lists: self.max_lists,
+            max_status_index: self.max_status_index,
+            max_statuses_per_request: self.max_statuses_per_request,
+            max_keys: self.max_keys,
+            write_burst_size: NonZeroU32::new(self.write_burst_size)
+                .expect("validated as non-zero"),
+            write_period: Duration::from_secs(self.write_period_secs),
+        }
+    }
+}
+
 /// JWT validation policy for protected management endpoints.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagementAuthConfig {
@@ -198,10 +571,10 @@ pub struct ManagementAuthConfig {
     pub issuers_file: Option<String>,
     /// Clock skew leeway in seconds for `exp`, `iat`, and `nbf`.
     pub leeway_secs: u64,
-    /// Maximum accepted lifetime in seconds, computed as `exp - iat`.
+    /// Checked as `exp - iat`.
     pub max_token_lifetime_secs: u64,
-    /// Accepted management-token audiences. Empty means the `aud` claim is not required.
-    #[serde(deserialize_with = "deserialize_audience_list")]
+    /// Empty means the `aud` claim is not required.
+    #[serde(deserialize_with = "deserialize_trimmed_list")]
     pub audiences: Vec<String>,
 }
 
@@ -233,7 +606,27 @@ impl ManagementAuthConfig {
     }
 }
 
-fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+/// JWT audience and lifetime policy for admin endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    #[serde(deserialize_with = "deserialize_trimmed_list")]
+    pub audiences: Vec<String>,
+}
+
+impl AdminAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_token_lifetime_secs == 0 {
+            return Err(ConfigError::Message(
+                "admin_auth.max_token_lifetime_secs must be greater than 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_trimmed_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -245,17 +638,14 @@ where
         .collect())
 }
 
-/// Telemetry configuration controlling tracing and metrics export.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelemetryConfig {
-    /// Environment mode: `"development"` (stdout) or `"production"` (OTLP export).
+    /// Development logs to stdout, production exports over OTLP.
     pub environment: TelemetryEnvironment,
-    /// OTLP gRPC endpoint for trace, metric, and log export (prod mode only).
+    /// OTLP gRPC endpoint, only used in production.
     pub otlp_endpoint: String,
-    /// Trace sampling ratio from 0.0 (none) to 1.0 (all).
     #[serde(deserialize_with = "deserialize_sampler_ratio")]
     pub sampler_ratio: f64,
-    /// Whether the OpenTelemetry tracing pipeline is enabled.
     pub enabled: bool,
 }
 
@@ -277,9 +667,7 @@ impl<'de> Deserialize<'de> for TelemetryEnvironment {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        // Reuse classify_app_env for the production mapping; this config field is
-        // deliberately stricter than the lenient APP_ENV classifier, so reject
-        // values that classify would silently treat as development.
+        // Stricter than `classify_app_env`: reject anything that isn't a known dev spelling.
         match classify_app_env(&raw) {
             Self::Production => Ok(Self::Production),
             Self::Development => match raw.trim().to_ascii_lowercase().as_str() {
@@ -307,7 +695,6 @@ where
     }
 }
 
-/// Repository URL advertised as the service document's `links.documentation`.
 pub const REPOSITORY_URL: &str = "https://github.com/adorsys/status-list-server";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,6 +702,8 @@ pub struct ServerConfig {
     pub host: String,
     pub domain: String,
     pub port: u16,
+    #[serde(default)]
+    pub profile: ServerProfile,
     pub management: ListenerConfig,
     pub admin: ListenerConfig,
     pub links: LinksConfig,
@@ -326,34 +715,20 @@ pub struct ServerConfig {
     pub public_base_url: Option<String>,
 }
 
-/// A single TCP listener binding (host + port).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListenerConfig {
     pub host: String,
     pub port: u16,
 }
 
-/// Links exposed in the service document returned by `GET /`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinksConfig {
     pub documentation: String,
-    /// Optional portal link; omitted from the service document when unset or
-    /// empty. An empty `APP_SERVER__LINKS__PORTAL` is treated as absent so
-    /// that the service document never emits `"portal": ""` (which would
-    /// violate the OpenAPI `format: uri` contract).
     #[serde(default, deserialize_with = "deserialize_optional_uri_string")]
     pub portal: Option<String>,
 }
 
 impl ServerConfig {
-    /// Whether the configured public, management, and admin listeners resolve to
-    /// the same host:port, which would make the network boundary meaningless.
-    ///
-    /// Returns `Some((name_a, name_b))` identifying the two clashing listeners,
-    /// or `None` when all three are distinct.
-    ///
-    /// Two listeners both on port 0 are NOT treated as a conflict: the OS
-    /// assigns each its own ephemeral port at bind time.
     pub fn duplicate_listener_pair(&self) -> Option<(&'static str, &'static str)> {
         let listeners: &[(&'static str, &str, u16)] = &[
             ("server.host:server.port", &self.host, self.port),
@@ -370,8 +745,7 @@ impl ServerConfig {
         ];
         for (i, (name_a, host_a, port_a)) in listeners.iter().enumerate() {
             for (name_b, host_b, port_b) in listeners.iter().skip(i + 1) {
-                // Port 0 means "let the OS pick an ephemeral port"; two listeners
-                // both on 0 get distinct ports and must not be flagged.
+                // Port 0 binds a distinct ephemeral port each time, so it never clashes.
                 if *port_a == 0 && *port_b == 0 {
                     continue;
                 }
@@ -383,34 +757,20 @@ impl ServerConfig {
         None
     }
 
-    /// True when two listeners resolve to the same host and port, which would
-    /// collapse the public/management/admin boundary. Used by tests.
     pub fn has_duplicate_listener(&self) -> bool {
         self.duplicate_listener_pair().is_some()
     }
 }
 
 impl ServerConfig {
-    /// The resolved public base URL, defaulting to `https://{domain}/api/v1`.
-    ///
-    /// IPv6 hosts are bracketed so the result is a valid URL.
-    ///
-    /// The URL is parsed once and re-serialized, so the returned value is the
-    /// canonical form of what validation accepted: scheme/host are lowercased,
-    /// the default port is dropped, and `.`/`..` path segments are resolved.
-    /// This same normalized URL is what gets signed into `sub` and returned to
-    /// issuers, so it matches the URL that `validate_public_base_url` checked.
+    /// Normalized form of the base URL; this exact value is signed into `sub`.
     pub fn resolved_public_base_url(&self) -> String {
-        // Parse once (validation guarantees it parses) and serialize back so the
-        // returned URL is normalized, not the raw string typed into config.
         url::Url::parse(&self.raw_resolved_public_base_url())
             .expect("resolved public base URL was validated at config load")
             .to_string()
     }
 
-    /// The resolved public base URL exactly as configured or derived, without
-    /// normalization. This is what validation inspects so the trailing-slash
-    /// rule sees the operator's actual input rather than the re-serialized form.
+    /// Unnormalized, so validation sees the trailing slash the operator typed.
     fn raw_resolved_public_base_url(&self) -> String {
         match trim_non_empty(self.public_base_url.as_deref()) {
             Some(base) => base.to_string(),
@@ -422,8 +782,6 @@ impl ServerConfig {
     }
 }
 
-/// Renders a configured host for use as a URL authority: a bare IPv6 address
-/// is wrapped in brackets, everything else is passed through unchanged.
 fn url_authority_host(domain: &str) -> String {
     if domain.parse::<std::net::Ipv6Addr>().is_ok() {
         format!("[{domain}]")
@@ -432,11 +790,6 @@ fn url_authority_host(domain: &str) -> String {
     }
 }
 
-/// Whether two listener host strings resolve to the same interface: equal
-/// hostnames (case-insensitive), equal IP literals, a hostname that resolves
-/// to the same IP, or a wildcard bind (`0.0.0.0` / `::`) covering the other
-/// host's address family. Used to reject ambiguous public/management/admin
-/// bindings at startup.
 fn hosts_resolve_equal(a: &str, b: &str) -> bool {
     if a.eq_ignore_ascii_case(b) {
         return true;
@@ -449,8 +802,7 @@ fn hosts_resolve_equal(a: &str, b: &str) -> bool {
     let wildcard_a = ips_a.iter().any(|ip| ip.is_unspecified());
     let wildcard_b = ips_b.iter().any(|ip| ip.is_unspecified());
     if wildcard_a || wildcard_b {
-        // A wildcard bind (0.0.0.0 / ::) covers every interface of its address
-        // family, so it collides with any other host in the same family.
+        // A wildcard bind covers every interface in its address family.
         return ips_a
             .iter()
             .any(|a| ips_b.iter().any(|b| a.is_ipv4() == b.is_ipv4()));
@@ -458,10 +810,7 @@ fn hosts_resolve_equal(a: &str, b: &str) -> bool {
     ips_a.iter().any(|ip_a| ips_b.contains(ip_a))
 }
 
-/// Resolve a listener host string to the set of IP addresses it can bind: an
-/// IP literal yields itself, a hostname is resolved via the system resolver
-/// (e.g. `localhost` -> `127.0.0.1` / `::1`). Unresolvable strings yield no
-/// addresses.
+/// Uses the system resolver; a host that doesn't resolve yields no addresses.
 fn host_bind_ips(host: &str) -> Vec<std::net::IpAddr> {
     use std::net::ToSocketAddrs;
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -473,17 +822,9 @@ fn host_bind_ips(host: &str) -> Vec<std::net::IpAddr> {
         .unwrap_or_default()
 }
 
-/// Validates `server.domain`: a bare host name or IP address with no scheme,
-/// path, userinfo, port, query, or fragment.
-///
-/// Structural rejection (scheme, port, path, userinfo, query, fragment,
-/// whitespace) uses [`url::Host::parse`], the same parser the base URL check
-/// and `resolved_public_base_url` use, so the two validations cannot drift.
-/// The WHATWG host parser deliberately accepts leading/trailing dots or
-/// hyphens, so a few hygiene rules are kept on top of it.
+/// `url::Host::parse` accepts leading or trailing dots and hyphens, so we reject those ourselves.
 fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
-    // `url::Host::parse` accepts bracketed IPv6 (`[::1]`) but not the bare
-    // form; `is_ipv6_host` accepts both, so it fills that gap.
+    // `Host::parse` rejects bare IPv6 like `::1`, so check that form separately.
     let parsed_as_host = url::Host::parse(domain).is_ok() || is_ipv6_host(domain);
 
     let unhygienic = domain.starts_with('-')
@@ -500,28 +841,14 @@ fn validate_server_domain(domain: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// API path prefix shared by all versioned routes (`/api/v1`). Both the public
-/// and management listeners mount their routes under this prefix; the name
-/// reflects the version rather than the listener so it is not confused with the
-/// "public" listener specifically.
-///
-/// The published `sub` URI is built as `{public_base_url}/status-lists/{list_id}`,
-/// so by default `public_base_url` carries this prefix for it to resolve.
-/// Operators running behind a proxy with a different path prefix may set a
-/// custom `server.public_base_url` whose path differs; the router mounts the
-/// same prefix so the two cannot drift.
+/// Public and management routes mount under this prefix.
+/// The default `public_base_url` includes it so the `sub` URI resolves.
 pub const API_V1_PREFIX: &str = "/api/v1";
 
-/// Validates `server.public_base_url`: an absolute `https` URL with a host, no
-/// userinfo, query, or fragment, and no trailing slash. The path is not
-/// constrained to a single value so the server can be served behind a proxy
-/// with a path prefix (`statuslist.ingress.path`); it only has to be a
-/// well-formed path that, once `/status-lists/{list_id}` is appended, resolves
-/// to the served route.
+/// Any path is allowed so the server can sit behind a path-prefixing proxy.
 fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(base_url).map_err(|err| {
-        // Do not echo the raw value: a mistyped URL may carry a password in the
-        // userinfo that the checks below would otherwise reject.
+        // Don't echo the value: it may hold a password in the userinfo.
         ConfigError::Message(format!(
             "Invalid server.public_base_url: not a valid URL ({err})"
         ))
@@ -561,11 +888,7 @@ fn validate_public_base_url(base_url: &str) -> Result<(), ConfigError> {
 }
 
 impl ServerConfig {
-    /// The aggregation endpoint's public URL, `None` when not configured.
-    /// Tokens advertise it with `/<aggregation_id>` appended for relying parties
-    /// to fetch, so it must be the endpoint itself: `{public_base_url}/aggregation`
-    /// over http(s) without credentials, https in production, and no query or
-    /// fragment.
+    /// Must be `{public_base_url}/aggregation`, since tokens append `/<aggregation_id>` to it.
     pub fn aggregation_uri(
         &self,
         environment: TelemetryEnvironment,
@@ -623,7 +946,7 @@ pub struct CertConfig {
     #[serde(default)]
     pub eku: Vec<u64>,
     pub acme_directory_url: String,
-    /// Cache TTL for private signing-key reads in seconds. `0` disables this cache.
+    /// Seconds; 0 disables the cache.
     pub signing_key_cache_ttl: u64,
     pub renewal_cron_schedule: String,
     #[serde(default)]
@@ -635,21 +958,16 @@ pub struct CertConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CertStoreConfig {
-    /// PEM certificate chain file path.
     #[serde(default)]
     pub certificate_path: Option<String>,
-    /// PEM private key file path.
     #[serde(default)]
     pub signing_key_path: Option<String>,
-    /// Inline PEM certificate chain.
     #[serde(default)]
     pub certificate: Option<String>,
-    /// Inline PEM private key.
     #[serde(default)]
     pub signing_key: Option<String>,
 }
 
-/// DNS provider used to solve ACME DNS-01 challenges
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DnsProviderKind {
@@ -661,22 +979,20 @@ pub enum DnsProviderKind {
     Pebble,
 }
 
-/// A DNS provider resolved by [`DnsConfig::resolve`], carrying its validated
-/// settings so the boot path can build the provider without re-checking them
+/// Settings here were already validated by `DnsConfig::resolve`.
 #[derive(Debug, Clone, Copy)]
 pub enum ResolvedDnsProvider<'a> {
-    /// Uses the ambient AWS credentials; no provider-specific settings
+    /// Uses the ambient AWS credentials.
     Route53,
     Cloudflare(&'a CloudflareDnsConfig),
     Gcloud(&'a GcloudDnsConfig),
     Azure(&'a AzureDnsConfig),
     Acmedns(&'a AcmeDnsConfig),
-    /// Development-only; its challenge server URL lives outside [`DnsConfig`]
+    /// Dev only; its URL lives outside `DnsConfig`.
     Pebble,
 }
 
 impl ResolvedDnsProvider<'_> {
-    /// The plain provider kind, without the settings
     pub fn kind(&self) -> DnsProviderKind {
         match self {
             Self::Route53 => DnsProviderKind::Route53,
@@ -691,8 +1007,7 @@ impl ResolvedDnsProvider<'_> {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DnsConfig {
-    /// Selected DNS provider. When unset, defaults to Route53 in production
-    /// and Pebble in development, preserving the historical behavior.
+    /// Defaults to Route53 in production and Pebble in development.
     #[serde(default)]
     pub provider: Option<DnsProviderKind>,
     pub cloudflare: Option<CloudflareDnsConfig>,
@@ -703,15 +1018,12 @@ pub struct DnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcloudDnsConfig {
-    /// GCP project ID holding the Cloud DNS managed zones
     pub project_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureDnsConfig {
-    /// Azure subscription ID holding the DNS zones
     pub subscription_id: String,
-    /// Resource group holding the DNS zones
     pub resource_group: String,
 }
 
@@ -723,22 +1035,16 @@ pub struct CloudflareDnsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcmeDnsConfig {
-    /// Base URL of the ACME-DNS server, e.g. <https://auth.example.org>
     pub server_url: String,
-    /// Default account, used for domains without an entry in `accounts`.
-    /// The three fields must be set together.
+    /// Fallback account for domains not in `accounts`; set all three or none.
     pub username: Option<String>,
     pub password: Option<SecretString>,
-    /// Subdomain returned by the ACME-DNS registration
     pub subdomain: Option<String>,
-    /// Per-domain accounts keyed by identifier (e.g. `status.example.com`),
-    /// so each identifier gets its own two-value TXT window. Accepts a map
-    /// or a JSON object string, allowing the whole map in one env var.
+    /// One account per domain, since an ACME-DNS account only holds two TXT values.
     #[serde(default, deserialize_with = "deserialize_map_from_string_or_map")]
     pub accounts: HashMap<String, AcmeDnsAccount>,
 }
 
-/// A single registered ACME-DNS account
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcmeDnsAccount {
     pub username: String,
@@ -746,14 +1052,12 @@ pub struct AcmeDnsAccount {
     pub subdomain: String,
 }
 
-/// Treat unset and empty (e.g. an env var set to an empty string) alike
+/// An env var set to "" counts as unset.
 fn non_empty(value: &Option<String>) -> Option<&String> {
     value.as_ref().filter(|v| !v.trim().is_empty())
 }
 
 impl AcmeDnsConfig {
-    /// The default account, when username, password and subdomain are all set
-    /// (empty values count as unset)
     pub fn default_account(&self) -> Option<AcmeDnsAccount> {
         let password = self
             .password
@@ -766,7 +1070,6 @@ impl AcmeDnsConfig {
         })
     }
 
-    /// Validate that the settings describe at least one usable account
     fn validate(&self) -> Result<(), ConfigError> {
         if self.server_url.trim().is_empty() {
             return Err(ConfigError::Message(
@@ -794,10 +1097,7 @@ impl AcmeDnsConfig {
                     .to_string(),
             ));
         }
-        // Reject unusable per-domain entries here instead of as an opaque
-        // HTTP 401 at the first renewal. Key conflicts under normalization
-        // are the provider's own invariant and are rejected in
-        // AcmeDnsProvider::new, also at startup.
+        // Fail at startup instead of with a 401 at the first renewal.
         for (domain, account) in &self.accounts {
             let name = domain.trim();
             let name = name.strip_prefix("*.").unwrap_or(name);
@@ -828,9 +1128,7 @@ impl AcmeDnsConfig {
     }
 }
 
-/// Deserialize a map either directly or from a JSON object string, so it can
-/// be provided via a single environment variable (map keys such as domain
-/// names cannot be encoded in `__`-separated env var names).
+/// Domain keys can't be spelled in env var names, so a JSON string is accepted too.
 fn deserialize_map_from_string_or_map<'de, D, V>(
     deserializer: D,
 ) -> Result<HashMap<String, V>, D::Error>
@@ -838,8 +1136,7 @@ where
     D: serde::Deserializer<'de>,
     V: serde::de::DeserializeOwned,
 {
-    // A visitor (rather than an untagged enum) so errors inside a map value
-    // surface as-is instead of as "did not match any variant"
+    // Visitor instead of an untagged enum so inner errors aren't swallowed.
     struct MapOrString<V>(PhantomData<V>);
 
     impl<'de, V: serde::de::DeserializeOwned> serde::de::Visitor<'de> for MapOrString<V> {
@@ -872,8 +1169,6 @@ where
 }
 
 impl AzureDnsConfig {
-    /// Reject empty required fields so misconfigurations fail at startup
-    /// instead of surfacing as opaque API errors at the first renewal
     fn validate(&self) -> Result<(), ConfigError> {
         let empty: Vec<&str> = [
             ("subscription_id", self.subscription_id.trim().is_empty()),
@@ -893,7 +1188,6 @@ impl AzureDnsConfig {
 }
 
 impl GcloudDnsConfig {
-    /// Reject an empty project ID so misconfigurations fail at startup.
     fn validate(&self) -> Result<(), ConfigError> {
         if self.project_id.trim().is_empty() {
             return Err(ConfigError::Message(
@@ -916,9 +1210,7 @@ impl CloudflareDnsConfig {
 }
 
 impl DnsConfig {
-    /// Resolve the DNS provider to use, validate its settings and return them
-    /// borrowed, so consumers need no re-validation. Synchronous and
-    /// network-free by design; anything needing I/O belongs to the boot path.
+    /// Keep this free of I/O; network checks belong to the boot path.
     pub fn resolve(&self, app_env: &str) -> Result<ResolvedDnsProvider<'_>, ConfigError> {
         let kind = self
             .provider
@@ -967,36 +1259,20 @@ impl DnsConfig {
     }
 }
 
-/// Connection-pool tuning for the production (Postgres/MySQL) backends.
-///
-/// Defaults are chosen so a single-replica deployment with a fresh Postgres
-/// instance works out of the box, while still being safe to run in
-/// production. Adjust `max` according to your server's `max_connections`
-/// divided by the number of application replicas.
-///
-/// PostgreSQL default `max_connections` = 100.
-/// Rule of thumb: pool.max = floor(pg_max_connections / replicas) - 5 (headroom)
+/// Size `max_connections` as floor(db max_connections / replicas) - 5.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabasePoolConfig {
-    /// Maximum number of connections in the pool. Default: 5
     pub max_connections: u32,
-    /// Minimum number of idle connections kept alive. Default: 1
     pub min_connections: u32,
-    /// Seconds to wait for an available connection before returning an error. Default: 5
     pub acquire_timeout_secs: u64,
-    /// Seconds for the TCP connect+auth handshake to the server. Default: 10
     pub connect_timeout_secs: u64,
-    /// Seconds a connection may sit idle before being closed. Default: 600 (10 min)
     pub idle_timeout_secs: u64,
-    /// Maximum age in seconds of any connection, regardless of activity. Default: 1800 (30 min)
     pub max_lifetime_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
-    /// Full database URL. This remains supported for local and non-Kubernetes
-    /// deployments, but Kubernetes manifests should prefer the split fields
-    /// below to avoid exposing an assembled credential URL in pod metadata.
+    /// Prefer the split fields on Kubernetes so no full credential URL lands in the pod spec.
     pub url: Option<SecretString>,
     #[serde(default)]
     pub host: Option<String>,
@@ -1010,11 +1286,9 @@ pub struct DatabaseConfig {
     pub password_file: Option<PathBuf>,
     #[serde(default)]
     pub name: Option<String>,
-    /// Optional URL query string for driver/TLS settings, for example
-    /// `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
+    /// Extra driver or TLS params, e.g. `sslmode=verify-full&sslrootcert=/certs/ca.crt`.
     #[serde(default)]
     pub query: Option<String>,
-    /// Validated against the URL scheme at startup.
     #[serde(default)]
     pub backend: DatabaseBackend,
     pub pool: DatabasePoolConfig,
@@ -1024,10 +1298,7 @@ fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-/// Serde deserializer for `Option<String>` URI fields that treats an empty (or
-/// whitespace-only) string the same as `None`. This prevents an unset env var
-/// (which the config crate maps to `""`) from producing `"portal": ""`  in the
-/// service document, violating the OpenAPI `format: uri` contract.
+/// Treats "" (what an empty env var becomes) as `None`, so `portal` never breaks `format: uri`.
 fn deserialize_optional_uri_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1068,7 +1339,6 @@ fn format_database_url_host(host: &str) -> String {
     }
 }
 
-/// Whether `host` is an IPv6 address, optionally wrapped in brackets.
 fn is_ipv6_host(host: &str) -> bool {
     host.parse::<std::net::Ipv6Addr>().is_ok()
         || host
@@ -1175,8 +1445,6 @@ impl DatabaseConfig {
                 .is_some_and(|value| !value.trim().is_empty())
     }
 
-    /// Resolve the database connection string from either the backward-compatible
-    /// full URL or the split connection fields used by the Helm chart.
     pub fn resolved_url(&self) -> Result<SecretString, ConfigError> {
         if !self.has_split_connection_fields() {
             return self.url.clone().ok_or_else(|| {
@@ -1286,42 +1554,29 @@ pub enum VaultAuthMethod {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultConfig {
-    /// Authentication method to use with Vault / OpenBao (`approle` or `kubernetes`).
     #[serde(default)]
     pub auth_method: VaultAuthMethod,
-    /// Vault / OpenBao API address (e.g. `http://vault:8200`).
     pub addr: String,
-    /// AppRole role_id (can be baked into config).
     pub role_id: String,
-    /// AppRole secret_id (deliver via env/secrets injector in production).
+    /// Keep out of config files; inject it via env or a secrets mount.
     #[serde(default)]
     pub secret_id: Option<SecretString>,
-    /// Optional path to file containing AppRole secret_id (e.g. Kubernetes volume mount or Docker secret).
     #[serde(default)]
     pub secret_id_path: Option<PathBuf>,
-    /// AppRole auth engine mount path (default: `approle`).
     pub auth_mount: String,
-    /// Kubernetes auth role name.
     #[serde(default)]
     pub k8s_role: Option<String>,
-    /// Path to Kubernetes service account JWT token.
     pub k8s_token_path: PathBuf,
-    /// Kubernetes auth engine mount path (default: `kubernetes`).
     pub k8s_auth_mount: String,
-    /// KV v2 engine mount path.
+    /// Must be a KV v2 engine.
     pub mount: String,
-    /// Prefix prepended to all secret paths. Default: empty.
     pub path_prefix: String,
-    /// Optional Vault Enterprise / OpenBao namespace.
     #[serde(default)]
     pub namespace: Option<String>,
-    /// HTTP request timeout in seconds.
     pub timeout_secs: u64,
 }
 
 impl VaultConfig {
-    /// Resolve the AppRole secret_id either directly from `secret_id`
-    /// or by reading from `secret_id_path` on disk.
     pub fn resolve_secret_id(&self) -> Result<SecretString, ConfigError> {
         if let Some(secret_id) = &self.secret_id
             && !secret_id.expose_secret().trim().is_empty()
@@ -1353,87 +1608,65 @@ impl VaultConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcpSecretManagerConfig {
-    /// GCP project ID.
     pub project_id: String,
-    /// Service account key JSON, inline.
     #[serde(default)]
     pub service_account_key: Option<SecretString>,
-    /// Path to the service account key JSON file.
     #[serde(default)]
     pub service_account_key_path: Option<String>,
-    /// Optional custom gRPC endpoint URL (e.g. for regional endpoints, VPC-SC, or emulator testing).
+    /// Override for regional endpoints, VPC-SC or the emulator.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Allow anonymous credentials (for local testing/emulator only).
+    /// Emulator only.
     #[serde(default)]
     pub allow_anonymous_credentials: bool,
-    /// Cache TTL for GCP secrets in seconds.
-    /// Setting this to 0 disables caching entirely.
+    /// Seconds; 0 disables caching.
     pub secrets_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AzureKeyVaultConfig {
-    /// Azure Key Vault URL (e.g. `https://my-vault.vault.azure.net/`).
     #[serde(default)]
     pub vault_url: Option<url::Url>,
-    /// Service principal tenant ID.
     #[serde(default)]
     pub tenant_id: Option<String>,
-    /// Service principal client ID.
     #[serde(default)]
     pub client_id: Option<String>,
-    /// Service principal client secret.
     #[serde(default)]
     pub client_secret: Option<SecretString>,
-    /// Cache TTL for Azure Key Vault secrets in seconds.
-    /// Setting this to 0 disables caching entirely.
+    /// Seconds; 0 disables caching.
     pub secrets_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
-    /// Cache backend selected at runtime.
     #[serde(default)]
     pub backend: CacheBackend,
-    /// Time-to-live for cached status list items in seconds.
-    /// Setting this to 0 disables caching entirely.
+    /// Seconds; 0 disables caching.
     pub ttl: u64,
     pub max_capacity: u64,
-    /// Redis hostname or IP address used when `cache.backend=redis`.
     #[serde(default)]
     pub host: Option<String>,
-    /// Redis port. Defaults to 6379 without TLS and 6380 with TLS.
+    /// Defaults to 6379, or 6380 with TLS.
     #[serde(default)]
     pub port: Option<u16>,
-    /// Optional Redis username.
     #[serde(default)]
     pub username: Option<String>,
-    /// Redis password.
     #[serde(default)]
     pub password: Option<SecretString>,
-    /// File containing the Redis password, for secret-mounted deployments.
     #[serde(default)]
     pub password_file: Option<PathBuf>,
-    /// Redis database number.
     #[serde(default)]
     pub database: Option<u8>,
-    /// Use TLS (`rediss://`) for the Redis connection.
     #[serde(default)]
     pub tls: bool,
-    /// Optional path to a private CA bundle for Redis TLS deployments.
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
-    /// Prefix for all Redis cache keys, used to isolate shared Redis instances.
     #[serde(default = "default_cache_key_prefix")]
     pub key_prefix: String,
-    /// Redis response timeout in milliseconds.
     #[serde(default = "default_cache_response_timeout_ms")]
     pub response_timeout_ms: u64,
-    /// Redis connection timeout in milliseconds.
     #[serde(default = "default_cache_connection_timeout_ms")]
     pub connection_timeout_ms: u64,
-    /// Cooldown in milliseconds after a Redis connection failure before retrying.
     #[serde(default = "default_cache_reconnect_cooldown_ms")]
     pub reconnect_cooldown_ms: u64,
 }
@@ -1575,13 +1808,10 @@ impl CacheConfig {
     }
 }
 
-/// Configuration for the per-replica, byte-bounded cache of fully signed
-/// status-list token bytes. Entries expire at their window boundary, and a
-/// zero capacity disables reuse; capacity pressure may evict an entry and
-/// cause a re-sign within the same window.
+/// Per-replica cache of signed token bytes, not shared across pods.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenBytesCacheConfig {
-    /// Byte budget bounding resident signed-token entries; `0` disables the cache.
+    /// Bytes; 0 disables the cache.
     pub max_capacity: u64,
 }
 
@@ -1589,45 +1819,17 @@ pub struct TokenBytesCacheConfig {
 pub struct StatusListConfig {
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    /// Retention period for status list snapshots in seconds.
-    /// Snapshots older than this will be deleted by a scheduled cleanup task.
-    /// Default is 90 days (7776000 seconds).
-    ///
-    /// **Privacy note:** Set to 0 to disable snapshots entirely.
-    /// This prevents unbounded database growth and mitigates timing leak
-    /// risks described in draft-21 §12.7. When disabled, historical resolution
-    /// via `?time=` query parameter will not be available.
-    ///
-    /// **Deprecation:** The old name `history_retention_secs`
-    /// (`APP_STATUS_LIST__HISTORY_RETENTION_SECS`) is accepted for backward
-    /// compatibility but will be removed in a future release. Use
-    /// `snapshot_retention_secs` (`APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS`).
+    /// 0 disables snapshots, and with them `?time=` lookups.
+    /// `history_retention_secs` is a deprecated alias.
     #[serde(alias = "history_retention_secs")]
     pub snapshot_retention_secs: u64,
 }
 
-/// Upper bound (in seconds) for the configured token lifetime.
-///
-/// Draft-21 requires `ttl` to be a positive number and §11.5 asks for reasonable
-/// ranges, so values that would effectively never expire (or push the `exp`
-/// claim past what relying parties can handle) are rejected at configuration
-/// load instead of at issuance. It deliberately does NOT compare against the
-/// startup clock, so configuration acceptance never depends on the instant the
-/// process started.
+/// Ceiling from draft-21 §11.5 so tokens can't effectively never expire.
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 3600;
 
 impl StatusListConfig {
-    /// Rejects token-lifetime values the spec forbids.
-    ///
-    /// This enforces only static, representation-level invariants: positive
-    /// values within `MAX_TOKEN_LIFETIME_SECS`, and `ttl < exp`. It deliberately
-    /// does NOT compare `token_exp_secs` against the wall clock at startup:
-    /// configuration acceptance must not depend on the instant the process
-    /// started, so an otherwise-valid value would silently change behaviour one
-    /// second later. Overflow of `iat + token_exp_secs` at issuance time is
-    /// instead guarded by `checked_add` at every expiry construction, which fails
-    /// closed instead of wrapping `exp` negative (see `build_snapshot` and the
-    /// token validity window).
+    /// Static checks only; `checked_add` catches overflow at issuance.
     fn validate(&self) -> Result<(), ConfigError> {
         validate_positive_secs("APP_STATUS_LIST__TOKEN_TTL_SECS", self.token_ttl_secs)?;
         validate_positive_secs("APP_STATUS_LIST__TOKEN_EXP_SECS", self.token_exp_secs)?;
@@ -1642,10 +1844,6 @@ impl StatusListConfig {
     }
 }
 
-/// `secs` must be a positive number at or below `MAX_TOKEN_LIFETIME_SECS`;
-/// `0` breaks the spec (ttl MUST be positive) and values above the ceiling would
-/// produce effectively-never-expiring tokens (or an `exp` past year 9999) that
-/// relying parties cannot handle, and let revoked credentials look valid (§11.5).
 fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
     if secs == 0 {
         return Err(ConfigError::Message(format!(
@@ -1663,25 +1861,23 @@ fn validate_positive_secs(env_var: &str, secs: u64) -> Result<(), ConfigError> {
 }
 
 impl Config {
-    /// Loads configuration from built-in defaults, then overrides them with
-    /// values sourced from the process environment.
-    ///
-    /// Environment variables must be prefixed with `APP_` and use `__` as the
-    /// separator between nested keys. For example `APP_SERVER__PORT=5002`
-    /// maps to the `server.port` configuration value.
+    /// Env vars override the defaults, e.g. `APP_SERVER__PORT` sets `server.port`.
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_from_overrides(&[])
     }
 
+    /// Per-tier limits: `tiers` with defaults filled from `limits`, validated
+    /// against the global caps. Loading fails when this does.
+    pub fn tier_limits(&self) -> Result<Tiers, ConfigError> {
+        self.tiers.resolve(&self.limits)
+    }
+
     pub fn load_from_overrides(overrides: &[(&str, &str)]) -> Result<Self, ConfigError> {
-        let mut builder = base_builder()?
-            // Override config values via environment variables
-            // The environment variables should be prefixed with 'APP_' and use '__' as a separator
-            .add_source(
-                Environment::with_prefix("APP")
-                    .prefix_separator("_")
-                    .separator("__"),
-            );
+        let mut builder = base_builder()?.add_source(
+            Environment::with_prefix("APP")
+                .prefix_separator("_")
+                .separator("__"),
+        );
 
         for &(key, val) in overrides {
             let normalized_key = key
@@ -1710,12 +1906,8 @@ impl Config {
             )));
         }
 
-        // Validate the *resolved* base URL — whether explicitly set or derived
-        // from `server.domain` — so a broken fallback is caught at startup too.
-        // The raw (un-normalized) value is inspected so the trailing-slash rule
-        // sees the operator's actual input.
+        // Check the resolved URL so a bad derived default also fails at startup.
         validate_public_base_url(&config.server.raw_resolved_public_base_url())?;
-        // Validate the optional portal link: it must be an absolute URI when set.
         if let Some(portal) = trim_non_empty(config.server.links.portal.as_deref()) {
             url::Url::parse(portal).map_err(|err| {
                 ConfigError::Message(format!(
@@ -1724,11 +1916,46 @@ impl Config {
             })?;
         }
         config.cache.validate(config.telemetry.environment)?;
+        if config.server.profile.is_hosted() && config.database.backend == DatabaseBackend::Memory {
+            return Err(ConfigError::Message(format!(
+                "server.profile={} requires a durable SQL backend (postgres, mysql or sqlite); \
+                 the memory backend would drop registered issuers on restart",
+                config.server.profile.as_str()
+            )));
+        }
+        if config.server.profile.is_hosted()
+            && matches!(
+                config.database.backend,
+                DatabaseBackend::Postgres | DatabaseBackend::MySql
+            )
+            && config.database.pool.max_connections < 2
+        {
+            return Err(ConfigError::Message(
+                "hosted PostgreSQL and MySQL need database.pool.max_connections >= 2 for registry coordination"
+                    .to_string(),
+            ));
+        }
+        if config.database.backend == DatabaseBackend::Memory
+            && config.telemetry.environment.is_production()
+        {
+            return Err(ConfigError::Message(
+                "the memory database backend cannot persist static key revocations in production"
+                    .to_string(),
+            ));
+        }
         config
             .management_auth
             .validate(config.telemetry.environment)?;
+        config.admin_auth.validate()?;
         config.status_list.validate()?;
         config.limits.validate()?;
+        config.rate_limit.trusted_proxy_networks()?;
+        config
+            .rate_limit
+            .validate_client_ip_source(config.telemetry.environment)?;
+        config
+            .rate_limit
+            .validate_admission(&config.tier_limits()?.standard)?;
         config
             .server
             .aggregation_uri(config.telemetry.environment)?;
@@ -1736,11 +1963,6 @@ impl Config {
     }
 }
 
-/// Returns a `config::ConfigBuilder` seeded with the built-in default values.
-///
-/// Both production loading (via [`Config::load`]) and test loading (via
-/// `Config::load_from_overrides`) start from this shared set of defaults so
-/// that there is exactly one source of truth for the default configuration.
 fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
     #[cfg(feature = "postgres")]
     let default_db_backend = "postgres";
@@ -1767,6 +1989,7 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("server.admin.port", 8002)?
         .set_default("server.links.documentation", REPOSITORY_URL)?
         .set_default("server.links.portal", Option::<String>::None)?
+        .set_default("server.profile", "private")?
         .set_default("server.enable_metrics", false)?
         .set_default("server.aggregation_uri", Option::<String>::None)?
         .set_default("database.url", Option::<String>::None)?
@@ -1845,10 +2068,19 @@ fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
         .set_default("management_auth.max_token_lifetime_secs", 300)?
         .set_default("management_auth.audiences", Vec::<String>::new())?
         .set_default("management_auth.issuers_file", Option::<String>::None)?
+        .set_default("admin_auth.leeway_secs", 60)?
+        .set_default("admin_auth.max_token_lifetime_secs", 300)?
+        .set_default("admin_auth.audiences", Vec::<String>::new())?
         .set_default("rate_limit.strict_burst_size", 10)?
         .set_default("rate_limit.strict_period_secs", 60)?
-        .set_default("rate_limit.permissive_burst_size", 100)?
-        .set_default("rate_limit.permissive_period_secs", 60)?
+        .set_default("rate_limit.admission_burst_size", 1000)?
+        .set_default("rate_limit.admission_per_second", 100)?
+        .set_default("rate_limit.permissive_burst_size", 1000)?
+        .set_default("rate_limit.permissive_period_secs", 0.005)?
+        .set_default("rate_limit.admin_burst_size", 100)?
+        .set_default("rate_limit.admin_period_secs", 1)?
+        .set_default("rate_limit.trusted_proxies", Vec::<String>::new())?
+        .set_default("rate_limit.client_ip_source", Option::<String>::None)?
         .set_default("limits.max_body_size_bytes", 2_097_152)?
         .set_default("limits.max_status_index", 100_000)?
         .set_default("limits.max_statuses_per_request", 5_000)?
@@ -1869,7 +2101,7 @@ mod tests {
 
     #[test]
     fn issuer_registry_path_is_required_only_in_production() {
-        let policy = ManagementAuthConfig {
+        let mut policy = ManagementAuthConfig {
             issuers_file: None,
             leeway_secs: 60,
             max_token_lifetime_secs: 300,
@@ -1877,6 +2109,8 @@ mod tests {
         };
         assert!(policy.validate(TelemetryEnvironment::Development).is_ok());
         assert!(policy.validate(TelemetryEnvironment::Production).is_err());
+        policy.issuers_file = Some("issuers.yaml".into());
+        assert!(policy.validate(TelemetryEnvironment::Production).is_ok());
     }
     use secrecy::ExposeSecret;
     use std::path::{Path, PathBuf};
@@ -1909,7 +2143,6 @@ mod tests {
 
     #[test]
     fn test_config_loading() {
-        // 1. Default configuration loading & helper methods
         let config = Config::load_from_overrides(&[]).expect("Failed to load default config");
 
         assert_eq!(config.server.host, "localhost");
@@ -1941,7 +2174,6 @@ mod tests {
         assert_eq!(config.server.cert.dns_challenge_server_url, None);
         assert_eq!(config.server.aggregation_uri, None);
 
-        // Feature-gated default database expectations
         #[cfg(feature = "postgres")]
         let expected_db_backend = DatabaseBackend::Postgres;
         #[cfg(all(not(feature = "postgres"), feature = "sqlite"))]
@@ -1968,8 +2200,14 @@ mod tests {
 
         assert_eq!(config.rate_limit.strict_burst_size, 10);
         assert_eq!(config.rate_limit.strict_period_secs, 60);
-        assert_eq!(config.rate_limit.permissive_burst_size, 100);
-        assert_eq!(config.rate_limit.permissive_period_secs, 60);
+        assert_eq!(config.rate_limit.permissive_burst_size, 1000);
+        assert_eq!(
+            config.rate_limit.permissive_period,
+            Duration::from_millis(5)
+        );
+        assert_eq!(config.rate_limit.admin_burst_size, 100);
+        assert_eq!(config.rate_limit.admin_period_secs, 1);
+        assert_eq!(config.rate_limit.client_ip_source, None);
         assert_eq!(config.limits.max_body_size_bytes, 2_097_152);
         assert_eq!(config.limits.max_status_index, 100_000);
         assert_eq!(config.limits.max_statuses_per_request, 5_000);
@@ -1990,7 +2228,6 @@ mod tests {
         );
         assert_eq!(config.telemetry.sampler_ratio, 1.0);
 
-        // DatabaseBackend helper unit tests
         assert_eq!(DatabaseBackend::default(), DatabaseBackend::Memory);
         assert_eq!(DatabaseBackend::Memory.as_str(), "memory");
         assert_eq!(DatabaseBackend::Postgres.as_str(), "postgres");
@@ -2004,7 +2241,6 @@ mod tests {
         assert!(DatabaseBackend::Sqlite.validate_url_scheme("sqlite::memory:"));
         assert!(!DatabaseBackend::MySql.validate_url_scheme("postgres://user:pass@host:5432/db"));
 
-        // 2. Comprehensive environment variable override testing
         let overridden = Config::load_from_overrides(&[
             ("server.host", "0.0.0.0"),
             ("server.port", "5002"),
@@ -2056,6 +2292,8 @@ mod tests {
             ("rate_limit.strict_period_secs", "120"),
             ("rate_limit.permissive_burst_size", "500"),
             ("rate_limit.permissive_period_secs", "10"),
+            ("rate_limit.admin_burst_size", "7"),
+            ("rate_limit.admin_period_secs", "30"),
             ("limits.max_body_size_bytes", "65536"),
             ("limits.max_status_index", "4096"),
             ("limits.max_statuses_per_request", "256"),
@@ -2182,7 +2420,12 @@ mod tests {
         assert_eq!(overridden.rate_limit.strict_burst_size, 3);
         assert_eq!(overridden.rate_limit.strict_period_secs, 120);
         assert_eq!(overridden.rate_limit.permissive_burst_size, 500);
-        assert_eq!(overridden.rate_limit.permissive_period_secs, 10);
+        assert_eq!(
+            overridden.rate_limit.permissive_period,
+            Duration::from_secs(10)
+        );
+        assert_eq!(overridden.rate_limit.admin_burst_size, 7);
+        assert_eq!(overridden.rate_limit.admin_period_secs, 30);
         assert_eq!(overridden.limits.max_body_size_bytes, 65_536);
         assert_eq!(overridden.limits.max_status_index, 4_096);
         assert_eq!(overridden.limits.max_statuses_per_request, 256);
@@ -2372,7 +2615,6 @@ mod tests {
         assert!(!missing_db_password.contains("postgres://"));
         assert!(!missing_db_password.contains("status-list"));
 
-        // 3a. status_list.token_ttl_secs must be strictly < token_exp_secs
         let valid_ttl = Config::load_from_overrides(&[
             ("status_list.token_ttl_secs", "300"),
             ("status_list.token_exp_secs", "900"),
@@ -2395,21 +2637,18 @@ mod tests {
             "the refusal must name the APP_STATUS_LIST__TOKEN_EXP_SECS env var: {ttl_ge_exp_msg}"
         );
 
-        // ttl > exp must also be rejected.
         let _ttl_gt_exp = Config::load_from_overrides(&[
             ("status_list.token_ttl_secs", "600"),
             ("status_list.token_exp_secs", "300"),
         ])
         .expect_err("ttl > exp must be rejected");
 
-        // exp == 0 is unusable (born-expired tokens) and is rejected by the same rule.
         let _exp_zero = Config::load_from_overrides(&[
             ("status_list.token_ttl_secs", "0"),
             ("status_list.token_exp_secs", "0"),
         ])
         .expect_err("exp == 0 must be rejected (ttl >= 0 can never be < 0)");
 
-        // 3. Database backend overrides (MySQL & SQLite)
         let mysql_cfg = Config::load_from_overrides(&[
             ("database.backend", "mysql"),
             (
@@ -2448,7 +2687,6 @@ mod tests {
 
     #[test]
     fn test_dns_provider_resolution() {
-        // Environment defaults & explicit selection override
         let default_dns = DnsConfig::default();
         assert_eq!(
             default_dns.resolve("production").unwrap().kind(),
@@ -2476,7 +2714,6 @@ mod tests {
             Some(DnsProviderKind::Route53)
         );
 
-        // Valid provider settings resolve successfully
         let cloudflare_dns = DnsConfig {
             provider: Some(DnsProviderKind::Cloudflare),
             cloudflare: Some(CloudflareDnsConfig {
@@ -2548,7 +2785,6 @@ mod tests {
             DnsProviderKind::Gcloud
         );
 
-        // ACME-DNS accounts JSON parsing from environment overrides
         let server_url = "https://auth.example.org";
         let accounts_json = r#"{"a.example.com": {"username": "u1", "password": "p1", "subdomain": "s1"}, "b.example.com": {"username": "u2", "password": "p2", "subdomain": "s2"}}"#;
         let acme_json_cfg = Config::load_from_overrides(&[
@@ -2590,8 +2826,6 @@ mod tests {
 
     #[test]
     fn test_classify_app_env() {
-        // Every accepted production spelling, in any case and with padding,
-        // classifies as production; anything else falls back to development.
         for raw in ["production", "prod", "PRODUCTION", "PROD", "  Production "] {
             assert!(
                 classify_app_env(raw).is_production(),
@@ -2614,8 +2848,6 @@ mod tests {
             );
         }
 
-        // The DNS default follows the same classifier, so a non-canonical
-        // production spelling still selects the production DNS provider.
         let default_dns = DnsConfig::default();
         assert_eq!(
             default_dns.resolve("PROD").unwrap().kind(),
@@ -2658,27 +2890,32 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_auth_defaults_and_zero_lifetime_validation() {
+        let defaults = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(defaults.admin_auth.leeway_secs, 60);
+        assert_eq!(defaults.admin_auth.max_token_lifetime_secs, 300);
+        assert!(defaults.admin_auth.audiences.is_empty());
+        assert!(
+            Config::load_from_overrides(&[("admin_auth.max_token_lifetime_secs", "0")]).is_err()
+        );
+    }
+
+    #[test]
     fn test_duplicate_listeners_are_rejected() {
-        // Defaults (8000/8001/8002) are distinct and load fine.
         assert!(Config::load_from_overrides(&[]).is_ok());
 
-        // Management colliding with the public port must fail startup.
         let mgmt_collides = Config::load_from_overrides(&[("server.management.port", "8000")]);
         let err = mgmt_collides
             .expect_err("management on the public port must be rejected")
             .to_string();
         assert!(err.contains("Duplicate listener"), "{err}");
 
-        // Admin colliding with management must fail startup.
         let admin_collides = Config::load_from_overrides(&[("server.admin.port", "8001")]);
         let err = admin_collides
             .expect_err("admin on the management port must be rejected")
             .to_string();
         assert!(err.contains("Duplicate listener"), "{err}");
 
-        // Same port on different hosts is a valid, distinct listener (the
-        // wildcard and loopback are in different address families, so binding
-        // 0.0.0.0 and [::1] on the same port does not collide).
         assert!(
             Config::load_from_overrides(&[
                 ("server.host", "0.0.0.0"),
@@ -2688,8 +2925,6 @@ mod tests {
             .is_ok()
         );
 
-        // A wildcard bind (0.0.0.0) covers the loopback of its own family, so
-        // 0.0.0.0 and 127.0.0.1 on the same port must be rejected.
         let wildcard_loopback = Config::load_from_overrides(&[
             ("server.host", "0.0.0.0"),
             ("server.management.host", "127.0.0.1"),
@@ -2700,8 +2935,6 @@ mod tests {
             .to_string();
         assert!(err.contains("Duplicate listener"), "{err}");
 
-        // `localhost` and the loopback literal resolve to the same address, so
-        // they must be rejected on the same port.
         let localhost_loopback = Config::load_from_overrides(&[
             ("server.host", "localhost"),
             ("server.management.host", "127.0.0.1"),
@@ -2739,48 +2972,38 @@ mod tests {
 
     #[test]
     fn test_status_list_validations() {
-        // The valid default (900 / 300) loads without error.
         let defaults = Config::load_from_overrides(&[]).expect("default config should load");
         assert_eq!(defaults.status_list.token_exp_secs, 900);
         assert_eq!(defaults.status_list.token_ttl_secs, 300);
 
-        // Each rejected override must fail AND name the offending env var, so
-        // deleting a validation branch cannot leave the test green.
         let above_ceiling = (MAX_TOKEN_LIFETIME_SECS + 1).to_string();
         let rejects: Vec<(Vec<(&str, &str)>, &str)> = vec![
-            // token_exp_secs == 0 -> every token is already expired at issue time.
             (
                 vec![("status_list.token_exp_secs", "0")],
                 "APP_STATUS_LIST__TOKEN_EXP_SECS must be a positive number",
             ),
-            // token_ttl_secs == 0 -> breaks the spec MUST that ttl be positive.
             (
                 vec![("status_list.token_ttl_secs", "0")],
                 "APP_STATUS_LIST__TOKEN_TTL_SECS must be a positive number",
             ),
-            // token_exp_secs above the ceiling would never expire (and exceed i64).
             (
                 vec![("status_list.token_exp_secs", "9223372036854775808")],
                 "APP_STATUS_LIST__TOKEN_EXP_SECS (9223372036854775808) exceeds the maximum \
                  supported token lifetime",
             ),
-            // token_ttl_secs above the ceiling would never expire (and exceed i64).
             (
                 vec![("status_list.token_ttl_secs", "9223372036854775808")],
                 "APP_STATUS_LIST__TOKEN_TTL_SECS (9223372036854775808) exceeds the maximum \
                  supported token lifetime",
             ),
-            // Just above the one-year ceiling is rejected.
             (
                 vec![("status_list.token_exp_secs", &above_ceiling)],
                 "exceeds the maximum supported token lifetime",
             ),
-            // token_ttl_secs == token_exp_secs leaves no usable token lifetime.
             (
                 vec![("status_list.token_ttl_secs", "900")],
                 "APP_STATUS_LIST__TOKEN_TTL_SECS (900) must be less than",
             ),
-            // token_ttl_secs > token_exp_secs leaves no usable token lifetime.
             (
                 vec![
                     ("status_list.token_exp_secs", "300"),
@@ -2800,10 +3023,6 @@ mod tests {
             );
         }
 
-        // Exact MAX_TOKEN_LIFETIME_SECS is the boundary and is accepted: it is
-        // positive, within the ceiling, and (with a lower ttl) leaves a usable
-        // lifetime. This is a fixed, clock-independent constant, so acceptance
-        // does not depend on the instant the process started.
         let max_exp = Config::load_from_overrides(&[(
             "status_list.token_exp_secs",
             &MAX_TOKEN_LIFETIME_SECS.to_string(),
@@ -2844,6 +3063,377 @@ mod tests {
         assert!(Config::load_from_overrides(&[("limits.max_lists_per_issuer", &at_page)]).is_ok());
     }
 
+    #[test]
+    fn test_trusted_proxies_parse_from_a_comma_separated_list() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert!(
+            config
+                .rate_limit
+                .trusted_proxy_networks()
+                .unwrap()
+                .is_empty()
+        );
+
+        let config = Config::load_from_overrides(&[(
+            "APP_RATE_LIMIT__TRUSTED_PROXIES",
+            "10.0.0.0/8, fd00::/8,192.0.2.7,::ffff:192.0.2.8",
+        )])
+        .unwrap();
+        let networks: Vec<String> = config
+            .rate_limit
+            .trusted_proxy_networks()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            networks,
+            ["10.0.0.0/8", "fd00::/8", "192.0.2.7/32", "192.0.2.8/32"]
+        );
+    }
+
+    #[test]
+    fn test_malformed_trusted_proxy_fails_loading() {
+        for value in ["10.0.0.0/40", "fd00::/129", "10.0.0.0/x", "example.com/8"] {
+            let err = Config::load_from_overrides(&[("rate_limit.trusted_proxies", value)])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("rate_limit.trusted_proxies"), "{value}: {err}");
+        }
+    }
+
+    fn production_rate_limits(overrides: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let mut all = vec![
+            ("telemetry.environment", "production"),
+            ("database.backend", "postgres"),
+            ("management_auth.audiences", "status-list-server-management"),
+            (
+                "management_auth.issuers_file",
+                "/etc/status-list-server/issuers.yaml",
+            ),
+        ];
+        all.extend(overrides.iter().copied());
+        Config::load_from_overrides(&all)
+    }
+
+    #[test]
+    fn test_client_ip_source_is_required_in_production() {
+        let err = production_rate_limits(&[]).unwrap_err().to_string();
+        assert!(
+            err.contains("rate_limit.client_ip_source is required in production"),
+            "{err}"
+        );
+        let config =
+            production_rate_limits(&[("APP_RATE_LIMIT__CLIENT_IP_SOURCE", "connect_info")])
+                .unwrap();
+        assert_eq!(
+            config.rate_limit.resolved_client_ip_source(),
+            ClientIpSource::ConnectInfo
+        );
+    }
+
+    #[test]
+    fn test_forwarded_client_addresses_need_trusted_proxies_in_production() {
+        let source = ("rate_limit.client_ip_source", "rightmost_x_forwarded_for");
+        let err = production_rate_limits(&[source]).unwrap_err().to_string();
+        assert!(
+            err.contains("needs rate_limit.trusted_proxies in production"),
+            "{err}"
+        );
+        assert!(
+            production_rate_limits(&[source, ("rate_limit.trusted_proxies", "10.0.0.0/8")]).is_ok()
+        );
+        assert!(Config::load_from_overrides(&[source]).is_ok());
+    }
+
+    #[test]
+    fn test_connect_info_with_trusted_proxies_fails_loading() {
+        let err = Config::load_from_overrides(&[
+            ("rate_limit.client_ip_source", "connect_info"),
+            ("rate_limit.trusted_proxies", "10.0.0.0/8"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("rate_limit.trusted_proxies has no effect"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_an_unset_client_ip_source_follows_trusted_proxies_outside_production() {
+        let source = |overrides: &[(&str, &str)]| {
+            Config::load_from_overrides(overrides)
+                .unwrap()
+                .rate_limit
+                .resolved_client_ip_source()
+        };
+        assert_eq!(source(&[]), ClientIpSource::ConnectInfo);
+        assert_eq!(
+            source(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]),
+            ClientIpSource::RightmostXForwardedFor
+        );
+    }
+
+    #[test]
+    fn test_unknown_client_ip_source_fails_loading() {
+        for value in ["x_real_ip", "Connect_Info", ""] {
+            assert!(
+                Config::load_from_overrides(&[("rate_limit.client_ip_source", value)]).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_permissive_period_takes_fractions_of_a_second() {
+        let period = |value: &str| {
+            Config::load_from_overrides(&[("APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS", value)])
+                .map(|config| config.rate_limit.permissive_period)
+        };
+        assert_eq!(period("0.005").unwrap(), Duration::from_millis(5));
+        assert_eq!(period("60").unwrap(), Duration::from_secs(60));
+        assert_eq!(period("1e-9").unwrap(), Duration::from_nanos(1));
+        for invalid in ["0", "-0.5", "NaN", "inf", "1e-10"] {
+            let err = period(invalid).unwrap_err().to_string();
+            assert!(
+                err.contains("rate_limit.permissive_period_secs"),
+                "{invalid}: {err}"
+            );
+        }
+        assert!(period("soon").is_err());
+    }
+
+    #[test]
+    fn test_admission_below_the_standard_budget_fails_loading() {
+        let err = Config::load_from_overrides(&[
+            ("tiers.standard.write_burst_size", "50"),
+            ("rate_limit.admission_burst_size", "49"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("rate_limit.admission_burst_size (49)"),
+            "{err}"
+        );
+        assert!(
+            Config::load_from_overrides(&[
+                ("tiers.standard.write_burst_size", "50"),
+                ("rate_limit.admission_burst_size", "50"),
+            ])
+            .is_ok()
+        );
+        for key in [
+            "rate_limit.admission_burst_size",
+            "rate_limit.admission_per_second",
+        ] {
+            let err = Config::load_from_overrides(&[(key, "0")])
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be greater than 0"), "{key}: {err}");
+        }
+    }
+
+    fn resolved_tiers(overrides: &[(&str, &str)]) -> Result<Tiers, ConfigError> {
+        Config::load_from_overrides(overrides)?.tier_limits()
+    }
+
+    fn tier_error(overrides: &[(&str, &str)]) -> String {
+        Config::load_from_overrides(overrides)
+            .expect_err("invalid tier configuration must fail config loading")
+            .to_string()
+    }
+
+    #[test]
+    fn test_tier_defaults() {
+        let tiers = resolved_tiers(&[]).unwrap();
+        assert_eq!(
+            tiers.sandbox_max_lifetime,
+            Duration::from_secs(30 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            tiers.standard,
+            TierLimits {
+                max_lists: 1_000,
+                max_status_index: 100_000,
+                max_statuses_per_request: 5_000,
+                max_keys: 5,
+                write_burst_size: NonZeroU32::new(100).unwrap(),
+                write_period: Duration::from_secs(1),
+            }
+        );
+        assert_eq!(
+            tiers.sandbox,
+            TierLimits {
+                max_lists: 10,
+                max_status_index: 10_000,
+                max_statuses_per_request: 1_000,
+                max_keys: 2,
+                write_burst_size: NonZeroU32::new(10).unwrap(),
+                write_period: Duration::from_secs(6),
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_lifetime_is_configurable_and_positive() {
+        let tiers = resolved_tiers(&[("tiers.sandbox.max_lifetime_secs", "604800")]).unwrap();
+        assert_eq!(tiers.sandbox_max_lifetime, Duration::from_secs(604800));
+        assert!(
+            tier_error(&[("tiers.sandbox.max_lifetime_secs", "0")])
+                .contains("tiers.sandbox.max_lifetime_secs")
+        );
+        assert!(
+            tier_error(&[("tiers.standard.max_lifetime_secs", "604800")])
+                .contains("tiers.standard.max_lifetime_secs is not supported")
+        );
+    }
+
+    #[test]
+    fn test_standard_tier_follows_global_limits() {
+        let tiers = resolved_tiers(&[
+            ("limits.max_lists_per_issuer", "50"),
+            ("limits.max_status_index", "20000"),
+            ("limits.max_statuses_per_request", "2000"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.standard.max_lists, 50);
+        assert_eq!(tiers.standard.max_status_index, 20_000);
+        assert_eq!(tiers.standard.max_statuses_per_request, 2_000);
+    }
+
+    #[test]
+    fn test_sandbox_defaults_clamp_to_lowered_global_limits() {
+        let tiers = resolved_tiers(&[
+            ("limits.max_lists_per_issuer", "5"),
+            ("limits.max_status_index", "4096"),
+            ("limits.max_statuses_per_request", "256"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 5);
+        assert_eq!(tiers.sandbox.max_status_index, 4_096);
+        assert_eq!(tiers.sandbox.max_statuses_per_request, 256);
+    }
+
+    #[test]
+    fn test_sandbox_defaults_clamp_to_a_lowered_standard_tier() {
+        let tiers = resolved_tiers(&[
+            ("tiers.standard.max_lists", "4"),
+            ("tiers.standard.max_keys", "1"),
+            ("tiers.standard.write_burst_size", "3"),
+            ("tiers.standard.write_period_secs", "30"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 4);
+        assert_eq!(tiers.sandbox.max_keys, 1);
+        assert_eq!(tiers.sandbox.write_burst_size.get(), 3);
+        assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_unknown_tier_keys_are_rejected() {
+        for key in ["tiers.sandbox.max_list", "tiers.premium.max_lists"] {
+            let err = tier_error(&[(key, "5")]);
+            assert!(err.contains("unknown field"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_tier_env_overrides() {
+        let tiers = resolved_tiers(&[
+            ("APP_TIERS__SANDBOX__MAX_LISTS", "3"),
+            ("APP_TIERS__SANDBOX__WRITE_PERIOD_SECS", "30"),
+            ("APP_TIERS__STANDARD__MAX_KEYS", "4"),
+        ])
+        .unwrap();
+        assert_eq!(tiers.sandbox.max_lists, 3);
+        assert_eq!(tiers.sandbox.write_period, Duration::from_secs(30));
+        assert_eq!(tiers.standard.max_keys, 4);
+    }
+
+    #[test]
+    fn test_tier_above_global_cap_is_rejected() {
+        let err = tier_error(&[("tiers.standard.max_status_index", "100001")]);
+        assert!(
+            err.contains("tiers.standard.max_status_index (100001) must not exceed limits.max_status_index (100000)"),
+            "{err}"
+        );
+        let err = tier_error(&[
+            ("limits.max_statuses_per_request", "500"),
+            ("tiers.sandbox.max_statuses_per_request", "600"),
+        ]);
+        assert!(
+            err.contains("tiers.sandbox.max_statuses_per_request (600) must not exceed limits.max_statuses_per_request (500)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_tier_max_lists_is_bounded_by_the_aggregation_page() {
+        let over = (AGGREGATION_DEFAULT_LIMIT + 1).to_string();
+        // `limits.max_lists_per_issuer` is itself at most the page size, so
+        // bounding each tier by it bounds the tier by the page.
+        let err = tier_error(&[("tiers.standard.max_lists", &over)]);
+        assert!(
+            err.contains(
+                "tiers.standard.max_lists (1001) must not exceed limits.max_lists_per_issuer"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_looser_than_standard_is_rejected() {
+        for (key, standard, sandbox) in [
+            ("max_lists", "5", "6"),
+            ("max_status_index", "500", "501"),
+            ("max_statuses_per_request", "50", "51"),
+            ("max_keys", "1", "2"),
+            ("write_burst_size", "4", "5"),
+        ] {
+            let standard_key = format!("tiers.standard.{key}");
+            let sandbox_key = format!("tiers.sandbox.{key}");
+            let err = tier_error(&[(&standard_key, standard), (&sandbox_key, sandbox)]);
+            assert!(
+                err.contains(&format!(
+                    "tiers.sandbox.{key} ({sandbox}) must not exceed tiers.standard.{key} ({standard})"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_write_period_shorter_than_standard_is_rejected() {
+        let err = tier_error(&[
+            ("tiers.standard.write_period_secs", "10"),
+            ("tiers.sandbox.write_period_secs", "5"),
+        ]);
+        assert!(
+            err.contains("tiers.sandbox.write_period_secs (5) must not be shorter than"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_zero_tier_values_are_rejected() {
+        for key in [
+            "max_lists",
+            "max_status_index",
+            "max_statuses_per_request",
+            "max_keys",
+            "write_burst_size",
+            "write_period_secs",
+        ] {
+            let sandbox_key = format!("tiers.sandbox.{key}");
+            let err = tier_error(&[(&sandbox_key, "0")]);
+            assert!(
+                err.contains(&format!("tiers.sandbox.{key} must be greater than 0")),
+                "{err}"
+            );
+        }
+    }
+
     fn aggregation_uri(uri: &str) -> Result<Option<Url>, ConfigError> {
         aggregation_uri_in("development", uri)
     }
@@ -2854,11 +3444,14 @@ mod tests {
             ("server.aggregation_uri", uri),
         ];
         if classify_app_env(environment).is_production() {
+            overrides.push(("database.backend", "sqlite"));
+            overrides.push(("database.url", "sqlite://status-list.db"));
             overrides.push(("management_auth.audiences", "status-list-server-management"));
             overrides.push((
                 "management_auth.issuers_file",
                 "/etc/status-list-server/issuers.yaml",
             ));
+            overrides.push(("rate_limit.client_ip_source", "connect_info"));
         }
         Config::load_from_overrides(&overrides).map(|config| {
             config
@@ -2939,10 +3532,6 @@ mod tests {
 
     #[test]
     fn test_status_list_ttl_exp_validation_boundaries() {
-        // The valid boundary and the rejected cases each exercise
-        // `StatusListConfig::validate` directly, so removing or loosening the
-        // check fails these tests instead of silently passing through the
-        // positive `Config::load_from_overrides` path.
         let valid = StatusListConfig {
             token_exp_secs: 900,
             token_ttl_secs: 300,
@@ -2996,7 +3585,6 @@ mod tests {
             "https://statuslist.example.com/api/v1"
         );
 
-        // An explicit public_base_url wins over the derived default.
         let config = Config::load_from_overrides(&[
             ("server.domain", "statuslist.example.com"),
             (
@@ -3048,7 +3636,6 @@ mod tests {
             );
         }
 
-        // A well-formed absolute https URL with exactly the API prefix loads.
         Config::load_from_overrides(&[(
             "server.public_base_url",
             "https://statuslist.example.com/api/v1",
@@ -3058,9 +3645,6 @@ mod tests {
 
     #[test]
     fn test_public_base_url_allows_non_api_v1_path() {
-        // The path is not constrained to `/api/v1`: operators may serve the
-        // status-list routes behind a proxy with a path prefix, and the sub URI
-        // simply carries `{public_base_url}/status-lists/{list_id}`.
         for value in [
             "https://statuslist.example.com",
             "https://statuslist.example.com/api/v2",
@@ -3099,11 +3683,6 @@ mod tests {
 
     #[test]
     fn test_resolved_public_base_url_is_normalized() {
-        // The resolved URL is the canonical form of what validation accepted,
-        // not the raw string typed into config: the scheme and host are
-        // lowercased, the default port is dropped, and `.`/`..` path segments
-        // are resolved. The same normalized value is what gets signed into
-        // `sub`, so it matches the URL that `validate_public_base_url` checked.
         let config = Config::load_from_overrides(&[(
             "server.public_base_url",
             "HTTPS://StatusList.Example.COM:443/api/../api/v1",
@@ -3117,8 +3696,6 @@ mod tests {
 
     #[test]
     fn test_public_base_url_derived_from_ipv6_domain_is_bracketed_and_valid() {
-        // A bare IPv6 `server.domain` must yield a bracket-wrapped, valid
-        // derived base URL rather than a malformed `https://2001:db8::1/api/v1`.
         let config = Config::load_from_overrides(&[("server.domain", "2001:db8::1")])
             .expect("a bare IPv6 server.domain should load");
         assert_eq!(
@@ -3126,7 +3703,6 @@ mod tests {
             "https://[2001:db8::1]/api/v1"
         );
 
-        // An already-bracketed IPv6 domain passes through unchanged.
         let config = Config::load_from_overrides(&[("server.domain", "[2001:db8::1]")])
             .expect("a bracketed IPv6 server.domain should load");
         assert_eq!(
@@ -3137,8 +3713,6 @@ mod tests {
 
     #[test]
     fn test_server_domain_must_be_bare_host() {
-        // Cases rejected by `url::Host::parse` — the same parser the base URL
-        // check uses — plus the extra hygiene rules kept on top of it.
         for (value, expected) in [
             (
                 "https://example.com",
@@ -3196,7 +3770,6 @@ mod tests {
 
     #[test]
     fn test_critical_validations() {
-        // Invalid database backend configuration
         let invalid_db_res = Config::load_from_overrides(&[
             ("database.backend", "invalid-backend"),
             (
@@ -3209,7 +3782,6 @@ mod tests {
             "an unknown database backend value should fail config loading"
         );
 
-        // DNS provider missing or empty required settings rejections
         let missing_cloudflare = DnsConfig {
             provider: Some(DnsProviderKind::Cloudflare),
             ..Default::default()
@@ -3315,7 +3887,6 @@ mod tests {
                 .contains("must be set together")
         );
 
-        // ACME-DNS unusable account entries validation
         let acmedns_accounts_helper = |accounts: HashMap<String, AcmeDnsAccount>| DnsConfig {
             provider: Some(DnsProviderKind::Acmedns),
             acmedns: Some(AcmeDnsConfig {
@@ -3416,7 +3987,6 @@ mod tests {
             other => panic!("Expected Azure DNS config, got {other:?}"),
         }
 
-        // Malformed ACME-DNS accounts JSON rejection
         assert!(
             Config::load_from_overrides(&[
                 (
@@ -3432,7 +4002,6 @@ mod tests {
             "malformed accounts JSON must fail config loading"
         );
 
-        // Security check: Default config contains no repository-specific test_data references
         let default_config =
             Config::load_from_overrides(&[]).expect("Failed to load default config");
         if let Some(path) = default_config.server.cert.store.certificate_path.as_deref() {
@@ -3467,7 +4036,6 @@ mod tests {
             );
         }
 
-        // Vault AppRole defaults
         assert_eq!(default_config.vault.auth_method, VaultAuthMethod::Approle);
         assert_eq!(default_config.vault.addr, "http://localhost:8200");
         assert_eq!(default_config.vault.role_id, "");
@@ -3486,7 +4054,6 @@ mod tests {
         assert_eq!(default_config.vault.timeout_secs, 30);
         assert!(default_config.vault.resolve_secret_id().is_err());
 
-        // Vault AppRole overrides with inline secret_id
         let overridden_config = Config::load_from_overrides(&[
             ("vault.addr", "http://vault.example.com:8200"),
             ("vault.role_id", "my-role-id"),
@@ -3521,7 +4088,6 @@ mod tests {
         );
         assert_eq!(overridden_config.vault.timeout_secs, 15);
 
-        // Vault AppRole overrides with secret_id_path
         let secret_file = std::env::temp_dir().join(format!(
             "vault_secret_id_test_{}.txt",
             time::OffsetDateTime::now_utc().nanosecond()
@@ -3544,7 +4110,6 @@ mod tests {
         );
         let _ = std::fs::remove_file(&secret_file);
 
-        // Vault Kubernetes auth overrides
         let k8s_config = Config::load_from_overrides(&[
             ("vault.auth_method", "kubernetes"),
             ("vault.k8s_role", "my-k8s-service-role"),
@@ -3567,10 +4132,6 @@ mod tests {
 
     #[test]
     fn normalize_app_env_aliases_match_config() {
-        // The exact aliases config treats as production (`production`/`prod`,
-        // any case, surrounding whitespace) must classify as production, and
-        // everything else as development. This is the pure mapping behind
-        // `normalize_app_env`, so the deployment guard agrees with config.
         for raw in ["production", "prod", "PRODUCTION", " Prod ", "  prod  "] {
             assert_eq!(
                 classify_app_env(raw),
@@ -3587,5 +4148,82 @@ mod tests {
             );
             assert!(!classify_app_env(raw).is_production());
         }
+    }
+
+    #[test]
+    fn profile_defaults_to_private() {
+        let config = Config::load_from_overrides(&[]).unwrap();
+        assert_eq!(config.server.profile, ServerProfile::Private);
+        // A hosted parse requires a backend the feature profile carries, so
+        // the hosted variant lives in `hosted_profile_refuses_the_memory_backend`
+        // and in the per-backend pass-through below (feature-gated).
+        #[cfg(feature = "sqlite")]
+        {
+            let config = Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", "sqlite"),
+            ])
+            .unwrap();
+            assert_eq!(config.server.profile, ServerProfile::Hosted);
+        }
+    }
+
+    #[test]
+    fn hosted_profile_refuses_the_memory_backend() {
+        let error = Config::load_from_overrides(&[
+            ("server.profile", "hosted"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a durable SQL backend"),
+            "the refusal must name the fix, got {error}"
+        );
+        for backend in ["sqlite", "postgres", "mysql"] {
+            Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", backend),
+            ])
+            .unwrap_or_else(|e| panic!("hosted on {backend} configures fine: {e}"));
+        }
+    }
+
+    #[test]
+    fn hosted_multi_pod_backends_need_two_pool_connections() {
+        for backend in ["postgres", "mysql"] {
+            let error = Config::load_from_overrides(&[
+                ("server.profile", "hosted"),
+                ("database.backend", backend),
+                ("database.pool.max_connections", "1"),
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("max_connections >= 2"));
+        }
+        Config::load_from_overrides(&[
+            ("server.profile", "hosted"),
+            ("database.backend", "sqlite"),
+            ("database.pool.max_connections", "1"),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn production_refuses_memory_backend_for_static_revocation_history() {
+        let error = Config::load_from_overrides(&[
+            ("telemetry.environment", "production"),
+            ("database.backend", "memory"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot persist static key revocations")
+        );
+
+        Config::load_from_overrides(&[
+            ("telemetry.environment", "development"),
+            ("database.backend", "memory"),
+        ])
+        .expect("development may use the in-memory backend");
     }
 }

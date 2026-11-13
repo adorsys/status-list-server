@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use status_list_server::config::Config;
+use status_list_server::config::{ClientIpSource, Config};
 
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create test chart directory");
@@ -92,6 +92,10 @@ fn helm_template_with_registry(
         .args([
             "--set",
             "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://statuslist.test.example/api/v1",
+            "--set",
+            "statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://statuslist.test.example/admin",
+            "--set",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16",
         ])
         .args(["--set", "opentelemetry-collector.enabled=false"]);
     if registry_volume {
@@ -225,6 +229,42 @@ fn production_chart_requires_an_explicit_management_audience() {
 }
 
 #[test]
+fn production_chart_requires_trusted_proxies_for_forwarded_client_addresses() {
+    for profile in ["production", "prod", " PRODUCTION "] {
+        let Some(output) = render_helm_failure(&[
+            "--set-string",
+            &format!("statuslist.env.APP_ENV={profile}"),
+            "--set-string",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ]) else {
+            return;
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("APP_RATE_LIMIT__TRUSTED_PROXIES is required in production"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for allowed in [
+        [
+            "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ],
+        [
+            "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+        ],
+    ] {
+        let Some(rendered) = render_helm(&["--set-string", allowed[0], "--set-string", allowed[1]])
+        else {
+            return;
+        };
+        assert!(rendered.contains("kind: Deployment"), "{allowed:?}");
+    }
+}
+
+#[test]
 fn production_chart_requires_an_issuer_registry_volume() {
     for profile in ["production", "prod", " PRODUCTION "] {
         let Some(output) = helm_template_with_registry(
@@ -324,8 +364,6 @@ fn release_production_overlays_supply_the_management_audience() {
         assert!(env::var_os("CI").is_none(), "helm is required in CI");
         return;
     }
-    // Match deploy.yml's overlays without the helper's CLI audience override:
-    // that override would conceal an incomplete production configuration.
     let chart_dir = dependency_free_chart();
     let output = Command::new("helm")
         .args(["template", "statuslist"])
@@ -361,6 +399,10 @@ fn release_production_overlays_supply_the_management_audience() {
     assert_eq!(
         config.management_auth.audiences,
         ["https://statuslist.eudi-adorsys.com/api/v1"]
+    );
+    assert_eq!(
+        config.rate_limit.client_ip_source,
+        Some(ClientIpSource::ConnectInfo)
     );
 }
 
@@ -953,13 +995,6 @@ fn rendered_chart_rejects_uppercase_database_backend() {
 
 #[test]
 fn rendered_chart_rejects_integer_env_values() {
-    // Env vars not explicitly typed in the chart schema fall through to
-    // `additionalProperties` of type string, so an integer passed for them is
-    // rejected at render time. Without this guard, a large integer like a byte
-    // budget would be rendered by Helm in scientific notation (e.g. 2592000 ->
-    // 2.592e+06) and crash the u64 parse in the application. (The token-lifetime
-    // vars are deliberately excluded here: the schema whitelists them as
-    // integer-or-string, so valid integers are accepted.)
     let arg = "statuslist.env.APP_TOKEN_BYTES_CACHE__MAX_CAPACITY=2592000";
     let Some(output) = render_helm_failure(&["--set", arg]) else {
         return;
@@ -968,7 +1003,7 @@ fn rendered_chart_rejects_integer_env_values() {
     assert!(
         stderr.contains("got number, want string")
             || stderr.contains("Expected: string, given: integer"),
-        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema: {stderr}"
+        "integer APP_TOKEN_BYTES_CACHE__MAX_CAPACITY must be rejected by the string-typed env schema, or Helm renders 2592000 as 2.592e+06 and the u64 parse fails: {stderr}"
     );
     assert!(
         stderr.contains("/statuslist/env/APP_TOKEN_BYTES_CACHE__MAX_CAPACITY")
@@ -1090,8 +1125,6 @@ fn rendered_chart_rejects_plain_database_password_env() {
 
 #[test]
 fn rendered_chart_uses_default_database_port() {
-    // With APP_DATABASE__BACKEND defaulting to "postgres", the chart derives 5432
-    // without requiring APP_DATABASE__PORT in values.yaml.
     let Some(rendered) = render_helm(&[]) else {
         return;
     };
@@ -1128,10 +1161,6 @@ fn rendered_chart_does_not_duplicate_watcher_poll_interval() {
 
 #[test]
 fn rendered_chart_rejects_zero_string_token_lifetime() {
-    // The schema `minimum` only applies to numeric instances; a quoted `"0"`
-    // previously slipped through as a string via the canonical
-    // `statuslist.env.APP_STATUS_LIST__TOKEN_*` route. Regression: reject it via
-    // `--set-string`.
     let Some(output) = render_helm_failure(&[
         "--set-string",
         "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0",
@@ -1159,10 +1188,6 @@ fn rendered_chart_rejects_zero_string_token_lifetime() {
 
 #[test]
 fn rendered_chart_rejects_numeric_zero_token_lifetime() {
-    // A numeric `0` (via `--set`, not `--set-string`) must be rejected by the
-    // schema's `minimum: 1` integer constraint. Regression for the numeric path.
-    // Helm versions describe that constraint as either "minimum" or
-    // "Must be greater than or equal to 1".
     let Some(output) =
         render_helm_failure(&["--set", "statuslist.env.APP_STATUS_LIST__TOKEN_EXP_SECS=0"])
     else {
@@ -1271,4 +1296,332 @@ fn rendered_chart_supports_aks_workload_identity_dns_example() {
             "rendered Helm output is missing AKS Workload Identity field {expected}"
         );
     }
+}
+
+fn helm_documents(rendered: &str) -> Vec<serde_json::Value> {
+    rendered
+        .split("\n---")
+        .map(|document| serde_saphyr::from_str(document).expect("rendered YAML is valid"))
+        .filter(|document: &serde_json::Value| !document.is_null())
+        .collect()
+}
+
+#[test]
+fn hosted_ingress_isolates_admin_with_shared_and_separate_hostnames() {
+    for management_host in ["", "management.sandbox.invalid"] {
+        let Some(rendered) = render_helm(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+            "--set",
+            &format!("statuslist.ingress.management.hostname={management_host}"),
+            "--set",
+            &format!(
+                "statuslist.ingress.management.tls.secretName={}",
+                if management_host.is_empty() {
+                    ""
+                } else {
+                    "sandbox-management-tls"
+                }
+            ),
+            "--set",
+            "statuslist.service.managementPort=18001",
+            "--set",
+            "statuslist.service.adminPort=18002",
+        ]) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        let ingresses: Vec<_> = documents
+            .iter()
+            .filter(|doc| doc["kind"] == "Ingress")
+            .collect();
+        assert_eq!(ingresses.len(), 2);
+        for ingress in ingresses {
+            let management = ingress["metadata"]["name"]
+                .as_str()
+                .unwrap()
+                .ends_with("-management-ingress");
+            let rule = &ingress["spec"]["rules"][0];
+            assert_eq!(ingress["spec"]["ingressClassName"], "hosted-sandbox");
+            assert_eq!(
+                rule["host"],
+                if management && !management_host.is_empty() {
+                    management_host
+                } else {
+                    "sandbox.invalid"
+                }
+            );
+            for path in rule["http"]["paths"].as_array().unwrap() {
+                assert_eq!(
+                    path["backend"]["service"]["port"]["number"],
+                    if management { 18001 } else { 8081 }
+                );
+                assert_eq!(
+                    path["path"],
+                    if management {
+                        "/api/v1/(status-lists/[^/]+/(statuses|allocations)|credentials)$"
+                    } else {
+                        "/"
+                    }
+                );
+            }
+            let annotations = &ingress["metadata"]["annotations"];
+            assert_eq!(
+                annotations["nginx.ingress.kubernetes.io/limit-rps"],
+                if management { "10" } else { "100" }
+            );
+            assert_eq!(
+                annotations["nginx.ingress.kubernetes.io/force-ssl-redirect"],
+                "true"
+            );
+            assert_eq!(
+                ingress["spec"]["tls"][0]["secretName"],
+                if management && !management_host.is_empty() {
+                    "sandbox-management-tls"
+                } else {
+                    "sandbox-edge-tls"
+                }
+            );
+        }
+        let env = rendered_env(&rendered);
+        assert!(env.contains(&("APP_SERVER__PROFILE".into(), "hosted".into())));
+        assert!(env.contains(&("APP_DATABASE__BACKEND".into(), "postgres".into())));
+        assert!(env.contains(&(
+            "APP_ADMIN_AUTH__AUDIENCES".into(),
+            "https://statuslist.test.example/admin".into()
+        )));
+        assert!(env.contains(&(
+            "APP_RATE_LIMIT__TRUSTED_PROXIES".into(),
+            "10.244.0.0/16".into()
+        )));
+        assert!(env.contains(&(
+            "APP_RATE_LIMIT__CLIENT_IP_SOURCE".into(),
+            "rightmost_x_forwarded_for".into()
+        )));
+        assert!(env.contains(&(
+            "APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE".into(),
+            "1000".into()
+        )));
+        assert!(env.contains(&(
+            "APP_SERVER__CERT__STORE__SIGNING_KEY_PATH".into(),
+            "/var/run/status-list-server/signing/tls.key".into()
+        )));
+    }
+}
+
+#[test]
+fn hosted_policy_scopes_admin_and_conditionally_allows_prometheus() {
+    for monitor in ["true", "false"] {
+        let Some(rendered) = render_helm(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+            "--set",
+            &format!("serviceMonitor.enabled={monitor}"),
+        ]) else {
+            return;
+        };
+        let documents = helm_documents(&rendered);
+        let policy = documents
+            .iter()
+            .find(|doc| doc["kind"] == "NetworkPolicy")
+            .unwrap();
+        let ingress = policy["spec"]["ingress"].as_array().unwrap();
+        let admin = ingress
+            .iter()
+            .find(|rule| rule["ports"][0]["port"] == 8002)
+            .unwrap();
+        let peers = admin["from"].as_array().unwrap();
+        assert_eq!(peers.len(), if monitor == "true" { 2 } else { 1 });
+        assert_eq!(
+            peers[0],
+            serde_json::json!({
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "sandbox-portal"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "sandbox-portal-backend"}}
+            })
+        );
+        if monitor == "true" {
+            assert_eq!(
+                peers[1],
+                serde_json::json!({
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
+                    "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}}
+                })
+            );
+        }
+        for port in [8000, 8001] {
+            let rule = ingress
+                .iter()
+                .find(|rule| rule["ports"][0]["port"] == port)
+                .unwrap();
+            assert_eq!(
+                rule["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+                "ingress-nginx-hosted"
+            );
+            assert_eq!(
+                rule["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"],
+                "controller"
+            );
+            assert_eq!(
+                rule["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/instance"],
+                "hosted-sandbox-ingress"
+            );
+        }
+        let deployment = documents
+            .iter()
+            .find(|doc| doc["kind"] == "Deployment")
+            .unwrap();
+        let probe =
+            &deployment["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"];
+        assert_eq!(probe["path"], "/health/ready");
+        assert_eq!(probe["port"], "admin");
+    }
+}
+
+#[test]
+fn hosted_edge_overwrites_untrusted_forwarded_headers() {
+    let controller: serde_json::Value =
+        serde_saphyr::from_str(include_str!("../deploy/helm/ingress-nginx-hosted.yaml")).unwrap();
+    for key in [
+        "use-forwarded-headers",
+        "compute-full-forwarded-for",
+        "enable-real-ip",
+        "use-proxy-protocol",
+    ] {
+        assert_eq!(controller["controller"]["config"][key], "false");
+    }
+    assert_eq!(
+        controller["controller"]["service"]["externalTrafficPolicy"],
+        "Local"
+    );
+    assert_eq!(controller["controller"]["ingressClass"], "hosted-sandbox");
+    assert_eq!(
+        controller["controller"]["ingressClassResource"]["name"],
+        "hosted-sandbox"
+    );
+    assert_eq!(
+        controller["controller"]["ingressClassResource"]["default"],
+        false
+    );
+    assert_eq!(
+        controller["controller"]["ingressClassResource"]["controllerValue"],
+        "k8s.io/hosted-sandbox-ingress-nginx"
+    );
+}
+
+#[test]
+fn hosted_ingress_requires_explicit_hostname_and_tls() {
+    for extra in [
+        vec![],
+        vec![
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+        ],
+    ] {
+        let mut args = vec![
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+        ];
+        args.extend(extra);
+        let Some(output) = helm_template(&args) else {
+            return;
+        };
+        assert!(
+            !output.status.success(),
+            "hosted ingress must reject missing site values"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("hosted ingress requires"));
+    }
+}
+
+#[test]
+fn hosted_separate_management_host_requires_explicit_tls_secret() {
+    let Some(output) = helm_template(&[
+        "-f",
+        "deploy/helm/chart/values-hosted.yaml",
+        "--set",
+        "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+        "--set",
+        "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+        "--set",
+        "statuslist.ingress.management.hostname=management.sandbox.invalid",
+    ]) else {
+        return;
+    };
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("requires statuslist.ingress.management.tls.secretName")
+    );
+}
+
+#[test]
+fn hosted_deployment_requires_admin_audience_and_trusted_controller_addresses() {
+    for (missing, expected) in [
+        (
+            "statuslist.env.APP_ADMIN_AUTH__AUDIENCES=",
+            "hosted deployment requires statuslist.env.APP_ADMIN_AUTH__AUDIENCES",
+        ),
+        (
+            "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+            "hosted management ingress requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES",
+        ),
+    ] {
+        let Some(output) = helm_template(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set-string",
+            missing,
+        ]) else {
+            return;
+        };
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
+#[test]
+fn hosted_scan_script_rejects_exposure_and_missing_authentication() {
+    let python = Command::new("python3").arg("--version").output();
+    if !python.is_ok_and(|output| output.status.success()) {
+        if env::var_os("CI").is_some() {
+            panic!("python3 is required for hosted scan tests in CI");
+        }
+        eprintln!("skipping hosted scan tests because python3 is not installed");
+        return;
+    }
+    let output = Command::new("python3")
+        .args([
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "scripts",
+            "-p",
+            "test_check_hosted_sandbox.py",
+        ])
+        .output()
+        .expect("failed to start hosted scan tests");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

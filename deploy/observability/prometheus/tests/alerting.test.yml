@@ -436,3 +436,86 @@ tests:
       - eval_time: 400m
         alertname: CertRenewalErrorBudgetCritical
         exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: issuer_registry_reload_failed{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0 1x40
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IssuerRegistryReloadFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+              team: statuslist
+              service: status-list-server
+              namespace: ns1
+            exp_annotations:
+              summary: Issuer registry reload failed
+              description: The last valid registry remains active; repair the mounted registry.
+              runbook_url: https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts
+  - interval: 1m
+    input_series:
+      - series: issuer_registry_reload_failed{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0x40
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IssuerRegistryReloadFailures
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: list_quota_rejections_total{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0+3x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ListQuotaRejectionsSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+              team: statuslist
+              service: status-list-server
+              namespace: ns1
+            exp_annotations:
+              summary: Issuer list quota rejections are elevated
+              description: Inspect issuer usage before changing sandbox quotas.
+              runbook_url: https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts
+  - interval: 1m
+    input_series:
+      - series: list_quota_rejections_total{otel_scope_name="status-list-server",namespace="ns1"}
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ListQuotaRejectionsSpike
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: management_auth_requests_total_total{otel_scope_name="status-list-server",namespace="ns1",outcome="rejected"}
+        values: 0+11x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ManagementAuthFailuresSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warn
+              team: statuslist
+              service: status-list-server
+              namespace: ns1
+            exp_annotations:
+              summary: Management authentication failures are elevated
+              description: Check issuer configuration and investigate abusive clients.
+              runbook_url: https://github.com/adorsys/status-list-server/blob/develop/docs/hosted-sandbox.md#alerts
+  - interval: 1m
+    input_series:
+      - series: management_auth_requests_total_total{otel_scope_name="status-list-server",namespace="ns1",outcome="rejected"}
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ManagementAuthFailuresSpike
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: management_auth_requests_total_total{otel_scope_name="status-list-server",namespace="ns1",outcome="success"}
+        values: 0+1000x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ManagementAuthFailuresSpike
+        exp_alerts: []

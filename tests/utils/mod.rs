@@ -9,6 +9,7 @@ use status_list_server::{
     config::Config,
     crypto::SigningKey,
     domain::{
+        models::credential::{Credential, Issuer, PublicJwk},
         models::status_list::StatusListError,
         ports::{CertificateProvider, SigningMaterial},
         service::Service,
@@ -23,8 +24,6 @@ use status_list_server::{
 use tokio::net::TcpListener;
 
 pub(super) const KEY: &str = include_str!("../../test_data/ec-private.pem");
-// Generate once per test process from the existing fixture key. Both the server
-// and the independent signature assertions use this exact certificate.
 pub(super) fn certificate() -> &'static str {
     static CERT: OnceLock<String> = OnceLock::new();
     CERT.get_or_init(|| {
@@ -46,8 +45,6 @@ impl CertificateProvider for FixtureCertificate {
     }
 }
 
-// Deserialize an explicit fixture through Config's existing public surface.
-// No ambient APP_* values are read and no process-wide environment is mutated.
 fn fixture_config() -> Config {
     serde_json::from_value(json!({
         "server": {"host": "127.0.0.1", "port": 0, "domain": "localhost",
@@ -70,8 +67,11 @@ fn fixture_config() -> Config {
         "token_bytes_cache": {"max_capacity": 1048576},
         "status_list": {"token_exp_secs": 900, "token_ttl_secs": 300, "snapshot_retention_secs": 3600},
         "management_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": [], "issuers_file": "issuers.yaml"},
+        "admin_auth": {"leeway_secs": 60, "max_token_lifetime_secs": 300, "audiences": ["status-list-server-admin"]},
         "rate_limit": {"strict_burst_size": 100, "strict_period_secs": 60,
-            "permissive_burst_size": 100, "permissive_period_secs": 60},
+            "permissive_burst_size": 100, "permissive_period_secs": 60,
+            "admin_burst_size": 30, "admin_period_secs": 60,
+            "admission_burst_size": 1000, "admission_per_second": 100},
         "limits": {"max_body_size_bytes": 2097152, "max_status_index": 100000,
             "max_statuses_per_request": 5000, "max_serialized_list_size": 1048576,
             "max_lists_per_issuer": 1000, "list_quota_transition": false},
@@ -81,7 +81,7 @@ fn fixture_config() -> Config {
     })).unwrap()
 }
 
-fn fixture_state(config: &Config) -> AppState {
+fn fixture_state(config: &Config, registry_override: Option<&str>) -> AppState {
     use base64::prelude::{BASE64_STANDARD, BASE64_URL_SAFE_NO_PAD};
     let snapshots = MemoryStatusListSnapshotRepo::default();
     let lists = MemoryStatusLists::default().with_snapshot(&snapshots);
@@ -94,17 +94,17 @@ fn fixture_state(config: &Config) -> AppState {
     .unwrap();
     let signing_key = SigningKey::from_pem(KEY).unwrap();
     let public = signing_key.public_key_bytes();
-    let issuer_registry = format!(
+    let default_registry = format!(
         "version: 1\nissuers:\n  - id: {ISSUER}\n    aggregation_id: {AGGREGATION_ID}\n    keys:\n      - kid: {KEY_ID}\n        alg: ES256\n        jwk:\n          kty: EC\n          crv: P-256\n          kid: {KEY_ID}\n          alg: ES256\n          x: {}\n          y: {}\nadmins: []\n",
         BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
         BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
     );
+    let registry_yaml = registry_override.unwrap_or(&default_registry);
     let registry = Arc::new(
-        status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(
-            &issuer_registry,
-        )
-        .unwrap(),
+        status_list_server::server::auth::issuer_registry::RegistryHandle::from_yaml(registry_yaml)
+            .unwrap(),
     );
+    let tiers = Arc::new(config.tier_limits().unwrap());
     AppState {
         service: Arc::new(Service::from_arcs(
             Arc::new(lists),
@@ -124,14 +124,19 @@ fn fixture_state(config: &Config) -> AppState {
         aggregation_withheld_from: Default::default(),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter: Arc::new(
+            status_list_server::server::rate_limit::IssuerRateLimiter::new(&tiers),
+        ),
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: (&config.management_auth).into(),
+        admin_auth: (&config.admin_auth).into(),
+        admin_registry: registry.clone(),
+        hosted_issuer_store: None,
         issuer_registry: registry.clone(),
         issuer_key_resolver: registry,
+        hosted_lifecycle_service: None,
         links: status_list_server::server::ServiceLinks {
             documentation: status_list_server::config::REPOSITORY_URL.to_string(),
             portal: None,
@@ -149,27 +154,54 @@ pub(super) struct TestServer {
     pub(super) management_url: String,
     pub(super) client: reqwest::Client,
     pub(super) aggregation_id: String,
+    token_kid: String,
 }
 
 impl TestServer {
     pub(super) async fn start(aggregation_uri: Option<String>) -> Self {
+        Self::start_with_registry(aggregation_uri, None).await
+    }
+
+    pub(super) async fn start_with_registry(
+        aggregation_uri: Option<String>,
+        registry_override: Option<String>,
+    ) -> Self {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut config = fixture_config();
         config.server.aggregation_uri = aggregation_uri;
-        // HttpServer::new owns binding. Retry if another parallel test/process
-        // acquires the OS-selected port between releasing it and server startup.
         let (base_url, management_url, server) = {
             let mut started = None;
             for attempt in 0..10 {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 config.server.port = listener.local_addr().unwrap().port();
                 let base_url = format!("http://127.0.0.1:{}", config.server.port);
-                // Connect directly to HTTP rather than a production TLS terminator.
                 config.server.public_base_url = Some(format!("{base_url}/api/v1"));
                 drop(listener);
-                match HttpServer::new(&config, fixture_state(&config), prometheus::Registry::new())
+                let state = fixture_state(&config, registry_override.as_deref());
+                let key = SigningKey::from_pem(KEY).unwrap();
+                let public = key.public_key_bytes();
+                let public_jwk = json!({
+                    "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
+                    "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
+                    "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
+                });
+                state
+                    .service
+                    .publish_credential_with_aggregation_id(
+                        Credential {
+                            issuer: Issuer(ISSUER.to_owned()),
+                            public_key: PublicJwk::try_new(
+                                serde_json::to_vec(&public_jwk).unwrap(),
+                            )
+                            .unwrap(),
+                        },
+                        status_list_server::domain::models::credential::AggregationId(
+                            AGGREGATION_ID.parse().unwrap(),
+                        ),
+                    )
                     .await
-                {
+                    .unwrap();
+                match HttpServer::new(&config, state, prometheus::Registry::new()).await {
                     Ok(server) => {
                         let management_url = format!("http://{}", server.management_addr());
                         started = Some((base_url, management_url, server));
@@ -190,12 +222,9 @@ impl TestServer {
             }
             started.expect("server bound within retry limit")
         };
-        // Each #[tokio::test] owns its runtime; shutdown drops its server tasks.
-        // Hold the sender alive for the server task's lifetime so the graceful
-        // shutdown future never resolves mid-test; teardown happens on runtime drop.
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
-            let _shutdown_tx = shutdown_tx;
+            let _keep_server_running = shutdown_tx;
             server.run(shutdown_rx).await
         });
         let client = reqwest::Client::builder()
@@ -208,35 +237,27 @@ impl TestServer {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        let app = Self {
+        Self {
             base_url,
             management_url,
             client,
             aggregation_id: AGGREGATION_ID.to_owned(),
-        };
-        let key = SigningKey::from_pem(KEY).unwrap();
-        let public = key.public_key_bytes();
-        let response = app
-            .client
-            .post(format!("{}/api/v1/credentials", app.management_url))
-            .json(&json!({"issuer": ISSUER, "public_key": {
-                "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": KEY_ID,
-                "x": BASE64_URL_SAFE_NO_PAD.encode(&public[1..33]),
-                "y": BASE64_URL_SAFE_NO_PAD.encode(&public[33..65]),
-            }}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-        let registration: serde_json::Value = response.json().await.unwrap();
-        uuid::Uuid::parse_str(registration["aggregation_id"].as_str().unwrap()).unwrap();
-        app
+            token_kid: registry_override
+                .as_deref()
+                .and_then(|yaml| serde_saphyr::from_str::<serde_json::Value>(yaml).ok())
+                .and_then(|value| {
+                    value["issuers"][0]["keys"][0]["kid"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| KEY_ID.to_owned()),
+        }
     }
 
     pub(super) fn bearer_token(&self) -> String {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
-        header.kid = Some(KEY_ID.to_owned());
+        header.kid = Some(self.token_kid.clone());
         header.typ = Some("statuslist-management+jwt".to_owned());
         jsonwebtoken::encode(
             &header,

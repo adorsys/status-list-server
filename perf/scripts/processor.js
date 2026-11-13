@@ -10,9 +10,6 @@ try {
   console.error('Error:', error.message);
 }
 
-// Same file as the tokens, so the key always matches the JWTs.
-let TEST_PUBLIC_KEY_JWK = testTokens ? testTokens.publicKeyJwk : null;
-
 // Seeded by scripts/setup.js so reads hit real lists instead of 404ing; publishes add to it.
 const fs = require('fs');
 const path = require('path');
@@ -43,16 +40,6 @@ function loadTestData(context, events, done) {
   context.vars.issuerId = testTokens.issuerId;
   context.vars.publicKeyJwk = testTokens.publicKeyJwk;
   context.vars.allTokens = testTokens.tokens;
-
-  return done();
-}
-
-function generateIssuerPayload(context, events, done) {
-  const timestamp = Date.now();
-  const randomStr = Math.random().toString(36).substring(2, 12);
-
-  context.vars.issuer = `load-test-issuer-${timestamp}-${randomStr}`;
-  context.vars.publicKeyJwk = { ...TEST_PUBLIC_KEY_JWK, kid: context.vars.issuer };
 
   return done();
 }
@@ -96,29 +83,12 @@ function selectPublishedListId(context, events, done) {
   return done();
 }
 
-function shouldRegister(context, events, done) {
-  context.vars.shouldRegister = Math.random() < 0.3;
-  return done();
-}
-
 function handleStatusListResponse(requestParams, response, context, ee, next) {
   if (response.statusCode === 200) {
     successCount++;
   } else if (response.statusCode !== 404) {
     errorCount++;
     console.error(`Error: Status list ${requestParams.url} returned ${response.statusCode}`);
-  }
-  return next();
-}
-
-function handleCredentialResponse(requestParams, response, context, ee, next) {
-  // 409 Conflict is acceptable (duplicate issuer)
-  if (response.statusCode === 202 || response.statusCode === 409) {
-    successCount++;
-  } else {
-    errorCount++;
-    console.error(`Error: Credential registration returned ${response.statusCode}`);
-    console.error(`Body: ${response.body}`);
   }
   return next();
 }
@@ -167,13 +137,10 @@ function afterScenario(context, ee, next) {
 
 module.exports = {
   loadTestData,
-  generateIssuerPayload,
   selectRandomToken,
   generateUUID,
   selectPublishedListId,
-  shouldRegister,
   handleStatusListResponse,
-  handleCredentialResponse,
   handlePublishResponse,
   handleUpdateResponse,
   handleUnauthorizedResponse,

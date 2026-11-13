@@ -10,18 +10,17 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
 };
 use prometheus::{Encoder, Registry, TextEncoder};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::TelemetryConfig;
+use crate::domain::models::tier::{IssuerTier, IssuerUsage};
 
 #[cfg(test)]
 static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
-/// Bumped each time the global meter provider is (re)installed by
-/// [`setup_metrics`]. Recorders that cache instrument handles key their cache
-/// on this so a fresh provider (e.g. every metric test) doesn't keep writing to
-/// a stale, previously-dropped provider.
+/// Lets cached instrument handles notice a newly installed meter provider.
 static METER_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static ROTATION_METRICS: OnceLock<Mutex<Option<(u64, RotationMetrics)>>> = OnceLock::new();
 static ISSUER_REGISTRY_METRICS: OnceLock<Mutex<Option<(u64, IssuerRegistryMetrics)>>> =
@@ -42,7 +41,9 @@ struct RotationMetrics {
 struct IssuerRegistryMetrics {
     keys: Gauge<u64>,
     reload_failures: Counter<u64>,
+    reload_failed: Gauge<u64>,
     auth_requests: Counter<u64>,
+    admin_auth_requests: Counter<u64>,
 }
 
 fn issuer_registry_metrics() -> IssuerRegistryMetrics {
@@ -53,17 +54,35 @@ fn issuer_registry_metrics() -> IssuerRegistryMetrics {
             reload_failures: meter
                 .u64_counter("issuer_registry_reload_failures_total")
                 .build(),
+            reload_failed: meter.u64_gauge("issuer_registry_reload_failed").build(),
             auth_requests: meter.u64_counter("management_auth_requests_total").build(),
+            admin_auth_requests: meter.u64_counter("admin_auth_requests_total").build(),
         }
     })
 }
 
+pub(crate) fn record_admin_auth_request(outcome: &'static str) {
+    issuer_registry_metrics()
+        .admin_auth_requests
+        .add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
 pub(crate) fn set_issuer_registry_keys(count: usize) {
-    issuer_registry_metrics().keys.record(count as u64, &[]);
+    let instruments = issuer_registry_metrics();
+    instruments.keys.record(count as u64, &[]);
+    instruments.reload_failed.record(0, &[]);
+    // Seed a baseline so increase() observes the first failed reload.
+    instruments.reload_failures.add(0, &[]);
 }
 
 pub(crate) fn record_issuer_registry_reload_failure() {
-    issuer_registry_metrics().reload_failures.add(1, &[]);
+    let instruments = issuer_registry_metrics();
+    instruments.reload_failures.add(1, &[]);
+    instruments.reload_failed.record(1, &[]);
+}
+
+pub(crate) fn record_issuer_registry_reload_success() {
+    issuer_registry_metrics().reload_failed.record(0, &[]);
 }
 
 pub(crate) fn record_management_auth_request(
@@ -81,14 +100,25 @@ pub(crate) fn record_management_auth_request(
     );
 }
 
+fn list_quota_rejections() -> Counter<u64> {
+    static COUNTER: InstrumentSlot<Counter<u64>> = OnceLock::new();
+    cached_instruments(&COUNTER, || {
+        global::meter("status-list-server")
+            .u64_counter("list_quota_rejections")
+            .with_description("HTTP requests rejected because an issuer's list quota is full.")
+            .build()
+    })
+}
+
+pub(crate) fn record_list_quota_rejection() {
+    list_quota_rejections().add(1, &[]);
+}
+
 /// The current global meter-provider generation.
 pub(crate) fn provider_generation() -> u64 {
     METER_PROVIDER_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Return `T` from a per-provider-generation cache, rebuilding it with `build`
-/// whenever the global meter provider has changed (e.g. after a re-run of
-/// `setup_metrics` in tests).
 pub(crate) fn cached_instruments<T: Clone>(
     slot: &'static OnceLock<Mutex<Option<(u64, T)>>>,
     build: impl FnOnce() -> T,
@@ -169,9 +199,100 @@ pub(crate) fn record_list_quota_enforced(enforced: bool) {
     gauge.record(u64::from(enforced), &[]);
 }
 
-/// Initialize the OpenTelemetry metrics pipeline before any instruments are
-/// created. Metrics are always exposed through the in-process Prometheus
-/// registry. In production, they are also pushed to the Collector over OTLP.
+static ISSUER_RATE_LIMITED: InstrumentSlot<Counter<u64>> = OnceLock::new();
+
+/// Each registered issuer's tier and usage, counted from the database.
+/// Replaced wholesale on startup, on every registry reload and on a fixed
+/// interval, and read by observable gauges, so an issuer that leaves the
+/// registry or changes tier stops being exported under its old labels.
+static ISSUER_USAGE: Mutex<BTreeMap<String, (IssuerTier, IssuerUsage)>> =
+    Mutex::new(BTreeMap::new());
+
+// Labelled per issuer. Ids come from the registry or the hosted issuer store,
+// never from the request, so a client cannot mint a series.
+fn issuer_tier_attrs(issuer: &str, tier: IssuerTier) -> [KeyValue; 2] {
+    [
+        KeyValue::new("issuer", issuer.to_owned()),
+        KeyValue::new("tier", tier.as_str()),
+    ]
+}
+
+pub(crate) fn record_issuer_rate_limited(issuer: &str, tier: IssuerTier) {
+    let counter = cached_instruments(&ISSUER_RATE_LIMITED, || {
+        global::meter("status-list-server")
+            // Exported as `issuer_rate_limited_total`: the exporter adds the suffix.
+            .u64_counter("issuer_rate_limited")
+            .with_description("Management requests rejected by the issuer's tier rate limit.")
+            .build()
+    });
+    counter.add(1, &issuer_tier_attrs(issuer, tier));
+}
+
+static RATE_LIMITER_KEYS: InstrumentSlot<Gauge<u64>> = OnceLock::new();
+
+pub(crate) fn record_rate_limiter_keys(limiter: &'static str, keys: usize) {
+    let gauge = cached_instruments(&RATE_LIMITER_KEYS, || {
+        global::meter("status-list-server")
+            .u64_gauge("rate_limiter_keys")
+            .with_description("Keys a rate limiter holds after its last prune.")
+            .build()
+    });
+    gauge.record(keys as u64, &[KeyValue::new("limiter", limiter)]);
+}
+
+fn issuer_usage() -> std::sync::MutexGuard<'static, BTreeMap<String, (IssuerTier, IssuerUsage)>> {
+    ISSUER_USAGE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Replaces the exported usage with one entry per registered issuer.
+pub(crate) fn set_issuer_usage(usage: impl IntoIterator<Item = (String, IssuerTier, IssuerUsage)>) {
+    *issuer_usage() = usage
+        .into_iter()
+        .map(|(issuer, tier, usage)| (issuer, (tier, usage)))
+        .collect();
+}
+
+/// Name, description and the usage field one gauge exports.
+type UsageGauge = (&'static str, &'static str, fn(&IssuerUsage) -> u64);
+
+fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
+    let meter = provider.meter("status-list-server");
+    let gauges: [UsageGauge; 4] = [
+        ("issuer_lists", "Status lists the issuer holds.", |usage| {
+            usage.lists
+        }),
+        (
+            "issuer_lists_limit",
+            "The issuer's tier list quota.",
+            |usage| usage.lists_limit,
+        ),
+        (
+            "issuer_keys",
+            "Active keys of the issuer whose not_after has not passed.",
+            |usage| usage.keys as u64,
+        ),
+        (
+            "issuer_keys_limit",
+            "The issuer's tier key limit.",
+            |usage| usage.keys_limit as u64,
+        ),
+    ];
+    for (name, description, value) in gauges {
+        meter
+            .u64_observable_gauge(name)
+            .with_description(description)
+            .with_callback(move |observer| {
+                for (issuer, (tier, usage)) in issuer_usage().iter() {
+                    observer.observe(value(usage), &issuer_tier_attrs(issuer, *tier));
+                }
+            })
+            .build();
+    }
+}
+
+/// Run before any instrument is created; production also pushes over OTLP.
 pub(crate) fn setup_metrics(
     registry: &Registry,
     config: &TelemetryConfig,
@@ -197,10 +318,11 @@ pub(crate) fn setup_metrics(
 
     let provider = builder.build();
     register_process_observers(&provider);
+    register_issuer_usage_observers(&provider);
 
-    // Install as global so `opentelemetry::global::meter()` works everywhere
     opentelemetry::global::set_meter_provider(provider.clone());
     METER_PROVIDER_GENERATION.fetch_add(1, Ordering::Relaxed);
+    list_quota_rejections().add(0, &[]);
     Ok(provider)
 }
 
@@ -341,7 +463,6 @@ fn register_process_observers(provider: &SdkMeterProvider) {
         .build();
 }
 
-/// Render all collected metrics in the Prometheus text exposition format.
 pub(crate) async fn metrics_handler(registry: Registry) -> String {
     let encoder = TextEncoder::new();
     let metric_families = registry.gather();
@@ -385,10 +506,6 @@ mod tests {
             .map(|family| family.name().to_string())
             .collect::<std::collections::HashSet<_>>();
 
-        // Observers only report when the collector yields a value, and
-        // `metrics_process` does not expose every field on every platform.
-        // Asserting the full set would test the host OS rather than the
-        // registration wiring, so derive it from what the collector reports.
         let snapshot = get_process_snapshot();
         let expected = [
             (
@@ -416,10 +533,6 @@ mod tests {
             ("process_threads", snapshot.threads.is_some()),
         ];
 
-        // Without a floor, a `setup_metrics` that registered no observers at all
-        // would filter every field out and pass the loop below vacuously. Six is
-        // what `metrics-process` reports on the thinnest supported platform
-        // (Windows, missing `virtual_memory_max_bytes` and `threads`).
         const ALWAYS_AVAILABLE: usize = 6;
         let available = expected.iter().filter(|(_, available)| *available).count();
         assert!(
@@ -474,6 +587,74 @@ mod tests {
         assert!(rendered.contains("outcome=\"failure\""));
     }
 
+    #[test]
+    fn hosted_alert_metrics_track_registry_reload_state() {
+        use crate::server::error::IntoApiError;
+        use axum::response::IntoResponse;
+
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        let _provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+        set_issuer_registry_keys(0);
+        record_issuer_registry_reload_failure();
+        record_management_auth_request(None, None, "rejected");
+        assert_eq!(
+            crate::domain::models::status_list::StatusListError::InvalidIndex
+                .into_api_error()
+                .into_response()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST,
+        );
+        let error = crate::domain::models::status_list::StatusListError::QuotaExceeded {
+            count: 10,
+            max: 10,
+        };
+        assert_eq!(
+            error.into_api_error().into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let rendered = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(metrics_handler(registry.clone()));
+        for name in [
+            "list_quota_rejections_total{",
+            "issuer_registry_reload_failures_total_total{",
+            "management_auth_requests_total_total{",
+            "issuer_registry_reload_failed{",
+        ] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.starts_with(name) && line.ends_with(" 1")),
+                "{rendered}"
+            );
+        }
+        record_issuer_registry_reload_success();
+        let recovered = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(metrics_handler(registry));
+        assert!(
+            recovered
+                .lines()
+                .any(|line| line.starts_with("issuer_registry_reload_failed{")
+                    && line.ends_with(" 0")),
+            "{recovered}"
+        );
+    }
+
     #[cfg(feature = "history")]
     #[test]
     fn list_quota_enforced_is_exported() {
@@ -499,13 +680,77 @@ mod tests {
         let rendered = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
             .block_on(metrics_handler(registry));
-        // Only its presence: SQL tests running in parallel record it on every
-        // publish, so its value here is whatever the last one wrote.
         assert!(
             rendered
                 .lines()
                 .any(|line| line.starts_with("list_quota_enforced")),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn issuer_usage_drops_issuers_that_left_or_changed_tier() {
+        let usage = |lists, keys| IssuerUsage {
+            lists,
+            lists_limit: 10,
+            keys,
+            keys_limit: 2,
+        };
+        let _metrics_guard = metrics_test_lock();
+        let registry = Registry::new();
+        let config = TelemetryConfig {
+            environment: TelemetryEnvironment::Development,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            sampler_ratio: 1.0,
+            enabled: false,
+        };
+        // One provider for both scrapes: series a previous collection
+        // exported must disappear, not merely be absent from a fresh provider.
+        let _meter_provider = setup_metrics(
+            &registry,
+            &config,
+            Resource::builder()
+                .with_service_name("status-list-server-test")
+                .build(),
+        )
+        .expect("metrics setup");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let scrape = |samples: Vec<(String, IssuerTier, IssuerUsage)>| {
+            set_issuer_usage(samples);
+            runtime.block_on(metrics_handler(registry.clone()))
+        };
+        let series = |rendered: &str, name: &str, issuer: &str, tier: &str| {
+            rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(&format!("{name}{{"))
+                        && line.contains(&format!("issuer=\"{issuer}\""))
+                        && line.contains(&format!("tier=\"{tier}\""))
+                })
+                .map(|line| line.rsplit(' ').next().unwrap().to_owned())
+        };
+
+        let before = scrape(vec![
+            ("moving".into(), IssuerTier::Sandbox, usage(3, 1)),
+            ("leaving".into(), IssuerTier::Standard, usage(5, 2)),
+        ]);
+        assert_eq!(
+            series(&before, "issuer_lists", "moving", "sandbox").as_deref(),
+            Some("3"),
+            "{before}"
+        );
+        assert!(series(&before, "issuer_keys", "leaving", "standard").is_some());
+
+        let after = scrape(vec![("moving".into(), IssuerTier::Standard, usage(3, 1))]);
+        assert_eq!(
+            series(&after, "issuer_lists", "moving", "standard").as_deref(),
+            Some("3"),
+            "{after}"
+        );
+        assert_eq!(series(&after, "issuer_lists", "moving", "sandbox"), None);
+        assert!(
+            !after.contains("issuer=\"leaving\""),
+            "an issuer that left the registry must not be exported: {after}"
         );
     }
 }

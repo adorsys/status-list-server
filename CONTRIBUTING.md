@@ -64,6 +64,129 @@ PostgreSQL, MySQL, and Redis integration tests need a running Docker daemon; SQL
 The [feature profile matrix](README.md#development-and-quality-checks) lists all profiles and their features. The `build`, `test`, and `compose` commands default to `postgres`, so select `minimal` explicitly when you want the in-memory workflow.
 Provider-specific setup is described in the [database](docs/database-backends.md), [secrets](docs/secrets-backends.md), and [DNS](docs/dns-providers.md) guides.
 
+### SQL test containers
+
+MySQL and Postgres tests start throwaway containers through `src/outbound/sql/test_containers.rs`.
+
+- Each fixture owns its container and removes it on drop, including during a panic. Keep it in scope until every pool and task using it has finished.
+- Hold one fixture per test. Plain `cargo test` allows four live SQL containers per process, so a test waiting on a second fixture can deadlock; open extra pools on the same fixture instead.
+- Put `mysql` or `postgres` in new database test names so they join nextest's `containers` group.
+- The cleanup regression tests also need the Docker CLI on `PATH`.
+
+A killed run (SIGTERM, including nextest slow-timeouts, Ctrl-C, SIGKILL, an abort, or `TESTCONTAINERS_COMMAND=keep`) can leave containers behind. Every fixture container is labelled with its run ID. Under nextest that is `NEXTEST_RUN_ID`, printed when the run starts; to choose your own, or to group plain `cargo test` runs, export one first:
+
+```bash
+export STATUS_LIST_TEST_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+cargo nextest run --workspace --all-targets --all-features
+```
+
+After the run has stopped, set `STATUS_LIST_TEST_RUN_ID` to its ID and remove only its SQL containers and their anonymous volumes. These filters never match Redis fixtures or other projects' containers.
+
+```bash
+: "${STATUS_LIST_TEST_RUN_ID:?Set the interrupted run ID first}"
+docker container ls -a --filter label=org.adorsys.status-list-server.fixture=sql \
+  --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"
+for id in $(docker container ls -aq --filter label=org.adorsys.status-list-server.fixture=sql \
+  --filter "label=org.adorsys.status-list-server.run=$STATUS_LIST_TEST_RUN_ID"); do
+  docker container rm -fv "$id"
+done
+```
+
+## Release and versioning
+
+`release-plz` is the single source of release versions and changelog entries. It
+uses the Conventional Commit history and the configuration in `release-plz.toml`
+and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
+Release-plz uses one release-branch prefix across target branches, so only one
+branch may have an open release-plz PR at a time. The workflow refuses to run
+when another target branch already has one; close that PR before dispatching
+for `develop` or a `hotfix/*` branch. A later dispatch recreates it if needed.
+
+Before the first promotion, repository administrators must protect `stage` and
+`hotfix/*` from direct pushes with review and required checks. Configure the
+production environment to require deployment approval for RC and final tags,
+and restrict creation of `v*` tags to the release-bot App. The `stage` ruleset
+can be created before the branch exists; create the branch only after the
+protections are active. Until then, a write-access push or hotfix workflow
+dispatch could deploy unreviewed code to production.
+
+The `gate` workflow enforces the promotion path on pull requests into `stage`
+and `main`. Make its `gate` check required on both branches, together with
+"Require branches to be up to date before merging", so a pull request that
+passed before a newer release cannot merge unchecked. The check runs on
+`pull_request_target` from the base branch's copy of the workflow and
+`scripts/promotion-gate.sh`. Both files must therefore be on `stage` and
+`main` before the check is required, or pull requests wait for it
+indefinitely, and a change to the gate takes effect only once it is promoted.
+If a broken gate blocks its own fix, an administrator bypasses the rule for
+that pull request. The gate accepts:
+
+- Into `stage`: pull requests from `develop` only.
+- Into `main`: pull requests from `stage` or `hotfix/*`, in this repository,
+  whose head already contains `main`, is the commit of the highest
+  `v<version>-rc.<N>` for its `Cargo.toml` version, and has a successful
+  **Build and Deploy to EKS** push run. A `hotfix/*` version must also be
+  newer than the latest final release.
+
+These cover the conditions the final release checks after the merge, so
+the gate refuses a promotion before `main` is tagged instead of after. The
+gate does not re-run when a candidate's run finishes. If it failed because the
+candidate was still being tagged or deployed, re-run the check once that run
+passes.
+
+The normal promotion path is:
+
+1. Before preparing a release, ensure the latest final release from `main` has
+   been back-merged into `develop`. The workflow refuses to calculate a version
+   when the latest final tag is not in the selected branch's history.
+2. Merge changes into `develop`.
+3. Manually dispatch **Release-plz PR** with `develop` selected. The resulting
+   release PR prepares the next version and changelog; it does not publish a
+   release.
+4. Review and merge the release PR into `develop`.
+5. Merge `develop` into `stage`. The RC automation creates
+   `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
+   Release-plz ignores RC tags because its `git_only` final-tag match is
+   `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
+   than the latest final tag, the stage workflow fails before it creates an RC
+   tag; prepare the next release-plz version instead. A tag whose deployment
+   fails is not a validated candidate until its run passes. If only the
+   deployment job failed, re-run that job after fixing the cause.
+6. Merge `stage` into `main`. A push to `main` creates `v<version>` and the
+   GitHub Release when that version is not tagged. If `v<version>` already
+   exists, release-plz makes no duplicate release.
+   The final tag does not rebuild the image. It promotes the image digest of
+   the highest-numbered `v<version>-rc.<N>`, and the release fails unless that
+   candidate's `deploy.yml` run passed and the tagged `main` commit has the
+   same file tree as the candidate's commit. Cut a new candidate whenever
+   `stage` changes after the last one, including documentation or workflow
+   changes, since any difference in the tree fails the release. A candidate is
+   promotable only when its whole run passed, so a **Deploy to Production**
+   failure that recurs blocks the release until its cause is fixed. If the
+   candidate's run failed there for a one-off reason, re-run that job; once
+   the run concludes `success`, the candidate can be promoted without cutting
+   a new one.
+
+RC and final releases therefore use the same semantic version and changelog.
+The final `v<version>` tag is created only from `main`.
+
+For a hotfix, branch `hotfix/*` from the released `main` state, then manually
+dispatch **Release-plz PR** with that branch selected. Review and merge the
+resulting patch-version and changelog PR into the hotfix branch, then manually
+dispatch **Tag Release Candidate** with that branch selected. Validate the RC
+deployment before the `hotfix/*` to `main` promotion: the final tag promotes
+that candidate's image and fails without one. Dispatch only after the
+patch-version PR is merged, and wait for the candidate's `deploy.yml` run to
+pass. The candidate's tree must match what `main` will hold after the
+promotion, so any later change to the hotfix branch needs a new candidate.
+
+After the hotfix release, merge `main` back into `develop` with a merge commit
+before the next `develop` to `stage` promotion. If `develop` already contains a
+newer prepared version, resolve `Cargo.toml` and `CHANGELOG.md` by keeping the
+development version and adding the hotfix changelog section. The merge commit
+keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
+run to calculate from the latest release.
+
 ## Coding style and architecture
 
 Use descriptive names and follow the surrounding code. Rust formatting is configured in [`rustfmt.toml`](rustfmt.toml), including LF line endings. Run `cargo fmt --all` before submitting Rust changes. Use rustdoc to explain public APIs and comments to explain decisions that are not clear from the code.

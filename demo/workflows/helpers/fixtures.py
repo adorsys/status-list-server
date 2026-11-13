@@ -1,22 +1,17 @@
-import random
-import string
 import jwt
 import time
 import os
+import hashlib
+import json
+import base64
 
 # Demo keypairs only; real issuers keep keys in a secret store.
 
 
-def generate_random_string(length):
-    characters = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(characters) for i in range(length))
-
-
 def get_gondwana_digital_pole_issuer():
-    """Random label suffix so reruns don't hit 409."""
-    random_suffix = generate_random_string(5)
+    """Return the fixed demo issuer provisioned by the local registry fixture."""
     issuer_data = {
-        "label": f"gondwana-digital-pole-{random_suffix}",
+        "label": "gondwana-digital-pole",
         "keypair": {
             "alg": "ES256",
             "public_key": (
@@ -35,10 +30,9 @@ def get_gondwana_digital_pole_issuer():
 
 
 def get_scott_holdings_issuer():
-    """Random label suffix so reruns don't hit 409."""
-    random_suffix = generate_random_string(5)
+    """Return the fixed demo issuer provisioned by the local registry fixture."""
     issuer_data = {
-        "label": f"scott-holdings-{random_suffix}",
+        "label": "scott-holdings",
         "keypair": {
             "alg": "PS256",
             "public_key": (
@@ -67,7 +61,33 @@ def get_public_jwk(issuer: dict) -> dict:
     jwk.pop("key_ops", None)
 
     # Management JWTs are resolved by kid and pinned to this signing algorithm.
-    return {**jwk, "alg": alg, "kid": issuer["label"]}
+    thumbprint_fields = {name: jwk[name] for name in ("crv", "kty", "x", "y") if name in jwk}
+    if jwk.get("kty") == "RSA":
+        thumbprint_fields = {name: jwk[name] for name in ("e", "kty", "n")}
+    thumbprint = base64.urlsafe_b64encode(hashlib.sha256(
+        json.dumps(thumbprint_fields, sort_keys=True, separators=(",", ":")).encode()
+    ).digest()).decode().rstrip("=")
+    return {**jwk, "alg": alg, "kid": thumbprint}
+
+
+def write_registry_fixture(path="issuer-registry/issuers.yaml"):
+    """Write the fixed local demo identities as a JSON-compatible YAML registry."""
+    issuers = []
+    for issuer, aggregation_id in [
+        (get_gondwana_digital_pole_issuer(), "00000000-0000-4000-8000-000000000101"),
+        (get_scott_holdings_issuer(), "00000000-0000-4000-8000-000000000102"),
+    ]:
+        jwk = get_public_jwk(issuer)
+        issuers.append({
+            "id": issuer["label"],
+            "aggregation_id": aggregation_id,
+            "tier": "standard",
+            "keys": [{"kid": jwk["kid"], "alg": jwk["alg"], "jwk": jwk}],
+        })
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as registry:
+        json.dump({"version": 1, "issuers": issuers, "admins": []}, registry, indent=2)
+        registry.write("\n")
 
 
 def create_bearer_jwt_token(issuer: dict, lifespan: int = 300) -> str:

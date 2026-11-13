@@ -1,111 +1,80 @@
 # API Testing
 
-This project ships ready-to-import Postman assets and an automated Newman
-runner for checking the live HTTP API.
-
-## Postman Quickstart
-
-Import these files into Postman, Bruno, or another client that accepts Postman
-Collection v2.1 exports:
+This project ships a Postman collection, a local environment, and a Newman
+runner for checking the live HTTP API:
 
 - [`postman/status-list-server.postman_collection.json`](../postman/status-list-server.postman_collection.json)
 - [`postman/status-list-server.postman_environment.json`](../postman/status-list-server.postman_environment.json)
 
-The environment exposes these variables:
+## Postman Quickstart
 
-| Variable              | Default                                | Purpose                                                               |
-| --------------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `baseUrl`             | `http://localhost:8000`                | Public status-list-server endpoint.                                   |
-| `managementUrl`       | `http://localhost:8001`                | Management endpoint for issuer and status-list writes.                |
-| `list_id`             | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
-| `issuer_id`           | `my-issuer`                            | Issuer identifier used for credential registration.                   |
-| `issuer_audience`     | empty                                  | Optional audience claim for deployments that require one.             |
-| `token`               | empty                                  | Generated signed issuer JWT for protected `PUT` and `PATCH` requests. |
-| `issuer_private_jwks` | empty                                  | Secret key cache indexed by issuer, retained when switching issuers.  |
-| `issuer_public_key`   | empty                                  | Public JWK generated for issuer registration.                         |
-| `historical_time`     | `1686925000`                           | Unix timestamp used by historical resolution.                         |
+Import both files and select the included environment. Set the public,
+management, and admin listener URLs for your server. The defaults are
+`http://localhost:8000`, `http://localhost:8001`, and
+`http://localhost:8002`. Set `issuer_id` to an issuer already provisioned by
+the operator, and set the secret `token` variable to a signed management JWT
+for that issuer. The token must use a registered key and the audience required
+by the server. See [issuer onboarding](issuer-onboarding.md) for local setup.
 
-The collection is organized into Health & Metrics, Issuer Management, Status
-Lists, and Aggregation folders. Requests include Postman test scripts that check
-status codes, content types, token response headers, and JSON response shapes.
+Send **Start new test run** to generate a fresh `list_id`, then **Verify issuer
+credentials**. The latter calls the authenticated
+`GET {{managementUrl}}/api/v1/credentials` endpoint. The management writes
+inherit the collection's bearer token. Public reads and negative authentication
+tests do not use it. The collection cannot register an issuer: the server's
+management API no longer has a registration route.
 
-Protected management routes require a Bearer JWT signed by the private key that
-matches the issuer public JWK registered through `POST /api/v1/credentials`.
-For fully automated local collection testing, use the Newman script below; it
-generates and registers a temporary issuer for the run.
+The environment also contains `adminToken` for admin reads and optional hosted
+issuer lifecycle requests. The **Issuer Lifecycle (destructive, hosted
+profile)** folder requires a hosted server, a portal issuer, its key ID, and
+an admin JWT with `issuers:write`. Set `issuer_id`, `kid`, and `adminToken`
+before running that folder; suspend and revoke change live issuer state.
+The Newman check omits this folder because it runs against the private profile.
 
-In Postman, select the included environment, send **Start new test run**, then
-send **Register issuer credentials** before publishing. The first request creates
-a fresh `list_id`; generated private keys are saved per issuer in the environment,
-so switching `issuer_id` back to an earlier issuer reuses its key. Keep the private
-key cache secret when backing up your local environment. Generated JWTs stay in the
-current request scope; the environment `token` value is only used by Newman when
-it supplies a preconfigured token.
-
-A registration conflict (`409`) is accepted only after an authenticated
-`GET {{managementUrl}}/api/v1/credentials` confirms the saved key works for that
-issuer. If it fails, the collection reports a failed test and blocks the workflow.
-Restore the issuer's original private key/environment, or choose a new
-`issuer_id` and register again. Reimporting an empty environment cannot recover
-the private key of an issuer already registered on the server.
-
-Run the registration-script regression checks with:
-
-```bash
-node --test scripts/tests/test_postman_registration.cjs
-```
-
-## Local Prerequisites
-
-The Postman/Newman runner expects these host tools:
-
-- Rust/Cargo to start the local server with `cargo run`.
-- Node.js for generating ephemeral issuer keys and JWTs.
-- `curl` for readiness checks.
-- Newman or Docker when running the Postman collection from the command line.
-  The CI path uses the pinned Newman container by default.
+Keep bearer tokens private. The checked-in environment contains empty secret
+values; do not export populated local values to the repository or a public
+workspace.
 
 ## Newman Collection Check
 
-Start the API first:
+The runner requires Rust/Cargo to start the server, Node.js to generate
+temporary test keys and JWTs, `curl` for readiness checks, and Newman or Docker.
+It replaces a dedicated registry file with temporary issuer and admin entries,
+then waits until both identities authenticate. Run it only against a local or
+isolated server with a dedicated registry file.
+
+Create an empty registry and start the server with that file:
 
 ```bash
+registry_file="$PWD/target/postman-test-issuers.json"
+mkdir -p "$(dirname "$registry_file")"
+printf '{"version":1,"issuers":[],"admins":[]}\n' > "$registry_file"
+
 APP_SERVER__HOST=0.0.0.0 \
+APP_SERVER__MANAGEMENT__HOST=0.0.0.0 \
+APP_SERVER__ADMIN__HOST=0.0.0.0 \
 APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
 APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
 APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$registry_file" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+APP_ADMIN_AUTH__AUDIENCES=status-list-server-admin \
 cargo run
 ```
 
-Then run the same collection check used by CI:
+In another terminal, run the collection check against that server:
 
 ```bash
+POSTMAN_ISSUER_REGISTRY_FILE="$PWD/target/postman-test-issuers.json" \
+MANAGEMENT_AUDIENCE=status-list-server-management \
+ADMIN_AUDIENCE=status-list-server-admin \
 ./scripts/test-postman-collection.sh
 ```
 
-The script generates a temporary P-256 issuer key, patches a temporary copy of
-the collection so `POST /api/v1/credentials` registers the matching public JWK,
-and runs Newman with a temporary environment containing `baseUrl`,
-`managementUrl`, `list_id`, `issuer_id`, `token`, and `historical_time`. The CI
-workflow also reruns registration against the same issuer to cover both `202` and
-`409` responses and checks the JWT readiness assertion in the Newman report. No
-generated collection or environment is written into the repository. Set
-`NEWMAN_RUNNER=docker` to use the pinned Newman container instead of a locally
-installed Newman binary.
-
-Useful environment overrides:
-
-| Variable                   | Default                             | Purpose                                                           |
-| -------------------------- | ----------------------------------- | ----------------------------------------------------------------- |
-| `API_ENDPOINT`             | `http://localhost:8000`             | Live API endpoint under test.                                     |
-| `NEWMAN_API_READY_TIMEOUT` | `180`                               | Maximum seconds to wait for the live API before running Newman.   |
-| `NEWMAN_RUNNER`            | `auto`                              | Newman runner selection: `auto`, `local`, or `docker`.            |
-| `NEWMAN_DOCKER_IMAGE`      | `postman/newman@sha256:02dc...e04f` | Pinned Newman container used by CI and `NEWMAN_RUNNER=docker`.    |
-
-Example against a deployed server:
-
-```bash
-API_ENDPOINT=https://statuslist.example.com \
-NEWMAN_RUNNER=docker \
-./scripts/test-postman-collection.sh
-```
+The runner writes only temporary collection and environment copies. It
+filters the hosted lifecycle folder and runs the remaining requests with the
+generated tokens. `POSTMAN_ISSUER_REGISTRY_FILE` is required. `API_ENDPOINT`
+defaults to `http://localhost:8000`; `MANAGEMENT_URL` and `ADMIN_URL`
+default to the same host on ports 8001 and 8002. The runner selects a local
+Newman binary when available, otherwise Docker; set `NEWMAN_RUNNER=local` or
+`NEWMAN_RUNNER=docker` to choose explicitly. `NEWMAN_API_READY_TIMEOUT`
+defaults to 180 seconds.

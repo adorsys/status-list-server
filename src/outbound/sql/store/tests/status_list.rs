@@ -71,7 +71,7 @@ async fn test_sqlite_status_list_round_trip() {
             "list-sqlite-test",
             StatusListRecord {
                 sub: "sub-2-sqlite-test".to_string(),
-                version: record.version + 1, // guarded write must advance the version
+                version: record.version + 1,
                 ..record.clone()
             },
             record.version,
@@ -148,8 +148,6 @@ async fn test_status_list_find_all() {
     assert_eq!(records[1].status_list.lst, "xyz");
 }
 
-/// Pins the keyset shape, in particular the `LIMIT` that bounds the read, and
-/// the `issuer` equality a scoped page adds for the `(issuer, list_id)` index.
 #[tokio::test]
 async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
     let row = |id: &str| {
@@ -213,8 +211,6 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
     );
 }
 
-/// The quota `UPDATE` must precede the `INSERT`; reversed, InnoDB deadlocks
-/// concurrent publishes for one issuer (see `reserve_list_slot`).
 #[tokio::test]
 async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
     let entity = fixtures::record("list-q", "issuer-q", "initial", "sub-q", 1000);
@@ -357,7 +353,6 @@ async fn test_insert_at_quota_refuses_without_inserting() {
                     "list_count".to_string(),
                     Value::from(2i64),
                 )])],
-                // The `list_id` lookup: not taken.
                 vec![],
             ])
             .into_connection(),
@@ -394,9 +389,6 @@ async fn test_update_one_optimistic_guard_rejects_stale_write() {
     assert_guarded_update_rejects_stale_write(db, "issuer-guard-sqlite", "list-guard-sqlite").await;
 }
 
-/// Cross-backend proof (#143): the optimistic guard behaves identically on
-/// MySQL, exercising the JSON `col_expr` write and `rows_affected` semantics
-/// most likely to diverge from sqlite.
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_update_one_optimistic_guard_rejects_stale_write() {
@@ -493,10 +485,6 @@ async fn test_update_one_conflict_loser_can_reread_and_retry() {
     assert_eq!(final_row.version, base.version + 2);
 }
 
-/// A guarded write whose `version` does not strictly advance past the
-/// guard is rejected before touching the DB, so a caller that forgets to
-/// advance the version fails loudly. The check precedes the query, so this
-/// runs on the mock backend.
 #[tokio::test]
 async fn test_update_one_rejects_non_advancing_stamp() {
     let db_conn = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
@@ -504,11 +492,9 @@ async fn test_update_one_rejects_non_advancing_stamp() {
 
     let entity = fixtures::record("list-x", "issuer", "x", "sub", 1000);
 
-    // new == expected: not advancing.
     let equal = store.update_one("list-x", entity.clone(), 1).await;
     assert!(matches!(equal, Err(RepositoryError::UpdateError(_))));
 
-    // new < expected: going backwards.
     let backwards = store.update_one("list-x", entity, 2).await;
     assert!(matches!(backwards, Err(RepositoryError::UpdateError(_))));
 }
@@ -662,9 +648,6 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
     );
 }
 
-/// The update + snapshot pair is atomic: a colliding snapshot INSERT rolls the
-/// row UPDATE back (no partial snapshot), against real SQLite since
-/// `MockDatabase` cannot model rollback.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_update_with_snapshot_is_atomic() {
@@ -688,7 +671,6 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
         .await
         .unwrap();
 
-    // --- Happy path: row update and snapshot both commit. ---
     let good_snapshot = fixtures::snapshot(
         "snap-good",
         &base.list_id,
@@ -733,10 +715,8 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
         "the committed snapshot must be resolvable"
     );
 
-    // --- Rollback path: force the snapshot INSERT to fail (duplicate PK)
-    // and assert the paired row update did NOT land. ---
     let colliding_snapshot = fixtures::snapshot(
-        "snap-good", // collides with the committed row
+        "snap-good",
         &base.list_id,
         issuer,
         "flip-2",
@@ -777,8 +757,6 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
         row.status_list.lst, "flip-1",
         "row content must roll back when the snapshot insert fails"
     );
-    // No partial snapshot for the rolled-back update: what resolves at v+2 is
-    // still the previously committed snapshot, not the flip-2 attempt.
     let resolved = history
         .find_valid_at(&base.list_id, v + 2)
         .await
@@ -789,8 +767,6 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
         "no partial snapshot from the rolled-back update may exist"
     );
 
-    // --- Conflict path: a stale guard rolls back cleanly and records
-    // nothing. ---
     let conflict = store
         .update_one_with_snapshot(
             &base.list_id,
@@ -805,7 +781,7 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
                 version: base.version + 4,
                 ..base.clone()
             },
-            base.version, // stale: the row is at version base.version + 1 now
+            base.version,
             fixtures::snapshot(
                 "snap-conflict",
                 &base.list_id,
@@ -832,9 +808,6 @@ async fn test_sqlite_update_with_snapshot_is_atomic() {
     );
 }
 
-/// The row INSERT and its opening snapshot must commit atomically — a missing
-/// opening snapshot can never be repaired by a later write. Also pins that a
-/// duplicate `list_id` classifies as `DuplicateEntry` (409), not a 500.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_insert_with_snapshot_is_atomic() {
@@ -860,7 +833,6 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         )
     };
 
-    // --- Happy path: row and opening snapshot both commit. ---
     store
         .insert_one_with_snapshot(
             new_record("list-ok"),
@@ -880,22 +852,13 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
     );
     assert_eq!(fixtures::list_count(&db, issuer).await, 1);
 
-    // --- Rollback path: the snapshot INSERT collides on its primary key,
-    // so the paired row INSERT must not survive. ---
     let result = store
         .insert_one_with_snapshot(
             new_record("list-rolled-back"),
-            // Collides with the snapshot committed above.
             new_snapshot("snap-ok", "list-rolled-back", "initial"),
             fixtures::NO_LIST_QUOTA,
         )
         .await;
-    // Specifically an `InsertError`, not a `DuplicateEntry`: only the *row*
-    // insert classifies duplicates (`map_insert_err`), because only a
-    // duplicate `list_id` is a client-visible conflict. `snapshot_id` is a
-    // fresh v4 UUID per publish, so a collision here is a server fault and
-    // must stay a 500. `assert_duplicate_list_id_is_conflict`
-    // reasons from this asymmetry, so it is pinned rather than assumed.
     assert!(
         matches!(result, Err(RepositoryError::InsertError(_))),
         "a failed snapshot insert must fail the whole unit as a plain \
@@ -916,8 +879,6 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         "a publish whose snapshot insert fails must give its quota slot back"
     );
 
-    // --- Conflict path: a duplicate list_id must stay a DuplicateEntry so
-    // a racing publish keeps mapping to 409 rather than 500. ---
     let dup = store
         .insert_one_with_snapshot(
             new_record("list-ok"),
@@ -930,9 +891,6 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
         "duplicate list_id must map to DuplicateEntry, got {dup:?}"
     );
     assert_eq!(fixtures::list_count(&db, issuer).await, 1);
-    // The rolled-back publish recorded no snapshot either. This must name
-    // `list-rolled-back` — the list that actually failed. Asserting against
-    // a list_id that was never inserted proves nothing about rollback.
     assert!(
         history
             .find_valid_at("list-rolled-back", 1000)
@@ -941,7 +899,6 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
             .is_none(),
         "the rolled-back publish must not leave a snapshot behind"
     );
-    // ...and the duplicate attempt left the committed snapshot alone.
     let surviving = history
         .find_valid_at("list-ok", 1000)
         .await
@@ -950,9 +907,6 @@ async fn test_sqlite_insert_with_snapshot_is_atomic() {
     assert_eq!(surviving.snapshot_id, "snap-ok");
 }
 
-/// A duplicate `list_id` raised inside the open transaction of
-/// `insert_one_with_snapshot` must still classify as `DuplicateEntry` on
-/// MySQL — the rollback-first-then-classify path must not lose it.
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -966,9 +920,6 @@ async fn test_mysql_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
     .await;
 }
 
-/// The same proof on Postgres, the production backend where a failed
-/// statement poisons the transaction (`25P02`); the classification must come
-/// from the original `23505`, not the rollback.
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
 async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -982,9 +933,6 @@ async fn test_postgres_insert_with_snapshot_duplicate_maps_to_duplicate_entry() 
     .await;
 }
 
-/// The same proof on SQLite so a regression in the error mapping fails in
-/// milliseconds under a plain `cargo test`, without Docker or
-/// `--all-features`.
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn test_sqlite_insert_with_snapshot_duplicate_maps_to_duplicate_entry() {
@@ -1034,9 +982,6 @@ async fn test_postgres_allocations_are_distinct_and_rollback_exhausted() {
     .await;
 }
 
-/// Cross-backend proof (#143): on MySQL a failed snapshot INSERT must roll
-/// the paired row UPDATE back. Requires InnoDB (pinned by the migration) —
-/// a non-transactional engine would silently keep the row change.
 #[cfg(feature = "mysql")]
 #[tokio::test]
 async fn test_mysql_update_with_snapshot_rolls_back_on_history_failure() {
@@ -1046,9 +991,6 @@ async fn test_mysql_update_with_snapshot_rolls_back_on_history_failure() {
         .await;
 }
 
-/// Postgres is the production backend, so the transactional rollback is
-/// proven directly on it, not just inferred from the SQLite and MySQL
-/// proofs: a colliding snapshot INSERT must roll the paired row UPDATE back.
 #[cfg(feature = "postgres-tests")]
 #[tokio::test]
 async fn test_postgres_update_with_snapshot_rolls_back_on_history_failure() {
@@ -1186,4 +1128,35 @@ async fn test_postgres_list_count_migration_backfills_existing_rows() {
         let test_db = postgres_helpers::postgres_connection_migrated(Some(steps)).await;
         assert_list_count_migration_backfills(&test_db.db, column_already_added, "Postgres").await;
     }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn admin_usage_count_is_scoped_and_reads_actual_lists() {
+    let db = fixtures::sqlite_connection().await;
+    fixtures::seed_credential(&db, "one").await;
+    fixtures::seed_credential(&db, "two").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db);
+    for (id, issuer) in [("a", "one"), ("b", "two"), ("c", "one")] {
+        store
+            .insert_one(
+                fixtures::record(id, issuer, "compressed", "sub", 0),
+                fixtures::NO_LIST_QUOTA,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.count_status_lists_by_issuer("one").await.unwrap(), 2);
+    assert_eq!(store.count_status_lists_by_issuer("two").await.unwrap(), 1);
+    assert_eq!(
+        store.count_status_lists_by_issuer("unknown").await.unwrap(),
+        0
+    );
+    let counts = store
+        .count_status_lists_by_issuers(&["one".into(), "two".into(), "unknown".into()])
+        .await
+        .unwrap();
+    assert_eq!(counts.get("one"), Some(&2));
+    assert_eq!(counts.get("two"), Some(&1));
+    assert_eq!(counts.get("unknown"), None);
 }

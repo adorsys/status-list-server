@@ -9,7 +9,8 @@ and a live server. The setup works on macOS, Linux, and Windows.
 Set `MANAGEMENT_AUDIENCE` to an audience accepted by the target server; the
 local default is `status-list-server-management`. Tokens use the required
 management type, registered key ID, and a five-minute lifetime. The RSA example
-uses PS256.
+uses PS256. Management writes require exactly one Authorization header;
+duplicate headers return `401 invalid_token`.
 
 You'll find the following scenarios in the `./workflows` directory:
 
@@ -109,11 +110,12 @@ ignored by Git. Existing files are kept unless you pass `--force`.
 Then start the server with in-memory storage from the root of the repository;
 no `.env` file or database is needed.
 
-The server rate-limits credential registration and status list writes per
-client IP address. By default each allows 10 requests and then gets back one
-request per minute, which is less than the workflow scripts need when run back
-to back. The commands below raise the limit to 100 for this local server,
-enough for several full runs of all four workflow scripts.
+The server limits rejected authentications per client IP address: by default
+10, then one more per minute. Workflows 03 and 04 send three requests with
+missing or unregistered credentials on purpose, so only a few full runs fit
+back to back. The commands below raise the limit to 100 for this local server,
+enough for many runs. Verified requests are limited per issuer instead, by the
+issuer's tier, which the workflows stay well within.
 
 macOS or Linux (bash / zsh):
 
@@ -142,9 +144,9 @@ set APP_RATE_LIMIT__STRICT_BURST_SIZE=100
 cargo run
 ```
 
-If a workflow still fails with HTTP `429`, restart the server. The limit
-refills slowly, so waiting a minute only allows one more request, and requests
-rejected for missing or invalid authentication count against it too.
+If a workflow still fails with HTTP `429` where it expects `401`, restart the
+server. The limit refills slowly, so waiting a minute only allows one more
+rejected request.
 
 The workflow scripts connect to `http://localhost:8000` by default. If
 `APP_SERVER__PORT` is set in the environment, or in a `.env` file at the root of
@@ -175,3 +177,65 @@ the pip fallback, then commit both:
 uv lock
 uv export --format requirements-txt -o requirements.txt
 ```
+
+## Issuer registry fixture
+
+The workflows use fixed issuer identities that must be trusted before the
+server starts. Generate the local public-key registry fixture, then mount it
+with the issuer-registry Compose override:
+
+```bash
+uv run python -c 'from workflows.helpers.fixtures import write_registry_fixture; write_registry_fixture()'
+ISSUER_REGISTRY_DIR="$PWD/issuer-registry" \
+  docker compose -f ../docker-compose.yml -f ../compose/issuer-registry.yml up -d --build
+```
+
+The fixture contains public keys only. Its private keys are demo material and
+must never be used outside local development.
+
+## Admin issuer reads
+
+Configure an admin principal, `issuers:read`, and a distinct admin audience as
+explained in the [operator guide](../docs/admin-api.md). For a local trial,
+follow its key and token example; other deployments use operator tooling.
+From the `demo` directory, run:
+
+```bash
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002
+uv run python workflows/05-admin-issuer-reads.py --url http://localhost:8002 --issuer example
+```
+
+The script prompts for the token without echoing it. The first command walks
+all pages; the second displays one issuer and its ETag. Tokens are never printed.
+
+## Hosted issuer creation and renewal
+
+With the hosted profile and an admin principal granted `issuers:write`, use a
+public JWK file without a `kid` or private fields:
+
+```bash
+uv run python workflows/06-admin-issuer-writes.py create --display-name Sandbox --owner 'github|5821374' --public-key public.jwk --alg ES256
+uv run python workflows/06-admin-issuer-writes.py renew --issuer ISSUER_ID --days 7
+```
+
+Both commands prompt for the admin token without echoing it. Creation assigns
+issuer and key identifiers. Renewal reads the current ETag before sending the
+write and accepts a new expiry within the configured sandbox maximum (30 days
+by default).
+
+## Hosted issuer emergency actions
+
+In the hosted profile, an operator uses the admin listener with a registry admin
+JWT carrying `issuers:write`. Read the issuer and its `ETag` with
+`GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`; the issuer's next management request is blocked. A
+missing `If-Match` returns `428 precondition_required`; a stale `ETag` returns
+`412 precondition_failed`, so re-read the issuer and retry.
+To renew a sandbox issuer, send the same PATCH with `{"expires_at":<unix-seconds>}`;
+the new expiry must be after now and within 30 days. A renewed expired issuer
+becomes active unless it is suspended.
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with `If-Match` and
+`{"state":"revoked"}` permanently revokes one key; revoking an already revoked
+key returns `200` unchanged. The public status-list endpoint remains readable
+after either action.

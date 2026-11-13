@@ -9,14 +9,7 @@ use crate::server::{AppState, auth::AuthenticatedIssuer, error::ApiError};
 
 use super::utils::request::{StatusesRequest, parse_statuses_payload};
 
-/// Update statuses in a status list.
-///
-/// Handle PATCH /status-lists/{list_id}/statuses request.
-///
-/// `err(level = "info")` because the default emits at ERROR for every `Err`,
-/// which would page on routine write contention and on optimistic-concurrency
-/// conflicts. Severity belongs to [`ApiError`]'s `IntoResponse`, which
-/// discriminates on status; this event only adds span context.
+/// Errors log at info: conflicts are routine, and ApiError picks the real level.
 #[tracing::instrument(skip_all, fields(list_id = %list_id, issuer = %principal), err(level = "info", Debug))]
 pub async fn update_status(
     State(appstate): State<AppState>,
@@ -37,7 +30,7 @@ pub async fn update_status(
         .map(Into::into)
         .collect::<Vec<_>>();
 
-    let policy = appstate.status_list_policy();
+    let policy = appstate.status_list_policy(principal.tier());
     appstate
         .service
         .update_statuses(principal.as_ref(), &list_id, statuses, &policy)
@@ -59,6 +52,7 @@ pub async fn update_status_route(
 mod tests {
     use super::*;
     use crate::domain::models::status_list::StatusList;
+    use crate::domain::models::tier::IssuerTier;
     use crate::server::handlers::status_list::publish_status::publish_status;
     use crate::server::handlers::status_list::utils::request::{
         Status as RequestStatus, StatusEntry as RequestStatusEntry,
@@ -87,7 +81,6 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        // First publish
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -97,7 +90,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Then update
         let update_res = update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -172,7 +164,9 @@ mod tests {
         .await
         .unwrap();
 
-        app_state.max_statuses_per_request = 1;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_statuses_per_request = 1;
 
         let update_res = update_status(
             State(app_state.clone()),
@@ -210,7 +204,9 @@ mod tests {
         .await
         .unwrap();
 
-        app_state.max_status_index = 10;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 10;
 
         let update_res = update_status(
             State(app_state.clone()),
@@ -229,6 +225,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_beyond_the_index_bound_reports_a_missing_list_first() {
+        let mut app_state = test_app_state(None).await;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_status_index = 10;
+
+        // Whether index 5000 is growth depends on the stored list, so a list
+        // that does not exist is reported before the index bound.
+        let err = match update_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 5_000,
+                    status: RequestStatus::INVALID,
+                }],
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("an update of a missing list must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "status_list_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_issuer_moved_to_a_lower_tier_can_still_update_its_existing_entries() {
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let mut app_state = test_app_state(None).await;
+        let entry = |index| RequestStatusEntry {
+            index,
+            status: RequestStatus::INVALID,
+        };
+
+        publish_status(
+            State(app_state.clone()),
+            authenticated_issuer("issuer1"),
+            Path(token_id.clone()),
+            Json(StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 50,
+                    status: RequestStatus::VALID,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // The registry moves the issuer to sandbox, whose bound is below 50.
+        app_state
+            .tier_limits_mut(IssuerTier::Sandbox)
+            .max_status_index = 10;
+        let update = |index| {
+            update_status(
+                State(app_state.clone()),
+                authenticated_issuer("issuer1").with_tier(IssuerTier::Sandbox),
+                Path(token_id.clone()),
+                Json(StatusesRequest {
+                    statuses: vec![entry(index)],
+                }),
+            )
+        };
+
+        let revoked = update(50).await.unwrap().into_response();
+        assert_eq!(revoked.status(), StatusCode::OK);
+
+        let err = match update(5_000).await {
+            Ok(_) => panic!("growing the list past the tier bound must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "index_too_large");
+    }
+
+    #[tokio::test]
     async fn test_update_status_empty_payload_is_successful_noop() {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
@@ -242,7 +316,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Populate the cache so a no-op's failure to invalidate can be observed.
         app_state.service.get_status_list(&token_id).await.unwrap();
         let now = crate::domain::service::current_unix_timestamp();
         let publish_snapshot = app_state
@@ -251,10 +324,6 @@ mod tests {
             .await
             .expect("the publish snapshot must be queryable");
 
-        // Read the version, the publish snapshot and the cache entry before the
-        // no-op, so we can prove the no-op touched none of them. The version is
-        // read from the repo (not through the cache) so a stale/masked cache
-        // entry cannot hide a spurious version bump.
         let before = app_state
             .service
             .status_list_repo()
@@ -295,11 +364,6 @@ mod tests {
         );
         assert_eq!(after.status_list, before.status_list);
 
-        // The issue's acceptance criterion is "no redundant history rows": a
-        // no-op must not leave a newer snapshot behind. Resolve the snapshot at
-        // a time strictly after the no-op so a redundant snapshot inserted by
-        // it would surface as a newer `iat`; querying at the fixed publish
-        // timestamp `now` could never observe one and would be vacuous.
         let after_now = crate::domain::service::current_unix_timestamp();
         let after_snapshot = app_state
             .service
@@ -311,7 +375,6 @@ mod tests {
             "a no-op must not insert a newer history snapshot"
         );
 
-        // Nothing was committed, so the cache entry must survive the no-op.
         let after_cache = app_state
             .service
             .status_list_cache()
@@ -327,9 +390,6 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        // An update that re-sets index 0 to its current value (VALID) leaves the
-        // list identical, so it must be a successful no-op: no version bump and
-        // no extra write, mirroring the empty-PATCH contract.
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -344,8 +404,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Populate the cache and capture the publish snapshot so we can assert
-        // the no-op touches neither.
         app_state.service.get_status_list(&token_id).await.unwrap();
         let now = crate::domain::service::current_unix_timestamp();
         let publish_snapshot = app_state
@@ -399,9 +457,6 @@ mod tests {
         );
         assert_eq!(after.status_list, before.status_list);
 
-        // Resolve the snapshot at a time strictly after the no-op so a
-        // redundant snapshot inserted by it would surface as a newer `iat`;
-        // querying at the fixed publish timestamp `now` would be vacuous.
         let after_now = crate::domain::service::current_unix_timestamp();
         let after_snapshot = app_state
             .service
@@ -423,9 +478,6 @@ mod tests {
         assert_eq!(after_cache.updated_at, before_cache.updated_at);
     }
 
-    /// Issuer validation runs before the no-op short-circuit, so an empty PATCH
-    /// from a non-owner is still a 403 — the empty payload does not mask the
-    /// ownership check — and the record is left untouched.
     #[tokio::test]
     async fn test_update_status_empty_patch_from_non_owner_is_rejected() {
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -473,8 +525,6 @@ mod tests {
         assert_eq!(after.status_list, before.status_list);
     }
 
-    /// A missing list is reported as 404 even for an empty PATCH: an empty
-    /// payload does not turn a non-existent list into a successful no-op.
     #[tokio::test]
     async fn test_update_status_empty_patch_to_missing_list_is_not_found() {
         let app_state = test_app_state(None).await;
@@ -495,8 +545,6 @@ mod tests {
         assert_eq!(err.error, "status_list_not_found");
     }
 
-    /// Exercises the `Json` extraction and rejection adapter with a raw JSON
-    /// body; routing and auth are covered elsewhere.
     #[tokio::test]
     async fn patch_route_handles_raw_json_bodies() {
         use axum::{Router, body::Body, body::to_bytes, http::Method, routing::patch};
@@ -543,15 +591,12 @@ mod tests {
             }
         };
 
-        // A valid PATCH returns 200.
         let ok = send(r#"{"statuses":[{"index":0,"status":1}]}"#).await;
         assert_eq!(ok.status(), StatusCode::OK);
 
-        // An empty PATCH body is a successful no-op, not a 400.
         let empty = send(r#"{"statuses":[]}"#).await;
         assert_eq!(empty.status(), StatusCode::OK);
 
-        // A duplicate-index payload is rejected with 400 duplicate_index.
         let dup = send(r#"{"statuses":[{"index":0,"status":0},{"index":0,"status":1}]}"#).await;
         assert_eq!(dup.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(dup.into_body(), usize::MAX).await.unwrap();
@@ -621,12 +666,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// An empty PATCH is a no-op, so there is no request-shape `400` to document
-    /// precedence for. The PATCH endpoint no longer rejects empty payloads.
-    ///
-    /// Duplicate-index rejection, by contrast, still runs before the target list
-    /// is resolved, so a duplicate payload to a non-existent list returns
-    /// `duplicate_index`, not `status_list_not_found`.
     #[tokio::test]
     async fn test_duplicate_update_takes_precedence_over_not_found() {
         let app_state = test_app_state(None).await;
@@ -664,7 +703,6 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         let app_state = test_app_state(None).await;
 
-        // Publish initial status list
         publish_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -679,11 +717,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Get the current record to force a stale read
         let initial_record = app_state.service.get_status_list(&token_id).await.unwrap();
         let _stale_updated_at = initial_record.updated_at;
 
-        // Perform an update to advance updated_at
         update_status(
             State(app_state.clone()),
             authenticated_issuer("issuer1"),
@@ -711,9 +747,6 @@ mod tests {
         )
         .await;
 
-        // With proper optimistic locking, this should be OK since memory backend
-        // doesn't implement it. For SQL backends with proper locking, you'd see 409.
-        // This test documents the expected behavior when backends enforce it.
         assert!(result.is_ok() || result.is_err());
     }
 
@@ -731,7 +764,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Set a very small max size to trigger the limit
         app_state.max_serialized_list_size = 10;
 
         let update_res = update_status(
@@ -740,7 +772,7 @@ mod tests {
             Path(token_id.clone()),
             Json(StatusesRequest {
                 statuses: vec![RequestStatusEntry {
-                    index: 10_000, // This will require a large encoded list
+                    index: 10_000,
                     status: RequestStatus::INVALID,
                 }],
             }),

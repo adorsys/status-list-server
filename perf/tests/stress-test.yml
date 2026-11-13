@@ -30,7 +30,7 @@ config:
 
   processor: "../scripts/processor.js"
 
-  # scripts/setup.js registers the issuer and seeds lists before the run.
+  # scripts/setup.js seeds lists for the issuer loaded from the registry.
 
   ensure:
     maxErrorRate: 25
@@ -70,21 +70,17 @@ scenarios:
           - think: 0.2
         count: 3
 
-  - name: "Concurrent Credential Registrations"
+  - name: "Concurrent Issuer Identity Lookups"
     weight: 25
     flow:
-      - function: "generateIssuerPayload"
-      - post:
+      - function: "loadTestData"
+      - function: "selectRandomToken"
+      - get:
           url: "{{ $processEnvironment.MANAGEMENT_TARGET }}/api/v1/credentials"
-          json:
-            issuer: "{{ issuer }}"
-            public_key: "{{ publicKeyJwk }}"
+          headers:
+            Authorization: "Bearer {{ token }}"
           expect:
-            - statusCode:
-                - 202
-                - 409
-          afterResponse: "handleCredentialResponse"
-      - think: 0.5
+            - statusCode: 200
 
   - name: "Authenticated Update Flow"
     weight: 40

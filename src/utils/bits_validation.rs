@@ -5,27 +5,6 @@ use serde::{Deserialize, Serialize};
 pub struct BitFlag(u8);
 
 impl BitFlag {
-    /// Attempts to create a new `BitFlag` instance from a given `u8` value.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - A `u8` representing the BitFlag. Must be one of: 1, 2, 4, or 8.
-    ///
-    /// # Returns
-    ///
-    /// * `Some(BitFlag)` if the value is valid.
-    /// * `None` if the value is not a supported BitFlag.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use status_list_server::bits_validation::BitFlag;
-    /// let valid = BitFlag::new(4);
-    /// assert!(valid.is_some());
-    ///
-    /// let invalid = BitFlag::new(3);
-    /// assert!(invalid.is_none());
-    /// ```
     pub fn new(value: u8) -> Option<Self> {
         match value {
             1 | 2 | 4 | 8 => Some(BitFlag(value)),
@@ -33,16 +12,22 @@ impl BitFlag {
         }
     }
 
-    /// Returns the inner `u8` value of the `BitFlag`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use status_list_server::bits_validation::BitFlag;
-    /// let bit = BitFlag::new(2).unwrap();
-    /// assert_eq!(bit.value(), 2);
-    /// ```
     pub fn value(self) -> u8 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BitFlag;
+
+    #[test]
+    fn new_accepts_only_supported_widths() {
+        for bits in [1, 2, 4, 8] {
+            assert_eq!(BitFlag::new(bits).map(BitFlag::value), Some(bits));
+        }
+        for bits in [0, 3, 5, 16] {
+            assert!(BitFlag::new(bits).is_none(), "{bits} must be rejected");
+        }
     }
 }

@@ -44,6 +44,8 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 
 ## Configure Your Secrets
 
+Static-key revocations are recorded in the configured SQL database, shared by all replicas and included in the normal database backup and migration process. No additional writable volume is required.
+
 The application Secret is always named `statuslist-secret`. The chart-managed fallback Secret and default ExternalSecret publish the database password under both `database-password` and the legacy `postgres-password` key.
 
 There are two secret delivery modes, and the chart rejects enabling both at once.
@@ -516,3 +518,10 @@ The `AlertmanagerConfig` CRD must be installed in the cluster (see the top-level
 * [Troubleshooting reference](../../docs/troubleshooting.md): error-indexed fixes for startup, secrets, Kubernetes/ESO, and Helm/upgrade issues.
 * [Container supply chain](../../docs/supply-chain.md): image scanning, SBOM, and SLSA.
 * [Project README](../../README.md): overview and local-development quick start.
+
+## Hosted sandbox
+
+Use [values-hosted.yaml](chart/values-hosted.yaml) for the isolated test profile.
+The [hosted sandbox guide](../../docs/hosted-sandbox.md) covers required site
+values, signing material, the dedicated ingress-controller configuration, network
+selectors, alerts, and the first-deployment check.

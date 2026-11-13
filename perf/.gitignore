@@ -1,4 +1,5 @@
 node_modules
 results/
 /scripts/test-tokens.json
+/scripts/issuer-registry.json
 /scripts/seed-lists.json

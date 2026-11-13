@@ -1,4 +1,8 @@
 {{- if .Values.statuslist.ingress.enabled }}
+{{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
+{{- $_ := required "hosted ingress requires statuslist.ingress.externalDnsHostname" .Values.statuslist.ingress.externalDnsHostname }}
+{{- $_ := required "hosted ingress requires statuslist.ingress.tls.secretName" .Values.statuslist.ingress.tls.secretName }}
+{{- end }}
 {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
 {{- $ingressHost := .Values.statuslist.ingress.externalDnsHostname | default "" | lower }}
 {{- if and (eq $ingressHost "") $globalDomain }}
@@ -32,7 +36,7 @@ metadata:
     {{- end }}
 
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ .Values.statuslist.ingress.className | quote }}
   rules:
   - host: {{ $ingressHost }}
     http:
@@ -57,6 +61,9 @@ spec:
 {{- if eq $mgmtHost "" }}
 {{- $mgmtHost = $ingressHost }}
 {{- end }}
+{{- if and (eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted") (ne $mgmtHost $ingressHost) }}
+{{- $_ := required "hosted ingress with a separate management hostname requires statuslist.ingress.management.tls.secretName" .Values.statuslist.ingress.management.tls.secretName }}
+{{- end }}
 {{- $mgmtTlsHosts := $tlsHosts }}
 {{- if ne (.Values.statuslist.ingress.management.hostname | default "") "" }}
 {{- /* A separate management hostname gets its own TLS hosts and DNS record. */}}
@@ -71,8 +78,7 @@ metadata:
     {{- include "status-list-server-chart.labels" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
-    # Route by path with a regex so the management writes that share the
-    # /api/v1/status-lists/ prefix with public reads resolve here.
+    # Regex paths: management writes share /api/v1/status-lists/ with public reads.
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- if and (ne $mgmtHost "localhost") (ne (.Values.statuslist.ingress.management.hostname | default "") "") }}
     external-dns.alpha.kubernetes.io/hostname: {{ $mgmtHost }}
@@ -81,7 +87,7 @@ metadata:
     {{- toYaml .Values.statuslist.ingress.management.annotations | nindent 4 }}
     {{- end }}
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ .Values.statuslist.ingress.className | quote }}
   rules:
   - host: {{ $mgmtHost }}
     http:
@@ -93,12 +99,7 @@ spec:
             name: {{ include "status-list-server-chart.fullname" . }}-internal-service
             port:
               number: {{ .Values.statuslist.service.managementPort }}
-{{- /* Resolve the TLS secret for the management Ingress:
-     - Use the dedicated management secret when explicitly set (ideal for
-       separate hostnames with their own cert).
-     - Otherwise fall back to the public TLS secret (works for wildcard
-       certs covering both hostnames). $mgmtTlsHosts already holds the
-       correct hostname(s), so the hosts: field is always right. */}}
+{{- /* Falls back to the public TLS secret, fine for a wildcard cert covering both hosts. */}}
 {{- $mgmtTlsSecret := .Values.statuslist.ingress.management.tls.secretName | default "" }}
 {{- if and (eq $mgmtTlsSecret "") .Values.statuslist.ingress.tls.secretName }}
 {{- $mgmtTlsSecret = .Values.statuslist.ingress.tls.secretName }}

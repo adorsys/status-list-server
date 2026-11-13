@@ -38,6 +38,10 @@ cargo run
 These files are public test fixtures for local development only.
 
 The server binds to `http://localhost:8000` with no database or cloud configuration required.
+This is the `private` profile. It starts without trusted issuers until you add
+an operator registry; follow the [local issuer onboarding guide](docs/issuer-onboarding.md#onboard-a-registry-issuer)
+to publish a list. The `hosted` profile also requires a SQL backend and an
+admin principal; see the [hosted onboarding steps](docs/issuer-onboarding.md#onboard-a-hosted-issuer).
 
 Verify that the service is running:
 
@@ -75,7 +79,7 @@ See the [Local Deployment Guide](docs/LOCAL_DEPLOYMENT.md) for all profiles, inc
 
 ## API Overview
 
-The server exposes endpoints for issuer credential registration, status list publishing and updates, public status list resolution, and list aggregation.
+The server exposes endpoints for authenticated issuer status-list publishing and updates, public status list resolution, and list aggregation. Issuers are provisioned through the operator-managed registry; see the [issuer migration guide](docs/issuer-migration.md).
 
 ### Retrieving a Status List Token
 
@@ -152,6 +156,8 @@ For production deployments:
 
 ### Architecture and Specification
 
+- [Hosted sandbox](docs/hosted-sandbox.md): Isolated test deployment and acceptance checks.
+- [Trust model](docs/trust-model.md): Status-token signing authority and sandbox trust separation.
 - [Architecture Guide](docs/architecture.md): Project organization and modularity, service container composition, and token signing workflows.
 - [Compliance Matrix](docs/compliance_matrix.md): Implementation status against OAuth Token Status List draft-21 requirements.
 - [OpenAPI Specification](docs/openapi.yaml): Complete REST API contract, request schemas, and error codes.

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use axum::{
     routing::{get, patch, post, put},
 };
 use color_eyre::eyre::{Context, eyre};
-use governor::middleware::NoOpMiddleware;
+use governor::{Quota, middleware::NoOpMiddleware};
 use hyper::Method;
 use prometheus::Registry;
 use tokio::net::TcpListener;
@@ -20,7 +21,6 @@ use tokio::sync::watch;
 use tower_governor::{
     GovernorLayer,
     governor::{GovernorConfig, GovernorConfigBuilder},
-    key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor},
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -32,22 +32,26 @@ use tower_http::{
 use crate::config::{API_V1_PREFIX, Config};
 
 use crate::server::handlers::{
-    allocate_indices_route, credential_handler, get_aggregation, get_credential,
-    get_issuer_aggregation, get_status_list, publish_status_route, update_status_route,
+    allocate_indices_route, get_aggregation, get_credential, get_issuer_aggregation,
+    get_status_list, publish_status_route, update_status_route,
 };
-use crate::server::{AppState, auth::auth, health, service_document};
+use crate::server::rate_limit::{
+    AuthFailureGate, ClientAddress, ClientKeyExtractor, auth_failure_gate, governor_error_response,
+    issuer_rate_limit, spawn_governor_pruner,
+};
+use crate::server::{
+    AppState,
+    auth::{admin_auth, auth},
+    health, service_document,
+};
 use crate::utils::metrics::metrics_handler;
 
-/// A typed request extension carrying the name of the TCP listener that
-/// accepted the connection.
 #[derive(Clone)]
 struct ListenerName(&'static str);
 
-/// A bound TCP listener paired with the router that owns its routes.
 struct ListenerServer {
     listener: TcpListener,
-    /// The address the listener is bound to, captured at bind time to avoid
-    /// `expect`-ing on `local_addr()` after the listener may have been moved.
+    /// Captured at bind time so reading it later can't fail.
     local_addr: SocketAddr,
     router: Router,
 }
@@ -64,38 +68,29 @@ impl HttpServer {
         state: AppState,
         prometheus_registry: Registry,
     ) -> color_eyre::Result<Self> {
-        let (strict_governor, issuer_governor, permissive_governor) =
+        let (auth_gate, permissive_governor, admin_governor) =
             build_governor_configs(&config.rate_limit)?;
+        AuthFailureGate::spawn_pruner(&auth_gate);
+        spawn_governor_pruner(permissive_governor.limiter(), "public");
+        spawn_governor_pruner(admin_governor.limiter(), "admin");
 
-        let public_router = with_listener_name(
-            with_common_layers(
-                public_routes(permissive_governor)
-                    // CORS is applied only to the public router: admin and management
-                    // have no browser clients, and a dev machine should not let any
-                    // web page read localhost:8002/metrics.
-                    .layer(
-                        CorsLayer::new()
-                            .allow_methods([Method::GET, Method::OPTIONS])
-                            .allow_origin(Any)
-                            .allow_headers(Any),
-                    ),
-                config,
-            ),
-            "public",
-        )
-        .with_state(state.clone());
+        let public_router = build_public_router(config, public_routes(permissive_governor))
+            .with_state(state.clone());
 
-        let management_router = with_listener_name(
-            with_common_layers(
-                management_routes(state.clone(), issuer_governor, strict_governor),
-                config,
-            ),
-            "management",
-        )
-        .with_state(state.clone());
+        let management_router =
+            build_management_router(config, state.clone(), auth_gate).with_state(state.clone());
 
         let admin_router = with_listener_name(
-            with_common_layers(admin_routes(config, prometheus_registry), config),
+            with_common_layers(
+                admin_routes(
+                    state.clone(),
+                    config,
+                    prometheus_registry,
+                    admin_governor.clone(),
+                )
+                .merge(hosted_admin_routes(state.clone(), admin_governor)),
+                config,
+            ),
             "admin",
         )
         .with_state(state);
@@ -140,14 +135,8 @@ impl HttpServer {
         })
     }
 
-    /// Serve all three listeners concurrently until `shutdown` is signalled.
-    ///
-    /// Each `serve` future resolves after the graceful-shutdown signal fires
-    /// and its in-flight requests have drained. `try_join!` awaits ALL three to
-    /// finish before returning, so a graceful shutdown covers every listener
-    /// (an idle admin listener no longer returns early and interrupts management
-    /// writes that are still in flight). Any listener error propagates so the
-    /// process exits non-zero and the orchestrator can restart it.
+    /// Serves all three listeners until `shutdown`, returning only once every one has drained.
+    /// A listener error is returned, so the process exits non-zero.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> color_eyre::Result<()> {
         tokio::try_join!(
             serve(
@@ -172,11 +161,8 @@ impl HttpServer {
         Ok(())
     }
 
-    /// Install SIGINT/SIGTERM handlers that broadcast the shutdown signal.
-    ///
-    /// Kept separate from [`Self::run`] so tests can drive shutdown directly
-    /// through the [`watch`] channel instead of the process-level signal
-    /// handlers (which can only be installed once per process).
+    /// Broadcasts SIGINT/SIGTERM as the shutdown signal.
+    /// Kept apart from `run` so tests can drive shutdown through the channel.
     pub fn install_shutdown_handler(shutdown: &watch::Sender<bool>) {
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
@@ -185,17 +171,14 @@ impl HttpServer {
         });
     }
 
-    /// The bound address of the public listener (the status-list read surface).
     pub fn public_addr(&self) -> SocketAddr {
         self.public.local_addr
     }
 
-    /// The bound address of the admin listener (readiness and metrics).
     pub fn admin_addr(&self) -> SocketAddr {
         self.admin.local_addr
     }
 
-    /// The bound address of the management listener (authenticated issuer writes).
     pub fn management_addr(&self) -> SocketAddr {
         self.management.local_addr
     }
@@ -221,11 +204,7 @@ async fn serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    // `wait_for` checks the current value first and resolves immediately if
-    // shutdown already fired, so a listener whose graceful-shutdown future is
-    // only polled after the signal still sees it. Unlike `Notify::notify_waiters`,
-    // the signal is retained in the channel rather than lost when nobody is
-    // waiting yet.
+    // `wait_for` sees a signal sent before it was polled; `Notify::notify_waiters` would lose it.
     .with_graceful_shutdown(async move {
         let _ = shutdown.wait_for(|shutdown| *shutdown).await;
     })
@@ -233,10 +212,7 @@ async fn serve(
     .map_err(|e| eyre!("HTTP server ({name}) failed: {e}"))
 }
 
-/// Applies the shared HTTP middleware stack (tracing, panic catch, SLI metrics,
-/// body limits) to every listener's router. CORS is intentionally NOT included
-/// here: it is applied only to the public router (see `HttpServer::new`), since
-/// admin and management listeners have no browser clients.
+/// Shared by every listener; CORS is added to the public router only.
 fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppState> {
     router
         .layer(
@@ -249,6 +225,35 @@ fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppSt
             config.limits.max_body_size_bytes,
         ))
         .layer(DefaultBodyLimit::disable())
+}
+
+fn build_management_router(
+    config: &Config,
+    state: AppState,
+    auth_gate: Arc<AuthFailureGate>,
+) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(management_routes(state, auth_gate), config),
+        "management",
+    )
+}
+
+fn build_public_router(config: &Config, router: Router<AppState>) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(
+            router
+                // Public only: admin and management have no browser clients,
+                // and no web page should be able to read /metrics on a dev machine.
+                .layer(
+                    CorsLayer::new()
+                        .allow_methods([Method::GET, Method::OPTIONS])
+                        .allow_origin(Any)
+                        .allow_headers(Any),
+                ),
+            config,
+        ),
+        "public",
+    )
 }
 
 async fn shutdown_signal() {
@@ -275,51 +280,54 @@ async fn shutdown_signal() {
     }
 }
 
-type GovernorPolicies = (
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
-    Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-);
+type ClientGovernor = Arc<GovernorConfig<ClientKeyExtractor, NoOpMiddleware>>;
+
+type GovernorPolicies = (Arc<AuthFailureGate>, ClientGovernor, ClientGovernor);
 
 fn build_governor_configs(
     config: &crate::config::RateLimitConfig,
 ) -> color_eyre::Result<GovernorPolicies> {
-    let strict = Arc::new(
-        GovernorConfigBuilder::default()
-            .burst_size(config.strict_burst_size)
-            .period(Duration::from_secs(config.strict_period_secs))
-            .finish()
-            .ok_or_else(|| eyre!("strict governor requires non-zero burst_size and period"))?,
-    );
-    let issuer = Arc::new(
-        GovernorConfigBuilder::default()
-            .burst_size(config.strict_burst_size)
-            .period(Duration::from_secs(config.strict_period_secs))
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .ok_or_else(|| eyre!("issuer governor requires non-zero burst_size and period"))?,
-    );
+    let admission = NonZeroU32::new(config.admission_per_second)
+        .zip(NonZeroU32::new(config.admission_burst_size))
+        .map(|(rate, burst)| Quota::per_second(rate).allow_burst(burst))
+        .ok_or_else(|| eyre!("management admission requires non-zero burst_size and per_second"))?;
+    let failures = Quota::with_period(Duration::from_secs(config.strict_period_secs))
+        .zip(NonZeroU32::new(config.strict_burst_size))
+        .map(|(quota, burst)| quota.allow_burst(burst))
+        .ok_or_else(|| {
+            eyre!("management authentication gate requires non-zero burst_size and period")
+        })?;
+    let client = Arc::new(ClientAddress::new(
+        config.resolved_client_ip_source(),
+        config.trusted_proxy_networks()?,
+    ));
+    let auth_gate = Arc::new(AuthFailureGate::new(admission, failures, client.clone()));
     let permissive = Arc::new(
         GovernorConfigBuilder::default()
             .burst_size(config.permissive_burst_size)
-            .period(Duration::from_secs(config.permissive_period_secs))
+            .period(config.permissive_period)
+            .key_extractor(ClientKeyExtractor(client.clone()))
             .finish()
             .ok_or_else(|| eyre!("permissive governor requires non-zero burst_size and period"))?,
     );
-    Ok((strict, issuer, permissive))
+    let admin = Arc::new(
+        GovernorConfigBuilder::default()
+            .burst_size(config.admin_burst_size)
+            .period(Duration::from_secs(config.admin_period_secs))
+            .key_extractor(ClientKeyExtractor(client))
+            .finish()
+            .ok_or_else(|| eyre!("admin governor requires non-zero burst_size and period"))?,
+    );
+    Ok((auth_gate, permissive, admin))
 }
 
-/// Routes owned by the public listener: status-list reads, aggregation reads,
-/// liveness, and the root service document. No management or admin route is
-/// registered here, so any such request gets a structural 404.
-fn public_routes(
-    permissive_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+/// Internet-facing: never register management or admin routes here.
+fn public_routes(permissive_governor: ClientGovernor) -> Router<AppState> {
     let public_reads = Router::new()
         .route("/aggregation", get(get_aggregation))
         .route("/aggregation/{aggregation_id}", get(get_issuer_aggregation))
         .route("/status-lists/{list_id}", get(get_status_list))
-        .layer(GovernorLayer::new(permissive_governor));
+        .layer(GovernorLayer::new(permissive_governor).error_handler(governor_error_response));
 
     Router::new()
         .route("/", get(service_document))
@@ -328,13 +336,14 @@ fn public_routes(
         .nest(API_V1_PREFIX, public_reads)
 }
 
-/// Routes owned by the management listener: authenticated issuer writes and
-/// credential registration. Nothing public or admin is registered here.
-fn management_routes(
-    state: AppState,
-    issuer_governor: Arc<GovernorConfig<SmartIpKeyExtractor, NoOpMiddleware>>,
-    strict_governor: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
-) -> Router<AppState> {
+/// Routes owned by the management listener: authenticated issuer operations.
+fn management_routes(state: AppState, auth_gate: Arc<AuthFailureGate>) -> Router<AppState> {
+    // Order: authentication gate -> auth -> issuer limiter -> handler. The gate
+    // admits a coarse per-address budget before `auth` does any work. Only a
+    // verified identity reaches an issuer bucket, and only rejected
+    // authentications spend the gate's failure budget. Every authenticated route
+    // spends the issuer's bucket, so no route lets one issuer load the server
+    // unbounded.
     let protected = Router::new()
         .nest(
             "/status-lists/{list_id}/statuses",
@@ -347,49 +356,75 @@ fn management_routes(
             post(allocate_indices_route),
         )
         .route("/credentials", get(get_credential))
+        .route_layer(from_fn_with_state(state.clone(), issuer_rate_limit))
         .route_layer(from_fn_with_state(state.clone(), auth))
-        .layer(GovernorLayer::new(issuer_governor));
+        .route_layer(from_fn_with_state(auth_gate, auth_failure_gate));
 
-    let credentials = Router::new()
-        .route("/credentials", post(credential_handler))
-        .layer(GovernorLayer::new(strict_governor));
-
-    Router::new().nest(
-        API_V1_PREFIX,
-        Router::new().merge(protected).merge(credentials),
-    )
+    Router::new().nest(API_V1_PREFIX, protected)
 }
 
 /// Routes owned by the admin listener: readiness and (optionally) metrics.
 /// Management and public routes are deliberately absent, so probing the admin
 /// port with anything else returns a structural 404.
-fn admin_routes(config: &Config, registry: Registry) -> Router<AppState> {
-    let router = Router::new().route("/health/ready", get(health::ready));
+fn admin_routes(
+    state: AppState,
+    config: &Config,
+    registry: Registry,
+    admin_governor: ClientGovernor,
+) -> Router<AppState> {
+    let admin_api = Router::new()
+        .route(
+            "/issuers",
+            get(crate::server::handlers::admin::list_issuers)
+                .post(crate::server::handlers::hosted_lifecycle::create_issuer),
+        )
+        .route(
+            "/issuers/{issuer_id}",
+            get(crate::server::handlers::admin::get_issuer),
+        )
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response));
+    let router = Router::new()
+        .route("/health/ready", get(health::ready))
+        .nest(
+            "/admin/v1",
+            admin_api.route_layer(from_fn_with_state(state, crate::server::auth::admin_auth)),
+        );
     attach_metrics(router, config, registry)
 }
 
-/// Axum middleware recording HTTP latency + request-count SLIs.
-///
-/// Keyed by the bounded route pattern (via [`MatchedPath`]), the HTTP method,
-/// and the response status class. Runs after routing so `MatchedPath` is
-/// populated, giving bounded cardinality regardless of path parameters.
-///
-/// This middleware is layered OUTSIDE `CatchPanicLayer`, so a handler panic is
-/// first converted to a 500 by `CatchPanicLayer` and then observed here as a
-/// normal `Response` — panic-induced 500s are recorded as 5xx and contribute to
-/// the error-rate SLI instead of silently disappearing.
-///
-/// Health/liveness/readiness and the metrics endpoint are excluded from the SLI
-/// so their traffic neither inflates the error-rate denominator (2xx probes)
-/// nor trips ErrorRateFastBurn on a transient readiness-probe 5xx.
+/// Hosted-profile lifecycle routes on the admin listener: suspend/resume an
+/// issuer and revoke one of its keys, as `PATCH` operations on the admin
+/// issuer API. Mounted only when the hosted profile provides the lifecycle
+/// service, so the routes are structurally absent in the private profile.
+fn hosted_admin_routes(state: AppState, admin_governor: ClientGovernor) -> Router<AppState> {
+    if state.hosted_lifecycle_service.is_none() {
+        return Router::new();
+    }
+    Router::new()
+        .route(
+            "/admin/v1/issuers/{issuer_id}/keys",
+            post(crate::server::handlers::hosted_lifecycle::add_issuer_key),
+        )
+        .route(
+            "/admin/v1/issuers/{issuer_id}",
+            patch(crate::server::handlers::hosted_lifecycle::update_issuer),
+        )
+        .route(
+            "/admin/v1/issuers/{issuer_id}/keys/{kid}",
+            patch(crate::server::handlers::hosted_lifecycle::revoke_issuer_key),
+        )
+        .layer(GovernorLayer::new(admin_governor).error_handler(governor_error_response))
+        .route_layer(from_fn_with_state(state, admin_auth))
+}
+
+/// Must stay outside CatchPanicLayer so panics still count as 5xx.
+/// Health and metrics routes are skipped so probes do not skew the error-rate SLI.
 async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     let start = std::time::Instant::now();
     let method = request.method().clone();
     let matched = request.extensions().get::<MatchedPath>().cloned();
     let route: &str = matched.as_ref().map(|p| p.as_str()).unwrap_or("unmatched");
-    // Read the listener name injected by `with_listener_name`; fall back to
-    // "unknown" so the metric is never silently dropped if the extension is
-    // missing (e.g. in unit tests that build routers directly).
+    // Falls back to "unknown" (routers built in tests) instead of dropping the metric.
     let listener_name: &'static str = request
         .extensions()
         .get::<ListenerName>()
@@ -424,14 +459,8 @@ async fn track_http_metrics(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-/// Wraps a `Router<S>` with an [`Extension`] layer that injects a
-/// [`ListenerName`] into every request. The name is consumed by
-/// [`track_http_metrics`] to record which listener accepted the connection.
-///
-/// This must be applied OUTSIDE the shared middleware layers (i.e. wrap
-/// [`with_common_layers`]) so the extension is present when
-/// [`track_http_metrics`] reads it. Applied inside, the metrics middleware
-/// would run before the extension is inserted and report `"unknown"`.
+/// Must wrap `with_common_layers`, not sit inside it,
+/// or the metrics middleware runs first and labels everything "unknown".
 fn with_listener_name<S: Clone + Send + Sync + 'static>(
     router: Router<S>,
     name: &'static str,
@@ -456,21 +485,22 @@ fn attach_metrics<S: Clone + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, to_bytes};
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
-    /// Credential registration and retrieval live on the management listener,
-    /// while aggregation reads live on the public listener; each keeps its own
+    /// Credential lookup lives on the management listener, while aggregation
+    /// reads live on the public listener; each keeps its own
     /// layers (auth, permissive governor) once built as separate routers.
     #[tokio::test]
-    async fn test_management_register_issuers_and_public_serve_aggregation() {
+    async fn test_management_rejects_registration_and_public_serves_aggregation() {
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (auth_gate, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
-        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
+        let aggregation_id = crate::test_utils::register_issuer(&state.service, "issuer1").await;
+        let management = management_routes(state.clone(), auth_gate).with_state(state.clone());
         let public = public_routes(permissive).with_state(state);
         let send = |router: Router, method: Method, uri: String, body: String| {
             let request = Request::builder()
@@ -497,14 +527,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(registration.status(), StatusCode::ACCEPTED);
-        let registration: serde_json::Value = serde_json::from_slice(
-            &to_bytes(registration.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        let aggregation_id = registration["aggregation_id"].as_str().unwrap();
+        // No POST handler is registered on this path; it must never accept an
+        // unauthenticated registration.
+        assert_eq!(registration.status(), StatusCode::UNAUTHORIZED);
 
         let unauthenticated = send(
             management,
@@ -527,15 +552,6 @@ mod tests {
         assert_eq!(aggregation.status(), StatusCode::OK);
     }
 
-    /// The network boundary is structural: a route belongs to exactly one
-    /// listener, so requesting it on any other listener returns 404. This test
-    /// uses a complete table of (method, path, owning listener) and asserts:
-    ///   - the owner returns a non-404 status (route is present)
-    ///   - every other listener returns 404 (route is absent)
-    ///
-    /// Metrics are explicitly enabled so /metrics checks pass because the route
-    /// actually exists on the admin listener, not because the path is simply
-    /// unknown.
     #[tokio::test]
     async fn test_routes_404_on_the_wrong_listener() {
         use crate::test_utils::{publish_list, register_issuer};
@@ -546,18 +562,23 @@ mod tests {
             ("APP_SERVER__ENABLE_METRICS", "true"),
         ])
         .unwrap();
-        let (strict, issuer, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (auth_gate, permissive, admin_governor) =
+            build_governor_configs(&config.rate_limit).unwrap();
 
-        // Seed a registered issuer and a published list so the public read
-        // routes return a real (non-404) response on their owner.
         let state = crate::test_utils::test_app_state(None).await;
         let aggregation_id = register_issuer(&state.service, "issuer1").await;
         let list_id = uuid::Uuid::new_v4().to_string();
         publish_list(&state.service, "issuer1", &list_id).await;
 
         let public = public_routes(permissive).with_state(state.clone());
-        let management = management_routes(state.clone(), issuer, strict).with_state(state.clone());
-        let admin = admin_routes(&config, prometheus::Registry::new()).with_state(state);
+        let management = management_routes(state.clone(), auth_gate).with_state(state.clone());
+        let admin = admin_routes(
+            state.clone(),
+            &config,
+            prometheus::Registry::new(),
+            admin_governor,
+        )
+        .with_state(state);
 
         let status = |router: Router, method: Method, uri: &str| {
             let request = Request::builder()
@@ -576,14 +597,7 @@ mod tests {
         const MANAGEMENT: &str = "management";
         const ADMIN: &str = "admin";
 
-        // Table: (method, path, owning_listener).
-        // Every route must be reachable (non-404) on exactly its owner, and
-        // must return 404 on the other two listeners. The public read routes
-        // are included and seeded above so their owner check is a real response
-        // (the scoped aggregation and status-list reads resolve to data, and
-        // the deprecated /aggregation returns a page).
         let routes: &[(Method, &str, &str)] = &[
-            // Public read routes (seeded so the owner check is not a 404)
             (
                 Method::GET,
                 &format!("{API_V1_PREFIX}/status-lists/{list_id}"),
@@ -594,13 +608,10 @@ mod tests {
                 &format!("{API_V1_PREFIX}/aggregation/{aggregation_id}"),
                 PUBLIC,
             ),
-            // Deprecated, unscoped aggregation
             (Method::GET, &format!("{API_V1_PREFIX}/aggregation"), PUBLIC),
-            // Public service/liveness routes (no data needed)
             (Method::GET, "/", PUBLIC),
             (Method::GET, "/health", PUBLIC),
             (Method::GET, "/health/live", PUBLIC),
-            // Management routes (return 4xx auth error on owner, not 404)
             (
                 Method::PUT,
                 &format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"),
@@ -617,18 +628,14 @@ mod tests {
                 MANAGEMENT,
             ),
             (
-                Method::POST,
-                &format!("{API_V1_PREFIX}/credentials"),
-                MANAGEMENT,
-            ),
-            (
                 Method::GET,
                 &format!("{API_V1_PREFIX}/credentials"),
                 MANAGEMENT,
             ),
-            // Admin routes
             (Method::GET, "/health/ready", ADMIN),
             (Method::GET, "/metrics", ADMIN),
+            (Method::GET, "/admin/v1/issuers", ADMIN),
+            (Method::GET, "/admin/v1/issuers/example", ADMIN),
         ];
 
         for (method, path, owner) in routes {
@@ -657,16 +664,12 @@ mod tests {
         }
     }
 
-    /// `GET /` returns the JSON service document with its links.
-    /// The Content-Type must be `application/json` (the change that affected
-    /// clients), and an empty portal env var must be absent from the document
-    /// rather than emitted as `"portal": ""`.
     #[tokio::test]
     async fn test_root_returns_json_service_document() {
         use axum::body::to_bytes;
 
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let state = crate::test_utils::test_app_state(None).await;
         let public = public_routes(permissive).with_state(state);
 
@@ -675,7 +678,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // The Content-Type is what changed for clients; assert it explicitly.
         let content_type = resp
             .headers()
             .get("content-type")
@@ -689,21 +691,17 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(doc["service"], "Status List Server");
         assert_eq!(doc["links"]["documentation"], crate::config::REPOSITORY_URL);
-        // An unset portal must be absent, never emitted as `"portal": ""`.
         assert!(doc["links"]["portal"].as_str().is_none());
         assert!(doc.get("version").is_none());
     }
 
-    /// A pod that started with the quota enforced keeps advertising the
-    /// aggregation after `list-quota disable`, and its cached tokens keep the
-    /// claim, so an issuer can outgrow one page on a running server. A client
-    /// that does not page must then get an error, not part of the aggregation.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_aggregation_never_answers_in_part_when_the_quota_is_disabled_live() {
         use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
         use crate::outbound::sql::list_quota;
         use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_app_state};
+        use axum::body::to_bytes;
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let db = sqlite_test_db(None).await;
@@ -717,7 +715,7 @@ mod tests {
                 .unwrap(),
         );
         let config = Config::load_from_overrides(&[]).unwrap();
-        let (_, _, permissive) = build_governor_configs(&config.rate_limit).unwrap();
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
         let router = public_routes(permissive).with_state(state.clone());
         let get = |uri: String| {
             let request = Request::get(uri)
@@ -793,16 +791,6 @@ mod tests {
         );
     }
 
-    /// Graceful shutdown must cover all three listeners. A request is held in
-    /// flight on the management listener (headers + half the body sent) while
-    /// the public and admin listeners sit idle. After shutdown is signalled,
-    /// `run` must stay pending until that request completes, and the request
-    /// must still get its response. With the old `select!`, an idle listener
-    /// would finish first and `run` would return with the request in flight.
-    ///
-    /// Also exercises the real `HttpServer::new` wiring: the root service
-    /// document answers on public and 404s on management, readiness answers on
-    /// admin.
     #[tokio::test]
     async fn test_graceful_shutdown_covers_all_three_listeners() {
         use std::time::Duration;
@@ -840,7 +828,6 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut run_handle = tokio::spawn(server.run(shutdown_rx));
 
-        // Wait for the public listener to accept connections.
         let client = reqwest::Client::new();
         let mut up = false;
         for _ in 0..50 {
@@ -858,7 +845,6 @@ mod tests {
         }
         assert!(up, "public listener never became ready");
 
-        // Routers are wired to the right surfaces.
         let public_resp = client
             .get(format!("http://{public_addr}/"))
             .send()
@@ -880,30 +866,13 @@ mod tests {
 
         // Hold a request in flight on the management listener: send the head
         // and only half of the body, so the handler is waiting on the rest.
-        let body = format!(
-            r#"{{"issuer":"issuer1","public_key":{}}}"#,
-            crate::test_fixtures::TEST_EC_PUBLIC_JWK
-        );
-        let (first_half, second_half) = body.as_bytes().split_at(body.len() / 2);
         let mut slow = TcpStream::connect(management_addr).await.unwrap();
-        let head = format!(
-            "POST {API_V1_PREFIX}/credentials HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
-        slow.write_all(head.as_bytes()).await.unwrap();
-        slow.write_all(first_half).await.unwrap();
+        slow.write_all(b"GET /api/v1/credentials HTTP/1.1\r\nHost:")
+            .await
+            .unwrap();
         slow.flush().await.unwrap();
-        // Give the server time to read the head and start the handler, so the
-        // request is genuinely in flight when shutdown is signalled.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Signal shutdown. The public and admin listeners are idle and drain
-        // immediately; management still has the request in flight, so `run`
-        // must NOT return yet. With the old `select!` it would.
         shutdown_tx.send(true).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(500), &mut run_handle)
@@ -913,8 +882,9 @@ mod tests {
         );
 
         // Finish the request: it must still be served despite shutdown.
-        slow.write_all(second_half).await.unwrap();
-        slow.flush().await.unwrap();
+        slow.write_all(b" localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = Vec::new();
         tokio::time::timeout(Duration::from_secs(5), slow.read_to_end(&mut response))
             .await
@@ -922,11 +892,10 @@ mod tests {
             .unwrap();
         let response = String::from_utf8_lossy(&response);
         assert!(
-            response.starts_with("HTTP/1.1 202"),
+            response.starts_with("HTTP/1.1 401"),
             "in-flight request must complete normally, got: {response}"
         );
 
-        // Only now may `run` finish, and it must do so cleanly.
         tokio::time::timeout(Duration::from_secs(10), run_handle)
             .await
             .expect("run did not finish after the in-flight request completed")
@@ -995,6 +964,1009 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
+    fn issuer_token(issuer: &str, kid: &str, private_pem: &str) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("statuslist-management+jwt".to_string());
+        header.kid = Some(kid.to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": issuer, "iat": now, "exp": now + 300 }),
+            &jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Management routes over a registry holding `issuer-a` and `issuer-b`,
+    /// with a standard write burst of `burst` per issuer.
+    async fn two_issuer_management(burst: u32) -> Router {
+        two_issuer_management_with(&[], burst).await
+    }
+
+    async fn two_issuer_management_with(overrides: &[(&str, &str)], burst: u32) -> Router {
+        two_issuer_management_tiered(overrides, burst, "standard").await
+    }
+
+    /// Management routes over `issuer-a` (standard) and `issuer-b` in
+    /// `issuer_b_tier`. The standard write burst is `burst` and the sandbox
+    /// burst is 1, each with one token per 600 seconds.
+    async fn two_issuer_management_tiered(
+        overrides: &[(&str, &str)],
+        burst: u32,
+        issuer_b_tier: &str,
+    ) -> Router {
+        two_issuer_routers_tiered(overrides, burst, issuer_b_tier)
+            .await
+            .0
+    }
+
+    async fn two_issuer_routers_tiered(
+        overrides: &[(&str, &str)],
+        burst: u32,
+        issuer_b_tier: &str,
+    ) -> (Router, Router) {
+        use crate::server::auth::tests::{rotation_public_jwk, test_public_jwk};
+
+        let config = Config::load_from_overrides(overrides).unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        let key = |key: crate::domain::models::credential::PublicJwk| {
+            serde_json::json!({
+                "kid": key.key_id(),
+                "alg": format!("{:?}", key.algorithm()),
+                "jwk": key.jwk(),
+            })
+        };
+        let registry = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [
+                { "id": "issuer-a", "aggregation_id": uuid::Uuid::new_v4(), "keys": [key(test_public_jwk())] },
+                { "id": "issuer-b", "aggregation_id": uuid::Uuid::new_v4(), "tier": issuer_b_tier, "keys": [key(rotation_public_jwk())] },
+            ],
+            "admins": []
+        }))
+        .unwrap();
+        state.set_issuer_registry(Arc::new(
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
+        ));
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let public =
+            build_public_router(&config, public_routes(permissive)).with_state(state.clone());
+        (management_with_budgets(&config, state, burst), public)
+    }
+
+    /// Management routes over `state` with the standard write burst set to
+    /// `burst` and the sandbox burst to 1, each with one token per 600 seconds.
+    fn management_with_budgets(config: &Config, mut state: AppState, burst: u32) -> Router {
+        use crate::domain::models::tier::IssuerTier;
+
+        let (auth_gate, _, _) = build_governor_configs(&config.rate_limit).unwrap();
+        for (tier, burst) in [(IssuerTier::Standard, burst), (IssuerTier::Sandbox, 1)] {
+            let limits = state.tier_limits_mut(tier);
+            limits.write_burst_size = std::num::NonZeroU32::new(burst).unwrap();
+            limits.write_period = Duration::from_secs(600);
+        }
+        state.issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(
+            &state.tiers,
+        ));
+        build_management_router(config, state.clone(), auth_gate).with_state(state)
+    }
+
+    /// One client IP for every request, as behind a shared NAT or proxy.
+    async fn patch_statuses(router: &Router, token: &str) -> axum::response::Response {
+        patch_statuses_from(router, token, IpAddr::V4(Ipv4Addr::LOCALHOST)).await
+    }
+
+    async fn patch_statuses_from(
+        router: &Router,
+        token: &str,
+        client: IpAddr,
+    ) -> axum::response::Response {
+        patch_statuses_via(router, token, client, None).await
+    }
+
+    /// A request whose TCP peer is `peer`, optionally carrying
+    /// `X-Forwarded-For`.
+    async fn patch_statuses_via(
+        router: &Router,
+        token: &str,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .method(Method::PATCH)
+            .uri(format!(
+                "{API_V1_PREFIX}/status-lists/{}/statuses",
+                uuid::Uuid::new_v4()
+            ))
+            .header("content-type", "application/json")
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .extension(axum::extract::ConnectInfo(SocketAddr::new(peer, 12345)));
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        let request = request.body(Body::from(r#"{"statuses":[]}"#)).unwrap();
+        router.clone().oneshot(request).await.unwrap()
+    }
+
+    async fn assert_contract_429(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("429 must carry Retry-After")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retry_after >= 1);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "too_many_requests");
+    }
+
+    mod security {
+        use super::*;
+
+        struct SecurityTokens {
+            issuer_a: String,
+            issuer_b: String,
+            forged: String,
+            unknown: String,
+            admin_type: String,
+            expired: String,
+            hmac: String,
+            none: String,
+        }
+
+        fn security_tokens() -> SecurityTokens {
+            use crate::server::auth::tests::{
+                rotation_private_pem, test_ec_private_pem, test_public_jwk,
+            };
+            use base64::Engine;
+
+            let private_pem = test_ec_private_pem();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+            let signed = |typ: &str, exp: u64| {
+                let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+                header.typ = Some(typ.into());
+                header.kid = Some("test-key".into());
+                format!("Bearer {}", jsonwebtoken::encode(
+                &header,
+                &serde_json::json!({"iss":"issuer-a","iat":if exp <= now { exp - 120 } else { now },"exp":exp}),
+                &key,
+            ).unwrap())
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+            header.typ = Some("statuslist-management+jwt".into());
+            header.kid = Some("test-key".into());
+            let public: serde_json::Value =
+                serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+            let hmac = format!(
+                "Bearer {}",
+                jsonwebtoken::encode(
+                    &header,
+                    &serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300}),
+                    &jsonwebtoken::EncodingKey::from_secret(&serde_json::to_vec(&public).unwrap()),
+                )
+                .unwrap()
+            );
+            let encode = |value: serde_json::Value| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&value).unwrap())
+            };
+            let none = format!(
+                "Bearer {}.{}.",
+                encode(
+                    serde_json::json!({"alg":"none","typ":"statuslist-management+jwt","kid":"test-key"})
+                ),
+                encode(serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300})),
+            );
+            SecurityTokens {
+                issuer_a: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-a", "test-key", &private_pem)
+                ),
+                issuer_b: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "rotation-key", &rotation_private_pem())
+                ),
+                forged: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "test-key", &private_pem)
+                ),
+                unknown: format!(
+                    "Bearer {}",
+                    issuer_token(
+                        "unknown-issuer",
+                        "unknown-key",
+                        include_str!("../test_data/ec-private.pem")
+                    )
+                ),
+                admin_type: signed("statuslist-admin+jwt", now + 300),
+                expired: signed("statuslist-management+jwt", now - 120),
+                hmac,
+                none,
+            }
+        }
+
+        struct SecurityCase {
+            name: &'static str,
+            headers: Vec<axum::http::HeaderValue>,
+            error: &'static str,
+        }
+
+        fn security_cases(tokens: &SecurityTokens) -> Vec<SecurityCase> {
+            use axum::http::HeaderValue;
+            let one = |name, value: &str, error| SecurityCase {
+                name,
+                headers: vec![HeaderValue::from_str(value).unwrap()],
+                error,
+            };
+            vec![
+                one("Basic", "Basic credential", "missing_token"),
+                one("malformed", "Bearer invalid.jwt.token", "invalid_token"),
+                one("forged issuer", &tokens.forged, "invalid_token"),
+                one("unknown key", &tokens.unknown, "invalid_token"),
+                one("admin type", &tokens.admin_type, "invalid_token"),
+                one("expired", &tokens.expired, "invalid_token"),
+                one("public-key HMAC", &tokens.hmac, "invalid_token"),
+                one("alg none", &tokens.none, "invalid_token"),
+                one("empty Bearer", "Bearer ", "invalid_token"),
+                SecurityCase {
+                    name: "duplicate headers",
+                    headers: vec![
+                        HeaderValue::from_static("Bearer invalid.jwt.token"),
+                        HeaderValue::from_str(&tokens.issuer_a).unwrap(),
+                    ],
+                    error: "invalid_token",
+                },
+                SecurityCase {
+                    name: "non-UTF8 header",
+                    headers: vec![
+                        HeaderValue::from_bytes(b"Bearer sensitive-fragment\xff").unwrap(),
+                    ],
+                    error: "missing_token",
+                },
+            ]
+        }
+
+        async fn security_write(
+            router: &Router,
+            method: Method,
+            list_id: &str,
+            headers: &[axum::http::HeaderValue],
+            body: &'static str,
+            client: u8,
+        ) -> axum::response::Response {
+            use axum::http::header;
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, client)),
+                    12345,
+                )));
+            for value in headers {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            router
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn security_read(router: &Router, list_id: &str) -> axum::response::Response {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}"))
+                        .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            12345,
+                        )))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        async fn response_json(response: axum::response::Response) -> serde_json::Value {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        fn authorization(value: &str) -> Vec<axum::http::HeaderValue> {
+            vec![axum::http::HeaderValue::from_str(value).unwrap()]
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_reject_invalid_credentials() {
+            use axum::http::header;
+            let router = two_issuer_management_with(&[], 100).await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            for method in [Method::PUT, Method::PATCH] {
+                let missing = security_write(
+                    &router,
+                    method.clone(),
+                    &list_id,
+                    &[],
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(
+                    missing.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} missing"
+                );
+                assert_eq!(missing.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                assert_eq!(response_json(missing).await["error"], "missing_token");
+                for (index, case) in security_cases(&tokens).iter().enumerate() {
+                    let rejected = security_write(
+                        &router,
+                        method.clone(),
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(
+                        rejected.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {}",
+                        case.name
+                    );
+                    let challenge = if case.error == "missing_token" {
+                        "Bearer"
+                    } else {
+                        "Bearer error=\"invalid_token\""
+                    };
+                    assert_eq!(
+                        rejected.headers()[header::WWW_AUTHENTICATE],
+                        challenge,
+                        "{method} {}",
+                        case.name
+                    );
+                    let body = axum::body::to_bytes(rejected.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(error["error"], case.error, "{method} {}", case.name);
+                    let body = String::from_utf8_lossy(&body);
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !body.contains(marker),
+                                    "{method} {} exposed a credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_preserve_issuer_ownership() {
+            use axum::http::header;
+            let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            let published = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                1,
+            )
+            .await;
+            assert_eq!(published.status(), StatusCode::CREATED);
+            let location = published.headers()[header::LOCATION].clone();
+            let initial = security_read(&public, &list_id).await;
+            assert_eq!(initial.status(), StatusCode::OK);
+            let etag = initial.headers()[header::ETAG].clone();
+            let body = axum::body::to_bytes(initial.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let owner_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                2,
+            )
+            .await;
+            assert_eq!(owner_republish.status(), StatusCode::CONFLICT);
+            assert_eq!(owner_republish.headers()[header::LOCATION], location);
+            assert_eq!(
+                response_json(owner_republish).await["error"],
+                "status_list_already_exists"
+            );
+            let other_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                r#"{"statuses":[]}"#,
+                3,
+            )
+            .await;
+            assert_eq!(other_republish.status(), StatusCode::CONFLICT);
+            assert!(other_republish.headers().get(header::LOCATION).is_none());
+            assert_eq!(
+                response_json(other_republish).await["error"],
+                "status_list_already_exists"
+            );
+
+            let change = r#"{"statuses":[{"index":0,"status":1}]}"#;
+            let other_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                change,
+                4,
+            )
+            .await;
+            assert_eq!(other_update.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response_json(other_update).await["error"],
+                "issuer_mismatch"
+            );
+            let after_other = security_read(&public, &list_id).await;
+            assert_eq!(after_other.status(), StatusCode::OK);
+            assert_eq!(after_other.headers()[header::ETAG], etag);
+            assert_eq!(
+                axum::body::to_bytes(after_other.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+
+            let owner_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                change,
+                5,
+            )
+            .await;
+            assert_eq!(owner_update.status(), StatusCode::OK);
+            let after_owner = security_read(&public, &list_id).await;
+            assert_eq!(after_owner.status(), StatusCode::OK);
+            assert_ne!(after_owner.headers()[header::ETAG], etag);
+            assert_ne!(
+                axum::body::to_bytes(after_owner.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+        }
+
+        #[tokio::test]
+        async fn management_and_public_routes_do_not_log_credentials_or_signing_key() {
+            use std::io::Write;
+            use tracing::instrument::WithSubscriber;
+            struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+            impl Write for LogWriter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || LogWriter(sink.clone()))
+                .finish();
+            async {
+                tracing::trace!("security log capture ready");
+                let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+                let tokens = security_tokens();
+                let cases = security_cases(&tokens);
+                let list_id = uuid::Uuid::new_v4().to_string();
+                let published = security_write(
+                    &management,
+                    Method::PUT,
+                    &list_id,
+                    &authorization(&tokens.issuer_a),
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(published.status(), StatusCode::CREATED);
+                for (index, case) in cases.iter().enumerate() {
+                    let response = security_write(
+                        &management,
+                        Method::PATCH,
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{}", case.name);
+                }
+                let public_response = security_read(&public, &list_id).await;
+                assert_eq!(public_response.status(), StatusCode::OK);
+                let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+                assert!(logs.contains("security log capture ready"));
+                assert!(logs.contains("Management JWT rejected"));
+                for sensitive in [
+                    &tokens.issuer_a,
+                    &tokens.forged,
+                    &tokens.unknown,
+                    &tokens.admin_type,
+                    &tokens.expired,
+                    &tokens.hmac,
+                    &tokens.none,
+                ] {
+                    let token = sensitive.strip_prefix("Bearer ").unwrap_or(sensitive);
+                    assert!(!logs.contains(token), "logs exposed credential material");
+                }
+                for case in &cases {
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !logs.contains(marker),
+                                    "logs exposed {} credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(!logs.contains("sensitive-fragment"));
+                for line in include_str!("../test_data/ec-private.pem").lines() {
+                    if line.len() > 40 {
+                        assert!(!logs.contains(line), "logs exposed signing key");
+                    }
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_issuers_behind_one_ip_have_independent_write_budgets() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let management = two_issuer_management(1).await;
+        let token_a = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        let token_b = issuer_token("issuer-b", "rotation-key", &rotation_private_pem());
+
+        let first = patch_statuses(&management, &token_a).await;
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_contract_429(patch_statuses(&management, &token_a).await).await;
+
+        let other = patch_statuses(&management, &token_b).await;
+        assert_ne!(
+            other.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "issuer-b must not share issuer-a's bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_sandbox_issuer_spends_its_tiers_request_budget() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let management = two_issuer_management_tiered(&[], 3, "sandbox").await;
+        let standard = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        let sandbox = issuer_token("issuer-b", "rotation-key", &rotation_private_pem());
+
+        assert_ne!(
+            patch_statuses(&management, &sandbox).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(patch_statuses(&management, &sandbox).await).await;
+        for _ in 0..3 {
+            assert_ne!(
+                patch_statuses(&management, &standard).await.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "the standard tier keeps its own, larger budget"
+            );
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_a_hosted_issuer_spends_the_budget_of_its_stored_tier() {
+        use crate::domain::models::credential::AggregationId;
+        use crate::domain::models::hosted_issuer::{
+            HostedIssuer, HostedIssuerKey, HostedIssuerKeyState, HostedIssuerState,
+        };
+        use crate::domain::ports::HostedIssuerStore;
+        use crate::server::auth::tests::{test_ec_private_pem, test_public_jwk};
+
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        let store = Arc::new(crate::outbound::sql::SqlHostedIssuerStore::new(db.clone()));
+        let issuer_id = uuid::Uuid::new_v4().to_string();
+        let now = time::OffsetDateTime::now_utc();
+        store
+            .create_issuer(
+                HostedIssuer {
+                    id: issuer_id.clone(),
+                    display_name: None,
+                    tier: "sandbox".into(),
+                    state: HostedIssuerState::Active,
+                    owner: None,
+                    created_at: now,
+                    expires_at: Some(now + time::Duration::days(1)),
+                    version: 1,
+                    aggregation_id: AggregationId::generate(),
+                },
+                "test-admin",
+            )
+            .await
+            .unwrap();
+        let jwk = test_public_jwk();
+        store
+            .add_key(
+                HostedIssuerKey {
+                    kid: jwk.key_id().to_owned(),
+                    issuer_id: issuer_id.clone(),
+                    jwk,
+                    created_at: now,
+                    not_before: None,
+                    not_after: None,
+                    state: HostedIssuerKeyState::Active,
+                },
+                "test-admin",
+            )
+            .await
+            .unwrap();
+        let mut state = crate::test_utils::test_app_state(Some(db)).await;
+        state.issuer_key_resolver = crate::setup::build_issuer_key_resolver(
+            Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
+            Some(store),
+        );
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let management = management_with_budgets(&config, state, 100);
+        let token = issuer_token(&issuer_id, "test-key", &test_ec_private_pem());
+
+        assert_ne!(
+            patch_statuses(&management, &token).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(patch_statuses(&management, &token).await).await;
+    }
+
+    async fn get_credentials(router: &Router, token: &str) -> axum::response::Response {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("{API_V1_PREFIX}/credentials"))
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                12345,
+            )))
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_credentials_route_spends_the_issuers_budget() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let management = two_issuer_management(2).await;
+        let token_a = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        let token_b = issuer_token("issuer-b", "rotation-key", &rotation_private_pem());
+
+        // Reads and writes share one bucket per issuer.
+        assert_ne!(
+            patch_statuses(&management, &token_a).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_ne!(
+            get_credentials(&management, &token_a).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(get_credentials(&management, &token_a).await).await;
+        assert_ne!(
+            get_credentials(&management, &token_b).await.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "issuer-b must not share issuer-a's bucket"
+        );
+    }
+
+    #[test]
+    fn test_issuer_rate_limit_rejections_are_counted() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        let metrics = crate::test_utils::metrics_after(async {
+            let management = two_issuer_management(1).await;
+            let token = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+            for _ in 0..3 {
+                patch_statuses(&management, &token).await;
+            }
+        });
+        let line = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("issuer_rate_limited_total{")
+                    && line.contains("issuer=\"issuer-a\"")
+                    && line.contains("tier=\"standard\"")
+            })
+            .unwrap_or_else(|| panic!("missing issuer_rate_limited_total: {metrics}"));
+        assert!(line.ends_with(" 2"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn test_forged_iss_cannot_spend_another_issuers_write_budget() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let management = two_issuer_management(1).await;
+        // Claims issuer-a but is signed with issuer-b's key, and the reverse
+        // pairing of kid and key: neither verifies.
+        let forged = [
+            issuer_token("issuer-a", "rotation-key", &rotation_private_pem()),
+            issuer_token("issuer-a", "test-key", &rotation_private_pem()),
+        ];
+        for token in &forged {
+            let response = patch_statuses(&management, token).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let genuine = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        let response = patch_statuses(&management, &genuine).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "forged requests must not have drained issuer-a's bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verified_writes_from_one_ip_do_not_spend_the_default_auth_gate() {
+        use crate::server::auth::tests::{rotation_private_pem, test_ec_private_pem};
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let writes = config.rate_limit.strict_burst_size + 1;
+        let management = two_issuer_management(writes).await;
+        let tokens = [
+            issuer_token("issuer-a", "test-key", &test_ec_private_pem()),
+            issuer_token("issuer-b", "rotation-key", &rotation_private_pem()),
+        ];
+        for token in &tokens {
+            for _ in 0..writes {
+                let response = patch_statuses(&management, token).await;
+                assert_ne!(
+                    response.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "verified writes must only spend the issuer's own budget"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_auth_gate() {
+        let management = two_issuer_management_with(
+            &[
+                ("rate_limit.strict_burst_size", "1"),
+                ("rate_limit.strict_period_secs", "600"),
+            ],
+            100,
+        )
+        .await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
+
+        // Without trusted proxies, a fresh X-Forwarded-For per request does
+        // not create a fresh bucket.
+        assert_eq!(
+            patch_statuses_via(&management, "not-a-token", attacker, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_contract_429(
+            patch_statuses_via(&management, "not-a-token", attacker, Some("203.0.113.2")).await,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_auth_gate() {
+        let management = two_issuer_management_with(
+            &[
+                ("rate_limit.strict_burst_size", "1"),
+                ("rate_limit.strict_period_secs", "600"),
+                ("rate_limit.trusted_proxies", "10.0.0.0/8"),
+            ],
+            100,
+        )
+        .await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert_eq!(
+            patch_statuses_via(&management, "not-a-token", proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // The same client stays charged even when it prepends a forged hop.
+        assert_contract_429(
+            patch_statuses_via(
+                &management,
+                "not-a-token",
+                proxy,
+                Some("192.0.2.99, 203.0.113.1"),
+            )
+            .await,
+        )
+        .await;
+        // Another client behind the same proxy has its own budget.
+        assert_eq!(
+            patch_statuses_via(&management, "not-a-token", proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spent_auth_failures_never_block_a_verified_issuer_on_the_same_address() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        let management = two_issuer_management_with(
+            &[
+                ("rate_limit.strict_burst_size", "1"),
+                ("rate_limit.strict_period_secs", "600"),
+            ],
+            100,
+        )
+        .await;
+        let genuine = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+
+        assert_eq!(
+            patch_statuses(&management, "not-a-token").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
+        // Clients behind one NAT or proxy share the address: a verified issuer
+        // among them is never refused for the others' bad tokens.
+        assert_ne!(
+            patch_statuses(&management, &genuine).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
+    }
+
+    /// Answers every `kid` as unknown and counts how often it was asked, as a
+    /// hosted store does with one query per lookup.
+    #[derive(Debug, Default)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::IssuerKeyResolver for CountingResolver {
+        async fn resolve(
+            &self,
+            _kid: &str,
+        ) -> Result<
+            Arc<crate::domain::models::credential::ResolvedKey>,
+            crate::domain::models::credential::KeyResolveError,
+        > {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::domain::models::credential::KeyResolveError::UnknownKid)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admission_bounds_key_lookups_before_auth() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        let config = Config::load_from_overrides(&[
+            ("tiers.standard.write_burst_size", "2"),
+            ("rate_limit.admission_burst_size", "2"),
+            ("rate_limit.admission_per_second", "1"),
+        ])
+        .unwrap();
+        let resolver = Arc::new(CountingResolver::default());
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.issuer_key_resolver = resolver.clone();
+        let management = management_with_budgets(&config, state, 2);
+        let token = issuer_token("issuer-x", "unknown-kid", &test_ec_private_pem());
+
+        let mut refused = 0;
+        for _ in 0..10 {
+            let response = patch_statuses(&management, &token).await;
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                refused += 1;
+                assert_contract_429(response).await;
+            }
+        }
+        let lookups = resolver.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            lookups + refused,
+            10,
+            "a refused request never reached auth"
+        );
+        // The burst, plus at most one token replenished on a slow runner.
+        assert!(lookups <= 3, "{lookups} key lookups passed admission");
+    }
+
+    #[tokio::test]
+    async fn test_admission_never_refuses_a_lone_issuer_within_its_budget() {
+        use crate::server::auth::tests::test_ec_private_pem;
+
+        // The smallest admission budget startup accepts for this tier.
+        let management = two_issuer_management_with(
+            &[
+                ("tiers.standard.write_burst_size", "5"),
+                ("rate_limit.admission_burst_size", "5"),
+                ("rate_limit.admission_per_second", "1"),
+            ],
+            5,
+        )
+        .await;
+        let token = issuer_token("issuer-a", "test-key", &test_ec_private_pem());
+        for _ in 0..5 {
+            assert_ne!(
+                patch_statuses(&management, &token).await.status(),
+                StatusCode::TOO_MANY_REQUESTS
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ip_governor_rejects_with_the_error_contract() {
+        let config = Config::load_from_overrides(&[
+            ("rate_limit.strict_burst_size", "1"),
+            ("rate_limit.strict_period_secs", "600"),
+        ])
+        .unwrap();
+        let (auth_gate, _, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        let management = management_routes(state.clone(), auth_gate).with_state(state);
+
+        let first = patch_statuses(&management, "not-a-token").await;
+        assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+        assert_contract_429(patch_statuses(&management, "not-a-token").await).await;
+    }
+
     #[tokio::test]
     async fn test_request_body_limit_returns_413_when_exceeded() {
         async fn handler() -> impl IntoResponse {
@@ -1042,46 +2014,213 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    fn one_request_budget(overrides: &[(&str, &str)]) -> Config {
+        let mut overrides = overrides.to_vec();
+        overrides.extend([
+            ("rate_limit.permissive_burst_size", "1"),
+            ("rate_limit.permissive_period_secs", "600"),
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ]);
+        Config::load_from_overrides(&overrides).unwrap()
+    }
+
+    async fn public_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        let config = one_request_budget(overrides);
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let state = crate::test_utils::test_app_state(None).await;
+        public_routes(permissive).with_state(state)
+    }
+
+    async fn admin_with_one_request(overrides: &[(&str, &str)]) -> Router {
+        let config = one_request_budget(overrides);
+        let (_, _, admin_governor) = build_governor_configs(&config.rate_limit).unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = admin_registry(&["issuers:read"]);
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+        admin_routes(
+            state.clone(),
+            &config,
+            prometheus::Registry::new(),
+            admin_governor,
+        )
+        .with_state(state)
+    }
+
+    fn admin_registry(
+        scopes: &[&str],
+    ) -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
+        let jwk: serde_json::Value =
+            serde_json::from_str(crate::test_fixtures::TEST_EC_PUBLIC_JWK).unwrap();
+        let yaml = serde_saphyr::to_string(&serde_json::json!({
+            "version": 1,
+            "issuers": [],
+            "admins": [{
+                "id": "admin-1",
+                "scopes": scopes,
+                "keys": [{"kid": "test-key", "alg": "ES256", "jwk": jwk}],
+            }],
+        }))
+        .unwrap();
+        Arc::new(crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&yaml).unwrap())
+    }
+
+    fn admin_token() -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.typ = Some("statuslist-admin+jwt".into());
+        header.kid = Some("test-key".into());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let secret = jsonwebtoken::EncodingKey::from_ec_pem(
+            crate::test_fixtures::TEST_EC_PRIVATE_PEM.as_bytes(),
+        )
+        .unwrap();
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "iss": "admin-1",
+                "iat": now,
+                "exp": now + 300,
+                "aud": ["status-list-server-admin"],
+            }),
+            &secret,
+        )
+        .unwrap()
+    }
+
+    async fn get_via(
+        router: &Router,
+        uri: &str,
+        bearer: Option<&str>,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(SocketAddr::new(peer, 12345)));
+        if let Some(token) = bearer {
+            request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn public_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let uri = format!("{API_V1_PREFIX}/aggregation");
+        get_via(router, &uri, None, peer, forwarded_for).await
+    }
+
+    async fn admin_read(
+        router: &Router,
+        peer: IpAddr,
+        forwarded_for: Option<&str>,
+    ) -> axum::response::Response {
+        let token = admin_token();
+        get_via(
+            router,
+            "/admin/v1/issuers",
+            Some(&token),
+            peer,
+            forwarded_for,
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn test_smart_ip_governor_independent_buckets_per_ip() {
-        async fn handler() -> impl IntoResponse {
-            "ok"
-        }
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_public_limiter() {
+        let public = public_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
 
-        let governor = Arc::new(
-            GovernorConfigBuilder::default()
-                .burst_size(1)
-                .period(Duration::from_secs(600))
-                .key_extractor(SmartIpKeyExtractor)
-                .finish()
-                .expect("non-zero burst/period"),
+        assert_ne!(
+            public_read(&public, attacker, None).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
         );
+        assert_contract_429(public_read(&public, attacker, Some("203.0.113.1")).await).await;
+    }
 
-        let router = Router::new()
-            .route("/write", axum::routing::put(handler))
-            .layer(GovernorLayer::new(governor))
-            .with_state(());
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_public_bucket() {
+        let public = public_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-        fn make_request(ip: IpAddr) -> Request<Body> {
-            Request::builder()
-                .method(Method::PUT)
-                .uri("/write")
-                .extension(axum::extract::ConnectInfo(SocketAddr::new(ip, 12345)))
-                .body(Body::empty())
-                .unwrap()
-        }
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, proxy, Some("192.0.2.99, 203.0.113.1")).await)
+            .await;
+        assert_ne!(
+            public_read(&public, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
-        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    #[tokio::test]
+    async fn test_ipv6_clients_in_one_slash_64_share_a_public_bucket() {
+        let public = public_with_one_request(&[]).await;
+        let ip = |value: &str| value.parse::<IpAddr>().unwrap();
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:2::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_contract_429(public_read(&public, ip("2001:db8:1:2::ffff"), None).await).await;
+        assert_ne!(
+            public_read(&public, ip("2001:db8:1:3::1"), None)
+                .await
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
-        let resp = router.clone().oneshot(make_request(ip_b)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    #[tokio::test]
+    async fn test_spoofed_forwarding_headers_do_not_evade_the_admin_limiter() {
+        let admin = admin_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
 
-        let resp = router.clone().oneshot(make_request(ip_a)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            admin_read(&admin, attacker, None).await.status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, attacker, Some("203.0.113.1")).await).await;
+    }
+
+    #[tokio::test]
+    async fn test_clients_behind_a_trusted_proxy_have_their_own_admin_bucket() {
+        let admin = admin_with_one_request(&[("rate_limit.trusted_proxies", "10.0.0.0/8")]).await;
+        let proxy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.1"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_contract_429(admin_read(&admin, proxy, Some("192.0.2.99, 203.0.113.1")).await).await;
+        assert_eq!(
+            admin_read(&admin, proxy, Some("203.0.113.2"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -1122,13 +2261,10 @@ mod tests {
         assert!(parsed.is_loopback());
     }
 
-    /// The HTTP metrics layer must record the bounded route pattern (not the
-    /// raw URI) and the status class for every request that passes through it.
-    // The test serialization lock (metrics_test_lock) guards against the global
-    // meter provider being swapped by a concurrent metrics test while this
-    // test's middleware binds its cached instrument handles, so it must be held
-    // across the router `.await`s below. Deliberate for a test-only std Mutex.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_middleware_records_route_and_status() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1215,13 +2351,10 @@ mod tests {
         );
     }
 
-    /// The HTTP metrics listener label must reflect the owning listener, not
-    /// "unknown". This goes through the SAME layer order as the production
-    /// router (`with_listener_name` wrapping `with_common_layers`), regressing
-    /// the bug where the Extension was applied INSIDE the metrics middleware so
-    /// the label always read "unknown".
-    // Same test-only serialization lock rationale as the middleware test above.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn http_metrics_listener_label_is_not_unknown() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1252,8 +2385,6 @@ mod tests {
             "ok"
         }
 
-        // Mirror production: with_listener_name wraps with_common_layers so the
-        // Extension (and thus the label) is present when track_http_metrics runs.
         let router = with_listener_name(
             with_common_layers(
                 Router::<AppState>::new().route("/ok", get(ok_handler)),
@@ -1287,15 +2418,10 @@ mod tests {
         );
     }
 
-    /// A handler panic must be observable as a 5xx metric. This only holds when
-    /// `track_http_metrics` is layered OUTSIDE `CatchPanicLayer` (as in the real
-    /// router): the panic is converted to a 500 by CatchPanicLayer first and then
-    /// recorded by the metrics middleware. Regresses the bug where panic-induced
-    /// 500s silently disappeared from the error-rate SLI.
-    // Same test-only serialization lock rationale as the middleware test above:
-    // the guard must stay held across the `oneshot(...).await` so the panic's
-    // 5xx counter binds to this test's meter provider, not a concurrent one.
-    #[allow(clippy::await_holding_lock)]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "metrics_test_lock must stay held while tests swap the global meter provider"
+    )]
     #[tokio::test]
     async fn panicking_handler_records_5xx_metric() {
         use crate::utils::metrics::{metrics_test_lock, setup_metrics};
@@ -1324,8 +2450,6 @@ mod tests {
             panic!("boom");
         }
 
-        // Layer order must mirror the production router: CatchPanicLayer inside,
-        // track_http_metrics outside.
         let router = Router::new()
             .route("/boom", get(boom_handler))
             .layer(CatchPanicLayer::new())
@@ -1356,5 +2480,232 @@ mod tests {
                 && body.contains("status_class=\"5xx\""),
             "expected 5xx counter for a panicking handler; body:\n{body}"
         );
+    }
+
+    /// The lifecycle routes exist only on the admin listener and only in the
+    /// hosted profile; everywhere else the request never reaches a
+    /// lifecycle handler.
+    #[tokio::test]
+    async fn lifecycle_routes_are_mounted_only_on_the_admin_listener() {
+        use crate::domain::models::hosted_issuer::{
+            HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerState,
+        };
+        use crate::domain::ports::HostedIssuerLifecycleStore;
+        use axum::http::header;
+
+        struct UnreachableLifecycleStore;
+        #[async_trait::async_trait]
+        impl HostedIssuerLifecycleStore for UnreachableLifecycleStore {
+            async fn get_issuer(&self, _id: &str) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn set_issuer_state(
+                &self,
+                _id: &str,
+                _state: HostedIssuerState,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn set_issuer_expiry(
+                &self,
+                _id: &str,
+                _expires_at: time::OffsetDateTime,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuer, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+            async fn revoke_key(
+                &self,
+                _issuer_id: &str,
+                _kid: &str,
+                _expected_version: u64,
+                _actor: &str,
+            ) -> Result<HostedIssuerKey, HostedIssuerError> {
+                unreachable!("mounting tests never invoke the store")
+            }
+        }
+
+        let config = Config::load_from_overrides(&[]).unwrap();
+        let (auth_gate, permissive, admin_governor) =
+            build_governor_configs(&config.rate_limit).unwrap();
+        let registry = admin_registry(&["issuers:write"]);
+        let mut hosted = crate::test_utils::test_app_state(None).await;
+        hosted.admin_registry = registry.clone();
+        hosted.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+        hosted.hosted_lifecycle_service = Some(Arc::new(
+            crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(Arc::new(
+                UnreachableLifecycleStore,
+            )),
+        ));
+        let mut private = crate::test_utils::test_app_state(None).await;
+        private.admin_registry = registry;
+        private.admin_auth = crate::server::AdminAuthConfig {
+            leeway_secs: 60,
+            max_token_lifetime_secs: 300,
+            audiences: vec!["status-list-server-admin".into()],
+        };
+
+        let hosted_for_limit = hosted.clone();
+        let admin = admin_routes(
+            hosted.clone(),
+            &config,
+            Registry::new(),
+            admin_governor.clone(),
+        )
+        .merge(hosted_admin_routes(hosted.clone(), admin_governor.clone()))
+        .with_state(hosted);
+        let public = {
+            let state = crate::test_utils::test_app_state(None).await;
+            public_routes(permissive).with_state(state)
+        };
+        let management = {
+            let state = crate::test_utils::test_app_state(None).await;
+            management_routes(state.clone(), auth_gate).with_state(state)
+        };
+        let private_admin = {
+            admin_routes(
+                private.clone(),
+                &config,
+                Registry::new(),
+                admin_governor.clone(),
+            )
+            .merge(hosted_admin_routes(private.clone(), admin_governor))
+            .with_state(private)
+        };
+
+        let token = admin_token();
+        let send = |router: Router, uri: String, token: Option<&str>, body: &'static str| {
+            let mut builder = Request::builder()
+                .method(Method::PATCH)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    12345,
+                )));
+            if let Some(token) = token {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            router.oneshot(builder.body(Body::from(body)).unwrap())
+        };
+
+        for (uri, body) in [
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001",
+                r#"{"state":"suspended"}"#,
+            ),
+            (
+                "/admin/v1/issuers/00000000-0000-4000-8000-000000000001/keys/some-kid",
+                r#"{"state":"revoked"}"#,
+            ),
+        ] {
+            // Other listeners have no admin route at all.
+            let response = send(public.clone(), uri.into(), None, body).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "public listener");
+            let response = send(management.clone(), uri.into(), None, body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "management listener"
+            );
+
+            // Private profile: the issuer read route exists (GET), so a PATCH
+            // is a method-not-allowed on it, and the key route does not exist.
+            let response = send(private_admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            let expected = if uri.ends_with("/keys/some-kid") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::METHOD_NOT_ALLOWED
+            };
+            assert_eq!(
+                response.status(),
+                expected,
+                "private profile must not mount lifecycle routes"
+            );
+
+            // Hosted profile: the lifecycle handlers answer. Without the
+            // precondition the request stops at 428, never at the store.
+            let response = send(admin.clone(), uri.into(), Some(&token), body)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PRECONDITION_REQUIRED,
+                "hosted admin listener"
+            );
+        }
+
+        let limited_config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let (_, _, governor) = build_governor_configs(&limited_config.rate_limit).unwrap();
+        let limited =
+            hosted_admin_routes(hosted_for_limit.clone(), governor).with_state(hosted_for_limit);
+        let uri = "/admin/v1/issuers/00000000-0000-4000-8000-000000000001";
+        let body = r#"{"state":"suspended"}"#;
+        let rejected = send(limited.clone(), uri.into(), Some("not-a-jwt"), body)
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let first = send(limited.clone(), uri.into(), Some(&token), body)
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::PRECONDITION_REQUIRED);
+        let second = send(limited, uri.into(), Some(&token), body).await.unwrap();
+        assert_contract_429(second).await;
+    }
+
+    #[tokio::test]
+    async fn admin_issuer_reads_are_rate_limited() {
+        use axum::http::header;
+
+        let config = Config::load_from_overrides(&[
+            ("rate_limit.admin_burst_size", "1"),
+            ("rate_limit.admin_period_secs", "600"),
+        ])
+        .unwrap();
+        let mut state = crate::test_utils::test_app_state(None).await;
+        state.admin_registry = admin_registry(&["issuers:read"]);
+        state.admin_auth.audiences = vec!["status-list-server-admin".into()];
+        let token = admin_token();
+
+        for (uri, expected_first) in [
+            ("/admin/v1/issuers", StatusCode::OK),
+            ("/admin/v1/issuers/missing", StatusCode::NOT_FOUND),
+        ] {
+            let (_, _, governor) = build_governor_configs(&config.rate_limit).unwrap();
+            let router = admin_routes(state.clone(), &config, Registry::new(), governor)
+                .with_state(state.clone());
+            let request = |bearer: &str| {
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        12345,
+                    )))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let rejected = router.clone().oneshot(request("not-a-jwt")).await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+            let first = router.clone().oneshot(request(&token)).await.unwrap();
+            assert_eq!(first.status(), expected_first);
+            let second = router.clone().oneshot(request(&token)).await.unwrap();
+            assert_contract_429(second).await;
+        }
     }
 }

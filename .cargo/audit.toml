@@ -2,6 +2,12 @@
 ignore = [
   # rkyv 0.7.46 via rust_decimal: no patched 0.7.x and not built; drop once upstream bumps it.
   "RUSTSEC-2026-0235",
+  # astral-tokio-tar via testcontainers, test-only; drop once testcontainers no longer depends on it.
+  "RUSTSEC-2026-0440",
+  # libsqlite3-sys 0.37.0 is pulled by sqlx 0.9.0, which currently caps the
+  # dependency below the patched 0.39.0 release. Remove this exception when
+  # sqlx releases a compatible update.
+  "RUSTSEC-2026-0459",
 ]
 
 informational_warnings = ["unmaintained"]

@@ -1,16 +1,15 @@
-//! Relational database outbound adapters implementing domain ports via SeaORM.
-
 mod error;
+pub mod hosted;
+pub mod issuer_export;
 pub mod list_quota;
 mod migrations;
 mod models;
 mod store;
-// Real-backend container fixtures, shared by the store's own backend proofs and
-// by the HTTP-layer publish test.
 #[cfg(test)]
 pub(crate) mod test_containers;
 
 pub use error::RepositoryError;
+pub use hosted::SqlHostedIssuerStore;
 pub use migrations::{Migrator, run_migrations};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub(crate) use migrations::{verify_binlog_format, verify_innodb_engines};
@@ -30,7 +29,6 @@ use crate::domain::ports::{
     StatusListSnapshotRepo,
 };
 
-/// SQL relational adapter implementing `StatusListRepo`.
 #[derive(Clone)]
 pub struct SqlStatusListRepo {
     store: SeaOrmStore<models::StatusListRecord>,
@@ -42,7 +40,6 @@ impl SqlStatusListRepo {
     }
 }
 
-/// SQL relational adapter implementing `CredentialRepo`.
 #[derive(Clone)]
 pub struct SqlCredentialRepo {
     store: SeaOrmStore<models::Credentials>,
@@ -54,7 +51,6 @@ impl SqlCredentialRepo {
     }
 }
 
-/// SQL relational adapter implementing `StatusListSnapshotRepo`.
 #[derive(Clone)]
 pub struct SqlStatusListSnapshotRepo {
     store: SeaOrmStore<models::StatusListHistoryRecord>,
@@ -126,8 +122,7 @@ impl CredentialRepo for SqlCredentialRepo {
         issuer: &str,
     ) -> Result<Option<AggregationId>, CredentialError> {
         let aggregation_id = match self.store.find_aggregation_id(issuer).await? {
-            // Registered before aggregation IDs existed. Another pod may be
-            // assigning one right now, so read back whichever landed.
+            // Legacy row: assign an ID, then read back in case another pod won the race.
             Some(None) => {
                 self.store
                     .assign_aggregation_id(issuer, &AggregationId::generate().to_string())
@@ -198,6 +193,23 @@ impl CredentialRepo for SqlCredentialRepo {
 
 #[async_trait]
 impl StatusListRepo for SqlStatusListRepo {
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError> {
+        self.store
+            .count_status_lists_by_issuer(issuer)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn count_by_issuers(
+        &self,
+        issuers: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.store
+            .count_status_lists_by_issuers(issuers)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError> {
         self.store
             .find_one_by(list_id)
@@ -263,6 +275,12 @@ impl StatusListRepo for SqlStatusListRepo {
             .find_status_list_issuers()
             .await
             .map_err(Into::into)
+    }
+
+    async fn list_counts_by_issuer(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.store.list_counts_by_issuer().await.map_err(Into::into)
     }
 
     async fn allocate_indices(
@@ -405,6 +423,7 @@ impl From<RepositoryError> for CredentialError {
 impl From<RepositoryError> for StatusListError {
     fn from(value: RepositoryError) -> Self {
         match value {
+            RepositoryError::Unavailable => StatusListError::Unavailable,
             RepositoryError::DuplicateEntry => StatusListError::AlreadyExists,
             RepositoryError::Contention { code } => StatusListError::Contention { code },
             RepositoryError::QuotaExceeded { count, max } => {
@@ -449,9 +468,6 @@ mod tests {
         );
     }
 
-    /// Spans the chain the other tests only cover in halves: adapter error →
-    /// domain conversion → status and code the client receives. A broken `From`
-    /// here would pass both halves while shipping a 500.
     #[test]
     fn contention_reaches_the_client_as_409_write_contention() {
         let status_list: StatusListError = RepositoryError::Contention { code: "40P01" }.into();
@@ -470,8 +486,6 @@ mod tests {
         assert_eq!(api.error, "write_contention");
     }
 
-    /// A duplicate key must stay a duplicate; routed through `Contention` it
-    /// would tell the client to retry a write that can never succeed.
     #[test]
     fn duplicate_entry_is_not_reported_as_contention() {
         let status_list: StatusListError = RepositoryError::DuplicateEntry.into();
@@ -497,8 +511,6 @@ mod tests {
         assert!(api.retry_after_secs.is_none());
     }
 
-    /// The classification carves out contention; it must not soften every
-    /// storage failure into something a client is told to retry.
     #[test]
     fn unclassified_storage_errors_remain_500() {
         for err in [

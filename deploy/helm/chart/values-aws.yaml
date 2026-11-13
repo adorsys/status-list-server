@@ -8,7 +8,6 @@ statuslist:
   image:
     variant: aws
   service:
-    # General AWS overlay keeps traffic behind the Ingress TLS layer.
     type: ClusterIP
     annotations: {}
   ingress:

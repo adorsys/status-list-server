@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Adds test-only audience and issuer-registry values: the chart has no defaults, so deployments must choose their own.
+# Adds test-only audience, issuer-registry and trusted-proxy values: the chart has no defaults, so deployments must choose their own.
 helm() {
   local action="$1"
   shift
   if [[ "$action" == template || "$action" == lint ]]; then
-    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers "$@"
+    command helm "$action" --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers --set-string statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 "$@"
   else
     command helm "$action" "$@"
   fi
@@ -23,6 +23,22 @@ helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
+  --namespace hosted-ci \
+  --set statuslist.ingress.externalDnsHostname=sandbox.helm-ci.invalid \
+  --set statuslist.ingress.tls.secretName=sandbox-edge-tls \
+  --set statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://sandbox.helm-ci.invalid/admin \
+  --set statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
+  --output-dir "${RENDER_TEMP}/rendered/hosted"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
+  --namespace hosted-ci \
+  --set statuslist.ingress.externalDnsHostname=sandbox.helm-ci.invalid \
+  --set statuslist.ingress.tls.secretName=sandbox-edge-tls \
+  --set statuslist.ingress.management.hostname=management.helm-ci.invalid \
+  --set statuslist.ingress.management.tls.secretName=sandbox-management-tls \
+  --set statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://sandbox.helm-ci.invalid/admin \
+  --set statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
+  --output-dir "${RENDER_TEMP}/rendered/hosted-separate"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir "${RENDER_TEMP}/rendered/rotation"
 helm template status-list-server "$CHART_DIR" --set serviceAccount.create=false --output-dir "${RENDER_TEMP}/rendered/no-sa"
@@ -675,14 +691,37 @@ helm template status-list-server "$CHART_DIR" \
   --set statuslist.fallbackSecret.enabled=true \
   --set-string statuslist.fallbackSecret.stringData.postgres-password=x \
   --set prometheusRule.enabled=true \
+  --set serviceMonitor.enabled=true \
   --output-dir "${RENDER_TEMP}/rendered/scoped-rules"
 RULES="${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates/prometheusrule.yaml"
 if ! grep -q 'otel_scope_name="status-list-server",namespace="statuslist-prod"' "$RULES"; then
   echo "ERROR: PrometheusRule raw selectors must be namespace-scoped"; exit 1
 fi
-if ! grep -q 'absent(up{namespace="statuslist-prod",service="status-list-server-service"})' "$RULES"; then
-  echo "ERROR: StatusListMetricsAbsent must be namespace-scoped and select the rendered Service, not cluster-global"; exit 1
-fi
+python3 - "${RENDER_TEMP}/rendered/scoped-rules/status-list-server/templates" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+templates = Path(sys.argv[1])
+monitor = yaml.safe_load((templates / 'servicemonitor.yaml').read_text())
+services = [doc for doc in yaml.safe_load_all((templates / 'service.yaml').read_text()) if doc]
+selector = monitor['spec']['selector']['matchLabels']
+endpoint_port = monitor['spec']['endpoints'][0]['port']
+matches = [service for service in services
+           if all(service['metadata']['labels'].get(key) == value
+                  for key, value in selector.items())
+           and any(port.get('name') == endpoint_port
+                   for port in service['spec']['ports'])]
+if len(matches) != 1:
+    raise SystemExit(f'ERROR: expected one Service selected by ServiceMonitor, found {len(matches)}')
+service_name = matches[0]['metadata']['name']
+rules = yaml.safe_load((templates / 'prometheusrule.yaml').read_text())
+alerts = [rule for group in rules['spec']['groups'] for rule in group['rules']
+          if rule.get('alert') == 'StatusListMetricsAbsent']
+expected = f'up{{namespace="statuslist-prod",service="{service_name}"}}'
+if len(alerts) != 1 or f'absent({expected})' not in alerts[0]['expr'] or expected not in alerts[0]['expr'].split(' or ', 1)[-1]:
+    raise SystemExit('ERROR: StatusListMetricsAbsent must select the Service scraped by ServiceMonitor in the rendered namespace')
+PY
 if ! grep -q 'sli:error_budget:success:30d{namespace="statuslist-prod"}' "$RULES"; then
   echo "ERROR: recording-series reads in alert rules must be namespace-scoped"; exit 1
 fi

@@ -1,0 +1,214 @@
+# Admin issuer API
+
+The admin listener (default `localhost:8002`) serves issuer reads and writes.
+The public and management listeners return 404 for these routes. Keep the admin
+listener on a private network.
+The [Admin OpenAPI contract](openapi-admin.yaml) describes the response fields.
+
+## Authentication and configuration
+
+Add an admin principal with public keys and `issuers:read` in the registry's
+`admins` array. The registry file is selected by
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE`; admin and issuer keys share that file but
+are resolved separately. Follow the [registry schema](schemas/issuers.v1.schema.json)
+for key and principal fields. Never put private keys in the registry.
+
+Set `APP_ADMIN_AUTH__AUDIENCES` to comma-separated values accepted for admin
+requests. These values must not overlap `APP_MANAGEMENT_AUTH__AUDIENCES`.
+Startup fails on overlap in every environment. In production, defining any
+admins with no admin audience also fails startup. With no admin audiences,
+admin authentication rejects every token, including in development.
+Registry reloads that introduce admins while the admin audience overlaps
+management audiences are rejected in every environment; in production, a
+missing admin audience also rejects the reload. The last valid registry
+remains active. Configure the audience before adding admin principals.
+
+`APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS` defaults to 300 and must be positive.
+`APP_ADMIN_AUTH__LEEWAY_SECS` defaults to 60. Helm deployments can supply these
+through `statuslist.env`; the chart includes the admin audience setting.
+
+Sign tokens using an admin's registered key. Set `typ: statuslist-admin+jwt`,
+`kid` to that key's ID, and `alg` to its registered algorithm. Include `iss`
+equal to the admin ID, a matching `aud`, and integer `iat` and `exp` claims.
+`exp` must exceed `iat`, with their difference within the configured lifetime.
+Future `iat` and optional `nbf` must be within the leeway. Scopes come only
+from the registry; a token's `scope` claim grants nothing. Admin tokens cannot
+be used on management routes, and management tokens cannot be used here.
+
+Missing credentials return `401 missing_token`; rejected tokens return the
+same `401 invalid_token` body. A valid admin without `issuers:read` receives
+`403 insufficient_scope` with the required scope in `WWW-Authenticate`.
+Successful responses use `Cache-Control: no-store`; API errors use
+`Cache-Control: no-store, max-age=0`.
+The admin issuer API has a separate per-client-address budget, configured by
+`APP_RATE_LIMIT__ADMIN_BURST_SIZE` (default 100) and
+`APP_RATE_LIMIT__ADMIN_PERIOD_SECS` (default 1 second per replenished request).
+Excess reads or writes return JSON `429 too_many_requests` with `Retry-After`.
+
+## Pagination and filters
+
+The private profile returns static registry issuers. The hosted profile also
+returns portal issuers from SQL. Filter with `source`, `tier`, `state`, or
+`owner`. Owner values use `<provider>|<subject>` and must be URL encoded.
+The default page size is 50; `limit` must be between 1 and 100.
+
+Follow `next_cursor` or the `Link` header with the same filters. Ordering is
+ascending by issuer ID. The cursor keeps independent positions for static and
+portal issuers, so database collation cannot change their merged order. Issuers
+present at the start that remain present and matching when their page is read
+appear exactly once. Concurrent inserts after a source position may appear once;
+inserts before that position are observed on a new traversal.
+
+## Usage and validators
+
+Usage reports the actual number of persisted lists, including during a quota
+transition, and the issuer tier's `max_lists`. Key usage counts the keys that
+hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
+passed, including keys staged for rotation. `keys_limit` is the tier's
+`max_keys`.
+
+For static issuers, the detail ETag identifies the complete JSON representation.
+For hosted issuers, the ETag and `Issuer-Version` derive from the persisted
+issuer version. Mutations use exactly one of `If-Match` or
+`If-Issuer-Version`, so ordinary list publishes and derived expiry state do
+not invalidate writes. The reads do not provide a transactional snapshot
+across issuer metadata, keys, and usage.
+
+## Hosted issuer writes
+
+An admin with `issuers:write` can create a portal issuer with its first public
+key, add a key, suspend or resume an issuer, renew its expiry, and revoke a key.
+Static issuers remain managed through the registry. Creation is available only
+in the hosted profile; it assigns the issuer and aggregation identifiers and
+the key thumbprint. Other writes require the current issuer `ETag` or
+`Issuer-Version`; stale values return 412 and missing values return 428.
+Retrying an already revoked key returns 200 unchanged.
+
+`APP_TIERS__SANDBOX__MAX_LIFETIME_SECS` defaults to 2592000 (30 days).
+Creation defaults `expires_at` to that duration from now. Creation and renewal
+accept an expiry strictly after now and no later than now plus the configured
+duration. Renewal may restore an expired issuer; resuming a suspension alone
+does not. Portal issuers stored with the `standard` tier do not expire and
+reject renewal. Each change is recorded in the SQL audit log with its actor.
+
+Hosted key writes and registry reloads share a database lock on PostgreSQL and
+MySQL. Reloads also record static principal IDs, key IDs, and normalized key
+material as durable claims. These claims are retained after a registry entry
+is removed, so a lagging replica cannot admit a hosted key still trusted by
+another replica. This reserves historical static identities from hosted use.
+
+Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
+inspect a detail response without placing the bearer token in shell history.
+
+## Hosted profile local setup
+
+Hosted mode needs a SQL backend and an operator registry containing the portal
+backend's admin principal with `issuers:read` and `issuers:write` scopes. For
+a local single-node trial, prepare the admin key and registry below, then run
+with SQLite, the development signing material, and a distinct admin audience:
+
+```bash
+mkdir -p issuer-registry
+APP_SERVER__PROFILE=hosted \
+APP_DATABASE__BACKEND=sqlite \
+APP_DATABASE__URL='sqlite://issuer-registry/status-list.db?mode=rwc' \
+APP_ADMIN_AUTH__AUDIENCES='http://localhost:8002/admin/v1' \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/certs/dev.crt \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
+cargo run --features sqlite
+```
+
+The `issuer-registry/` directory is ignored by Git and holds this local
+database and registry. File-backed SQLite does not need the single-connection
+limit used for shared in-memory SQLite.
+
+For a local admin key, generate a separate P-256 private key outside the
+repository and write its public JWK into the ignored registry directory:
+
+```bash
+umask 077
+mkdir -p issuer-registry
+install -d -m 700 "$HOME/.local/share/status-list-server"
+export ADMIN_KEY
+ADMIN_KEY=$(mktemp "$HOME/.local/share/status-list-server/admin.XXXXXXXX")
+openssl ecparam -name prime256v1 -genkey -noout -out "$ADMIN_KEY"
+printf 'Private key: %s\n' "$ADMIN_KEY"
+uv run --project demo --locked python - > issuer-registry/admin-public.jwk <<'PY'
+import json
+import os
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from jwt.algorithms import ECAlgorithm
+
+with open(os.environ["ADMIN_KEY"], "rb") as key_file:
+    public_key = load_pem_private_key(key_file.read(), password=None).public_key()
+jwk = ECAlgorithm.to_jwk(public_key, as_dict=True)
+print(json.dumps({field: jwk[field] for field in ("kty", "crv", "x", "y")}))
+PY
+```
+
+Add the public key to `issuer-registry/issuers.yaml`. If the file does not
+exist yet, start with `version: 1` and `issuers: []`. This example uses a
+local-only key ID; keep it unique across all registry keys:
+
+```yaml
+version: 1
+issuers: []
+admins:
+  - id: portal-backend
+    scopes: ["issuers:read", "issuers:write"]
+    keys:
+      - kid: local-admin-key
+        alg: ES256
+        jwk: # replace this mapping with the fields in issuer-registry/admin-public.jwk
+          kty: EC
+          crv: P-256
+          x: <public JWK x>
+          y: <public JWK y>
+```
+
+Validate the edited registry with
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml cargo run --features sqlite -- issuer-registry`.
+Then start the hosted server with the command above. To sign a short-lived admin
+token for a local request, run:
+
+```bash
+export ADMIN_KEY='<private key path printed above>'
+export ADMIN_ID=portal-backend ADMIN_KID=local-admin-key
+export ADMIN_AUDIENCE='http://localhost:8002/admin/v1'
+ADMIN_TOKEN=$(uv run --project demo --locked python - <<'PY'
+import os
+import time
+import jwt
+
+now = int(time.time())
+with open(os.environ["ADMIN_KEY"], encoding="utf-8") as key_file:
+    token = jwt.encode(
+        {"iss": os.environ["ADMIN_ID"], "aud": os.environ["ADMIN_AUDIENCE"],
+         "iat": now, "exp": now + 60},
+        key_file.read(), algorithm="ES256",
+        headers={"typ": "statuslist-admin+jwt", "kid": os.environ["ADMIN_KID"]},
+    )
+print(token)
+PY
+)
+printf 'Authorization: Bearer %s\n' "$ADMIN_TOKEN" | \
+  curl -i -H @- http://localhost:8002/admin/v1/issuers
+unset ADMIN_TOKEN ADMIN_ID ADMIN_KID ADMIN_AUDIENCE ADMIN_KEY
+```
+
+The portal backend calls `POST /admin/v1/issuers` with the required
+`display_name`, `owner`, `public_key` (a public JWK), and `alg` fields, then
+reads the assigned issuer and key IDs from the response. `expires_at` is
+optional. See the `createIssuer` operation in the
+[Admin OpenAPI contract](openapi-admin.yaml) and the
+[hosted issuer creation demo](../demo/README.md#hosted-issuer-creation-and-renewal)
+for the request shape. The developer signs management tokens as described in the
+[registry issuer onboarding steps](issuer-onboarding.md#onboard-a-registry-issuer).
+For overlap rotation, read the issuer's `ETag`, add the new public key with
+`POST /admin/v1/issuers/{issuer_id}/keys` and `If-Match`, verify writes with
+the new key, then revoke the old key with
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}`, body
+`{"state":"revoked"}`, and a fresh `If-Match`.
+See the [portal ownership trust boundary](trust-model.md#portal-ownership)
+for the backend's authorization responsibility.

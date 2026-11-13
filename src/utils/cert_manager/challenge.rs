@@ -48,7 +48,6 @@ pub enum ChallengeError {
     Other(#[source] Report),
 }
 
-/// Abstract interface for handling ACME challenges
 #[async_trait::async_trait]
 pub trait ChallengeHandler: Send + Sync {
     /// Handles the ACME challenge for this authorization and returns a future that cleans it up.
@@ -60,13 +59,11 @@ pub trait ChallengeHandler: Send + Sync {
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// A future that performs cleanup of resources allocated during ACME challenge validation
 pub struct CleanupFuture {
     inner: BoxFuture<'static, Result<(), ChallengeError>>,
 }
 
 impl CleanupFuture {
-    /// Create a cleanup future with the given future
     pub fn new<F>(fut: F) -> Self
     where
         F: Future<Output = Result<(), ChallengeError>> + Send + 'static,
@@ -76,7 +73,6 @@ impl CleanupFuture {
         }
     }
 
-    /// Run the cleanup process
     pub async fn run(self) -> Result<(), ChallengeError> {
         self.inner.await
     }

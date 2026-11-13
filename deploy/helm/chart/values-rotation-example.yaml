@@ -1,8 +1,6 @@
 # Example: zero-downtime rotation of database credentials and signing keys via ESO-synced file mounts.
 # Pods reload on file change; the checksum annotation only rolls pods when rendered ExternalSecrets change.
 
-# External Secrets Configuration
-# Use ClusterSecretStore for cluster-wide secret management
 externalSecret:
   enabled: true
   metadata:
@@ -15,7 +13,6 @@ externalSecret:
     target:
       name: statuslist-secret
       creationPolicy: Owner
-      # Template to map external secret structure to expected application Secret keys.
       template:
         type: Opaque
         data:
@@ -26,9 +23,7 @@ externalSecret:
         remoteRef:
           key: secret/data/statuslist/production/database
           property: password
-    # Separately mounted Secrets. These target names and keys match
-    # statuslist.secretMounts below, so the rendered Pod can mount them without
-    # customer-side Kubernetes Secret provisioning.
+    # Names must match statuslist.secretMounts below.
     extraExternalSecrets:
       - metadata:
           name: statuslist-db-credentials
@@ -68,11 +63,10 @@ externalSecret:
                 key: secret/data/statuslist/production/api
                 property: internal_api_key
 
-# Disable SecretStore rendering - ClusterSecretStore is managed cluster-wide
+# The ClusterSecretStore is managed cluster-wide.
 secretStore:
   enabled: false
 
-# Application Configuration with File-Based Secret Mounts
 global:
   domain: example.com
 
@@ -83,15 +77,9 @@ statuslist:
     enabled: false
 
   aws:
-    # Use Workload Identity / ambient cloud credentials in this vendor-neutral example.
-    # Set true only when you also configure statuslist.aws.credentialsSecret.
     mountCredentials: false
 
-  # File-based secret mounts enable zero-downtime credential rotation.
-  # Secrets are mounted as files and can be rotated without pod restart
-  # when the application image supports file-based credential reloading.
   secretMounts:
-    # Database credentials mounted as files for rotation
     - name: database-credentials
       secretName: statuslist-db-credentials
       mountPath: /etc/secrets/database
@@ -101,8 +89,6 @@ statuslist:
       fileEnv:
         APP_DATABASE__PASSWORD_FILE: password
 
-    # Token signing keys for certificate rotation
-    # Rotate these independently of database credentials
     - name: signing-keys
       secretName: statuslist-token-keys
       mountPath: /etc/secrets/token-keys
@@ -115,7 +101,6 @@ statuslist:
         APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
         APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
 
-    # Additional secret mounts for other credentials
     - name: api-keys
       secretName: statuslist-api-keys
       mountPath: /etc/secrets/api
@@ -123,8 +108,6 @@ statuslist:
         - key: internal-api-key
           path: internal-api-key
 
-  # File watcher for credential rotation detection
-  # Application polls these paths and reloads credentials when files change
   watcher:
     pollIntervalSecs: "60"
 
@@ -135,22 +118,16 @@ statuslist:
     APP_SERVER__PORT: "8000"
     APP_SERVER__DOMAIN: "statuslist.example.com"
 
-    # Database configuration
     APP_DATABASE__HOST: "statuslist-postgres.example.internal"
     APP_DATABASE__PORT: "5432"
     APP_DATABASE__USERNAME: "statuslist"
     APP_DATABASE__NAME: "statuslist"
     APP_DATABASE__BACKEND: "postgres"
-    # Password is read from file. When APP_DATABASE__PASSWORD_FILE is set through
-    # fileEnv above, the chart does not inject APP_DATABASE__PASSWORD.
+    # The password comes from the mounted file (fileEnv above).
 
-    # Certificate store configuration
-    # Paths are injected by the signing-keys fileEnv mapping above:
-    # APP_SERVER__CERT__STORE__CERTIFICATE_PATH: /etc/secrets/token-keys/statuslist.crt
-    # APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: /etc/secrets/token-keys/statuslist.key
+    # Cert and key paths come from the signing-keys fileEnv above.
 
-    # ACME-enabled image variants use DNS-01 issuance instead of these static
-    # certificate files.
+    # ACME images use DNS-01 instead of static files:
     # APP_SERVER__CERT__ACME_DIRECTORY_URL: "https://acme-v02.api.letsencrypt.org/directory"
     # APP_SERVER__CERT__EMAIL: "ops@example.com"
 
@@ -171,16 +148,9 @@ statuslist:
       memory: "1Gi"
       cpu: "1000m"
 
-  # High Availability Configuration
-  # Use multiple replicas for zero-downtime deployments
   replicaCount: 3
 
-# PostgreSQL Configuration
-# File-based database credential rotation requires the database password accepted
-# by PostgreSQL to rotate with overlap. Use an external managed database or a
-# database operator that supports coordinated password rotation. The bundled
-# PostgreSQL subchart is disabled here because updating a Kubernetes Secret does
-# not itself update an already-created PostgreSQL user's password.
+# The bundled subchart can't rotate an existing user's password; use a managed database.
 postgres:
   enabled: false
 
@@ -200,7 +170,6 @@ podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
 
-# Security Hardening
 serviceAccount:
   create: true
   automountServiceAccountToken: false
@@ -216,7 +185,6 @@ networkPolicy:
           kubernetes.io/metadata.name: ingress-nginx
   egressInternal: []
 
-# Observability
 opentelemetry-collector:
   enabled: true
   mode: deployment

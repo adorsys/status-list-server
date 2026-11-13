@@ -14,9 +14,9 @@ This suite contains four tests exercising the StatusList Server:
 4. Authentication test
 
 Each test targets `http://localhost:8000` by default. Public reads (health,
-welcome, status-list retrieval) hit that target. Management writes (credential
-registration and status-list publishes/updates) go to the management listener at
-`http://localhost:8001` by default. Override the write destination with
+welcome, status-list retrieval) hit that target. Authenticated status-list
+publishes and updates go to the management listener at `http://localhost:8001`
+by default. Override the write destination with
 `MANAGEMENT_TARGET` (e.g. `MANAGEMENT_TARGET=https://mgmt.example.com npm run
 test:load`) for a deployment with a separate management hostname.
 
@@ -49,26 +49,43 @@ and is written with owner-only permissions. Regenerate it for each run.
 `generate-tokens` writes a single, git-ignored `scripts/test-tokens.json`
 containing the issuer ID, the public JWK and a set of signed JWTs. The run and
 setup scripts read everything they need from this file, so the key always
-matches the signed JWTs it was generated with.
+matches the signed JWTs it was generated with. It also writes the matching
+operator-managed issuer registry to `scripts/issuer-registry.json`.
 
-### One-time setup against the running server
+### Start the server with the generated registry
 
-Before each test, `scripts/setup.js` runs automatically (via the `npm run
-test:*` scripts). It registers the test issuer from `test-tokens.json` and
-publishes a set of seed status lists, writing their IDs to
-`scripts/seed-lists.json` (git-ignored). Registration lets the server resolve the
-token's `kid` to its public key; without it, authenticated requests return
-`401 invalid_token`. The seed lists give the read scenarios real list IDs to query.
+Generate the token and registry files before starting the server. From the
+repository root, configure the server to load that registry and accept the same
+audience used to sign the management tokens:
+
+```bash
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$PWD/perf/scripts/issuer-registry.json" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+cargo run
+```
+
+Set `MANAGEMENT_AUDIENCE` to the same value before `npm run generate-tokens` if
+you use a different audience. Before each test, `scripts/setup.js` runs
+automatically and publishes seed status lists with the registry-provisioned
+issuer. It writes their IDs to `scripts/seed-lists.json` (git-ignored); the
+seed lists give the read scenarios real list IDs to query. The issuer identity
+lookup scenario also uses this issuer and its token. Regenerate the tokens and
+registry, then restart the server, before running a test with a new key.
 
 Setup runs as a separate Node script rather than an Artillery `before:` hook,
 which does not execute processor `function:` steps.
 
 ## Rate limits
 
-The server rate-limits by source IP (strict 10 req/60s writes, permissive
-100 req/60s reads by default). A single IP running this suite will be throttled
-with `429 Too Many Requests`, which masks the behaviour the tests assert on.
-Raise the limits before running the suite.
+The server rate-limits by client address and per issuer. Each limit allows a
+burst, then one request per period. By default: strict, 10 rejected management
+authentications, then one every 60 seconds; permissive, 1000 reads, then one
+every 5 milliseconds; the `standard` tier, 100 management requests per issuer,
+then one per second. The
+`auth` suite sends unauthenticated requests on purpose, which spend the strict
+limit, and every suite writes as one issuer. A single IP and issuer running
+this suite will be throttled with `429 Too Many Requests`, which masks the
+behaviour the tests assert on. Raise the limits before running the suite.
 
 ### Limits per suite
 
@@ -84,13 +101,17 @@ per virtual user):
 | `spike` | 600 users/sec     | mixed        | `STRICT_BURST_SIZE=60000` / `PERMISSIVE=60000` |
 | `stress`| 250 users/sec     | mixed        | `STRICT_BURST_SIZE=30000` / `PERMISSIVE=30000` |
 
-The values below (the highest of the four) are safe for every suite -- raising
-the write (strict) limit especially matters, since the authenticated update
-flows send two writes back to back. Use the per-suite values above when running
-a single suite so the limits stay high enough to avoid `429`s yet still let the
-server shed truly excessive load. `APP_SERVER__AGGREGATION_URI` makes every
-served token carry `aggregation_uri`, so the read scenarios also measure the
-aggregation ID lookup that comes with it:
+The values below (the highest of the four) are safe for every suite. Raising
+the issuer request limit especially matters, since the authenticated update
+flows send two writes back to back and every suite writes as one issuer, so
+`APP_TIERS__STANDARD__WRITE_BURST_SIZE` needs the same headroom as
+`STRICT_BURST_SIZE`, and `APP_RATE_LIMIT__ADMISSION_BURST_SIZE` must be at
+least that value or the server refuses to start. Use the per-suite values
+above when running a single suite so the limits stay high enough to avoid
+`429`s yet still let the server shed truly excessive load.
+`APP_SERVER__AGGREGATION_URI` makes every served token carry
+`aggregation_uri`, so the read scenarios also measure the aggregation ID lookup
+that comes with it:
 
 ```bash
 APP_SERVER__ENABLE_METRICS=true \
@@ -101,6 +122,8 @@ APP_RATE_LIMIT__STRICT_BURST_SIZE=60000 \
 APP_RATE_LIMIT__STRICT_PERIOD_SECS=60 \
 APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE=60000 \
 APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS=60 \
+APP_RATE_LIMIT__ADMISSION_BURST_SIZE=60000 \
+APP_TIERS__STANDARD__WRITE_BURST_SIZE=60000 \
 RUST_LOG=info \
 ./target/debug/status-list-server
 ```

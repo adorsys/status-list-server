@@ -100,24 +100,33 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production Helm renders fail without a registry volume; without one in development, the server warns and trusts no issuers. The release-tag workflow deploys with `statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers` and nothing creates that ConfigMap, so it must already exist in the target namespace before the first release; the deploy job fails fast with a clear message when it is missing, and without it the pods would sit in `ContainerCreating` for the whole `--wait` window and then roll back.
-- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
+- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material, or for an issuer holding more keys than its tier's `max_keys`.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
+
+The admin listener serves authenticated issuer reads as well as readiness and
+metrics. It is not exposed through an Ingress and has a per-client rate limit.
+The chart's NetworkPolicy is disabled by default; enable it and configure
+`statuslist.networkPolicy.adminIngress` to restrict which pods can reach the
+admin service when cluster-wide pod access is not acceptable. Set a distinct
+`APP_ADMIN_AUTH__AUDIENCES` in every environment that defines admin principals;
+staging must not reuse the production audience. During upgrades, configure the
+admin audience before adding admin principals to the mounted registry.
+
+### Onboard a registry issuer
+
+For local key generation, registry setup, and a first authenticated publish, use
+the [local issuer onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer).
+For hosted issuers, see the [hosted onboarding steps](issuer-onboarding.md#onboard-a-hosted-issuer).
 
 ### Rotate or revoke issuer keys
 
 Keep the registry in the operator-controlled source used to publish the mount.
 It contains public keys only. Never put an issuer's private key in the registry.
 
-To start a new registry (there is no committed file), create the three-line skeleton:
-
-```yaml
-version: 1
-issuers: []
-admins: []
-```
-
 `cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
-file must exist with at least this structure before you add keys.
+file must exist with at least the structure in the
+[local onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer)
+before you add keys.
 
 For a zero-downtime rotation:
 
@@ -126,11 +135,92 @@ For a zero-downtime rotation:
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
 3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the exact bytes delivered by the selected volume source, then compare the result with the `fingerprint` in each pod's `issuer_registry_reloaded` log. For a ConfigMap, use `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`. For a Secret, decode the base64 value first: `kubectl get secret <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | base64 --decode | shasum -a 256` (use the platform's equivalent decode flag if needed). For a CSI volume, hash the file from the provider's source or another copy of the exact mounted bytes; there is no Kubernetes API object to query. `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
-5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
+5. Move the old key from that issuer's `keys` list to the top-level `revoked_keys` list, validate the file again, and publish the registry. Tombstones do not authenticate and permanently reserve both the `kid` and the public-key material in the durable history. Confirm reload on every pod; requests signed with the removed key should then be rejected. Simply deleting the key from `keys` stops trusting it in the current registry but creates no tombstone, so restoring an older registry can trust it again.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+For emergency revocation, move the compromised key from `keys` to the top-level `revoked_keys` list; to suspend the whole issuer, set its `disabled` field to `true`. Commit the change when the operator-managed registry is version-controlled, validate the file, then publish it to the mounted source. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer needs to authenticate, and do not delete the durable mapping while published tokens may still reference its URL. Public status-list reads continue while the issuer is disabled.
+
+Static registry tombstones are recorded in the SQL database. A candidate that reuses a revoked `kid` or normalized public-key material is rejected even after restoring an older registry file and restarting **on a release that enforces this history**. An older binary ignores the table: rolling back that binary and restoring an old registry file can trust the revoked key again. Do not rely on tombstone enforcement during a binary rollback; use a registry compatible with the older release that excludes the revoked key from active `keys`, and verify rejection on every pod. The same records prevent portal registration of a revoked key on the current release. Database backups must retain the revocation table, and normal migrations create it. Finish propagating one registry revision before publishing the next. Hosted-profile and static-key revocations share the database durability boundary.
+
+Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
+
+For a hosted issuer, use the admin listener with a registry admin JWT carrying
+`issuers:write`. See [the admin API guide](admin-api.md) for how to mint it
+(header `typ: statuslist-admin+jwt`, the admin's `kid`, `iss` equal to the
+admin id, `aud` from `APP_ADMIN_AUTH__AUDIENCES`, `exp - iat` within
+`APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS`, default 300s). Read the issuer and
+its `ETag` with `GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`. A missing `If-Match` returns `428
+precondition_required`; a stale `ETag` returns `412 precondition_failed`, so
+re-read and retry. `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with
+`If-Match` and `{"state":"revoked"}` permanently revokes one key; repeating it
+returns the key unchanged. The committed state and actor audit event are
+written in one database transaction. The admin routes have their own
+rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults to a burst of 100 and one replenished request per second per client address),
+and a write that already authenticated before the change can still commit.
+Send the old issuer token to each pod's management listener
+(`GET /api/v1/credentials` must answer `401`); public status-list reads remain
+available. A revoked `kid` remains stored and cannot be reused. An expired
+hosted issuer is rejected at verification time, even if no cleanup job has
+run.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
+
+### Issuer tiers
+
+Each registry issuer has a `tier`, `standard` (the default) or `sandbox`, which
+selects its rate limit, list quota and request bounds from
+`APP_TIERS__*` (see [architecture](architecture.md#issuer-tiers-app_tiers__)).
+A registry with any other tier value is rejected, and a failed reload keeps the
+previous registry. A registry is also rejected when an issuer holds more keys
+whose `not_after` has not passed than its tier's `max_keys`: a pod refuses to
+start with it, and a reload with it keeps the previous registry.
+`status-list-server issuer-registry` reports the same error before a
+deployment. Retire a key by setting its `not_after` before adding a new one
+beyond the limit.
+
+Moving an issuer to another tier takes effect on the next reload. Lists it
+already holds are kept even when they exceed the new quota, and statuses at
+indices those lists already hold stay updatable even above the new tier's
+`max_status_index`. The issuer starts with a full bucket of the new tier.
+
+Per-issuer usage is exported with `issuer` and `tier` labels:
+
+| Metric                      | Meaning                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `issuer_lists`              | Status lists counted against the issuer's quota                       |
+| `issuer_lists_limit`        | The tier's `max_lists`                                                |
+| `issuer_keys`               | Active keys whose `not_after` has not passed                          |
+| `issuer_keys_limit`         | The tier's `max_keys`                                                 |
+| `issuer_rate_limited_total` | Management requests refused with `429` by the issuer's tier rate limit |
+
+The gauges list exactly the issuers of the current registry and, in the
+`hosted` profile, every active hosted issuer the registry does not own, each
+under its current tier. Each pod reads them from the database at startup and
+every 60 seconds, so every pod reports the cluster-wide value, at most a minute
+old: aggregate `issuer_lists` across pods with `max`, not `sum`.
+`issuer_lists` is the per-issuer counter the list quota is enforced against;
+while the quota awaits `list-quota enable`, pods of the previous release leave
+it short.
+`issuer_rate_limited_total` is per pod, so `sum` it. Rate limits are held per
+replica, so an issuer's cluster-wide budget is the tier budget times the
+replica count; set a global cap at the ingress or API gateway.
+
+Every limit keyed on an address uses `APP_RATE_LIMIT__CLIENT_IP_SOURCE`, which
+production must set. Behind an ingress, set it to `rightmost_x_forwarded_for`
+(the chart default) and set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress
+controller's addresses or CIDRs, so the limits key on the client address the
+ingress appends to `X-Forwarded-For`. Production refuses to start with
+`rightmost_x_forwarded_for` and no trusted proxies, and the chart refuses to
+render it. Use `connect_info` only when the pods see client addresses
+directly: behind a proxy, every client shares the proxy's public, admin,
+failure and admission budgets. Every management request spends admission
+(`APP_RATE_LIMIT__ADMISSION_*`) before its token is checked. The failure
+budget never refuses a request that authenticates. Make sure the ingress
+appends the peer address it saw rather than passing a client's
+`X-Forwarded-For` through unchanged. Each pod exports `rate_limiter_keys`,
+labelled by `limiter`: the keys each limiter still holds after its last prune,
+every 60 seconds.
 
 ## Redis Status-List Cache
 
@@ -718,6 +808,12 @@ here; a test fails until it does.
 | `m20261014_000001_credentials_key_id` | Yes: the column is nullable, and the unique index is additive | Follow [Preparing existing management credentials](#preparing-existing-management-credentials); reconcile duplicate IDs and thumbprints before upgrade | Existing IDs are preserved; absent/null IDs on parseable public JWKs get an RFC 7638 SHA-256 thumbprint in both JSON and `key_id`. Algorithms are unchanged. Repair both columns after migration; changing JSON alone is insufficient |
 | `m20261020_000001_issuer_aggregations` | Yes: the table is additive, and an older release ignores it | None; keep the table and its mappings | Existing issuer-to-aggregation mappings remain immutable and the migration keeps the existing table and unique index |
 | `m20261022_000001_issuer_ownership` | **No**: the previous release does not update the new quota counter and cannot create issuer-owner rows | Run `list-quota disable` before deleting its migration record; the old release can publish only for existing owners and cannot register new issuers | Recreate the new release; the migration safely reruns, preserves owner IDs and recomputes counts from `status_lists`. If it reports conflicting aggregation IDs, follow [the repair steps](troubleshooting.md#resolving-issuer-aggregation-id-conflicts) first |
+| `m20261023_000001_hosted_issuers` | Yes: the columns carry defaults, so rows created without them load unchanged, and an older release ignores them | None; keep the columns | Hosted metadata is additive; registry-created rows keep their defaults |
+| `m20261023_000002_issuer_keys` | Yes: an older release ignores the table | None; keep the table | Created empty; the next migration fills it with `reserved` rows |
+| `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
+| `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
+| `m20261105_000001_static_key_revocations` | Schema-compatible: an older release ignores the table, but rollback does not preserve revocation enforcement if an old registry file is restored | Keep the table and revocations; use a registry compatible with the older release that excludes revoked keys from active `keys`, then verify rejection | Current releases retain static key revocations across restarts and registry file restores |
+| `m20261109_000001_registry_coordination` | Schema-compatible: an older release ignores the lock and claims tables, but does not enforce cross-pod hosted/static serialization | Keep both tables; do not rely on cross-pod coordination until all pods run the new release | Current releases reserve admitted static identities and serialize registry reloads with hosted key writes |
 
 ### Preparing existing management credentials
 

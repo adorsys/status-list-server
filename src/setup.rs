@@ -1,5 +1,3 @@
-//! Composition root assembling outbound infrastructure adapters and creating the AppState container.
-
 #[cfg(feature = "aws")]
 use aws_config::{BehaviorVersion, Region};
 #[cfg(any(
@@ -19,7 +17,12 @@ use sea_orm::{ConnectOptions, DbErr};
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
-use std::{collections::HashSet, num::NonZeroU64, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU64,
+    sync::Arc,
+    time::Duration,
+};
 #[cfg(feature = "acme")]
 use tracing::warn;
 
@@ -55,7 +58,10 @@ use crate::config::{DnsProviderKind, ResolvedDnsProvider, TelemetryEnvironment};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::domain::models::status_list::AGGREGATION_DEFAULT_LIMIT;
 use crate::domain::{
-    models::credential::Issuer,
+    models::{
+        credential::Issuer,
+        tier::{IssuerTier, IssuerUsage, Tiers},
+    },
     ports::{CertificateProvider, CredentialRepo, StatusListRepo, StatusListSnapshotRepo},
     service::Service,
 };
@@ -81,8 +87,8 @@ use crate::outbound::gcp_secret::GcpSecretManagerClient;
 use crate::outbound::memory::{MemoryCredentials, MemoryStatusListSnapshotRepo, MemoryStatusLists};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::outbound::sql::{
-    SeaOrmStore, SqlCredentialRepo, SqlStatusListRepo, SqlStatusListSnapshotRepo,
-    SwappableDatabaseConnection,
+    SeaOrmStore, SqlCredentialRepo, SqlHostedIssuerStore, SqlStatusListRepo,
+    SqlStatusListSnapshotRepo, SwappableDatabaseConnection,
     list_quota::{self, StartupState},
     run_migrations, verify_binlog_format, verify_innodb_engines,
 };
@@ -306,7 +312,6 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
     });
 }
 
-/// Usage of `status-list-server list-quota`.
 pub const LIST_QUOTA_USAGE: &str =
     "usage: status-list-server list-quota <status|recount|enable|disable>
 
@@ -316,7 +321,7 @@ pub const LIST_QUOTA_USAGE: &str =
            has more lists than the cap or a stale count
   disable  stop enforcing the quota";
 
-/// Runs `list-quota <action>` and returns what to print. Does not migrate.
+/// Does not run migrations.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
     if !matches!(action, "status" | "recount" | "enable" | "disable") {
@@ -361,7 +366,6 @@ pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeRe
     ))
 }
 
-/// Assembles application configuration, connects outbound repositories, and builds `AppState`.
 #[cfg(feature = "acme")]
 pub async fn build_state(config: &AppConfig) -> EyeResult<AppState> {
     build_state_with_cert_manager(config)
@@ -400,22 +404,32 @@ type BuildStateResult = (AppState,);
 
 async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     // Validate operator input before connecting to the database or running migrations.
+    let tiers = Arc::new(config.tier_limits()?);
     #[cfg_attr(
         not(any(feature = "memory", feature = "history")),
         allow(unused_variables)
     )]
-    let issuer_registry = Arc::new(match config.management_auth.issuers_file.as_deref() {
-        Some(path) if !path.is_empty() => {
-            crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+    let issuer_registry = Arc::new(
+        match config.management_auth.issuers_file.as_deref() {
+            Some(path) if !path.is_empty() => {
+                crate::server::auth::issuer_registry::RegistryHandle::load(path)?
+            }
+            _ => {
+                tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
+                crate::server::auth::issuer_registry::RegistryHandle::empty()
+            }
         }
-        _ => {
-            tracing::warn!("management_auth.issuers_file is unset; no issuer keys are trusted");
-            crate::server::auth::issuer_registry::RegistryHandle::empty()
-        }
-    });
-    // Hoisted DB handle captured from the backend branches below so the
-    // readiness probe can reach the real adapter (the domain ports only expose
-    // the higher-level repositories).
+        .with_key_limits(tiers.clone()),
+    );
+    if let Err(message) = validate_admin_auth_settings(
+        config.telemetry.environment,
+        &config.admin_auth.audiences,
+        &config.management_auth.audiences,
+        !issuer_registry.snapshot().admins().is_empty(),
+    ) {
+        color_eyre::eyre::bail!("{message}");
+    }
+    // Kept so the readiness probe can reach the real DB, which the ports hide.
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
     let db_arc: Option<Arc<SwappableDatabaseConnection>>;
     // Some feature profiles have only the in-memory backend; in those profiles
@@ -431,6 +445,13 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         allow(unused_variables)
     )]
     let aggregation_withheld: Option<String>;
+    // The dynamic trust source behind the composite resolver: `Some` only in
+    // the hosted profile, where registrations live in durable SQL storage.
+    let dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
+    let revocation_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>;
+    let hosted_lifecycle_service: Option<
+        Arc<crate::server::auth::hosted_service::HostedIssuerLifecycleService>,
+    >;
 
     let (status_list_repo, credential_repo, status_list_snapshot): (
         Arc<dyn StatusListRepo>,
@@ -445,6 +466,9 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             }
             aggregation_withheld = None;
             aggregation_withheld_from = HashSet::new();
+            dynamic_issuer_store = None;
+            revocation_store = None;
+            hosted_lifecycle_service = None;
             let memory_snapshot = MemoryStatusListSnapshotRepo::default();
             let memory_lists = MemoryStatusLists::default().with_snapshot(&memory_snapshot);
             (
@@ -536,6 +560,23 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             let db_handle = Arc::new(SwappableDatabaseConnection::new(Arc::new(db)));
             db_arc = Some(db_handle.clone());
             spawn_database_rotation(config.clone(), db_handle.clone());
+            revocation_store = Some(Arc::new(SqlHostedIssuerStore::from_handle(
+                db_handle.clone(),
+            )));
+            let hosted_store = config.server.profile.is_hosted().then(|| {
+                Arc::new(
+                    SqlHostedIssuerStore::from_handle(db_handle.clone())
+                        .with_key_limits(tiers.clone()),
+                )
+            });
+            dynamic_issuer_store = hosted_store
+                .clone()
+                .map(|store| store as Arc<dyn crate::domain::ports::HostedIssuerStore>);
+            hosted_lifecycle_service = hosted_store.map(|store| {
+                Arc::new(
+                    crate::server::auth::hosted_service::HostedIssuerLifecycleService::new(store),
+                )
+            });
             (
                 Arc::new(SqlStatusListRepo::new(SeaOrmStore::from_handle(
                     db_handle.clone(),
@@ -647,7 +688,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
             cert_inline,
             key_inline,
         ) {
-            // Filesystem mode: both paths → ReloadingCertificateProvider with hot-reload
             (Some(cp), Some(kp), None, None) => {
                 let p = ReloadingCertificateProvider::from_files(cp.to_owned(), kp.to_owned())
                     .await
@@ -655,19 +695,16 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                 spawn_cert_rotation(config.clone(), p.clone());
                 Arc::new(p)
             }
-            // Inline mode: both inline PEM values → InlineCertificateProvider (validated at startup)
             (None, None, Some(ci), Some(ki)) => Arc::new(
                 InlineCertificateProvider::new(ci.to_owned(), ki.to_owned())
                     .map_err(|e| color_eyre::eyre::eyre!("{e}"))?,
             ),
-            // Conflict: cannot mix sources
             _ if has_fs && has_inline => {
                 return Err(color_eyre::eyre::eyre!(
                     "certificate and signing key must both come from the same source; \
                      do not mix filesystem paths with inline (env var) values"
                 ));
             }
-            // Missing: neither source fully configured — fail immediately at startup
             _ => {
                 return Err(color_eyre::eyre::eyre!(
                     "static certificate mode requires both certificate and signing key; \
@@ -773,7 +810,6 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         cert_provider,
     ));
 
-    // Assemble the readiness probes from the real adapters captured above.
     let mut readiness = Readiness::default();
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -803,17 +839,8 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ));
     }
 
-    // A `localhost`/loopback `sub` can never be reached by a relying party, so a
-    // production profile refuses to start rather than silently signing tokens
-    // that every relying party rejects. Private/local addresses (`.local`,
-    // private IPv4, link-local, ULA) may be valid internal setups, so those only
-    // warn with an accurate message. The Helm chart falls back to `localhost`
-    // with APP_ENV=production when no host is configured, which this catches.
-    // `APP_ENV` is read directly (not telemetry.environment, which operators may
-    // override just to change the log format) so the guard is tied to the real
-    // deployment profile. `normalize_app_env` applies the same normalization as
-    // config (trim, lowercase, `prod`/`production`), so a production profile set
-    // with e.g. `APP_ENV=prod` is caught here exactly as config treats it.
+    // Read APP_ENV, not telemetry.environment, which operators may flip just for log format.
+    // Also catches the Helm chart's localhost fallback under APP_ENV=production.
     let app_env = crate::config::normalize_app_env();
     let base_url = config.server.resolved_public_base_url();
     match check_production_base_url(app_env, &base_url) {
@@ -822,14 +849,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Ok(None) => {}
     }
 
-    // ACME issues a certificate only for `server.domain`; when `sub` comes from
-    // a different host, relying parties that check the token signature against
-    // the host in `sub` will reject it.
-    //
-    // Both sides are compared as normalized hosts: the WHATWG parser lowercases
-    // domain names and brackets a bare IPv6 address the same way
-    // `resolved_public_base_url` renders the domain into the URL authority, so
-    // an identical host never false-positives here.
+    // ACME only covers `server.domain`, so a `sub` on another host fails relying-party checks.
     #[cfg(feature = "acme")]
     {
         let base_url = config.server.resolved_public_base_url();
@@ -859,16 +879,60 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         }
     }
 
+    let _registry_database_guard = if let Some(store) = &dynamic_issuer_store {
+        Some(store.registry_write_guard().await?)
+    } else {
+        None
+    };
     issuer_registry.validate_candidate(&issuer_registry.snapshot())?;
+    if let Some(dynamic_store) = &revocation_store {
+        crate::server::auth::hosted::validate_static_revocation_history(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     let empty_registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
+    // Cross-source checks are read-only and run before the immutable aggregation
+    // rows are written, so a rejected registry leaves no adoption side effects.
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        // In both directions of a collision the registry wins
+        // (composite resolution is static-first), so a candidate colliding
+        // with durable dynamic state must keep the last-known-good snapshot
+        // in force rather than silently absorb or shadow it.
+        crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+            dynamic_store,
+            &empty_registry,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+        warn_hosted_issuers_over_key_limit(dynamic_store.as_ref(), &tiers).await;
+    }
     validate_registry_aggregation_ids(&service, &empty_registry, &issuer_registry.snapshot())
         .await?;
+    if let Some(dynamic_store) = &revocation_store {
+        crate::server::auth::hosted::record_static_revocation_history(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
+    if let Some(dynamic_store) = &dynamic_issuer_store {
+        crate::server::auth::hosted::record_static_registry_claims(
+            dynamic_store,
+            &issuer_registry.snapshot(),
+        )
+        .await?;
+    }
     crate::utils::metrics::set_issuer_registry_keys(issuer_registry.snapshot().key_count());
     tracing::info!(
         fingerprint = %issuer_registry.snapshot().fingerprint(),
         "issuer registry loaded"
     );
-    warn_missing_registry_issuers(&service, &issuer_registry.snapshot()).await;
+    warn_missing_registry_issuers(&service, &issuer_registry.snapshot(), &dynamic_issuer_store)
+        .await;
+    let issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(&tiers));
+    crate::server::rate_limit::IssuerRateLimiter::spawn_pruner(&issuer_rate_limiter);
     let state = AppState {
         service,
         public_base_url: config.server.resolved_public_base_url(),
@@ -876,14 +940,20 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         aggregation_withheld_from: Arc::new(aggregation_withheld_from),
         token_exp_secs: config.status_list.token_exp_secs,
         token_ttl_secs: config.status_list.token_ttl_secs,
-        max_status_index: config.limits.max_status_index,
-        max_statuses_per_request: config.limits.max_statuses_per_request,
         max_serialized_list_size: config.limits.max_serialized_list_size,
-        max_lists_per_issuer: config.limits.max_lists_per_issuer,
+        tiers: tiers.clone(),
+        issuer_rate_limiter,
         snapshot_retention_secs: config.status_list.snapshot_retention_secs,
         management_auth: crate::server::ManagementAuthConfig::from(&config.management_auth),
-        issuer_key_resolver: issuer_registry.clone(),
+        admin_auth: crate::server::AdminAuthConfig::from(&config.admin_auth),
+        admin_registry: issuer_registry.clone(),
+        hosted_issuer_store: dynamic_issuer_store.clone(),
+        issuer_key_resolver: build_issuer_key_resolver(
+            issuer_registry.clone(),
+            dynamic_issuer_store.clone(),
+        ),
         issuer_registry: issuer_registry.clone(),
+        hosted_lifecycle_service,
         links: crate::server::ServiceLinks {
             documentation: config.server.links.documentation.clone(),
             portal: config.server.links.portal.clone(),
@@ -893,6 +963,12 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         ),
         readiness,
     };
+    spawn_issuer_usage_refresh(
+        issuer_registry.clone(),
+        dynamic_issuer_store.clone(),
+        &state.service,
+        tiers,
+    );
 
     if let Some(path) = config
         .management_auth
@@ -903,8 +979,15 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         spawn_issuer_registry_watcher(
             issuer_registry.clone(),
             state.service.clone(),
+            dynamic_issuer_store.clone(),
+            revocation_store.clone(),
             path.into(),
             Duration::from_secs(config.watcher.poll_interval_secs),
+            RegistryWatcherAuthValidation {
+                environment: config.telemetry.environment,
+                admin_audiences: config.admin_auth.audiences.clone(),
+                management_audiences: config.management_auth.audiences.clone(),
+            },
         );
     }
 
@@ -918,17 +1001,65 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     }
 }
 
+fn validate_admin_auth_settings(
+    environment: crate::config::TelemetryEnvironment,
+    admin_audiences: &[String],
+    management_audiences: &[String],
+    admins_configured: bool,
+) -> Result<(), &'static str> {
+    if admin_audiences
+        .iter()
+        .any(|aud| management_audiences.contains(aud))
+    {
+        return Err("admin_auth.audiences and management_auth.audiences must not overlap");
+    }
+    if admins_configured && environment.is_production() && admin_audiences.is_empty() {
+        return Err(
+            "admin_auth.audiences must not be empty in production when admins are configured",
+        );
+    }
+    Ok(())
+}
+
+/// A hosted deployment resolves through the composite: the static registry
+/// first, then the dynamic store behind the same port. Private deployments
+/// resolve against the registry only, exactly as before.
+pub(crate) fn build_issuer_key_resolver(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    dynamic: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Arc<dyn crate::domain::ports::IssuerKeyResolver> {
+    if dynamic.is_some() {
+        return Arc::new(
+            crate::server::auth::hosted::CompositeIssuerKeyResolver::new(registry, dynamic),
+        );
+    }
+    registry
+}
+
+#[derive(Clone)]
+pub(crate) struct RegistryWatcherAuthValidation {
+    pub(crate) environment: crate::config::TelemetryEnvironment,
+    pub(crate) admin_audiences: Vec<String>,
+    pub(crate) management_audiences: Vec<String>,
+}
+
 pub(crate) fn spawn_issuer_registry_watcher(
     registry_handle: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
     service: Arc<Service>,
+    dynamic_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+    revocation_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     path: std::path::PathBuf,
     poll_interval: Duration,
+    auth_validation: RegistryWatcherAuthValidation,
 ) {
     crate::utils::file_watcher::FileWatcher::new(vec![path], poll_interval)
         .spawn_with_initial_reconcile("issuer_registry", move || {
             let registry_handle = registry_handle.clone();
             let service = service.clone();
+            let dynamic_issuer_store = dynamic_issuer_store.clone();
+            let revocation_store = revocation_store.clone();
             let retry_interval = poll_interval;
+            let auth_validation = auth_validation.clone();
             async move {
                 loop {
                     let result = async {
@@ -936,20 +1067,77 @@ pub(crate) fn spawn_issuer_registry_watcher(
                             crate::server::auth::issuer_registry::IssuerRegistry::from_file(
                                 registry_handle.path(),
                             )?;
+                        validate_admin_auth_settings(
+                            auth_validation.environment,
+                            &auth_validation.admin_audiences,
+                            &auth_validation.management_audiences,
+                            !candidate.admins().is_empty(),
+                        )
+                        .map_err(|message| {
+                            crate::server::auth::issuer_registry::RegistryError::Semantic(
+                                message.into(),
+                            )
+                        })?;
                         registry_handle.validate_candidate(&candidate)?;
+                        if let Some(dynamic_store) = &revocation_store {
+                            crate::server::auth::hosted::validate_static_revocation_history(
+                                dynamic_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
+                        let _guard = registry_handle.write_lock().await;
+                        let _database_guard = if let Some(store) = &dynamic_issuer_store {
+                            Some(store.registry_write_guard().await.map_err(|error| {
+                                crate::server::auth::issuer_registry::RegistryError::Database(
+                                    error.to_string(),
+                                )
+                            })?)
+                        } else {
+                            None
+                        };
                         let active = registry_handle.snapshot();
+                        // Read-only cross-source checks run before the immutable
+                        // aggregation rows are written, so rejection leaves none.
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+                                dynamic_store,
+                                &active,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         validate_registry_aggregation_ids(&service, &active, &candidate).await?;
+                        if let Some(revocation_store) = &revocation_store {
+                            crate::server::auth::hosted::record_static_revocation_history(
+                                revocation_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
+                        if let Some(dynamic_store) = &dynamic_issuer_store {
+                            crate::server::auth::hosted::record_static_registry_claims(
+                                dynamic_store,
+                                &candidate,
+                            )
+                            .await?;
+                        }
                         registry_handle.replace(candidate)
                     }
                     .await;
                     match result {
                         Ok(()) => {
+                            crate::utils::metrics::record_issuer_registry_reload_success();
                             crate::utils::metrics::record_rotation("issuer_registry", true);
                             crate::utils::metrics::set_issuer_registry_keys(
                                 registry_handle.snapshot().key_count(),
                             );
-                            warn_missing_registry_issuers(&service, &registry_handle.snapshot())
-                                .await;
+                            warn_missing_registry_issuers(
+                                &service,
+                                &registry_handle.snapshot(),
+                                &dynamic_issuer_store,
+                            )
+                            .await;
                             tracing::info!(
                                 event = "issuer_registry_reloaded",
                                 fingerprint = %registry_handle.snapshot().fingerprint(),
@@ -1085,27 +1273,221 @@ async fn validate_registry_aggregation_ids(
     Ok(())
 }
 
-async fn warn_missing_registry_issuers(
-    service: &crate::domain::service::Service,
-    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+/// How often each pod refreshes the issuer usage gauges. A reload, a list
+/// another pod creates and a key whose `not_after` passes all show within one
+/// interval.
+const ISSUER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Refreshes the usage gauges at once, then on every interval, until the
+/// service is dropped.
+fn spawn_issuer_usage_refresh(
+    registry: Arc<crate::server::auth::issuer_registry::RegistryHandle>,
+    hosted: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+    service: &Arc<Service>,
+    tiers: Arc<Tiers>,
 ) {
-    match service.issuers_with_status_lists().await {
-        Ok(owners) => {
-            for issuer in owners {
-                if registry.issuer(&issuer).is_none() {
-                    tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry")
-                }
-            }
+    let service = Arc::downgrade(service);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ISSUER_USAGE_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(service) = service.upgrade() else {
+                break;
+            };
+            refresh_issuer_usage(&service, &registry.snapshot(), hosted.as_deref(), &tiers).await;
         }
+    });
+}
+
+/// Hosted issuers and their keys, read together for the usage gauges.
+type HostedSnapshot = (
+    Vec<crate::domain::models::hosted_issuer::HostedIssuer>,
+    Vec<crate::domain::models::hosted_issuer::HostedIssuerKey>,
+);
+
+async fn read_hosted(
+    store: &dyn crate::domain::ports::HostedIssuerStore,
+) -> Result<HostedSnapshot, crate::domain::models::hosted_issuer::HostedIssuerError> {
+    Ok((store.all_issuers().await?, store.all_keys().await?))
+}
+
+/// Publishes every registry and hosted issuer's list and key usage against its
+/// tier.
+async fn refresh_issuer_usage(
+    service: &Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    hosted: Option<&dyn crate::domain::ports::HostedIssuerStore>,
+    tiers: &Tiers,
+) {
+    let counts = match service.status_list_repo().list_counts_by_issuer().await {
+        Ok(counts) => counts,
         Err(error) => {
-            tracing::warn!(%error, "could not check status-list owners against issuer registry")
+            tracing::warn!(%error, "could not count status lists per issuer; usage metrics keep their previous values");
+            return;
+        }
+    };
+    let hosted = match hosted {
+        Some(store) => match read_hosted(store).await {
+            Ok(hosted) => hosted,
+            Err(error) => {
+                tracing::warn!(%error, "could not read hosted issuers; usage metrics keep their previous values");
+                return;
+            }
+        },
+        None => Default::default(),
+    };
+    crate::utils::metrics::set_issuer_usage(issuer_usage_samples(
+        registry,
+        &hosted,
+        &counts,
+        tiers,
+        time::OffsetDateTime::now_utc(),
+    ));
+}
+
+/// One sample per registry issuer, then per active hosted issuer the registry
+/// does not own (the registry wins, as when keys resolve).
+fn issuer_usage_samples(
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    (hosted_issuers, hosted_keys): &HostedSnapshot,
+    counts: &HashMap<String, u64>,
+    tiers: &Tiers,
+    now: time::OffsetDateTime,
+) -> Vec<(String, IssuerTier, IssuerUsage)> {
+    let lists = |id: &str| counts.get(id).copied().unwrap_or(0);
+    let mut samples: Vec<_> = registry
+        .issuers()
+        .iter()
+        .map(|issuer| {
+            let usage = IssuerUsage::new(
+                lists(&issuer.id),
+                issuer.active_key_count(now),
+                tiers.get(issuer.tier),
+            );
+            (issuer.id.clone(), issuer.tier, usage)
+        })
+        .collect();
+    let keys = hosted_key_counts(hosted_keys, now);
+    samples.extend(
+        hosted_issuers
+            .iter()
+            .filter(|issuer| {
+                issuer.state == crate::domain::models::hosted_issuer::HostedIssuerState::Active
+                    && !registry.issuers().iter().any(|owned| owned.id == issuer.id)
+            })
+            .map(|issuer| {
+                let tier = IssuerTier::from_name_or_strictest(&issuer.tier);
+                let usage = IssuerUsage::new(
+                    lists(&issuer.id),
+                    keys.get(issuer.id.as_str()).copied().unwrap_or(0),
+                    tiers.get(tier),
+                );
+                (issuer.id.clone(), tier, usage)
+            }),
+    );
+    samples
+}
+
+/// Keys per hosted issuer that count against its tier's `max_keys` at `now`.
+fn hosted_key_counts(
+    keys: &[crate::domain::models::hosted_issuer::HostedIssuerKey],
+    now: time::OffsetDateTime,
+) -> HashMap<&str, usize> {
+    let mut counts = HashMap::new();
+    for key in keys.iter().filter(|key| key.counts_against_quota(now)) {
+        *counts.entry(key.issuer_id.as_str()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Hosted keys are capped when added, but rows written before the cap, or
+/// before a tier was lowered, can exceed it. They keep authenticating, so the
+/// operator is told rather than the server refusing to start.
+async fn warn_hosted_issuers_over_key_limit(
+    store: &dyn crate::domain::ports::HostedIssuerStore,
+    tiers: &Tiers,
+) {
+    let (issuers, keys) = match read_hosted(store).await {
+        Ok(hosted) => hosted,
+        Err(error) => {
+            tracing::warn!(%error, "could not check hosted issuers against their key limits");
+            return;
+        }
+    };
+    let counts = hosted_key_counts(&keys, time::OffsetDateTime::now_utc());
+    for issuer in &issuers {
+        let tier = IssuerTier::from_name_or_strictest(&issuer.tier);
+        let held = counts.get(issuer.id.as_str()).copied().unwrap_or(0);
+        let max_keys = tiers.get(tier).max_keys;
+        if held > max_keys {
+            tracing::warn!(
+                issuer = %issuer.id,
+                tier = tier.as_str(),
+                keys = held,
+                max_keys,
+                "hosted issuer holds more keys than its tier allows; revoke the extra keys"
+            );
         }
     }
 }
 
-/// The aggregation URI tokens advertise. A draft-21 §9.3 client takes the first
-/// page of an issuer's aggregation as complete, so tokens leave the claim out,
-/// for the reason in `withheld`, while one might not fit in it.
+async fn warn_missing_registry_issuers(
+    service: &crate::domain::service::Service,
+    registry: &crate::server::auth::issuer_registry::ValidatedRegistry,
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) {
+    let Ok(owners) = service.issuers_with_status_lists().await else {
+        tracing::warn!("could not check status-list owners against issuer registry");
+        return;
+    };
+    let missing: Vec<String> = owners
+        .into_iter()
+        .filter(|issuer| registry.issuer(issuer).is_none())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    // A hosted issuer owns its lists legitimately and is not expected
+    // to appear in the static registry; skip it so the warning keeps meaning
+    // "an operator-backed issuer is missing". One batched query for the hosted
+    // ids instead of one find_issuer per owner; a database error must not fall
+    // through to the false "missing from the registry" warning.
+    let to_warn = match missing_registry_issuers(&missing, dynamic_issuer_store).await {
+        Ok(to_warn) => to_warn,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not check hosted issuers; skipping the missing-issuer warnings"
+            );
+            return;
+        }
+    };
+    for issuer in to_warn {
+        tracing::warn!(issuer = %issuer, "issuer owns status lists but is missing from the trusted issuer registry");
+    }
+}
+
+/// Which of the owners missing from the static registry are not hosted issuers
+/// and should be warned about. A single batched `find_issuer_ids` call handles
+/// all of them; a store error is returned so the caller skips the warnings
+/// rather than emitting a false "missing from the registry" per owner.
+async fn missing_registry_issuers(
+    missing: &[String],
+    dynamic_issuer_store: &Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
+) -> Result<Vec<String>, crate::domain::models::hosted_issuer::HostedIssuerError> {
+    let Some(store) = dynamic_issuer_store else {
+        return Ok(missing.to_vec());
+    };
+    let hosted = store.find_issuer_ids(missing).await?;
+    Ok(missing
+        .iter()
+        .filter(|issuer| !hosted.contains(*issuer))
+        .cloned()
+        .collect())
+}
+
+/// Omitted while an issuer's lists might not fit one page: §9.3 clients treat page one as complete.
 fn advertised_aggregation_uri(
     config: &AppConfig,
     withheld: Option<&str>,
@@ -1151,10 +1533,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
                     Ok(deleted) => {
                         info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
                     }
-                    // Expected, not exceptional: the sweep scans a range of
-                    // `idx_status_list_history_exp` while snapshot inserts write
-                    // into the top of it. The next run retries the lost batch, so
-                    // this must not page.
+                    // Expected now and then; the next run retries, so warn instead of paging.
                     Err(crate::domain::models::status_list::StatusListError::Contention {
                         code,
                     }) => {
@@ -1177,12 +1556,9 @@ pub async fn setup_snapshot_cleanup_scheduler(
     Ok(())
 }
 
-/// Whether the resolved public base URL's authority is a localhost/loopback
-/// address that can never be reached by any relying party. `server.public_base_url`
-/// is authoritative, so this inspects it rather than `server.domain`.
 fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
-        // Config validation already rejected an unparsable URL; be conservative.
+        // Config already rejected unparsable URLs.
         return false;
     };
     let Some(host) = parsed.host() else {
@@ -1200,12 +1576,6 @@ fn resolved_base_url_is_localhost(public_base_url: &str) -> bool {
     }
 }
 
-/// Whether the resolved public base URL's authority is a private or local
-/// address that may be valid for an internal deployment but is not generally
-/// reachable by external relying parties: `.local` domains, private IPv4,
-/// link-local addresses, and IPv6 unique-local/ULA addresses. Unlike
-/// [`resolved_base_url_is_localhost`], these are not categorically unusable, so
-/// production only warns about them.
 fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(public_base_url) else {
         return false;
@@ -1223,14 +1593,7 @@ fn resolved_base_url_is_private_or_local(public_base_url: &str) -> bool {
     }
 }
 
-/// In a production profile the resolved base URL must be reachable by relying
-/// parties. A localhost/loopback host can never be, so it is returned as a hard
-/// startup error; a private/local host may be a valid internal deployment, so
-/// it is returned as a warning string. A public host returns `Ok(None)`.
-///
-/// Non-production profiles always return `Ok(None)`. `app_env` is passed
-/// explicitly so the decision is testable without mutating the process
-/// environment.
+/// Production only: localhost is an error, private or .local addresses just warn.
 fn check_production_base_url(app_env: &str, base_url: &str) -> Result<Option<String>, String> {
     if !crate::config::classify_app_env(app_env).is_production() {
         return Ok(None);
@@ -1530,10 +1893,37 @@ mod tests {
 #[cfg(test)]
 mod general_tests {
     use super::*;
+    use crate::domain::models::hosted_issuer::{
+        HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    };
+    use crate::domain::ports::HostedIssuerStore;
     use crate::{
         domain::models::credential::{AggregationId, Credential, CredentialError},
         test_utils::test_app_state,
     };
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn admin_auth_settings_require_a_distinct_audience_and_production_configuration() {
+        let production = crate::config::TelemetryEnvironment::Production;
+        assert!(validate_admin_auth_settings(production, &[], &[], false).is_ok());
+        assert!(validate_admin_auth_settings(production, &[], &[], true).is_err());
+        assert!(
+            validate_admin_auth_settings(production, &["shared".into()], &["shared".into()], true,)
+                .is_err()
+        );
+        assert!(
+            validate_admin_auth_settings(
+                production,
+                &["admin".into()],
+                &["management".into()],
+                true,
+            )
+            .is_ok()
+        );
+    }
 
     #[derive(Debug)]
     struct UnavailableCredentials;
@@ -1693,8 +2083,15 @@ mod general_tests {
         spawn_issuer_registry_watcher(
             registry.clone(),
             state.service,
+            None,
+            None,
             file.clone(),
             Duration::from_secs(1),
+            RegistryWatcherAuthValidation {
+                environment: crate::config::TelemetryEnvironment::Development,
+                admin_audiences: Vec::new(),
+                management_audiences: Vec::new(),
+            },
         );
         std::fs::write(&file, registry_yaml(uuid::Uuid::new_v4())).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1724,8 +2121,6 @@ mod general_tests {
         );
     }
 
-    /// Overrides that let `build_state` start whichever features are built.
-    /// Keep it while the state is in use: it serves the mocked Vault.
     struct Startable {
         overrides: Vec<(&'static str, String)>,
         #[cfg(feature = "vault")]
@@ -1801,9 +2196,6 @@ mod general_tests {
         }
     }
 
-    /// Verifies that build_state succeeds with AppConfig::load_from_overrides defaults under
-    /// the default feature set, catching missing test_data/ or config mismatch issues.
-    /// When SQL features are enabled, uses memory backend to avoid requiring a real database.
     #[tokio::test]
     async fn build_state_succeeds_under_default_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1818,7 +2210,6 @@ mod general_tests {
         }
     }
 
-    /// Pods of a deployment, restarted on one SQLite database.
     #[cfg(feature = "sqlite")]
     mod aggregation_withheld {
         use super::*;
@@ -1827,8 +2218,6 @@ mod general_tests {
 
         const AGGREGATION_URI: &str = "https://statuslist.example.com/api/v1/aggregation";
 
-        /// A database file, which outlives a restart as a deployment's does.
-        /// Returns its directory, to remove afterwards, and its URL.
         fn database_file() -> (std::path::PathBuf, String) {
             let dir = std::env::temp_dir().join(format!("status-list-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -1888,6 +2277,183 @@ mod general_tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        #[tokio::test]
+        async fn private_profile_rejects_a_static_key_revoked_before_registry_restore() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let active_registry = registry_yaml(uuid::Uuid::new_v4());
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                (
+                    "APP_MANAGEMENT_AUTH__ISSUERS_FILE",
+                    registry_path.to_str().unwrap(),
+                ),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+
+            build_state(&startable.config(&overrides))
+                .await
+                .expect("private profile accepts the initial active registry");
+
+            let mut revoked_registry: serde_json::Value =
+                serde_saphyr::from_str(&active_registry).unwrap();
+            let key = revoked_registry["issuers"][0]["keys"][0].take();
+            revoked_registry["issuers"][0]["keys"] = serde_json::json!([{
+                "kid": "another-active-key",
+                "alg": "ES256",
+                "jwk": {
+                    "kty": "EC", "crv": "P-256",
+                    "x": "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY",
+                    "y": "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+                }
+            }]);
+            revoked_registry["revoked_keys"] = serde_json::json!([key]);
+            std::fs::write(
+                &registry_path,
+                serde_saphyr::to_string(&revoked_registry).unwrap(),
+            )
+            .unwrap();
+            build_state(&startable.config(&overrides))
+                .await
+                .expect("revocation is persisted by the private profile");
+
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let error = build_state(&startable.config(&overrides))
+                .await
+                .expect_err("restarting with the old active registry must reject the revoked key");
+            assert!(
+                error.to_string().contains("previously revoked"),
+                "unexpected restart error: {error:?}"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[tokio::test]
+        async fn live_reload_rejects_restored_static_key_after_revocation() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let active_registry = registry_yaml(uuid::Uuid::new_v4());
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+            let state = build_state(&startable.config(&overrides)).await.unwrap();
+            let registry = Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::load(&registry_path).unwrap(),
+            );
+            let connection = sea_orm::Database::connect(&database).await.unwrap();
+            let revocation_store: Arc<dyn crate::domain::ports::HostedIssuerStore> = Arc::new(
+                crate::outbound::sql::SqlHostedIssuerStore::new(Arc::new(connection)),
+            );
+            spawn_issuer_registry_watcher(
+                registry.clone(),
+                state.service,
+                None,
+                Some(revocation_store),
+                registry_path.clone(),
+                Duration::from_secs(1),
+                RegistryWatcherAuthValidation {
+                    environment: crate::config::TelemetryEnvironment::Development,
+                    admin_audiences: Vec::new(),
+                    management_audiences: Vec::new(),
+                },
+            );
+
+            let mut revoked_registry: serde_json::Value =
+                serde_saphyr::from_str(&active_registry).unwrap();
+            let key = revoked_registry["issuers"][0]["keys"][0].take();
+            revoked_registry["issuers"][0]["keys"] = serde_json::json!([{
+                "kid": "another-active-key",
+                "alg": "ES256",
+                "jwk": {
+                    "kty": "EC", "crv": "P-256",
+                    "x": "qaCUinBNo9IgFyzWGAu6KfXt3F7eO96BcnzXj5CzedY",
+                    "y": "BWYxfxFdS_axRuHChV_3uQ1DQFccSMXFqNrBqdBobks"
+                }
+            }]);
+            revoked_registry["revoked_keys"] = serde_json::json!([key]);
+            std::fs::write(
+                &registry_path,
+                serde_saphyr::to_string(&revoked_registry).unwrap(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while !registry
+                    .snapshot()
+                    .has_revoked_kid("058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50")
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("live reload did not accept the revocation");
+
+            let failures = registry.reload_failure_count();
+            std::fs::write(&registry_path, active_registry).unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while registry.reload_failure_count() == failures {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("live reload did not reject the restored key");
+            assert!(
+                registry
+                    .snapshot()
+                    .has_revoked_kid("058ikiXBnjVCnxgY5bOcUVun3CLKhnwXE_MlmaT0G50")
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[tokio::test]
+        async fn rejected_registry_does_not_record_static_revocations() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let registry_path = dir.join("issuers.yaml");
+            let original = uuid::Uuid::new_v4();
+            let active_registry = registry_yaml(original);
+            std::fs::write(&registry_path, &active_registry).unwrap();
+            let overrides = [
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", database.as_str()),
+                (
+                    "APP_MANAGEMENT_AUTH__ISSUERS_FILE",
+                    registry_path.to_str().unwrap(),
+                ),
+                ("APP_SERVER__PROFILE", "private"),
+            ];
+            build_state(&startable.config(&overrides)).await.unwrap();
+
+            let mut invalid: serde_json::Value = serde_saphyr::from_str(&active_registry).unwrap();
+            let revoked = invalid["issuers"][0]["keys"][0].take();
+            invalid["issuers"][0]["keys"] = serde_json::json!([]);
+            invalid["issuers"][0]["aggregation_id"] = serde_json::json!(uuid::Uuid::new_v4());
+            invalid["revoked_keys"] = serde_json::json!([revoked]);
+            std::fs::write(&registry_path, serde_saphyr::to_string(&invalid).unwrap()).unwrap();
+            assert!(build_state(&startable.config(&overrides)).await.is_err());
+
+            use sea_orm::EntityTrait;
+            let connection = sea_orm::Database::connect(&database).await.unwrap();
+            let rows = crate::outbound::sql::static_key_revocations::Entity::find()
+                .all(&connection)
+                .await
+                .unwrap();
+            assert!(
+                rows.is_empty(),
+                "rejected registry must not leave tombstones"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
         /// In transition publishes past the cap are accepted, so an issuer's
         /// aggregation can outgrow one page.
         #[tokio::test]
@@ -1905,7 +2471,6 @@ mod general_tests {
             let fresh = build_state(&config).await.expect("first start");
             assert!(fresh.aggregation_uri.is_some());
 
-            // As on a database a release without the quota has served.
             run_list_quota_command(&config, "disable")
                 .await
                 .expect("disable the quota");
@@ -1926,8 +2491,6 @@ mod general_tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
-        /// The quota bounds new lists only, so an issuer keeps any it published
-        /// under an earlier, higher cap.
         #[tokio::test]
         async fn only_from_an_issuer_with_more_lists_than_one_page() {
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1941,7 +2504,6 @@ mod general_tests {
             let state = build_state(&config).await.expect("first start");
             assert!(state.aggregation_uri.is_some());
 
-            // An earlier build enforced a cap above one page.
             run_list_quota_command(&config, "disable")
                 .await
                 .expect("disable the quota");
@@ -2187,8 +2749,6 @@ mod general_tests {
         assert!(!rendered.contains("postgres://"));
     }
 
-    /// Verifies that a saturated pool returns an error within `acquire_timeout`
-    /// rather than queuing indefinitely.
     #[cfg(feature = "postgres-tests")]
     #[tokio::test]
     async fn test_pool_acquire_timeout_fires() {
@@ -2219,11 +2779,6 @@ mod general_tests {
             )
         };
 
-        // sea-orm folds `connect_timeout` and `acquire_timeout` onto sqlx's
-        // single `PoolOptions::acquire_timeout`, and pool construction opens a
-        // connection eagerly under it — so this bound also caps the initial
-        // handshake, which exceeds a second on some hosts (Docker Desktop on
-        // Windows). Sized to clear that while staying under the holder's 10s.
         const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
         let mut opt = ConnectOptions::new(db_url);
@@ -2237,7 +2792,6 @@ mod general_tests {
                 .expect("Failed to connect for pool test"),
         );
 
-        // Hold the single connection with a long-running query
         let db_clone = db.clone();
         let _holder = tokio::spawn(async move {
             let _ = sea_orm::ConnectionTrait::execute_unprepared(
@@ -2247,7 +2801,6 @@ mod general_tests {
             .await;
         });
 
-        // Give the holder time to acquire the connection
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let start = Instant::now();
@@ -2255,15 +2808,11 @@ mod general_tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "Expected pool-exhaustion error, got Ok");
-        // Lower bound: the failure came from the acquire timeout, not an
-        // unrelated early error.
         assert!(
             elapsed >= ACQUIRE_TIMEOUT,
             "failed before acquire_timeout could fire, so the error was not \
              pool exhaustion: {elapsed:?}"
         );
-        // Upper bound: it gave up instead of queueing behind the holder's 10s
-        // query. Sized against that 10s, leaving headroom for jitter.
         const UPPER_BOUND: Duration = Duration::from_secs(8);
         assert!(
             elapsed < UPPER_BOUND,
@@ -2429,12 +2978,6 @@ mod general_tests {
         let _ = tokio::fs::remove_dir_all(temp_dir).await;
     }
 
-    /// The local-address checks key off the resolved public base URL, not the
-    /// `server.domain` string. `localhost`/loopback can never be reached by a
-    /// relying party, while private/local addresses (`.local`, private IPv4,
-    /// link-local, ULA) may be valid internal setups — the two must be told
-    /// apart because production fails on the former but only warns on the
-    /// latter.
     #[test]
     fn resolved_base_url_local_host_detection() {
         use super::{resolved_base_url_is_localhost, resolved_base_url_is_private_or_local};
@@ -2489,10 +3032,6 @@ mod general_tests {
         }
     }
 
-    /// A production profile with an explicit localhost `public_base_url` must
-    /// be classified as localhost, while a localhost `server.domain` overridden
-    /// by an explicit public URL must not. Config validation is independent of
-    /// the startup check, so these assert the resolved URL used for it.
     #[test]
     fn production_localhost_public_base_url_detection() {
         use super::resolved_base_url_is_localhost;
@@ -2524,16 +3063,11 @@ mod general_tests {
         );
     }
 
-    /// The production base-URL guard: localhost/loopback is a hard startup
-    /// error, private/local is a warning, public is quiet, and non-production
-    /// profiles never fire. The decision is keyed off the explicit `app_env`
-    /// argument so it is testable without mutating the process environment.
     #[test]
     fn production_base_url_check() {
         use super::check_production_base_url;
         use crate::config::ENV_PRODUCTION;
 
-        // localhost/loopback -> hard startup error in production.
         for url in [
             "https://localhost/api/v1",
             "https://localhost.localdomain/api/v1",
@@ -2549,7 +3083,6 @@ mod general_tests {
             );
         }
 
-        // private/local -> warning in production, not a failure.
         for url in [
             "https://10.0.0.5/api/v1",
             "https://192.168.1.10/api/v1",
@@ -2567,7 +3100,6 @@ mod general_tests {
             );
         }
 
-        // public -> quiet.
         for url in [
             "https://statuslist.example.com/api/v1",
             "https://statuslist.example.org/api/v1",
@@ -2580,7 +3112,6 @@ mod general_tests {
             );
         }
 
-        // Non-production profiles never fire.
         let dev = crate::config::ENV_DEVELOPMENT;
         assert!(
             check_production_base_url(dev, "https://localhost/api/v1")
@@ -2590,11 +3121,6 @@ mod general_tests {
         );
     }
 
-    /// A production profile set via the `prod` alias (any casing, surrounding
-    /// whitespace) must still fire the localhost base-URL guard: the guard runs
-    /// the raw `APP_ENV` through `classify_app_env`, so it catches the same
-    /// profiles config treats as production. Regression for a guard that
-    /// compared the raw value to exactly `production`.
     #[test]
     fn prod_alias_fires_production_base_url_guard() {
         use super::check_production_base_url;
@@ -2608,5 +3134,246 @@ mod general_tests {
                 "APP_ENV={raw:?} must be treated as production for the base-URL guard"
             );
         }
+    }
+
+    /// A `HostedIssuerStore` double for the missing-issuer warning path: records
+    /// every `find_issuer_ids` call and can be made to fail.
+    #[derive(Default)]
+    struct ProbeStore {
+        portal: Mutex<HashSet<String>>,
+        calls: Mutex<Vec<Vec<String>>>,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl HostedIssuerStore for ProbeStore {
+        async fn registry_write_guard(
+            &self,
+        ) -> Result<Box<dyn crate::domain::ports::RegistryWriteGuard>, HostedIssuerError> {
+            Ok(Box::new(()))
+        }
+
+        async fn record_static_registry_claims(
+            &self,
+            _keys: &[(String, String, String)],
+        ) -> Result<(), HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_claim_conflict(
+            &self,
+            _issuer_id: &str,
+            _kid: Option<&str>,
+            _material: Option<&str>,
+        ) -> Result<Option<crate::domain::ports::StaticClaimConflict>, HostedIssuerError> {
+            Ok(None)
+        }
+
+        async fn record_static_key_revocations(
+            &self,
+            _revocations: &[crate::domain::ports::StaticKeyRevocation],
+        ) -> Result<(), crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(())
+        }
+
+        async fn static_key_was_revoked(
+            &self,
+            _kid: &str,
+            _material: &str,
+        ) -> Result<bool, crate::domain::models::hosted_issuer::HostedIssuerError> {
+            Ok(false)
+        }
+
+        async fn list_issuers_after(
+            &self,
+            _after: Option<&str>,
+            _limit: usize,
+            _filters: &crate::domain::models::hosted_issuer::HostedIssuerFilter,
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+        async fn issuer_keys(
+            &self,
+            _issuer_id: &str,
+        ) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            unreachable!("this authentication fixture does not serve admin reads")
+        }
+
+        async fn find_issuer_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<HashSet<String>, HostedIssuerError> {
+            self.calls.lock().unwrap().push(ids.to_vec());
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(HostedIssuerError::Backend(Box::new(std::io::Error::other(
+                    "backend down",
+                ))));
+            }
+            Ok(self.portal.lock().unwrap().clone())
+        }
+        async fn find_key_by_kid(
+            &self,
+            _kid: &str,
+        ) -> Result<Option<HostedIssuerKeyEntry>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn find_issuer(&self, _id: &str) -> Result<Option<HostedIssuer>, HostedIssuerError> {
+            Ok(None)
+        }
+        async fn create_issuer(
+            &self,
+            _issuer: HostedIssuer,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn create_issuer_with_key(
+            &self,
+            _issuer: HostedIssuer,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<HostedIssuer, HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+        async fn add_key(
+            &self,
+            _key: HostedIssuerKey,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            unreachable!("not used by the missing-issuer path")
+        }
+
+        async fn add_key_if_version(
+            &self,
+            _key: HostedIssuerKey,
+            _expected_version: u64,
+            _actor: &str,
+        ) -> Result<(), HostedIssuerError> {
+            Err(HostedIssuerError::VersionMismatch)
+        }
+        async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
+        async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError> {
+            Ok(Vec::new())
+        }
+        async fn find_key_by_material(
+            &self,
+            _material: &str,
+        ) -> Result<Option<HostedIssuerKey>, HostedIssuerError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_batches_one_call_for_many_owners() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.portal.lock().unwrap().insert("portal-1".into());
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "portal-1".into(), "b".into(), "c".into()];
+
+        let to_warn = missing_registry_issuers(&missing, &Some(store))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            to_warn,
+            vec!["a", "b", "c"],
+            "portal owners must be excluded from the missing-issuer warnings"
+        );
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one batched call, not one per owner");
+        assert_eq!(
+            calls[0].len(),
+            missing.len(),
+            "the batched call carries every owner"
+        );
+        for id in &missing {
+            assert!(calls[0].contains(id), "missing {id:?} in the batched call");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_skips_warnings_on_store_error() {
+        let probe = Arc::new(ProbeStore::default());
+        probe.fail.store(true, Ordering::SeqCst);
+        let store: Arc<dyn HostedIssuerStore> = probe.clone();
+        let missing = vec!["a".into(), "b".into()];
+
+        let result = missing_registry_issuers(&missing, &Some(store)).await;
+
+        assert!(
+            result.is_err(),
+            "a store error must skip the warnings, never fall through to a false per-owner warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_registry_issuers_without_dynamic_store_warns_all() {
+        let missing = vec!["a".into(), "b".into()];
+        let to_warn = missing_registry_issuers(&missing, &None).await.unwrap();
+        assert_eq!(
+            to_warn, missing,
+            "no dynamic store means every missing owner is warned"
+        );
+    }
+
+    #[test]
+    fn test_usage_samples_include_hosted_only_issuers_under_their_stored_tier() {
+        use crate::domain::models::hosted_issuer::{HostedIssuerKeyState, HostedIssuerState};
+
+        let now = time::OffsetDateTime::now_utc();
+        let hosted = |id: &str, tier: &str, state| HostedIssuer {
+            id: id.into(),
+            display_name: None,
+            tier: tier.into(),
+            state,
+            owner: None,
+            created_at: now,
+            expires_at: None,
+            version: 1,
+            aggregation_id: AggregationId::generate(),
+        };
+        let key = |issuer_id: &str, state, not_after| HostedIssuerKey {
+            kid: uuid::Uuid::new_v4().to_string(),
+            issuer_id: issuer_id.into(),
+            jwk: crate::server::auth::tests::test_public_jwk(),
+            created_at: now,
+            not_before: None,
+            not_after,
+            state,
+        };
+        let snapshot = (
+            vec![
+                hosted("hosted-sandbox", "sandbox", HostedIssuerState::Active),
+                hosted("hosted-disabled", "standard", HostedIssuerState::Suspended),
+            ],
+            vec![
+                key("hosted-sandbox", HostedIssuerKeyState::Active, None),
+                key("hosted-sandbox", HostedIssuerKeyState::Revoked, None),
+                key(
+                    "hosted-sandbox",
+                    HostedIssuerKeyState::Active,
+                    Some(now - time::Duration::days(1)),
+                ),
+                key("hosted-disabled", HostedIssuerKeyState::Active, None),
+            ],
+        );
+        let tiers = crate::test_utils::test_tiers();
+        let counts = HashMap::from([("hosted-sandbox".to_owned(), 4)]);
+        let registry = crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot();
+
+        let samples = issuer_usage_samples(&registry, &snapshot, &counts, &tiers, now);
+
+        assert_eq!(
+            samples,
+            vec![(
+                "hosted-sandbox".to_owned(),
+                IssuerTier::Sandbox,
+                IssuerUsage::new(4, 1, &tiers.sandbox),
+            )],
+            "a hosted-only issuer is exported under its stored tier; a disabled one is not"
+        );
     }
 }
