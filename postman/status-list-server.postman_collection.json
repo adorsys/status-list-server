@@ -814,6 +814,1086 @@
       ]
     },
     {
+      "name": "Portal Admin Contract (hosted profile)",
+      "description": "The admin API as the Status List Portal uses it: the requests it sends and the fields, headers and error codes it reads. Needs the hosted profile and an adminToken with issuers:write; scripts/test-postman-collection.sh runs it when POSTMAN_HOSTED_PROFILE=true.",
+      "item": [
+        {
+          "name": "Create sandbox issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"display_name\":\"Portal contract issuer\",\"owner\":\"{{portalOwner}}\",\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer is created\", () => pm.response.to.have.status(201));",
+                  "const issuer = pm.response.json();",
+                  "pm.test(\"A portal issuer starts as an active sandbox issuer of its owner\", () => {",
+                  "  pm.expect(issuer.source).to.eql(\"portal\");",
+                  "  pm.expect(issuer.tier).to.eql(\"sandbox\");",
+                  "  pm.expect(issuer.state).to.eql(\"active\");",
+                  "  pm.expect(issuer.owner).to.eql(pm.collectionVariables.get(\"portalOwner\"));",
+                  "});",
+                  "pm.test(\"It expires one sandbox lifetime from now\", () => {",
+                  "  const expected = Math.floor(Date.now() / 1000) + 2592000;",
+                  "  pm.expect(issuer.expires_at).to.be.within(expected - 600, expected + 600);",
+                  "});",
+                  "pm.test(\"It has the submitted key, active, under a server-assigned kid\", () => {",
+                  "  pm.expect(issuer.keys).to.have.lengthOf(1);",
+                  "  const [key] = issuer.keys;",
+                  "  pm.expect(key.state).to.eql(\"active\");",
+                  "  pm.expect(key.alg).to.eql(\"ES256\");",
+                  "  pm.expect(key.kid).to.be.a(\"string\").and.not.empty;",
+                  "  const sent = JSON.parse(pm.collectionVariables.get(\"portalPublicJwk\"));",
+                  "  pm.expect(key.public_key.x).to.eql(sent.x);",
+                  "  pm.expect(key.public_key.y).to.eql(sent.y);",
+                  "});",
+                  "pm.test(\"Response carries the Issuer-Version\", () => {",
+                  "  pm.expect(pm.response.headers.get(\"Issuer-Version\")).to.be.a(\"string\").and.not.empty;",
+                  "});",
+                  "pm.collectionVariables.set(\"contractIssuerId\", issuer.id);",
+                  "pm.collectionVariables.set(\"contractVersion\", pm.response.headers.get(\"Issuer-Version\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer is read\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"It is the created issuer\", () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get(\"contractIssuerId\")));",
+                  "pm.test(\"Issuer-Version matches the one returned on create\", () => {",
+                  "  pm.expect(pm.response.headers.get(\"Issuer-Version\")).to.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List the owner's active sandbox issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOwner}}&state=active&tier=sandbox&source=portal&limit=10",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "owner",
+                  "value": "{{portalOwner}}"
+                },
+                {
+                  "key": "state",
+                  "value": "active"
+                },
+                {
+                  "key": "tier",
+                  "value": "sandbox"
+                },
+                {
+                  "key": "source",
+                  "value": "portal"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuers are listed\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Only the owner's issuer is listed\", () => {",
+                  "  const page = pm.response.json();",
+                  "  pm.expect(page.issuers.map((issuer) => issuer.id)).to.eql([pm.collectionVariables.get(\"contractIssuerId\")]);",
+                  "  pm.expect(page.next_cursor).to.eql(null);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List another owner's issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOtherOwner}}&limit=10",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "owner",
+                  "value": "{{portalOtherOwner}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuers are listed\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Another owner's issuers are not listed\", () => pm.expect(pm.response.json().issuers).to.eql([]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Renew issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"expires_at\":{{contractRenewalExpiry}}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"contractRenewalExpiry\", Math.floor(Date.now() / 1000) + 2592000 - 3600);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer is renewed\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"It expires at the requested time\", () => {",
+                  "  pm.expect(pm.response.json().expires_at).to.eql(Number(pm.collectionVariables.get(\"contractRenewalExpiry\")));",
+                  "});",
+                  "pm.test(\"Response carries the new Issuer-Version\", () => {",
+                  "  const version = pm.response.headers.get(\"Issuer-Version\");",
+                  "  pm.expect(version).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(version).to.not.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractStaleVersion\", pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractVersion\", version);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Suspend with a stale version",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractStaleVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"suspended\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 412 precondition_failed\", () => {",
+                  "  pm.response.to.have.status(412);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"precondition_failed\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Suspend without a version",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"suspended\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 428 precondition_required\", () => {",
+                  "  pm.response.to.have.status(428);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"precondition_required\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Suspend issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"suspended\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer is suspended\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().state).to.eql(\"suspended\");",
+                  "});",
+                  "pm.test(\"Response carries the new Issuer-Version\", () => {",
+                  "  const version = pm.response.headers.get(\"Issuer-Version\");",
+                  "  pm.expect(version).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(version).to.not.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractStaleVersion\", pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractVersion\", version);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List the owner's suspended issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOwner}}&state=suspended&limit=10",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "owner",
+                  "value": "{{portalOwner}}"
+                },
+                {
+                  "key": "state",
+                  "value": "suspended"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuers are listed\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"The suspended issuer is listed\", () => {",
+                  "  pm.expect(pm.response.json().issuers.map((issuer) => issuer.id)).to.eql([pm.collectionVariables.get(\"contractIssuerId\")]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resume issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"active\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer is active again\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().state).to.eql(\"active\");",
+                  "});",
+                  "pm.test(\"Response carries the new Issuer-Version\", () => {",
+                  "  const version = pm.response.headers.get(\"Issuer-Version\");",
+                  "  pm.expect(version).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(version).to.not.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractStaleVersion\", pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractVersion\", version);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Renew beyond the sandbox lifetime",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"expires_at\":{{contractTooLateExpiry}}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"contractTooLateExpiry\", Math.floor(Date.now() / 1000) + 2592000 + 86400);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 422 invalid_expiry\", () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"invalid_expiry\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}/keys",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}",
+                "keys"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"public_key\":{{portalSecondPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Key is added\", () => pm.response.to.have.status(201));",
+                  "const key = pm.response.json();",
+                  "pm.test(\"It is the submitted key, active, under a server-assigned kid\", () => {",
+                  "  pm.expect(key.state).to.eql(\"active\");",
+                  "  pm.expect(key.kid).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(key.public_key.x).to.eql(JSON.parse(pm.collectionVariables.get(\"portalSecondPublicJwk\")).x);",
+                  "});",
+                  "pm.collectionVariables.set(\"contractSecondKid\", key.kid);",
+                  "pm.test(\"Response carries the new Issuer-Version\", () => {",
+                  "  const version = pm.response.headers.get(\"Issuer-Version\");",
+                  "  pm.expect(version).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(version).to.not.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractStaleVersion\", pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractVersion\", version);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoke issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}/keys/{{contractSecondKid}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}",
+                "keys",
+                "{{contractSecondKid}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"revoked\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Key is revoked\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().state).to.eql(\"revoked\");",
+                  "});",
+                  "pm.test(\"Response carries the new Issuer-Version\", () => {",
+                  "  const version = pm.response.headers.get(\"Issuer-Version\");",
+                  "  pm.expect(version).to.be.a(\"string\").and.not.empty;",
+                  "  pm.expect(version).to.not.eql(pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractStaleVersion\", pm.collectionVariables.get(\"contractVersion\"));",
+                  "  pm.collectionVariables.set(\"contractVersion\", version);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Revoke the revoked key again",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Issuer-Version",
+                "value": "{{contractVersion}}"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}/keys/{{contractSecondKid}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}",
+                "keys",
+                "{{contractSecondKid}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"revoked\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Revoking again succeeds and leaves the key revoked\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().state).to.eql(\"revoked\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create with a registered key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"display_name\":\"Portal contract issuer\",\"owner\":\"{{portalOtherOwner}}\",\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 409 key_material_in_use\", () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"key_material_in_use\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create with an invalid key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"display_name\":\"Portal contract issuer\",\"owner\":\"{{portalOtherOwner}}\",\"public_key\":{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"AAAA\",\"y\":\"AAAA\"},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 422 invalid_public_jwk\", () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"invalid_public_jwk\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read with a token for another audience",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminTokenOtherAudience}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{contractIssuerId}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{contractIssuerId}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Refused with 401 invalid_token\", () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().error).to.eql(\"invalid_token\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "Issuer Lifecycle (destructive, hosted profile)",
       "description": "Manual hosted-profile writes. Supply an adminToken with issuers:write, portalOwner, portalPublicJwk, issuer_id and issuer_etag. Excluded from the automated Newman run.",
       "item": [
@@ -1063,6 +2143,42 @@
     {
       "key": "kid",
       "value": "paste-key-id"
+    },
+    {
+      "key": "portalOtherOwner",
+      "value": ""
+    },
+    {
+      "key": "portalSecondPublicJwk",
+      "value": ""
+    },
+    {
+      "key": "adminTokenOtherAudience",
+      "value": ""
+    },
+    {
+      "key": "contractIssuerId",
+      "value": ""
+    },
+    {
+      "key": "contractVersion",
+      "value": ""
+    },
+    {
+      "key": "contractStaleVersion",
+      "value": ""
+    },
+    {
+      "key": "contractRenewalExpiry",
+      "value": ""
+    },
+    {
+      "key": "contractTooLateExpiry",
+      "value": ""
+    },
+    {
+      "key": "contractSecondKid",
+      "value": ""
     }
   ]
 }

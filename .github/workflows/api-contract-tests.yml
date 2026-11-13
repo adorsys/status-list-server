@@ -124,3 +124,44 @@ jobs:
             echo "::endgroup::"
             exit 1
           fi
+
+      # The Status List Portal creates and changes issuers through the admin API, which only
+      # the hosted profile allows. This run checks those writes against a real hosted server.
+      - name: Start hosted server on SQLite and run collection
+        if: steps.api-changes.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          cargo build --no-default-features --features memory,sqlite
+          issuer_registry_file=$(mktemp)
+          database_dir=$(mktemp -d)
+          printf 'version: 1\nissuers: []\nadmins: []\n' > "$issuer_registry_file"
+          APP_SERVER__PROFILE=hosted \
+            APP_DATABASE__BACKEND=sqlite \
+            APP_DATABASE__URL="sqlite://$database_dir/status-list.db?mode=rwc" \
+            APP_SERVER__HOST=0.0.0.0 \
+            APP_SERVER__MANAGEMENT__HOST=0.0.0.0 \
+            APP_SERVER__ADMIN__HOST=0.0.0.0 \
+            APP_SERVER__ENABLE_METRICS=true \
+            APP_MANAGEMENT_AUTH__ISSUERS_FILE="$issuer_registry_file" \
+            APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+            APP_ADMIN_AUTH__AUDIENCES=status-list-server-admin \
+            APP_STATUS_LIST__SNAPSHOT_RETENTION_SECS=7776000 \
+            APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+            APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+            APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
+            target/debug/status-list-server > /tmp/status-list-server-hosted.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" >/dev/null 2>&1 || true
+            wait "$server_pid" >/dev/null 2>&1 || true
+            rm -rf "$issuer_registry_file" "$database_dir"
+          }
+          trap cleanup EXIT
+
+          if ! POSTMAN_HOSTED_PROFILE=true POSTMAN_ISSUER_REGISTRY_FILE="$issuer_registry_file" NEWMAN_RUNNER=docker ./scripts/test-postman-collection.sh; then
+            echo "::group::status-list-server logs"
+            cat /tmp/status-list-server-hosted.log
+            echo "::endgroup::"
+            exit 1
+          fi
