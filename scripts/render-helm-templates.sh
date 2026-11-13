@@ -179,6 +179,12 @@ fi
 if grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
   echo "ERROR: Datev staging must not mount AWS signer credentials"; exit 1
 fi
+# fscert signs from a mounted file, so the six ACME cert env keys must not render (a regression that
+# slips an empty value back in would crash the pod on the DNS provider parse). The STORE__* paths are
+# the file-backed settings this profile does need, and are intentionally excluded from this check.
+if grep -qE 'name: APP_SERVER__CERT__(EMAIL|ORGANIZATION|DNS__PROVIDER|ACME_DIRECTORY_URL|EKU|RENEWAL_CRON_SCHEDULE)$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not render ACME certificate env"; exit 1
+fi
 helm template status-list-server "$CHART_DIR" \
   --set postgres.enabled=false \
   --set statuslist.env.APP_DATABASE__BACKEND=mysql \
