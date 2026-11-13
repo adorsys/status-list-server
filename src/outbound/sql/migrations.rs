@@ -2544,29 +2544,6 @@ mod carry_over_tests {
             .unwrap();
     }
 
-    /// A static registry that has adopted the carried identity `legacy-1` /
-    /// `key-1`, so its key now authenticates through the static-first resolver.
-    fn registry_with_static_adoption(
-        aggregation_id: uuid::Uuid,
-    ) -> Arc<crate::server::auth::issuer_registry::RegistryHandle> {
-        let jwk: serde_json::Value = serde_json::from_str(KEY_1).unwrap();
-        Arc::new(
-            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(
-                &serde_saphyr::to_string(&serde_json::json!({
-                    "version": 1,
-                    "issuers": [{
-                        "id": "legacy-1",
-                        "aggregation_id": aggregation_id,
-                        "keys": [{ "kid": "key-1", "alg": "ES256", "jwk": jwk }],
-                    }],
-                    "admins": [],
-                }))
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-    }
-
     /// The full upgrade scenario, run from an unmigrated database: an earlier
     /// release's legacy credentials are seeded, then the current migrator runs.
     /// Postgres exercises the `$n` numbering and `CAST($5 AS JSON)`; on MySQL a
@@ -2574,7 +2551,6 @@ mod carry_over_tests {
     /// there too.
     async fn upgrade_scenario(db: Arc<DatabaseConnection>) {
         let backend = db.get_database_backend();
-        let exported_aggregation_id = uuid::Uuid::new_v4();
         apply_migrations::<Before>(db.as_ref()).await.unwrap();
 
         seed(&db, "legacy-1", "key-1", KEY_1, "registry").await; // human-chosen EC kid
@@ -2606,6 +2582,26 @@ mod carry_over_tests {
         .await; // shared material
         // A credential attached to a hosted issuer's id must not be carried.
         seed(&db, "portal-issuer", "portal-key", KEY_2, "portal").await;
+
+        let exported = crate::outbound::sql::issuer_export::legacy_issuer_credentials(db.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.issuer == "legacy-1")
+            .expect("the pre-upgrade exporter must see the legacy issuer");
+        let exported_aggregation_id = exported.aggregation_id.parse::<uuid::Uuid>().unwrap();
+        let registry_yaml =
+            crate::server::auth::issuer_registry::IssuerRegistry::export_legacy_issuers([(
+                exported.issuer,
+                exported.aggregation_id,
+                exported.public_key,
+            )])
+            .unwrap();
+        let registry: serde_json::Value = serde_saphyr::from_str(&registry_yaml).unwrap();
+        let exported_kid = registry["issuers"][0]["keys"][0]["kid"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         run_migrations(&db).await.unwrap();
 
@@ -2673,10 +2669,13 @@ mod carry_over_tests {
             "a reserved carried key must not authenticate on {backend:?}"
         );
         let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
-            registry_with_static_adoption(exported_aggregation_id),
+            Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry_yaml)
+                    .unwrap(),
+            ),
             Some(store),
         );
-        let resolved = resolver.resolve("key-1").await.unwrap();
+        let resolved = resolver.resolve(&exported_kid).await.unwrap();
         assert_eq!(resolved.principal.id(), "legacy-1");
 
         // Idempotency: re-running the carry-over migration is a no-op (this is
