@@ -1,6 +1,7 @@
-"""The legacy key must be adopted only after migration assigns its aggregation ID."""
+"""The pre-upgrade registry and legacy row use the same disposable issuer key."""
 
 import base64
+import hashlib
 import json
 import pathlib
 import shutil
@@ -16,7 +17,7 @@ _ID = "11111111-1111-4111-8111-111111111111"
 
 @unittest.skipIf(shutil.which("node") is None, "Node.js is required")
 class DirectUpgradeFixtureTest(unittest.TestCase):
-    def test_registry_adopts_migrated_id_and_token_uses_legacy_kid(self) -> None:
+    def test_registry_precedes_migration_and_token_uses_exported_kid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def generate(*args: str) -> None:
                 subprocess.run(
@@ -26,13 +27,14 @@ class DirectUpgradeFixtureTest(unittest.TestCase):
 
             generate("prepare")
             registry_path = pathlib.Path(directory) / "issuers.yaml"
-            self.assertEqual(json.loads(registry_path.read_text())["issuers"], [])
-
-            generate("registry", _ID)
             registry = json.loads(registry_path.read_text())
             issuer = registry["issuers"][0]
             self.assertEqual(issuer["aggregation_id"], _ID)
-            self.assertEqual(issuer["keys"][0]["kid"], "upgrade-fixture-key")
+            jwk = json.loads((pathlib.Path(directory) / "public-jwk.json").read_text())
+            self.assertEqual(issuer["keys"][0]["kid"], jwk["kid"])
+            canonical = json.dumps({field: jwk[field] for field in ("crv", "kty", "x", "y")}, separators=(",", ":"))
+            thumbprint = base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).rstrip(b"=").decode()
+            self.assertEqual(jwk["kid"], thumbprint)
 
             generate("token")
             token = (pathlib.Path(directory) / "token").read_text()

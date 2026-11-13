@@ -204,14 +204,15 @@ fetch_list "$pod" "$fixture_dir/candidate-list.jwt"
 }
 aggregation_first=$(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'")
 [[ -n "$aggregation_first" ]] || { echo "::error::The migrated issuer has no aggregation ID."; exit 1; }
+registry_id=$(jq -r '.issuers[0].aggregation_id' "$fixture_dir/issuers.yaml")
+[[ "$aggregation_first" == "$registry_id" ]] || {
+  echo "::error::The candidate did not adopt the pre-upgrade registry aggregation ID."
+  exit 1
+}
 if [[ "$issuers_present" == t && "$aggregation_first" != "$aggregation_before" ]]; then
   echo "::error::The pre-upgrade aggregation ID changed."
   exit 1
 fi
-node scripts/generate-direct-upgrade-fixture.js registry "$fixture_dir" "$aggregation_first"
-kubectl create configmap direct-upgrade-issuers -n "$namespace" \
-  --from-file="issuers.yaml=$fixture_dir/issuers.yaml" --dry-run=client -o yaml \
-  | kubectl apply -f -
 
 if [[ "$quota_present" == f ]]; then
   kubectl exec -n "$namespace" "pod/$pod" -- /app/status-list-server list-quota recount
