@@ -213,12 +213,7 @@ spec:
               {{- fail "statuslist.env.APP_DATABASE__PASSWORD must not be set as a plain env value; use the chart-managed APP_DATABASE__PASSWORD_FILE mounted Secret path" }}
             {{- end }}
             {{- if not (hasKey $env "APP_SERVER__DOMAIN") }}
-              {{- $globalDomain := trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
-              {{- if or .Values.statuslist.ingress.externalDnsHostname $globalDomain }}
-                {{- $_ := set $env "APP_SERVER__DOMAIN" (.Values.statuslist.ingress.externalDnsHostname | default (printf "statuslist.%s" $globalDomain) | lower) }}
-              {{- else }}
-                {{- $_ := set $env "APP_SERVER__DOMAIN" "localhost" }}
-              {{- end }}
+              {{- $_ := set $env "APP_SERVER__DOMAIN" (include "status-list-server-chart.publicHost" .) }}
             {{- end }}
             {{- if not (hasKey $env "APP_SERVER__MANAGEMENT__HOST") }}
               {{- $_ := set $env "APP_SERVER__MANAGEMENT__HOST" "0.0.0.0" }}

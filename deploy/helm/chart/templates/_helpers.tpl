@@ -39,7 +39,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- trimSuffix "." (dig "domain" "" (.Values.global | default dict) | default "" | lower) }}
 {{- end }}
 
-{{/* Ingresses and HTTPRoutes both use these, so their hosts can't drift. */}}
+{{/* The Ingresses, HTTPRoutes and APP_SERVER__DOMAIN share these, so published URIs match the routes. */}}
 {{- define "status-list-server-chart.publicHost" -}}
 {{- $domain := include "status-list-server-chart.globalDomain" . }}
 {{- $host := .Values.statuslist.ingress.externalDnsHostname | default "" | lower }}

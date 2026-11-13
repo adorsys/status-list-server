@@ -1802,6 +1802,33 @@ fn gateway_routes_match_the_ingress_hosts_and_management_path() {
 }
 
 #[test]
+fn gateway_route_host_is_the_published_server_domain() {
+    for extra in [
+        vec![],
+        vec!["--set-string", "global.domain=Example.COM."],
+        vec![
+            "--set-string",
+            "statuslist.ingress.externalDnsHostname=StatusList.Example.NET",
+        ],
+    ] {
+        let Some(rendered) = render_helm(&[GATEWAY_MODE.as_slice(), &extra].concat()) else {
+            return;
+        };
+        let domain = rendered_env(&rendered)
+            .into_iter()
+            .find_map(|(name, value)| (name == "APP_SERVER__DOMAIN").then_some(value))
+            .expect("APP_SERVER__DOMAIN is rendered");
+        let documents = helm_documents(&rendered);
+        let route = named(&documents, "HTTPRoute", "status-list-server-route");
+        assert_eq!(
+            route["spec"]["hostnames"],
+            serde_json::json!([domain]),
+            "{extra:?}"
+        );
+    }
+}
+
+#[test]
 fn gateway_429_matches_the_too_many_requests_contract() {
     let Some(documents) = render_gateway(&["--set", "statuslist.ingress.management.enabled=true"])
     else {
