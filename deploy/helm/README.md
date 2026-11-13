@@ -367,7 +367,8 @@ helm install statuslist ./chart --namespace statuslist \
 | `statuslist.gateway.rateLimit.global.shadowMode` | `true` | Count and report without rejecting |
 
 The routes take `statuslist.ingress.externalDnsHostname` (or `global.domain`),
-`management.hostname` and `management.path` from the Ingress values. The other
+`management.hostname` and `management.path` from the Ingress values; the hosted
+profile requires `externalDnsHostname`, as its Ingress does. The other
 Ingress settings do not apply: `className`, the nginx and cert-manager
 annotations, and `tls`, since TLS terminates at the Gateway listener. The
 management route waits 60 seconds for the server, as ingress-nginx does; the

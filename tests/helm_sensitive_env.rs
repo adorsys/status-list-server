@@ -2046,6 +2046,44 @@ fn envoy_gateway_overlay_restores_the_permissive_defaults_over_production() {
 }
 
 #[test]
+fn hosted_gateway_mode_requires_a_public_hostname() {
+    let hosted = [
+        "-f",
+        "deploy/helm/chart/values-hosted.yaml",
+        "-f",
+        "deploy/helm/chart/values-envoy-gateway.yaml",
+        "--set",
+        "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+    ];
+    let Some(output) = render_helm_failure(&hosted) else {
+        return;
+    };
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("hosted gateway mode requires statuslist.ingress.externalDnsHostname")
+    );
+    let with_host = [
+        hosted.as_slice(),
+        &[
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+        ],
+    ]
+    .concat();
+    let Some(documents) = render_helm(&with_host).map(|rendered| helm_documents(&rendered)) else {
+        return;
+    };
+    let routes = of_kind(&documents, "HTTPRoute");
+    assert_eq!(routes.len(), 2);
+    for route in routes {
+        assert_eq!(
+            route["spec"]["hostnames"],
+            serde_json::json!(["sandbox.invalid"])
+        );
+    }
+}
+
+#[test]
 fn envoy_gateway_platform_reference_matches_the_overlay() {
     let overlay: serde_json::Value = serde_saphyr::from_str(include_str!(
         "../deploy/helm/chart/values-envoy-gateway.yaml"

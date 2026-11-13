@@ -2,6 +2,9 @@
 {{- if empty .Values.statuslist.gateway.parentRefs }}
 {{- fail "statuslist.gateway.parentRefs is required when statuslist.gateway.enabled is true: name the Gateway listener the routes attach to (name, namespace, sectionName)" }}
 {{- end }}
+{{- if eq (.Values.statuslist.env.APP_SERVER__PROFILE | default "private") "hosted" }}
+{{- $_ := required "hosted gateway mode requires statuslist.ingress.externalDnsHostname" .Values.statuslist.ingress.externalDnsHostname }}
+{{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
