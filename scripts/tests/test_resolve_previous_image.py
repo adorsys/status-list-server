@@ -22,9 +22,15 @@ class ResolvePreviousImageTest(unittest.TestCase):
         docker = self.directory / "docker"
         docker.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_DIGEST"\n', encoding="utf-8")
         docker.chmod(0o755)
+        gh = self.directory / "gh"
+        gh.write_text('#!/bin/sh\nprintf "%040d\\n" 1\n', encoding="utf-8")
+        gh.chmod(0o755)
         bash = self.directory / "bash"
         bash.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_VERIFY_LOG"\nexit "$FAKE_VERIFY_EXIT"\n',
+            '#!/bin/sh\ncase "$1" in\n'
+            '  */resolve-rc.sh) printf "rc_ref=refs/tags/v1.3.0-rc.2\\n" ;;\n'
+            '  */verify-attestation.sh) printf "%s\\n" "$*" >> "$FAKE_VERIFY_LOG"; exit "$FAKE_VERIFY_EXIT" ;;\n'
+            '  *) exit 1 ;;\nesac\n',
             encoding="utf-8",
         )
         bash.chmod(0o755)
@@ -62,7 +68,7 @@ class ResolvePreviousImageTest(unittest.TestCase):
         verified = self.run_script("v1.3.0", digest)
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assertEqual(verified.stdout, digest + "\n")
-        self.assertIn(f"ghcr.io/acme/status-list-server@{digest} acme/status-list-server", self.log.read_text())
+        self.assertIn(f"ghcr.io/acme/status-list-server@{digest} acme/status-list-server refs/tags/v1.3.0-rc.2", self.log.read_text())
 
         rejected = self.run_script("v1.3.0", digest, verify_exit=1)
         self.assertNotEqual(rejected.returncode, 0)

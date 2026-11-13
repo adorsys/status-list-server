@@ -34,7 +34,17 @@ if [[ "$tag" == v1.2.0 ]]; then
     exit 1
   }
 else
-  bash "${script_dir}/verify-attestation.sh" "${image}@${digest}" "$repo" >&2
+  final_sha=$(gh api "repos/${repo}/commits/refs/tags/${tag}" --jq .sha)
+  [[ "$final_sha" =~ ^[a-f0-9]{40}$ ]] || {
+    echo "::error::Previous release tag did not resolve to a commit." >&2
+    exit 1
+  }
+  rc_ref=$(bash "${script_dir}/resolve-rc.sh" "$repo" "$tag" "$final_sha" | sed -n 's/^rc_ref=//p')
+  [[ "$rc_ref" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
+    echo "::error::Previous release did not resolve to a validated RC ref." >&2
+    exit 1
+  }
+  bash "${script_dir}/verify-attestation.sh" "${image}@${digest}" "$repo" "$rc_ref" >&2
 fi
 
 printf '%s\n' "$digest"

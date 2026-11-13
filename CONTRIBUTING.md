@@ -150,7 +150,8 @@ The normal promotion path is:
    latest stable chart and `fscert` image in a disposable kind cluster, seeds a
    PostgreSQL database, and upgrades that installation to the candidate chart
    and image. Migration or readiness failure blocks image tag promotion and
-   the production deployment. A manual dispatch on the candidate branch runs
+   the production deployment. The `stage` to `main` promotion gate also requires
+   a successful RC run, so a failed direct upgrade blocks that merge. A manual dispatch on the candidate branch runs
    this upgrade before cutting an RC without promoting or deploying the image.
    Release-plz ignores RC tags because its `git_only` final-tag match is
    `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older

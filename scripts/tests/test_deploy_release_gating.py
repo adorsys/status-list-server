@@ -185,10 +185,18 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertIn("is_final", self.jobs["validate-tag"].get("outputs", {}))
 
     def test_reusable_helm_checks_get_the_permissions_they_request(self) -> None:
-        permissions = self.jobs["helm-checks"]["permissions"]
-        self.assertEqual(permissions["contents"], "read")
-        self.assertEqual(permissions["pull-requests"], "read")
-        self.assertEqual(permissions["security-events"], "write")
+        root = _WORKFLOW.parents[2]
+        for caller, path in (("ci", "CI.yml"), ("helm-checks", "helm-checks.yml")):
+            workflow = yaml.safe_load((root / ".github/workflows" / path).read_text(encoding="utf-8"))
+            granted = self.jobs[caller]["permissions"]
+            for job_name, job in workflow["jobs"].items():
+                requested = job.get("permissions", workflow.get("permissions", {}))
+                for scope, access in requested.items():
+                    with self.subTest(workflow=path, job=job_name, scope=scope):
+                        self.assertGreaterEqual(
+                            {"none": 0, "read": 1, "write": 2}[granted.get(scope, "none")],
+                            {"none": 0, "read": 1, "write": 2}[access],
+                        )
 
     def test_reusable_checks_have_distinct_concurrency_groups(self) -> None:
         root = _WORKFLOW.parents[2]
@@ -322,10 +330,13 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertFalse(values["statuslist"]["fallbackSecret"]["generatedCertificate"]["enabled"])
         self.assertTrue((root / "test_data/certs/dev.key").read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----"))
         script = (root / "scripts/test-direct-upgrade.sh").read_text(encoding="utf-8")
-        self.assertEqual(script.count('-f "$values"'), 3)
-        self.assertEqual(script.count('"${cert_args[@]}"'), 3)
         self.assertNotIn("values-local.yaml", script)
-        self.assertNotIn("statuslist.strategy.type=Recreate", script)
+        self.assertIn("statuslist.strategy.type=Recreate", script)
+        self.assertIn("/spec/strategy", script)
+        candidate = yaml.safe_load((root / "scripts/direct-upgrade-candidate-values.yaml").read_text(encoding="utf-8"))
+        self.assertIn("issuerRegistry", candidate["statuslist"])
+        self.assertNotIn("issuerRegistry", values["statuslist"])
+        self.assertNotIn("image", values["postgres"])
         self.assertIn("/api/v1/status-lists/upgrade-fixture-list", script)
         self.assertIn(".restartCount", script)
 
