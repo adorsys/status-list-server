@@ -1,4 +1,4 @@
-# Existing EKS release, applied after the AWS and production overlays.
+# Existing EKS release, applied after the AWS, production, and fscert overlays.
 statuslist:
   # The in-memory cache is local to each pod and this profile has no Redis:
   # keep a single replica and never overlap old and new pods across a release.

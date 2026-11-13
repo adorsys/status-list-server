@@ -831,7 +831,8 @@ include that configured value in their management tokens' `aud` claim.
 The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`,
 `values-fscert.yaml`, and `values-datev-staging.yaml`, in that order, in the
 existing `statuslist` namespace.
-The last overlay selects the `fscert` image and the in-memory cache, disables
+`values-fscert.yaml` selects the `fscert` image; the last overlay
+(`values-datev-staging.yaml`) selects the in-memory cache, disables
 autoscaling, and runs one application replica. The in-memory cache is local to
 that pod, so status updates invalidate the cache used by subsequent reads. Its
 management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
@@ -839,8 +840,8 @@ Issuers calling this deployment must put this value in their management tokens'
 `aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as
 its registry source.
 
-The reusable `values-fscert.yaml` selects the file-backed image and cache
-settings. The EKS-specific overlay supplies the public cert-manager issuer,
+The reusable `values-fscert.yaml` selects the file-backed image. The
+EKS-specific overlay supplies the public cert-manager issuer,
 hostname, and Secret mounts. This deployment exercises the file-backed signer
 and ESO database password, but it does not exercise Datev's ESO certificate/key
 seeding, remote property names, PEM encoding, refresh interval, or private CA.
@@ -910,11 +911,14 @@ The chart still renders that version; Datev's own ExternalSecret uses `v1`.
 Plan a separate chart migration to `v1` after checking both clusters.
 
 Before triggering a tagged release, provide the `status-list-server-issuers`
-ConfigMap in `statuslist`; the workflow checks for it before running Helm. Set
-the repository-level GitHub Actions variable `IMAGE_VARIANT` to `fscert` before
-the first deployment. The workflow rejects any other value, and the scheduled
-image scan reads the same repository-level variable. The workflow uses
-short-lived AWS credentials through OIDC.
+ConfigMap in `statuslist`; the workflow checks for it before running Helm. The
+deploy role's EKS access entry and `statuslist-deployer` RoleBinding must also
+cover `statuslist` (see ADORSYS-GIS/wallet-eks-env#68; they currently point at
+`statuslist-production`), or the check fails with a 403 that it reports as a
+missing ConfigMap. Set the repository-level GitHub Actions variable
+`IMAGE_VARIANT` to `fscert` before the first deployment. The workflow rejects
+any other value, and the scheduled image scan reads the same repository-level
+variable. The workflow uses short-lived AWS credentials through OIDC.
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only

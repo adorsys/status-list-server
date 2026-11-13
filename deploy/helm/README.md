@@ -43,7 +43,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * `mysql.auth.username`, `mysql.auth.database`, `mysql.service.port`: connection defaults for an external MySQL database after `APP_DATABASE__HOST` is set.
 * `statuslist.image.variant`: selected image variant when no explicit `tag` or `digest` is set (`fscert`, `aws`, `gcp`, `azure`, or `vault`).
 * `statuslist.image.digest`: takes precedence over `statuslist.image.tag` and renders `repository@digest`.
-* `tokenSigningCertificate`: optionally creates a dedicated cert-manager Certificate and Secret for file-backed token signing. Set `enabled`, `dnsName`, and `issuerName`; the issuer must be a pre-existing ClusterIssuer. `renewBefore` defaults to 30 days. The EKS overlay uses this setting.
+* `tokenSigningCertificate`: optionally creates a dedicated cert-manager Certificate and Secret for file-backed token signing. Set `enabled`, `dnsName`, and `issuerName`; `issuerKind` (default `ClusterIssuer`) and `issuerGroup` (default `cert-manager.io`) make the issuer configurable. `renewBefore` defaults to 30 days. The EKS overlay uses this setting.
 
 ## Configure Your Secrets
 
