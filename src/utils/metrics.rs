@@ -30,6 +30,7 @@ static ISSUER_REGISTRY_METRICS: OnceLock<Mutex<Option<(u64, IssuerRegistryMetric
 pub(crate) const TARGET_DATABASE: &str = "database";
 #[cfg(any(not(feature = "acme"), test))]
 pub(crate) const TARGET_TOKEN_SIGNING_KEY: &str = "token_signing_key";
+pub(crate) const CERT_TIME_TO_EXPIRY_METRIC: &str = "cert_time_to_expiry_seconds";
 
 #[derive(Clone)]
 struct RotationMetrics {

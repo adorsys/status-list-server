@@ -262,7 +262,7 @@ spec:
             namespace: {{ .Release.Namespace | quote }}
             sli: cert_renewal
           annotations:
-            summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+            summary: "Certificate expires within 14 days"
             description: 'namespace {{ `{{ $labels.namespace }}` }}: time to expiry is {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
@@ -279,6 +279,20 @@ spec:
             summary: "Certificate expires within 7 days (imminent expiry)"
             description: 'namespace {{ `{{ $labels.namespace }}` }}: time to expiry is {{ `{{ $value }}` }}s'
             runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
+            dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
+        - alert: ListQuotaNotEnforced
+          expr: list_quota_enforced{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"} == 0
+          for: 30m
+          labels:
+            severity: warn
+            team: statuslist
+            service: status-list-server
+            namespace: {{ .Release.Namespace | quote }}
+            sli: list_quota
+          annotations:
+            summary: "The list quota is not enforced"
+            description: 'namespace {{ `{{ $labels.namespace }}` }}: list_quota_enforced is 0; run list-quota recount then list-quota enable, then drop the transition flag'
+            runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/troubleshooting.md#upgrading-to-the-list-quota"
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
 
     - name: hosted-trust-alerts

@@ -213,20 +213,17 @@ impl ReadinessCheck for CertStoreCheck {
     }
 }
 
-/// Checks the files are readable; never parses the key.
+/// Checks the signer can still produce valid, non-expired signing material by delegating to the
+/// same provider the signer uses, so readiness reflects its actual view instead of re-parsing files.
 #[cfg(not(feature = "acme"))]
 pub struct FilesystemCertCheck {
-    cert_path: Option<String>,
-    key_path: Option<String>,
+    provider: Arc<dyn crate::domain::ports::CertificateProvider>,
 }
 
 #[cfg(not(feature = "acme"))]
 impl FilesystemCertCheck {
-    pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self {
-            cert_path: cert_path.filter(|p| !p.trim().is_empty()),
-            key_path: key_path.filter(|p| !p.trim().is_empty()),
-        }
+    pub fn new(provider: Arc<dyn crate::domain::ports::CertificateProvider>) -> Self {
+        Self { provider }
     }
 }
 
@@ -238,17 +235,11 @@ impl ReadinessCheck for FilesystemCertCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        for path in self.cert_path.iter().chain(self.key_path.iter()) {
-            tokio::fs::metadata(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' unavailable: {e}"))?;
-            tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' not readable: {e}"))?;
-        }
-        Ok(())
+        self.provider
+            .signing_material()
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("signing material unavailable: {e}"))
     }
 }
 
@@ -437,6 +428,34 @@ mod tests {
             );
             assert_eq!(response_body(resp).await, "NOT_READY");
         }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    struct ExpiredSigningProvider;
+
+    #[cfg(not(feature = "acme"))]
+    #[async_trait::async_trait]
+    impl crate::domain::ports::CertificateProvider for ExpiredSigningProvider {
+        async fn signing_material(
+            &self,
+        ) -> Result<
+            Arc<crate::domain::ports::SigningMaterial>,
+            crate::domain::models::status_list::StatusListError,
+        > {
+            Err(
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Other, "signing certificate expired"),
+                )),
+            )
+        }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn certificate_readiness_fails_when_signing_material_is_unavailable() {
+        let check = FilesystemCertCheck::new(Arc::new(ExpiredSigningProvider));
+        let result = check.check().await;
+        assert!(result.is_err());
     }
 
     #[cfg(feature = "acme")]

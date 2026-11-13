@@ -1,0 +1,41 @@
+# Existing EKS release, applied after the AWS, production, and fscert overlays.
+statuslist:
+  # The in-memory cache is local to each pod and this profile has no Redis:
+  # keep a single replica and never overlap old and new pods across a release.
+  replicaCount: 1
+  strategy:
+    type: Recreate
+  env:
+    APP_CACHE__BACKEND: memory
+    # List-quota transition mode for the first rollout; drop after recount and enable.
+    APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: signing-material
+      secretName: statuslist-token-signing
+      mountPath: /var/run/status-list-server/token-signing
+      items:
+        - key: tls.crt
+          path: statuslist.crt
+        - key: tls.key
+          path: statuslist.key
+          mode: 0440
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+
+tokenSigningCertificate:
+  enabled: true
+  dnsName: statuslist.eudi-adorsys.com
+  issuerName: letsencrypt-prod
+
+autoscaling:
+  # One replica, no Redis: the HPA has nothing to scale.
+  enabled: false

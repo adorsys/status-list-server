@@ -820,20 +820,124 @@ here; a test fails until it does.
 Helm deployments must explicitly set
 `statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES` to an audience unique to that
 deployment (for example, `https://statuslist.prod.example.com/api/v1`). Give
-staging a different value, even if both environments register the same issuer
-key. Production chart rendering fails if the audience is empty. Issuers must
+an independent staging deployment a different value, even if both environments
+register the same issuer key. The release-tag profile below upgrades the existing
+production release, so it retains that release's production audience. The
+`values-datev-staging.yaml` filename reflects the #733 migration objective; it
+does not create an isolated staging release. Production chart rendering fails if
+the audience is empty. Issuers must
 include that configured value in their management tokens' `aud` claim.
 
-The release-tag deployment uses `values-aws.yaml` followed by
-`values-production.yaml`. Its management audience is
-`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
-deployment must put this exact value in `aud` (as a string or an array member).
-The release workflow selects the `status-list-server-issuers` ConfigMap as its
-registry source; the production values file leaves the source empty so other
-deployments can choose a ConfigMap, Secret, or CSI volume.
-Deployments reusing the production overlay for another environment or hostname
-must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
-the production value.
+The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`,
+`values-fscert.yaml`, and `values-datev-staging.yaml`, in that order, in the
+existing `statuslist` namespace.
+`values-fscert.yaml` selects the `fscert` image; the last overlay
+(`values-datev-staging.yaml`) selects the in-memory cache, disables
+autoscaling, and runs one application replica. The in-memory cache is local to
+that pod, so status updates invalidate the cache used by subsequent reads. Its
+management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
+Issuers calling this deployment must put this value in their management tokens'
+`aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as
+its registry source.
+
+The reusable `values-fscert.yaml` selects the file-backed image. The
+EKS-specific overlay supplies the public cert-manager issuer,
+hostname, and Secret mounts. This deployment exercises the file-backed signer
+and ESO database password, but it does not exercise Datev's ESO certificate/key
+seeding, remote property names, PEM encoding, refresh interval, or private CA.
+Validate those against Datev's own SecretStore and ExternalSecret manifests in
+an integration environment before treating #733's Datev parity criterion as met.
+
+### Existing EKS release with file-backed signing
+
+Before the first switch, check whether the existing `statuslist` Helm release
+in `statuslist`
+owns Redis HA resources. Redis is not part of this chart or the EKS file-backed
+profile, so upgrading a release that owns Redis will remove those resources.
+Review any other consumers before that upgrade, and do not switch the image
+until the signing material and the chart's prerequisites are ready. The workflow
+creates the signing Certificate and waits for Ready before upgrading the release.
+This profile keeps `Recreate` for every deployment. Later upgrades must avoid
+overlapping application pods:
+each pod has its own in-memory status-list cache, so a write on one pod cannot
+invalidate a cached list on another. **Expect a brief service outage on every
+release**, including RC and final deployments, while the old pod stops and the
+new one becomes ready. Plan deployments around integrator traffic.
+
+The first upgrade must reconcile the rollout strategy in place: the live
+Deployment was created without a `strategy`, so the API server defaulted it to
+`RollingUpdate`, and Helm v4's server-side apply rejects switching straight to
+`Recreate` while that `rollingUpdate` block is still present. The workflow
+patches `spec.strategy` to `{type: Recreate}` before upgrading (it does not touch
+the pod template, so nothing restarts):
+
+```bash
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+```
+
+The existing AWS Secrets Manager entry `statuslist-secret` supplies
+`POSTGRES_PASSWORD` to the namespaced `statuslist-secret-store`. The chart's
+ExternalSecret writes it to `statuslist-secret` as both `database-password` and
+`postgres-password`. The existing `REDIS_PASSWORD` property is no longer mapped
+into the application Secret by the new profile.
+
+Before the first upgrade, inspect the existing store with
+`kubectl get secretstore statuslist-secret-store -n statuslist -o yaml`.
+Verify Helm release ownership, the AWS provider configuration, and whether ESO
+uses controller identity or explicit credentials. The chart renders the store
+without an `auth` block, so its controller identity must still be able to read
+the existing `statuslist-secret` entry. Helm will reject an existing store that
+belongs to another release.
+This identity may be shared across the cluster. Restrict who can edit this
+namespace's SecretStore and ExternalSecret until a dedicated ESO service account
+and AWS role limited to the statuslist entries are in place (tracked in #773).
+
+The `fscert` image reads a dedicated token-signing certificate and private key
+from `statuslist-token-signing`. The chart creates a cert-manager `Certificate`
+for the exact host `statuslist.eudi-adorsys.com`, issued by the
+`letsencrypt-prod` ClusterIssuer, with an ECDSA P-256 key that rotates on
+renewal, starting 30 days before expiry. Integrators that pin the public key
+must update their pin when cert-manager rotates the key. Verify that cert-manager
+and this ClusterIssuer are available before
+upgrading. cert-manager writes `tls.crt` and `tls.key` to the Secret; the pod
+mounts them as `statuslist.crt` and `statuslist.key`. Do not reuse the
+`statuslist-tls` ingress Secret for token signing. Verify
+`kubectl get certificate statuslist-token-signing -n statuslist` reports Ready
+and check the certificate-expiry alerts after deployment.
+
+The public ACME certificate has the `serverAuth` extended key usage, as the
+current AWS signer does. Confirm integrator profiles accept that usage; a
+document-signing certificate requires a different issuer.
+
+Once the file-backed release is stable and rollback to the AWS signer is no
+longer planned, deactivate the IAM key in `statuslist-aws-credentials`, remove
+the old app-managed ACME material, and delete the unused `REDIS_PASSWORD` from
+Secrets Manager. Keep all three until that decision. A Helm uninstall or
+rollback does not remove the `statuslist-token-signing` Secret; delete it and
+its private key manually only when no deployment still uses it.
+
+Before deploying this chart to either EKS or Datev, verify that the installed
+ESO CRDs serve `external-secrets.io/v1beta1` for ExternalSecret and SecretStore.
+The chart still renders that version; Datev's own ExternalSecret uses `v1`.
+Plan a separate chart migration to `v1` after checking both clusters.
+
+Before triggering a tagged release, provide the `status-list-server-issuers`
+ConfigMap in `statuslist`; the workflow checks for it before running Helm. The
+deploy role's EKS access entry and `statuslist-deployer` RoleBinding must also
+cover `statuslist` (see ADORSYS-GIS/wallet-eks-env#68; they currently point at
+`statuslist-production`), or the check fails with an RBAC error. Set the
+repository-level GitHub Actions variable
+`IMAGE_VARIANT` to `fscert` before the first deployment. The workflow rejects
+any other value, and the scheduled image scan reads the same repository-level
+variable. The workflow uses short-lived AWS credentials through OIDC.
+
+The first `fscert` release boots in list-quota transition mode (the overlay sets
+`APP_LIMITS__LIST_QUOTA_TRANSITION=true`) so the pod starts across the
+non-rollback-safe list-quota and issuer-ownership migrations. Follow [Upgrading
+to the list quota](troubleshooting.md#upgrading-to-the-list-quota): once no old
+pod remains, run `list-quota recount` then `list-quota enable`, then drop the
+flag (tracked in #776).
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only

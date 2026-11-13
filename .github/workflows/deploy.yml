@@ -22,10 +22,10 @@ env:
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/status-list-server
   CHART_DIR: deploy/helm/chart
   HELM_RELEASE_NAME: statuslist
-  HELM_NAMESPACE: statuslist-production
+  HELM_NAMESPACE: statuslist
   APP_DATABASE_PORT: ${{ vars.APP_DATABASE_PORT }}
   # Repo-scoped value, compared in deploy against the environment-scoped one.
-  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+  REPO_IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
 
 jobs:
   # No if: a skip here would cascade to every dependent job.
@@ -789,9 +789,18 @@ jobs:
       attestations: read
     env:
       # Pushed-ref values go through env, never ${{ }} in run:, since the pusher controls them.
-      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'aws' }}
+      IMAGE_VARIANT: ${{ vars.IMAGE_VARIANT || 'fscert' }}
       SOURCE_REF: ${{ needs.image-source.outputs.source_ref }}
       SOURCE_RUN_ID: ${{ needs.image-source.outputs.source_run_id }}
+      # One values list shared by the preflight helm template and the helm upgrade, so the
+      # Certificate rendered here can never drift from the one Helm later manages. Uses the
+      # literal chart path: a job `env:` value is not re-expanded by the shell.
+      HELM_VALUES_ARGS: |
+        -f deploy/helm/chart/values-aws.yaml
+        -f deploy/helm/chart/values-production.yaml
+        -f deploy/helm/chart/values-fscert.yaml
+        -f deploy/helm/chart/values-datev-staging.yaml
+        --set statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -829,6 +838,10 @@ jobs:
             echo "APP_DATABASE_PORT repository/environment variable is required" >&2
             exit 1
           fi
+          if [[ "${IMAGE_VARIANT}" != "fscert" ]]; then
+            echo "IMAGE_VARIANT must be fscert for the existing EKS release profile" >&2
+            exit 1
+          fi
 
       - name: Assert the issuer registry ConfigMap exists
         # The chart mounts the registry from status-list-server-issuers and nothing
@@ -837,11 +850,15 @@ jobs:
         # release is attempted.
         run: |
           set -euo pipefail
-          if ! kubectl get configmap status-list-server-issuers \
-              -n "${{ env.HELM_NAMESPACE }}" >/dev/null 2>&1; then
-            echo "::error::ConfigMap 'status-list-server-issuers' does not exist in namespace '${{ env.HELM_NAMESPACE }}'."
-            echo "The deployment mounts the issuer trust registry from it, and nothing creates it."
-            echo "Create it before the first release; see docs/deployment-runbook.md, 'Issuer trust registry'."
+          if ! out=$(kubectl get configmap status-list-server-issuers \
+              -n "${{ env.HELM_NAMESPACE }}" 2>&1); then
+            if grep -qi forbidden <<<"$out"; then
+              echo "::error::Deploy role cannot read configmaps in namespace '${{ env.HELM_NAMESPACE }}' (RBAC). Its EKS access entry and 'statuslist-deployer' binding must cover this namespace."
+            else
+              echo "::error::ConfigMap 'status-list-server-issuers' does not exist in namespace '${{ env.HELM_NAMESPACE }}'."
+              echo "The deployment mounts the issuer trust registry from it, and nothing creates it."
+              echo "Create it before the first release; see docs/deployment-runbook.md, 'Issuer trust registry'."
+            fi
             exit 1
           fi
           echo "ConfigMap 'status-list-server-issuers' is present."
@@ -851,24 +868,39 @@ jobs:
         # the nightly would verify a variant nobody runs, so fail the deploy instead.
         run: |
           set -eu
-          if [ "${IMAGE_VARIANT:-aws}" != "$REPO_IMAGE_VARIANT" ]; then
+          if [ "${IMAGE_VARIANT:-fscert}" != "$REPO_IMAGE_VARIANT" ]; then
             echo "::error::IMAGE_VARIANT differs between scopes: this environment resolves"
-            echo "'${IMAGE_VARIANT:-aws}', the repository resolves '${REPO_IMAGE_VARIANT}'."
+            echo "'${IMAGE_VARIANT:-fscert}', the repository resolves '${REPO_IMAGE_VARIANT}'."
             echo
             echo "An environment-scoped IMAGE_VARIANT on 'production' is invisible to"
             echo "scheduled-image-scan.yml, which would keep re-scanning '${REPO_IMAGE_VARIANT}'"
-            echo "and reporting success while production serves '${IMAGE_VARIANT:-aws}'."
+            echo "and reporting success while production serves '${IMAGE_VARIANT:-fscert}'."
             echo
             echo "Set IMAGE_VARIANT at the repository level and remove the environment"
             echo "override, or teach the nightly to read the same scope before deploying."
             exit 1
           fi
-          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-aws}' is visible to the scheduled re-scan."
+          echo "IMAGE_VARIANT '${IMAGE_VARIANT:-fscert}' is visible to the scheduled re-scan."
 
       - name: Build Helm dependencies
         run: |
           helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
           helm dependency build "$CHART_DIR"
+
+      - name: Prepare token-signing certificate before switching pods
+        run: |
+          set -euo pipefail
+          NAMESPACE="${{ env.HELM_NAMESPACE }}"
+          kubectl auth can-i create certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes \
+            || { echo "::error::Deploy role can't create cert-manager Certificates in $NAMESPACE"; exit 1; }
+          kubectl auth can-i patch certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes \
+            || { echo "::error::Deploy role can't patch cert-manager Certificates in $NAMESPACE"; exit 1; }
+          helm template "${{ env.HELM_RELEASE_NAME }}" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            $HELM_VALUES_ARGS \
+            --show-only templates/token-signing-certificate.yaml | kubectl apply -f -
+          kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
+            --for=condition=Ready --timeout=10m
 
       - name: Deploy chart
         id: deploy-chart
@@ -878,7 +910,7 @@ jobs:
         run: |
           set -euo pipefail
           DEPLOY_TAG="${GITHUB_REF_NAME#v}"
-          IMAGE_VARIANT="${IMAGE_VARIANT:-aws}"
+          IMAGE_VARIANT="${IMAGE_VARIANT:-fscert}"
           FULL_TAG="${DEPLOY_TAG}-${IMAGE_VARIANT}"
 
           # Kubernetes needs the index digest, not a per-arch manifest.
@@ -915,7 +947,7 @@ jobs:
           # Record each ExternalSecret's refreshTime so the verify step can prove this deploy reconciled.
           BASELINES="$RUNNER_TEMP/eso-refresh-baselines"
           : > "$BASELINES"
-          for es in statuslist-external-secret statuslist-external-secret-aws-credentials; do
+          for es in statuslist-external-secret; do
             rt=$(kubectl get externalsecret "$es" -n "${{ env.HELM_NAMESPACE }}" \
               -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
             printf '%s %s\n' "$es" "${rt:-}" >> "$BASELINES"
@@ -929,15 +961,19 @@ jobs:
           fi
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
+          # Reconcile the rollout strategy only now, after the digest/attestation gates, so a
+          # failed gate can't leave the live release on Recreate out-of-band (see the runbook).
+          if kubectl get deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "${{ env.HELM_NAMESPACE }}" >/dev/null 2>&1; then
+            kubectl patch deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "${{ env.HELM_NAMESPACE }}" --type=json \
+              -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+          fi
+
           # A clean-looking rollback can still leave migration records the old release cannot start on.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
             --namespace ${{ env.HELM_NAMESPACE }} \
-            -f "$CHART_DIR"/values-aws.yaml \
-            -f "$CHART_DIR"/values-production.yaml \
-            --set "statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers" \
-            --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
-            --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
-            --set "secretStore.enabled=false" \
+            $HELM_VALUES_ARGS \
             --wait \
             --rollback-on-failure \
             --timeout 10m \
@@ -957,13 +993,11 @@ jobs:
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
 
-      - name: Verify ESO secret path reconciles
+      - name: Verify database secret
         # Ready=True can be stale from before the upgrade, so require refreshTime to move past the baseline.
-        # ClusterSecretStore isn't readable with the deploy role's namespaced RBAC.
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
         env:
           PRIMARY_ES: statuslist-external-secret
-          CREDS_ES: statuslist-external-secret-aws-credentials
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
@@ -983,7 +1017,7 @@ jobs:
             if [ -f "$PREV_REVISION_FILE" ]; then
               prev_rev=$(cat "$PREV_REVISION_FILE")
             fi
-            echo "::warning::ESO verification failed; restoring the previous release state"
+            echo "::warning::Database secret verification failed; restoring the previous release state"
             if [ -n "$prev_rev" ]; then
               if ! helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m; then
                 echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
@@ -997,7 +1031,7 @@ jobs:
           trap cleanup_on_failure EXIT
 
           # Force a sync: the 30m refreshInterval could outlast the wait.
-          for es in "$PRIMARY_ES" "$CREDS_ES"; do
+          for es in "$PRIMARY_ES"; do
             kubectl annotate externalsecret "$es" -n "$NAMESPACE" \
               "external-secrets.io/force-sync=$FORCE_SYNC" --overwrite >/dev/null 2>&1 || \
               echo "::warning::could not annotate $es for force-sync; relying on its own refresh interval"
@@ -1022,13 +1056,11 @@ jobs:
               sleep 5
               i=$((i + 5))
             done
-            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the cluster store (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
+            echo "::error::Timed out after ${TIMEOUT}s waiting for $label to sync from the SecretStore (Ready='${ready:-<unset>}', refreshTime='${rt:-<unset>}', baseline='${baseline:-<none>}')"
             return 1
           }
 
           await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
-
-          await_synced "$CREDS_ES" "ExternalSecret $CREDS_ES ($NAMESPACE)"
 
           rollback_done=1
 

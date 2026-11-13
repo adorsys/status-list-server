@@ -259,7 +259,7 @@ tests:
               namespace: "ns1"
               otel_scope_name: "status-list-server"
             exp_annotations:
-              summary: "Certificate expires within 14 days (renewal loop not refreshing it)"
+              summary: "Certificate expires within 14 days"
               description: "time to expiry is 600000s"
               runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
               dashboard_url: "http://localhost:3000/d/status-list-slo"
@@ -518,4 +518,34 @@ tests:
     alert_rule_test:
       - eval_time: 15m
         alertname: ManagementAuthFailuresSpike
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: >-
+          list_quota_enforced{otel_scope_name="status-list-server",namespace="ns1"}
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ListQuotaNotEnforced
+        exp_alerts:
+          - exp_labels:
+              service: "status-list-server"
+              severity: "warn"
+              team: "statuslist"
+              sli: "list_quota"
+              namespace: "ns1"
+              otel_scope_name: "status-list-server"
+            exp_annotations:
+              summary: "The list quota is not enforced"
+              description: "list_quota_enforced is 0; run list-quota recount then list-quota enable, then drop the transition flag"
+              runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/troubleshooting.md#upgrading-to-the-list-quota"
+              dashboard_url: "http://localhost:3000/d/status-list-slo"
+  - interval: 1m
+    input_series:
+      - series: >-
+          list_quota_enforced{otel_scope_name="status-list-server",namespace="ns1"}
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ListQuotaNotEnforced
         exp_alerts: []

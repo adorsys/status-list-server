@@ -21,6 +21,7 @@ helm lint "$CHART_DIR"
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
@@ -105,6 +106,82 @@ fi
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml --output-dir "${RENDER_TEMP}/rendered/aws"
 if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${EXPECTED_AWS_TAG}\"" "${RENDER_TEMP}/rendered/aws/status-list-server/templates/deployment.yaml"; then
   echo "ERROR: AWS overlay must derive the AWS image variant from chart appVersion"; exit 1
+fi
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml -f "$CHART_DIR"/values-fscert.yaml -f "$CHART_DIR"/values-datev-staging.yaml --namespace statuslist --output-dir "${RENDER_TEMP}/rendered/datev-staging"
+DATEV_DEPLOYMENT="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/deployment.yaml"
+DATEV_EXTERNAL_SECRETS="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/external-secrets.yaml"
+DATEV_SECRET_STORE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/secret-store.yaml"
+DATEV_HPA="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/hpa.yaml"
+DATEV_CERTIFICATE="${RENDER_TEMP}/rendered/datev-staging/status-list-server/templates/token-signing-certificate.yaml"
+if ! grep -q "image: \"ghcr.io/adorsys/status-list-server:${CHART_BASE_VERSION}-fscert\"" "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use the fscert image"; exit 1
+fi
+if ! grep -q '^  replicas: 1$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must run one application replica"; exit 1
+fi
+if ! grep -q '^    type: Recreate$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use Recreate to avoid overlapping memory caches"; exit 1
+fi
+if [ -f "$DATEV_HPA" ]; then
+  echo "ERROR: Datev staging must not render an HPA"; exit 1
+fi
+if [ ! -f "$DATEV_CERTIFICATE" ] || ! grep -q 'name: statuslist-token-signing' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging must render the dedicated signing Certificate"; exit 1
+fi
+if ! grep -q 'statuslist.eudi-adorsys.com' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging signing Certificate must use the exact service hostname"; exit 1
+fi
+if ! grep -q 'name: "letsencrypt-prod"' "$DATEV_CERTIFICATE"; then
+  echo "ERROR: Datev staging signing Certificate must use letsencrypt-prod"; exit 1
+fi
+if ! grep -q 'secretName: statuslist-token-signing' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must mount the dedicated signing Secret"; exit 1
+fi
+if [ ! -f "$DATEV_SECRET_STORE" ]; then
+  echo "ERROR: Datev staging must render a namespaced SecretStore"; exit 1
+fi
+if ! grep -q 'name: statuslist-secret-store' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must be named statuslist-secret-store"; exit 1
+fi
+if ! grep -q '^      service: SecretsManager$' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must use SecretsManager"; exit 1
+fi
+if ! grep -q '^      region: eu-central-1$' "$DATEV_SECRET_STORE"; then
+  echo "ERROR: Datev staging SecretStore must use eu-central-1"; exit 1
+fi
+if ! grep -q 'kind: SecretStore' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging ExternalSecrets must use a namespaced SecretStore"; exit 1
+fi
+if ! grep -q 'name: statuslist-secret-store' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging ExternalSecrets must reference statuslist-secret-store"; exit 1
+fi
+if grep -q 'statuslist-signing\|statuslist-fscert-signing' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging must not fetch signing material through ESO"; exit 1
+fi
+if ! grep -A3 'key: tls.key' "$DATEV_DEPLOYMENT" | grep -q 'mode: 288'; then
+  echo "ERROR: Datev staging signing key must render mode 0440"; exit 1
+fi
+if ! grep -q 'path: statuslist.crt' "$DATEV_DEPLOYMENT" || ! grep -q 'path: statuslist.key' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must use token signing file names"; exit 1
+fi
+if grep -q 'redis-password' "$DATEV_EXTERNAL_SECRETS"; then
+  echo "ERROR: Datev staging must not fetch a Redis password"; exit 1
+fi
+if ! grep -A1 'name: APP_CACHE__BACKEND' "$DATEV_DEPLOYMENT" | grep -q 'value: "memory"'; then
+  echo "ERROR: Datev staging must use the in-memory cache"; exit 1
+fi
+if grep -q 'name: APP_CACHE__PASSWORD' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not mount a Redis cache password"; exit 1
+fi
+if find "${RENDER_TEMP}/rendered/datev-staging" -iname '*redis*' | grep -q .; then
+  echo "ERROR: Datev staging must not render Redis resources"; exit 1
+fi
+if grep -q 'name: AWS_SHARED_CREDENTIALS_FILE' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not mount AWS signer credentials"; exit 1
+fi
+# fscert signs from a file, so no ACME cert env may render (STORE__* paths are the file-backed settings it needs).
+if grep -qE 'name: APP_SERVER__CERT__(EMAIL|ORGANIZATION|DNS__PROVIDER|ACME_DIRECTORY_URL|EKU|RENEWAL_CRON_SCHEDULE)$' "$DATEV_DEPLOYMENT"; then
+  echo "ERROR: Datev staging must not render ACME certificate env"; exit 1
 fi
 helm template status-list-server "$CHART_DIR" \
   --set postgres.enabled=false \
