@@ -1,0 +1,44 @@
+# For scripts/check-envoy-gateway-kind.sh only, never a real deployment.
+statuslist:
+  image:
+    pullPolicy: IfNotPresent
+  ingress:
+    externalDnsHostname: statuslist.kind.test
+  env:
+    APP_ENV: "development"
+    APP_TELEMETRY__ENVIRONMENT: "development"
+    # kind's default pod subnet.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: "10.244.0.0/16"
+  fallbackSecret:
+    generatedCertificate:
+      enabled: true
+      commonName: statuslist.kind.test
+      dnsNames:
+        - statuslist.kind.test
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: signing-material
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cert
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+
+postgres:
+  persistence:
+    enabled: false
+
+opentelemetry-collector:
+  enabled: false

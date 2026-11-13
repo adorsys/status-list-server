@@ -1,0 +1,42 @@
+# Assumes the reference Gateway, with its Envoy pods in envoy-gateway-system.
+statuslist:
+  gateway:
+    enabled: true
+    parentRefs:
+      - name: statuslist
+        namespace: envoy-gateway-system
+        sectionName: https
+  ingress:
+    management:
+      # Without this, issuer writes reach the public listener and get 404.
+      enabled: true
+  env:
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
+    # The Envoy pods' CIDR; renders fail until you set it.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: ""
+    # Restores the defaults that values-production.yaml lifts for connect_info.
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "0.005"
+  networkPolicy:
+    # Trusting the pod CIDR is only safe while this admits Envoy alone.
+    enabled: true
+    ingress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: envoy-gateway-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            gateway.envoyproxy.io/owning-gateway-name: statuslist
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+    managementIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: envoy-gateway-system
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            gateway.envoyproxy.io/owning-gateway-name: statuslist
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system

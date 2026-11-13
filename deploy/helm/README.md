@@ -6,7 +6,7 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 
 * A Kubernetes cluster (EKS, GKE, AKS, or any standard `apps/v1` cluster) running version 1.24 or newer.
 * [Helm](https://helm.sh/docs/intro/install/) and [`kubectl`](https://kubernetes.io/docs/tasks/tools/).
-* An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS.
+* An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS, or [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.2 or newer for [Gateway API mode](#gateway-api-mode).
 * Access to the public images at `ghcr.io/adorsys/status-list-server`.
 * [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you enable `externalSecret.enabled=true`. With ESO enabled, the chart renders `ExternalSecret` and `SecretStore` resources with `apiVersion: external-secrets.io/v1beta1` to match the API version served by the currently-deployed ESO. A `ClusterSecretStore` referenced through `externalSecret.spec.secretStoreRef` is cluster-scoped and must already exist (and serve the same API group) before installing or upgrading this chart.
 * (Optional) The `AlertmanagerConfig` CRD if you use alert configuration. It is provided by [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) or the [standalone Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator).
@@ -35,6 +35,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
+* [`chart/values-envoy-gateway.yaml`](chart/values-envoy-gateway.yaml): [Gateway API mode](#gateway-api-mode) behind the reference Envoy Gateway setup.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
 * `postgres.persistence.storageClass`: leave as `""` to use the cluster default StorageClass; set explicitly in environment overlays when needed.
@@ -340,6 +341,53 @@ helm install statuslist ./chart --namespace statuslist \
   -f chart/values-aws.yaml \
   -f chart/values-aws-nlb.yaml
 ```
+
+## Gateway API Mode
+
+`statuslist.gateway.enabled=true` renders Gateway API resources for
+[Envoy Gateway](https://gateway.envoyproxy.io/) instead of the Ingresses:
+
+* An HTTPRoute for the public listener and, when
+  `statuslist.ingress.management.enabled` is true, one for the management
+  listener. They use the Ingresses' hostnames and management path regex, attach
+  to the Gateway listener in `statuslist.gateway.parentRefs`, and never route to
+  the admin port.
+* A BackendTrafficPolicy per route that limits each client address, IPv4 and
+  IPv6, and answers over-limit requests with the API's `429` JSON body,
+  `Retry-After: 1` and `Cache-Control: no-store, max-age=0`. The server's own
+  `429`s pass through unchanged, and Envoy adds no `X-RateLimit-*` headers.
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `statuslist.gateway.enabled` | `false` | Render the routes and policies instead of the Ingresses |
+| `statuslist.gateway.parentRefs` | `[]` | The Gateway listener the routes attach to; required |
+| `statuslist.gateway.rateLimit.publicRequestsPerSecond` | `100` | Per client address and Envoy replica |
+| `statuslist.gateway.rateLimit.managementRequestsPerSecond` | `10` | Per client address and Envoy replica |
+| `statuslist.gateway.rateLimit.global.enabled` | `false` | Also count each address across Envoy replicas |
+| `statuslist.gateway.rateLimit.global.shadowMode` | `true` | Count and report without rejecting |
+
+The routes take `statuslist.ingress.externalDnsHostname` (or `global.domain`),
+`management.hostname` and `management.path` from the Ingress values; the hosted
+profile requires `externalDnsHostname`, as its Ingress does. The other
+Ingress settings do not apply: `className`, the nginx and cert-manager
+annotations, and `tls`, since TLS terminates at the Gateway listener. The
+management route waits 60 seconds for the server, as ingress-nginx does; the
+public route keeps Envoy's 15-second default. Request bodies stay bounded by the
+server's `APP_LIMITS__MAX_BODY_SIZE_BYTES`.
+
+The management limit applies per client address, so issuers behind one shared
+address share it. It also caps bursts: at 10 per second an issuer can send at
+most 10 requests in any second, while its tier allows a burst of 100 and then one
+request a second. One `PATCH` can change up to 5000 statuses, so most issuers
+stay well below the limit; raise `managementRequestsPerSecond` if yours do not.
+
+To deploy it, follow the
+[deployment runbook](../../docs/deployment-runbook.md#expose-the-service-through-envoy-gateway):
+it covers the topology this assumes, installing Envoy Gateway, the values the
+render requires, applying [`chart/values-envoy-gateway.yaml`](chart/values-envoy-gateway.yaml),
+enabling the global rules, and verifying the cap across replicas and a Redis
+outage. [`scripts/check-envoy-gateway-kind.sh`](../../scripts/check-envoy-gateway-kind.sh)
+checks the edge limits, routing and `429` responses in a throwaway kind cluster.
 
 ## Configure Signing Credentials
 

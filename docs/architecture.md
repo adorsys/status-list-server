@@ -248,7 +248,33 @@ whole seconds until the next token, rounded up.
 > **Note:** Rate-limit state is held in memory per replica. In a horizontally
 > scaled deployment each instance maintains its own token buckets, so the
 > effective cluster-wide rate limit is `burst_size × replica_count`. Rate-limit
-> state is not shared between instances.
+> state is not shared between instances. A limit that holds across replicas
+> belongs at the edge; see [Edge and server layers](#edge-and-server-layers).
+
+### Edge and server layers
+
+The chart's Gateway API mode (see
+[the Helm guide](../deploy/helm/README.md#gateway-api-mode)) puts Envoy Gateway
+in front of the server. Each layer limits what it can identify:
+
+- **Edge.** Envoy limits each client address on the public and management
+  routes, by default to 100 and 10 requests per second, before a request
+  reaches the server. Its `429` carries the same JSON body as the server's,
+  with `Retry-After: 1` because its limits are per second. Each Envoy replica
+  counts on its own; optional global rules count each address across replicas
+  through a rate limit service backed by Redis, and let requests pass when that
+  service cannot answer. No route leads to the admin listener.
+- **Server.** The tiers above stay as a safety net. Behind Envoy they key on the
+  address Envoy appends to `X-Forwarded-For`, which needs
+  `rate_limit.client_ip_source=rightmost_x_forwarded_for` and
+  `rate_limit.trusted_proxies` covering the Envoy pods. Only the server can
+  apply an issuer's budget, because only the server verifies the issuer.
+
+Envoy listens on IPv4 only unless its `EnvoyProxy` enables IPv6. With IPv6
+enabled, the edge keys each IPv6 address on its own and holds at most 10,000
+addresses per route in each replica, so a client that changes address within
+its /64 escapes the edge limit. The server, which keys IPv6 by /64, still
+limits it.
 
 ### Issuer tiers (`APP_TIERS__*`)
 
