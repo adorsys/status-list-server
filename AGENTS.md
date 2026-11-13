@@ -16,7 +16,7 @@ Status List Server implements the IETF OAuth Token Status List draft in Rust (ed
 | `src/utils/`               | Signing keys (`crypto.rs`), ACME certificate management, telemetry, metrics.  |
 | `tests/`, `src/**/tests`   | Integration and unit tests; container-backed tests need Docker.               |
 | `xtask/`                   | `cargo xtask` entry point for profile-aware build, test, lint, and CI.        |
-| `docs/openapi*.yaml`       | HTTP API contracts.                                                           |
+| `docs/openapi.yaml`        | HTTP API contract.                                                            |
 | `.env.template`, `deploy/` | Runtime configuration reference, Helm chart, and observability configuration. |
 
 ## Change rules

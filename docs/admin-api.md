@@ -3,7 +3,7 @@
 The admin listener (default `localhost:8002`) serves issuer reads and writes.
 The public and management listeners return 404 for these routes. Keep the admin
 listener on a private network.
-The [Admin OpenAPI contract](openapi-admin.yaml) describes the response fields.
+The Admin API section of the [OpenAPI contract](openapi.yaml) describes the response fields.
 
 ## Authentication and configuration
 
@@ -201,7 +201,7 @@ The portal backend calls `POST /admin/v1/issuers` with the required
 `display_name`, `owner`, `public_key` (a public JWK), and `alg` fields, then
 reads the assigned issuer and key IDs from the response. `expires_at` is
 optional. See the `createIssuer` operation in the
-[Admin OpenAPI contract](openapi-admin.yaml) and the
+[OpenAPI contract](openapi.yaml) and the
 [hosted issuer creation demo](../demo/README.md#hosted-issuer-creation-and-renewal)
 for the request shape. The developer signs management tokens as described in the
 [registry issuer onboarding steps](issuer-onboarding.md#onboard-a-registry-issuer).
