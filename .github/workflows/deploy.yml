@@ -902,22 +902,6 @@ jobs:
           kubectl wait certificate/statuslist-token-signing -n "$NAMESPACE" \
             --for=condition=Ready --timeout=10m
 
-      - name: Reconcile rollout strategy before upgrade
-        # The live Deployment was created without a strategy, so the API server defaulted it to
-        # RollingUpdate (including its rollingUpdate block). Helm v4 applies server-side, and
-        # switching to strategy type Recreate then conflicts with that leftover block ("may not be
-        # specified when strategy type is 'Recreate'"). Replace the strategy in place first; this
-        # touches only spec.strategy, not the pod template, so nothing restarts.
-        run: |
-          set -euo pipefail
-          NAMESPACE="${{ env.HELM_NAMESPACE }}"
-          if kubectl get deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
-              -n "$NAMESPACE" >/dev/null 2>&1; then
-            kubectl patch deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
-              -n "$NAMESPACE" --type=json \
-              -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
-          fi
-
       - name: Deploy chart
         id: deploy-chart
         # :? on the digest: empty would silently deploy the mutable tag, and helm's error points elsewhere.
@@ -976,6 +960,15 @@ jobs:
               --output json | jq -r 'max_by(.revision) | .revision' 2>/dev/null || true)
           fi
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
+
+          # Reconcile the rollout strategy only now, after the digest/attestation gates, so a
+          # failed gate can't leave the live release on Recreate out-of-band (see the runbook).
+          if kubectl get deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "${{ env.HELM_NAMESPACE }}" >/dev/null 2>&1; then
+            kubectl patch deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "${{ env.HELM_NAMESPACE }}" --type=json \
+              -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+          fi
 
           # A clean-looking rollback can still leave migration records the old release cannot start on.
           if ! helm upgrade --install ${{ env.HELM_RELEASE_NAME }} "$CHART_DIR" \
