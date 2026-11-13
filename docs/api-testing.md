@@ -39,6 +39,12 @@ running that folder. Its suspend and revoke requests change live issuer state.
 The private profile Newman check omits this folder because it has no portal
 issuer or admin token; the hosted lifecycle is covered by the Rust HTTP tests.
 
+The **Portal Admin Contract (hosted profile)** folder checks the admin API as
+the Status List Portal uses it: it creates a sandbox issuer, reads and lists
+it, renews, suspends and resumes it with `If-Issuer-Version`, adds and revokes
+a key, and checks the error codes the portal branches on. It needs a hosted
+server and runs only in a [hosted Newman check](#hosted-profile-check).
+
 Protected management routes require a Bearer JWT signed by the private key that
 matches the issuer public JWK provisioned in the operator-managed issuer
 registry. The Newman script generates separate temporary issuer and admin keys and
@@ -105,6 +111,7 @@ Useful environment overrides:
 | `API_ENDPOINT`             | `http://localhost:8000`             | Live API endpoint under test.                                     |
 | `NEWMAN_API_READY_TIMEOUT` | `180`                               | Maximum seconds to wait for the live API before running Newman.   |
 | `NEWMAN_RUNNER`            | `auto`                              | Newman runner selection: `auto`, `local`, or `docker`.            |
+| `POSTMAN_HOSTED_PROFILE`   | `false`                             | `true` for a hosted server: also runs the portal admin contract.  |
 | `NEWMAN_DOCKER_IMAGE`      | `postman/newman@sha256:02dc...e04f` | Pinned Newman container used by CI and `NEWMAN_RUNNER=docker`.    |
 | `POSTMAN_ISSUER_REGISTRY_FILE` | required                          | Dedicated registry file loaded by the server through `APP_MANAGEMENT_AUTH__ISSUERS_FILE`. |
 
@@ -113,3 +120,40 @@ only against a local or isolated test server with a dedicated registry file;
 never point it at a production registry or a registry shared with other
 issuers. For a remote test server, the Newman runner and server must both have
 access to the same dedicated registry file.
+
+## Hosted Profile Check
+
+CI also runs the collection against a hosted server on SQLite, which adds the
+Portal Admin Contract folder. The script then gives its temporary admin the
+`issuers:write` scope and generates the portal owners, keys, and a token for
+another audience that the folder uses. Start the server with a SQL backend:
+
+```bash
+mkdir -p target/postman-hosted
+printf '{"version":1,"issuers":[],"admins":[]}\n' > "$registry_file"
+
+APP_SERVER__PROFILE=hosted \
+APP_DATABASE__BACKEND=sqlite \
+APP_DATABASE__URL="sqlite://$PWD/target/postman-hosted/status-list.db?mode=rwc" \
+APP_SERVER__CERT__PROVISIONING_STRATEGY=store \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/ed25519_cert.pem \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/ed25519_key.pem \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE="$registry_file" \
+APP_MANAGEMENT_AUTH__AUDIENCES=status-list-server-management \
+APP_ADMIN_AUTH__AUDIENCES=status-list-server-admin \
+cargo run --features sqlite
+```
+
+Then run the check with `POSTMAN_HOSTED_PROFILE=true`:
+
+```bash
+POSTMAN_HOSTED_PROFILE=true \
+POSTMAN_ISSUER_REGISTRY_FILE="$registry_file" \
+./scripts/test-postman-collection.sh
+```
+
+The folder's issuers stay in the database. Each run uses new owners and keys,
+so later runs against the same database still pass.
+
+To try the same calls through the portal itself, see
+[Testing the Status List Portal against a local server](portal-local-testing.md).

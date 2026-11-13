@@ -16,6 +16,8 @@ NEWMAN_RUNNER="${NEWMAN_RUNNER:-auto}"
 MANAGEMENT_AUDIENCE="${MANAGEMENT_AUDIENCE:-status-list-server-management}"
 ADMIN_AUDIENCE="${ADMIN_AUDIENCE:-status-list-server-admin}"
 POSTMAN_ISSUER_REGISTRY_FILE="${POSTMAN_ISSUER_REGISTRY_FILE:-}"
+# true when the server runs the hosted profile: also runs the portal admin contract, which writes.
+POSTMAN_HOSTED_PROFILE="${POSTMAN_HOSTED_PROFILE:-false}"
 NEWMAN_DOCKER_IMAGE="${NEWMAN_DOCKER_IMAGE:-postman/newman@sha256:02dc4a285dc05aa3a3f4035e5425a83f3b4cdb21afb71c79df589cbac0a0e04f}"
 
 if [[ -z "$POSTMAN_ISSUER_REGISTRY_FILE" ]]; then
@@ -96,14 +98,17 @@ generate_postman_artifacts() {
   local collection_out="$1"
   local environment_out="$2"
 
-  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" "$ADMIN_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" <<'NODE'
+  node - "$POSTMAN_COLLECTION" "$POSTMAN_ENVIRONMENT" "$collection_out" "$environment_out" "$COLLECTION_ENDPOINT" "$RESOLVED_MANAGEMENT_URL" "$RESOLVED_ADMIN_URL" "$MANAGEMENT_AUDIENCE" "$ADMIN_AUDIENCE" "$POSTMAN_ISSUER_REGISTRY_FILE" "$POSTMAN_HOSTED_PROFILE" <<'NODE'
 const crypto = require('crypto');
 const fs = require('fs');
 
-const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, adminAudience, registryFile] = process.argv.slice(2);
+const [collectionFile, environmentFile, collectionOut, environmentOut, baseUrl, mgmtUrl, adminUrl, audience, adminAudience, registryFile, hostedProfile] = process.argv.slice(2);
+const hosted = hostedProfile === 'true';
 const collection = JSON.parse(fs.readFileSync(collectionFile, 'utf8'));
 const environment = JSON.parse(fs.readFileSync(environmentFile, 'utf8'));
-collection.item = collection.item.filter(item => item.name !== 'Issuer Lifecycle (destructive, hosted profile)');
+collection.item = collection.item.filter(item =>
+  item.name !== 'Issuer Lifecycle (destructive, hosted profile)' &&
+  (hosted || item.name !== 'Portal Admin Contract (hosted profile)'));
 
 function siblingUrl(baseUrl, port) {
   const url = new URL(baseUrl);
@@ -119,24 +124,36 @@ function base64url(input) {
   return Buffer.from(input).toString('base64url');
 }
 
-function identity(id, typ, audience) {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-    namedCurve: 'P-256',
-  });
-  const header = { alg: 'ES256', typ, kid: id };
-  const payload = { iss: id, aud: audience, iat: now, exp: now + 300 };
+function token(privateKey, header, audience) {
+  const payload = { iss: header.kid, aud: audience, iat: now, exp: now + 300 };
   const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
   const signature = crypto.sign('sha256', Buffer.from(signingInput), {
     key: privateKey,
     dsaEncoding: 'ieee-p1363'
   });
+  return `${signingInput}.${base64url(signature)}`;
+}
+
+function identity(id, typ, audience) {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+    namedCurve: 'P-256',
+  });
+  const header = { alg: 'ES256', typ, kid: id };
   const jwk = publicKey.export({ format: 'jwk' });
   jwk.kid = id;
   jwk.alg = header.alg;
   return {
-    token: `${signingInput}.${base64url(signature)}`,
+    token: token(privateKey, header, audience),
+    otherAudienceToken: token(privateKey, header, `${audience}-other`),
     key: { kid: id, alg: header.alg, jwk },
   };
+}
+
+// A public key as the portal submits it for a new issuer key: never registered before.
+function portalPublicJwk() {
+  const { publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
+  return JSON.stringify({ kty, crv, x, y });
 }
 
 const issuer = identity(issuerId, 'statuslist-management+jwt', audience);
@@ -152,7 +169,11 @@ const registryContent = JSON.stringify({
     tier: 'standard',
     keys: [issuer.key],
   }],
-  admins: [{ id: adminId, scopes: ['issuers:read'], keys: [admin.key] }],
+  admins: [{
+    id: adminId,
+    scopes: hosted ? ['issuers:read', 'issuers:write'] : ['issuers:read'],
+    keys: [admin.key],
+  }],
 }, null, 2);
 const temporaryRegistry = `${registryFile}.${process.pid}.tmp`;
 fs.writeFileSync(temporaryRegistry, registryContent);
@@ -173,6 +194,11 @@ const values = new Map([
   ['issuer_id', issuerId],
   ['token', issuer.token],
   ['adminToken', admin.token],
+  ['adminTokenOtherAudience', admin.otherAudienceToken],
+  ['portalOwner', `github|${now}${crypto.randomInt(1000000)}`],
+  ['portalOtherOwner', `github|other-${crypto.randomUUID()}`],
+  ['portalPublicJwk', portalPublicJwk()],
+  ['portalSecondPublicJwk', portalPublicJwk()],
 ]);
 
 for (const variable of collection.variable || []) {
