@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from typing import Any, Callable
 
@@ -146,6 +149,7 @@ _FINAL_GREEN = {
         build_and_push="skipped",
         scan_image="success",
         verify_provenance="skipped",
+        direct_upgrade="skipped",
         promote_tags="success",
     ),
 }
@@ -154,7 +158,7 @@ _PRERELEASE_GREEN = {
     "github.ref": "refs/tags/v1.2.3-rc.1",
     "github.ref_name": "v1.2.3-rc.1",
     "needs.validate-tag.outputs.is_final": "false",
-    **_outcome(build_and_push="success", verify_provenance="success"),
+    **_outcome(build_and_push="success", verify_provenance="success", direct_upgrade="success"),
 }
 
 
@@ -179,6 +183,26 @@ class DeployReleaseGatingTest(unittest.TestCase):
 
     def test_validate_tag_classifies_final_releases(self) -> None:
         self.assertIn("is_final", self.jobs["validate-tag"].get("outputs", {}))
+
+    def test_reusable_helm_checks_get_the_permissions_they_request(self) -> None:
+        root = _WORKFLOW.parents[2]
+        for caller, path in (("ci", "CI.yml"), ("helm-checks", "helm-checks.yml")):
+            workflow = yaml.safe_load((root / ".github/workflows" / path).read_text(encoding="utf-8"))
+            granted = self.jobs[caller]["permissions"]
+            for job_name, job in workflow["jobs"].items():
+                requested = job.get("permissions", workflow.get("permissions", {}))
+                for scope, access in requested.items():
+                    with self.subTest(workflow=path, job=job_name, scope=scope):
+                        self.assertGreaterEqual(
+                            {"none": 0, "read": 1, "write": 2}[granted.get(scope, "none")],
+                            {"none": 0, "read": 1, "write": 2}[access],
+                        )
+
+    def test_reusable_checks_have_distinct_concurrency_groups(self) -> None:
+        root = _WORKFLOW.parents[2]
+        ci = yaml.safe_load((root / ".github/workflows/CI.yml").read_text(encoding="utf-8"))
+        helm = yaml.safe_load((root / ".github/workflows/helm-checks.yml").read_text(encoding="utf-8"))
+        self.assertNotEqual(ci["concurrency"]["group"], helm["concurrency"]["group"])
 
     def test_final_tags_skip_the_build(self) -> None:
         self.assertFalse(self.runs("build-and-push", _FINAL_GREEN))
@@ -229,11 +253,98 @@ class DeployReleaseGatingTest(unittest.TestCase):
                 scenario = {**_PRERELEASE_GREEN, **_outcome(verify_provenance=result)}
                 self.assertFalse(self.runs("promote-tags", scenario))
 
+    def test_a_prerelease_needs_the_direct_upgrade(self) -> None:
+        self.assertIn("direct-upgrade", self.needs("promote-tags"))
+        direct = self.jobs["direct-upgrade"]
+        read = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.", str(direct["if"])))
+        self.assertLessEqual(read, self.needs("direct-upgrade"))
+        self.assertTrue(self.runs("direct-upgrade", _PRERELEASE_GREEN))
+        self.assertFalse(self.runs("direct-upgrade", _FINAL_GREEN))
+        dispatch = {**_PRERELEASE_GREEN, "github.event_name": "workflow_dispatch", "github.ref": "refs/heads/direct-upgrade"}
+        beta = {**_PRERELEASE_GREEN, "github.ref": "refs/tags/v1.2.3-beta.1", "github.ref_name": "v1.2.3-beta.1"}
+        self.assertTrue(self.runs("direct-upgrade", dispatch))
+        self.assertTrue(self.runs("direct-upgrade", beta))
+        self.assertFalse(self.runs("promote-tags", dispatch))
+        self.assertTrue(self.runs("promote-tags", beta))
+        self.assertNotIn("scan-image", self.needs("direct-upgrade"))
+        self.assertTrue(self.runs("direct-upgrade", {**_PRERELEASE_GREEN, **_outcome(scan_image="failure")}))
+        for gate in ("image_source", "verify_provenance"):
+            with self.subTest(gate=gate):
+                scenario = {**_PRERELEASE_GREEN, **_outcome(**{gate: "failure"})}
+                self.assertFalse(self.runs("direct-upgrade", scenario))
+        for result in ("failure", "skipped"):
+            with self.subTest(direct_upgrade=result):
+                scenario = {**_PRERELEASE_GREEN, **_outcome(direct_upgrade=result)}
+                self.assertFalse(self.runs("promote-tags", scenario))
+
+    def test_direct_upgrade_uses_the_source_run_and_verifies_the_previous_image(self) -> None:
+        direct = self.jobs["direct-upgrade"]
+        self.assertIn("image-source", self.needs("direct-upgrade"))
+        steps = {step["name"]: step for step in direct["steps"]}
+        resolve = steps["Resolve verified image digests"]
+        self.assertEqual(resolve["env"]["SOURCE_RUN_ID"], "${{ needs.image-source.outputs.source_run_id }}")
+        self.assertIn('gh run download "$SOURCE_RUN_ID"', resolve["run"])
+        self.assertIn('scripts/resolve-previous-image.sh "$PREVIOUS_TAG" "$IMAGE_BASE" "$GITHUB_REPOSITORY"', resolve["run"])
+        self.assertEqual(direct["permissions"].get("attestations"), "read")
+        self.assertIn("scripts/select-latest-final.sh", steps["Find last stable release"]["run"])
+
+        checkout = steps["Checkout last stable release"]
+        self.assertEqual(checkout["with"]["ref"], "refs/tags/${{ steps.previous.outputs.tag }}")
+
+    @unittest.skipIf(shutil.which("bash") is None, "bash is required")
+    def test_direct_upgrade_command_passes_unmodified_arguments(self) -> None:
+        steps = {step["name"]: step for step in self.jobs["direct-upgrade"]["steps"]}
+        command = steps["Install last release and upgrade to candidate"]["run"]
+        with tempfile.TemporaryDirectory() as directory:
+            for name, value in (
+                ("previous-chart-path", "previous-release/helm/chart"),
+                ("previous-digest", "sha256:previous"),
+                ("candidate-digest.txt", "sha256:candidate"),
+            ):
+                (pathlib.Path(directory) / name).write_text(value + "\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", 'bash() { printf "<%s>\\n" "$@"; }\n' + command],
+                env={"RUNNER_TEMP": directory, "CHART_DIR": "deploy/helm/chart", "IMAGE_BASE": "ghcr.io/acme/status-list-server"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "<scripts/test-direct-upgrade.sh>",
+                "<previous-release/helm/chart>",
+                "<deploy/helm/chart>",
+                "<sha256:previous>",
+                "<sha256:candidate>",
+                "<ghcr.io/acme/status-list-server>",
+            ],
+        )
+
+    def test_direct_upgrade_uses_shared_production_values_and_serves_seeded_list(self) -> None:
+        root = _WORKFLOW.parents[2]
+        values = yaml.safe_load((root / "scripts/direct-upgrade-values.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(values["statuslist"]["env"]["APP_ENV"], "production")
+        self.assertTrue(values["postgres"]["persistence"]["enabled"])
+        self.assertFalse(values["statuslist"]["fallbackSecret"]["generatedCertificate"]["enabled"])
+        self.assertTrue((root / "test_data/certs/dev.key").read_text(encoding="utf-8").startswith("-----BEGIN PRIVATE KEY-----"))
+        script = (root / "scripts/test-direct-upgrade.sh").read_text(encoding="utf-8")
+        self.assertNotIn("values-local.yaml", script)
+        self.assertIn("statuslist.strategy.type=Recreate", script)
+        self.assertIn("/spec/strategy", script)
+        candidate = yaml.safe_load((root / "scripts/direct-upgrade-candidate-values.yaml").read_text(encoding="utf-8"))
+        self.assertIn("issuerRegistry", candidate["statuslist"])
+        self.assertNotIn("issuerRegistry", values["statuslist"])
+        self.assertNotIn("image", values["postgres"])
+        self.assertIn("/api/v1/status-lists/upgrade-fixture-list", script)
+        self.assertIn(".restartCount", script)
+
     def test_promote_tags_lists_every_job_its_condition_reads(self) -> None:
         condition = str(self.jobs["promote-tags"]["if"])
         read = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.", condition))
         self.assertLessEqual(read, self.needs("promote-tags"))
-        self.assertLessEqual({"ci", "helm-checks", "image-source", "scan-image", "verify-provenance"}, read)
+        self.assertLessEqual({"ci", "helm-checks", "image-source", "scan-image", "verify-provenance", "direct-upgrade"}, read)
 
     def test_deploy_needs_a_successful_promotion(self) -> None:
         self.assertIn("promote-tags", self.needs("deploy"))

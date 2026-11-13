@@ -450,10 +450,19 @@ run concurrently. The chart exposes the Deployment strategy through
 `statuslist.strategy`; set its type to `Recreate` for this upgrade:
 
 ```bash
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> \
+  --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
 helm upgrade --install statuslist ./deploy/helm/chart \
   --set statuslist.strategy.type=Recreate \
   ... # your other values
 ```
+
+Patch the live Deployment first when upgrading an existing release. Helm 4's
+server-side apply can retain the old `rollingUpdate` fields while changing the
+type, which Kubernetes rejects for `Recreate`. The patch removes those fields
+before Helm applies the new chart. Confirm old pods have stopped before allowing
+the new version to serve traffic.
 
 Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
 `maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
@@ -469,6 +478,9 @@ kubectl scale deployment statuslist-status-list-server-deployment -n <namespace>
 # gone before upgrading, otherwise the helm upgrade on the next line scales
 # replicas back up and new pods can start while old ones are still draining.
 kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> \
+  --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
 helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
 kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
 ```

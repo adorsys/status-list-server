@@ -2243,8 +2243,8 @@ pub(crate) mod issuer_audit_events {
 ///
 /// Carried issuers get `source = 'credential'`, which the hosted key lookup
 /// accepts and `find_issuer` does not: they resolve by key, but are not hosted
-/// issuers. Issuers whose aggregation ID is still NULL are assigned one, so
-/// the carried key does not resolve to a corrupt row.
+/// issuers. A NULL aggregation ID stays NULL so startup can adopt the ID from
+/// the operator's pre-upgrade registry export.
 ///
 /// Only registry-backed credentials are carried (`source = 'registry'`): a
 /// credential someone attaches to a hosted issuer's id must not be picked up.
@@ -2294,7 +2294,6 @@ pub(crate) mod issuer_keys_carry_over {
         hash: String,
         alg: &'static str,
         jwk_json: String,
-        needs_aggregation_id: bool,
     }
 
     fn ph(backend: DatabaseBackend, n: usize) -> String {
@@ -2324,8 +2323,7 @@ pub(crate) mod issuer_keys_carry_over {
         let rows = conn
             .query_all_raw(Statement::from_string(
                 backend,
-                "SELECT c.issuer AS issuer, c.public_key AS public_key, c.key_id AS key_id, \
-                     i.aggregation_id AS aggregation_id \
+                "SELECT c.issuer AS issuer, c.public_key AS public_key, c.key_id AS key_id \
                      FROM credentials c JOIN issuers i ON i.issuer = c.issuer \
                      WHERE c.key_id IS NOT NULL AND i.source = 'registry' \
                      ORDER BY c.issuer",
@@ -2337,7 +2335,6 @@ pub(crate) mod issuer_keys_carry_over {
             let issuer: String = row.try_get("", "issuer")?;
             let kid: String = row.try_get("", "key_id")?;
             let public_key: serde_json::Value = row.try_get("", "public_key")?;
-            let aggregation_id: Option<String> = row.try_get("", "aggregation_id")?;
 
             let bytes = serde_json::to_vec(&public_key)
                 .map_err(|e| DbErr::Migration(format!("credential `{issuer}`: {e}")))?;
@@ -2364,7 +2361,6 @@ pub(crate) mod issuer_keys_carry_over {
                 hash,
                 alg,
                 jwk_json: jwk_to_string(&jwk)?,
-                needs_aggregation_id: aggregation_id.is_none(),
             });
         }
 
@@ -2446,21 +2442,6 @@ pub(crate) mod issuer_keys_carry_over {
         );
         let mut carried = 0;
         for (planned, skip) in carrying.iter().zip(already) {
-            if planned.needs_aggregation_id {
-                conn.execute_raw(Statement::from_sql_and_values(
-                        backend,
-                        format!(
-                            "UPDATE issuers SET aggregation_id = {} WHERE issuer = {} AND aggregation_id IS NULL",
-                            ph(backend, 1),
-                            ph(backend, 2)
-                        ),
-                        [
-                            uuid::Uuid::new_v4().to_string().into(),
-                            planned.issuer.clone().into(),
-                        ],
-                    ))
-                    .await?;
-            }
             if skip {
                 continue;
             }
@@ -2563,28 +2544,6 @@ mod carry_over_tests {
             .unwrap();
     }
 
-    /// A static registry that has adopted the carried identity `legacy-1` /
-    /// `key-1`, so its key now authenticates through the static-first resolver.
-    fn registry_with_static_adoption() -> Arc<crate::server::auth::issuer_registry::RegistryHandle>
-    {
-        let jwk: serde_json::Value = serde_json::from_str(KEY_1).unwrap();
-        Arc::new(
-            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(
-                &serde_saphyr::to_string(&serde_json::json!({
-                    "version": 1,
-                    "issuers": [{
-                        "id": "legacy-1",
-                        "aggregation_id": uuid::Uuid::new_v4(),
-                        "keys": [{ "kid": "key-1", "alg": "ES256", "jwk": jwk }],
-                    }],
-                    "admins": [],
-                }))
-                .unwrap(),
-            )
-            .unwrap(),
-        )
-    }
-
     /// The full upgrade scenario, run from an unmigrated database: an earlier
     /// release's legacy credentials are seeded, then the current migrator runs.
     /// Postgres exercises the `$n` numbering and `CAST($5 AS JSON)`; on MySQL a
@@ -2624,6 +2583,26 @@ mod carry_over_tests {
         // A credential attached to a hosted issuer's id must not be carried.
         seed(&db, "portal-issuer", "portal-key", KEY_2, "portal").await;
 
+        let exported = crate::outbound::sql::issuer_export::legacy_issuer_credentials(db.as_ref())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.issuer == "legacy-1")
+            .expect("the pre-upgrade exporter must see the legacy issuer");
+        let exported_aggregation_id = exported.aggregation_id.parse::<uuid::Uuid>().unwrap();
+        let registry_yaml =
+            crate::server::auth::issuer_registry::IssuerRegistry::export_legacy_issuers([(
+                exported.issuer,
+                exported.aggregation_id,
+                exported.public_key,
+            )])
+            .unwrap();
+        let registry: serde_json::Value = serde_saphyr::from_str(&registry_yaml).unwrap();
+        let exported_kid = registry["issuers"][0]["keys"][0]["kid"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
         run_migrations(&db).await.unwrap();
 
         // Carried kids: key-1, the thumbprint kid, and rsa-1. The oct key, the
@@ -2653,8 +2632,8 @@ mod carry_over_tests {
             "carried keys must land reserved on {backend:?}: {states:?}"
         );
 
-        // A NULL-aggregation-id issuer was assigned one so its carried key does
-        // not resolve to a corrupt row.
+        // The exporter supplies this ID before upgrade; carry-over must leave
+        // it available for startup to adopt from the mounted registry.
         let agg = db
             .query_one_raw(Statement::from_string(
                 backend,
@@ -2665,10 +2644,16 @@ mod carry_over_tests {
             .expect("legacy-1 must exist")
             .try_get::<Option<String>>("", "aggregation_id")
             .unwrap();
-        assert!(
-            agg.is_some(),
-            "NULL aggregation id must be assigned on {backend:?}"
+        assert_eq!(
+            agg, None,
+            "legacy aggregation ID must await adoption on {backend:?}"
         );
+
+        db.execute_unprepared(&format!(
+            "UPDATE issuers SET aggregation_id = '{exported_aggregation_id}' WHERE issuer = 'legacy-1'"
+        ))
+        .await
+        .unwrap();
 
         // A reserved carried key must never authenticate, until adopted.
         let store: Arc<dyn HostedIssuerStore> = Arc::new(SqlHostedIssuerStore::new(db.clone()));
@@ -2684,10 +2669,13 @@ mod carry_over_tests {
             "a reserved carried key must not authenticate on {backend:?}"
         );
         let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
-            registry_with_static_adoption(),
+            Arc::new(
+                crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry_yaml)
+                    .unwrap(),
+            ),
             Some(store),
         );
-        let resolved = resolver.resolve("key-1").await.unwrap();
+        let resolved = resolver.resolve(&exported_kid).await.unwrap();
         assert_eq!(resolved.principal.id(), "legacy-1");
 
         // Idempotency: re-running the carry-over migration is a no-op (this is
