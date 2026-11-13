@@ -246,11 +246,20 @@ fi
 printf '== network policy\n'
 POD_IP=$(kubectl --namespace "$NAMESPACE" get pod -o 'jsonpath={.items[0].status.podIP}' \
   --selector "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=status-list-server")
-if kubectl exec client-c -- curl -s -o /dev/null --max-time 5 "http://$POD_IP:8000/health/live"; then
-  printf 'NOTE this CNI let client-c reach the server pod directly; the NetworkPolicy is not verified here\n'
-else
-  pass "a direct request to the server pod's public port is refused"
+if [ -z "$POD_IP" ]; then
+  fail "no server pod address to probe"
 fi
+for port in 8000 8001 8002; do
+  [ -n "$POD_IP" ] || break
+  code=0
+  kubectl exec client-c -- curl -s -o /dev/null --max-time 5 "http://$POD_IP:$port/" || code=$?
+  # 7 is refused and 28 a timeout; anything else means the probe itself broke.
+  case "$code" in
+    0) fail "client-c reached the server pod directly on port $port" ;;
+    7 | 28) pass "a direct request to the server pod's port $port is refused" ;;
+    *) fail "could not probe port $port directly (exit $code)" ;;
+  esac
+done
 
 if [ "$FAILURES" -gt 0 ]; then
   printf '%s check(s) failed\n' "$FAILURES"
