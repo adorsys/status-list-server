@@ -34,8 +34,8 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values.yaml`](chart/values.yaml): provider-neutral defaults.
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
-* [`chart/values-fscert.yaml`](chart/values-fscert.yaml): reusable file-backed signing image, single replica, and memory cache settings. Supply certificate/key mounts for the environment.
-* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): existing EKS release's cert-manager certificate and Secret mounts. Apply after the AWS, production, and fscert overlays; see the [EKS release prerequisites](../../docs/deployment-runbook.md#existing-eks-release-with-file-backed-signing).
+* [`chart/values-fscert.yaml`](chart/values-fscert.yaml): reusable file-backed signing profile — the `fscert` image variant and the ACME settings cleared for file-backed signing. Environment overlays supply the certificate/key mounts.
+* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): the existing EKS release's file-backed settings — single replica with a per-pod memory cache, `Recreate`, and the cert-manager certificate and Secret mounts. Apply after the AWS, production, and fscert overlays; see the [EKS release prerequisites](../../docs/deployment-runbook.md#existing-eks-release-with-file-backed-signing).
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
 * `global.domain`: chart-wide public DNS suffix. When set, Ingress defaults derive `statuslist.<global.domain>` and `*.<global.domain>` from this single value. Rendered hostnames are normalized to lowercase.
