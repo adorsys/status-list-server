@@ -154,3 +154,6 @@ POSTMAN_ISSUER_REGISTRY_FILE="$registry_file" \
 
 The folder's issuers stay in the database. Each run uses new owners and keys,
 so later runs against the same database still pass.
+
+To try the same calls through the portal itself, see
+[Testing the Status List Portal against a local server](portal-local-testing.md).
