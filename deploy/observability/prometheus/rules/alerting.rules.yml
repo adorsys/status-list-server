@@ -262,6 +262,23 @@ groups:
           runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/deploy/observability/runbooks/cert-renewal.md"
           dashboard_url: "http://localhost:3000/d/status-list-slo"
 
+      # A transition rollout leaves the quota off until the operator runs recount + enable, and the
+      # transition flag also lets a later `list-quota disable` boot without the quota. Page until enforced.
+      - alert: ListQuotaNotEnforced
+        expr: |
+          list_quota_enforced{otel_scope_name="status-list-server"} == 0
+        for: 15m
+        labels:
+          severity: page
+          team: statuslist
+          service: status-list-server
+          sli: list_quota
+        annotations:
+          summary: "The list quota is not enforced"
+          description: "list_quota_enforced is 0; run list-quota recount then list-quota enable, then drop the transition flag"
+          runbook_url: "https://github.com/adorsys/status-list-server/blob/develop/docs/troubleshooting.md#upgrading-to-the-list-quota"
+          dashboard_url: "http://localhost:3000/d/status-list-slo"
+
   - name: hosted-trust-alerts
     rules:
       - alert: IssuerRegistryReloadFailures
