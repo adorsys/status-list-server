@@ -266,7 +266,8 @@ in front of the server. Each layer limits what it can identify:
   service cannot answer. No route leads to the admin listener.
 - **Server.** The tiers above stay as a safety net. Behind Envoy they key on the
   address Envoy appends to `X-Forwarded-For`, which needs
-  `rate_limit.trusted_proxies` to cover the Envoy pods. Only the server can
+  `rate_limit.client_ip_source=rightmost_x_forwarded_for` and
+  `rate_limit.trusted_proxies` covering the Envoy pods. Only the server can
   apply an issuer's budget, because only the server verifies the issuer.
 
 Envoy listens on IPv4 only unless its `EnvoyProxy` enables IPv6. With IPv6

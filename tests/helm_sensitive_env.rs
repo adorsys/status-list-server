@@ -2046,6 +2046,83 @@ fn envoy_gateway_overlay_restores_the_permissive_defaults_over_production() {
 }
 
 #[test]
+fn envoy_gateway_overlay_over_production_loads_as_application_config() {
+    let Some(rendered) = render_helm(&[
+        "-f",
+        "deploy/helm/chart/values-aws.yaml",
+        "-f",
+        "deploy/helm/chart/values-production.yaml",
+        "-f",
+        "deploy/helm/chart/values-envoy-gateway.yaml",
+    ]) else {
+        return;
+    };
+    let env = rendered_env(&rendered);
+    let overrides = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let config =
+        Config::load_from_overrides(&overrides).expect("production gateway config must load");
+    assert_eq!(
+        config.rate_limit.client_ip_source,
+        Some(ClientIpSource::RightmostXForwardedFor)
+    );
+    assert_eq!(config.rate_limit.trusted_proxies, ["10.244.0.0/16"]);
+}
+
+#[test]
+fn gateway_mode_requires_the_forwarded_client_address() {
+    let production = [
+        "-f",
+        "deploy/helm/chart/values-aws.yaml",
+        "-f",
+        "deploy/helm/chart/values-production.yaml",
+    ];
+    for args in [
+        [
+            ["-f", "deploy/helm/chart/values-envoy-gateway.yaml"].as_slice(),
+            &production,
+        ]
+        .concat(),
+        [production.as_slice(), &GATEWAY_MODE].concat(),
+        [
+            production.as_slice(),
+            &GATEWAY_MODE,
+            &[
+                "--set-string",
+                "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=",
+            ],
+        ]
+        .concat(),
+        [
+            GATEWAY_MODE.as_slice(),
+            &[
+                "--set-string",
+                "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info",
+                "--set-string",
+                "statuslist.env.APP_ENV=development",
+                "--set-string",
+                "statuslist.env.APP_TELEMETRY__ENVIRONMENT=development",
+            ],
+        ]
+        .concat(),
+    ] {
+        let Some(output) = render_helm_failure(&args) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "gateway mode requires \
+                 statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for"
+            ),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn hosted_gateway_mode_requires_a_public_hostname() {
     let hosted = [
         "-f",

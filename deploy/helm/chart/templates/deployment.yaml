@@ -14,6 +14,10 @@
 {{- fail "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES is required in production; configure a deployment-specific audience" }}
 {{- end }}
 {{- $trustedProxies := regexReplaceAll "[,[:space:]]" (toString (.Values.statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES | default "")) "" }}
+{{- $clientIpSource := trim (toString (.Values.statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE | default "")) }}
+{{- if and .Values.statuslist.gateway.enabled (ne $clientIpSource "rightmost_x_forwarded_for") }}
+{{- fail "gateway mode requires statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for so the server reads the address Envoy appends to X-Forwarded-For; apply values-envoy-gateway.yaml after values-production.yaml and other environment overlays" }}
+{{- end }}
 {{- if and .Values.statuslist.gateway.enabled (empty $trustedProxies) }}
 {{- fail "gateway mode requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES for the Envoy proxy pods (their CIDR, usually the pod CIDR); without it the server keys every client on the Envoy pod" }}
 {{- end }}
@@ -29,7 +33,6 @@
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}
 {{- fail "statuslist.issuerRegistry.volume is required in production" }}
 {{- end }}
-{{- $clientIpSource := trim (toString (.Values.statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE | default "")) }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (eq $clientIpSource "rightmost_x_forwarded_for") (empty $trustedProxies) }}
 {{- fail "statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES is required in production with APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for, the chart default: list the ingress or gateway pod addresses (CIDRs), or set APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info if the pods see client addresses directly" }}
 {{- end }}

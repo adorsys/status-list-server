@@ -319,7 +319,7 @@
         "gateway": {
           "type": "object",
           "title": "Gateway API mode",
-          "description": "Renders HTTPRoutes and Envoy Gateway BackendTrafficPolicies instead of the Ingresses. The routes reuse statuslist.ingress hostnames, management.path and management.enabled, and never target the admin port. Requires APP_RATE_LIMIT__TRUSTED_PROXIES to cover the Envoy pods.",
+          "description": "Renders HTTPRoutes and Envoy Gateway BackendTrafficPolicies instead of the Ingresses. The routes reuse statuslist.ingress hostnames, management.path and management.enabled, and never target the admin port. Requires APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for and APP_RATE_LIMIT__TRUSTED_PROXIES covering the Envoy pods.",
           "additionalProperties": false,
           "properties": {
             "enabled": {

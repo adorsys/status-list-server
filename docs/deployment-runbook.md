@@ -366,8 +366,10 @@ explains how the edge and server limits fit together.
    start, and the local limits work regardless.
 2. Upgrade the release with `values-envoy-gateway.yaml` after your environment
    overlays and before your site values, which set
-   `APP_RATE_LIMIT__TRUSTED_PROXIES`. Check that the routes and policies are
-   accepted and that no server pod warns about an untrusted proxy:
+   `APP_RATE_LIMIT__TRUSTED_PROXIES`. The overlay sets
+   `APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for`, and the render
+   fails without it or the trusted proxies. Check that the routes and policies
+   are accepted and that no server pod warns about an untrusted proxy:
 
    ```bash
    kubectl get httproute,backendtrafficpolicy -n <namespace>
