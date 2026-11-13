@@ -74,28 +74,11 @@ impl HttpServer {
         spawn_governor_pruner(permissive_governor.limiter(), "public");
         spawn_governor_pruner(admin_governor.limiter(), "admin");
 
-        let public_router = with_listener_name(
-            with_common_layers(
-                public_routes(permissive_governor)
-                    // Public only: admin and management have no browser clients,
-                    // and no web page should be able to read /metrics on a dev machine.
-                    .layer(
-                        CorsLayer::new()
-                            .allow_methods([Method::GET, Method::OPTIONS])
-                            .allow_origin(Any)
-                            .allow_headers(Any),
-                    ),
-                config,
-            ),
-            "public",
-        )
-        .with_state(state.clone());
+        let public_router = build_public_router(config, public_routes(permissive_governor))
+            .with_state(state.clone());
 
-        let management_router = with_listener_name(
-            with_common_layers(management_routes(state.clone(), auth_gate), config),
-            "management",
-        )
-        .with_state(state.clone());
+        let management_router =
+            build_management_router(config, state.clone(), auth_gate).with_state(state.clone());
 
         let admin_router = with_listener_name(
             with_common_layers(
@@ -242,6 +225,35 @@ fn with_common_layers(router: Router<AppState>, config: &Config) -> Router<AppSt
             config.limits.max_body_size_bytes,
         ))
         .layer(DefaultBodyLimit::disable())
+}
+
+fn build_management_router(
+    config: &Config,
+    state: AppState,
+    auth_gate: Arc<AuthFailureGate>,
+) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(management_routes(state, auth_gate), config),
+        "management",
+    )
+}
+
+fn build_public_router(config: &Config, router: Router<AppState>) -> Router<AppState> {
+    with_listener_name(
+        with_common_layers(
+            router
+                // Public only: admin and management have no browser clients,
+                // and no web page should be able to read /metrics on a dev machine.
+                .layer(
+                    CorsLayer::new()
+                        .allow_methods([Method::GET, Method::OPTIONS])
+                        .allow_origin(Any)
+                        .allow_headers(Any),
+                ),
+            config,
+        ),
+        "public",
+    )
 }
 
 async fn shutdown_signal() {
@@ -986,6 +998,16 @@ mod tests {
         burst: u32,
         issuer_b_tier: &str,
     ) -> Router {
+        two_issuer_routers_tiered(overrides, burst, issuer_b_tier)
+            .await
+            .0
+    }
+
+    async fn two_issuer_routers_tiered(
+        overrides: &[(&str, &str)],
+        burst: u32,
+        issuer_b_tier: &str,
+    ) -> (Router, Router) {
         use crate::server::auth::tests::{rotation_public_jwk, test_public_jwk};
 
         let config = Config::load_from_overrides(overrides).unwrap();
@@ -1009,7 +1031,10 @@ mod tests {
         state.set_issuer_registry(Arc::new(
             crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry).unwrap(),
         ));
-        management_with_budgets(&config, state, burst)
+        let (_, permissive, _) = build_governor_configs(&config.rate_limit).unwrap();
+        let public =
+            build_public_router(&config, public_routes(permissive)).with_state(state.clone());
+        (management_with_budgets(&config, state, burst), public)
     }
 
     /// Management routes over `state` with the standard write burst set to
@@ -1026,7 +1051,7 @@ mod tests {
         state.issuer_rate_limiter = Arc::new(crate::server::rate_limit::IssuerRateLimiter::new(
             &state.tiers,
         ));
-        management_routes(state.clone(), auth_gate).with_state(state)
+        build_management_router(config, state.clone(), auth_gate).with_state(state)
     }
 
     /// One client IP for every request, as behind a shared NAT or proxy.
@@ -1082,6 +1107,465 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"], "too_many_requests");
+    }
+
+    mod security {
+        use super::*;
+
+        struct SecurityTokens {
+            issuer_a: String,
+            issuer_b: String,
+            forged: String,
+            unknown: String,
+            admin_type: String,
+            expired: String,
+            hmac: String,
+            none: String,
+        }
+
+        fn security_tokens() -> SecurityTokens {
+            use crate::server::auth::tests::{
+                rotation_private_pem, test_ec_private_pem, test_public_jwk,
+            };
+            use base64::Engine;
+
+            let private_pem = test_ec_private_pem();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes()).unwrap();
+            let signed = |typ: &str, exp: u64| {
+                let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+                header.typ = Some(typ.into());
+                header.kid = Some("test-key".into());
+                format!("Bearer {}", jsonwebtoken::encode(
+                &header,
+                &serde_json::json!({"iss":"issuer-a","iat":if exp <= now { exp - 120 } else { now },"exp":exp}),
+                &key,
+            ).unwrap())
+            };
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+            header.typ = Some("statuslist-management+jwt".into());
+            header.kid = Some("test-key".into());
+            let public: serde_json::Value =
+                serde_json::from_slice(test_public_jwk().as_bytes()).unwrap();
+            let hmac = format!(
+                "Bearer {}",
+                jsonwebtoken::encode(
+                    &header,
+                    &serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300}),
+                    &jsonwebtoken::EncodingKey::from_secret(&serde_json::to_vec(&public).unwrap()),
+                )
+                .unwrap()
+            );
+            let encode = |value: serde_json::Value| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&value).unwrap())
+            };
+            let none = format!(
+                "Bearer {}.{}.",
+                encode(
+                    serde_json::json!({"alg":"none","typ":"statuslist-management+jwt","kid":"test-key"})
+                ),
+                encode(serde_json::json!({"iss":"issuer-a","iat":now,"exp":now+300})),
+            );
+            SecurityTokens {
+                issuer_a: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-a", "test-key", &private_pem)
+                ),
+                issuer_b: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "rotation-key", &rotation_private_pem())
+                ),
+                forged: format!(
+                    "Bearer {}",
+                    issuer_token("issuer-b", "test-key", &private_pem)
+                ),
+                unknown: format!(
+                    "Bearer {}",
+                    issuer_token(
+                        "unknown-issuer",
+                        "unknown-key",
+                        include_str!("../test_data/ec-private.pem")
+                    )
+                ),
+                admin_type: signed("statuslist-admin+jwt", now + 300),
+                expired: signed("statuslist-management+jwt", now - 120),
+                hmac,
+                none,
+            }
+        }
+
+        struct SecurityCase {
+            name: &'static str,
+            headers: Vec<axum::http::HeaderValue>,
+            error: &'static str,
+        }
+
+        fn security_cases(tokens: &SecurityTokens) -> Vec<SecurityCase> {
+            use axum::http::HeaderValue;
+            let one = |name, value: &str, error| SecurityCase {
+                name,
+                headers: vec![HeaderValue::from_str(value).unwrap()],
+                error,
+            };
+            vec![
+                one("Basic", "Basic credential", "missing_token"),
+                one("malformed", "Bearer invalid.jwt.token", "invalid_token"),
+                one("forged issuer", &tokens.forged, "invalid_token"),
+                one("unknown key", &tokens.unknown, "invalid_token"),
+                one("admin type", &tokens.admin_type, "invalid_token"),
+                one("expired", &tokens.expired, "invalid_token"),
+                one("public-key HMAC", &tokens.hmac, "invalid_token"),
+                one("alg none", &tokens.none, "invalid_token"),
+                one("empty Bearer", "Bearer ", "invalid_token"),
+                SecurityCase {
+                    name: "duplicate headers",
+                    headers: vec![
+                        HeaderValue::from_static("Bearer invalid.jwt.token"),
+                        HeaderValue::from_str(&tokens.issuer_a).unwrap(),
+                    ],
+                    error: "invalid_token",
+                },
+                SecurityCase {
+                    name: "non-UTF8 header",
+                    headers: vec![
+                        HeaderValue::from_bytes(b"Bearer sensitive-fragment\xff").unwrap(),
+                    ],
+                    error: "missing_token",
+                },
+            ]
+        }
+
+        async fn security_write(
+            router: &Router,
+            method: Method,
+            list_id: &str,
+            headers: &[axum::http::HeaderValue],
+            body: &'static str,
+            client: u8,
+        ) -> axum::response::Response {
+            use axum::http::header;
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}/statuses"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, client)),
+                    12345,
+                )));
+            for value in headers {
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            router
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn security_read(router: &Router, list_id: &str) -> axum::response::Response {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{API_V1_PREFIX}/status-lists/{list_id}"))
+                        .extension(axum::extract::ConnectInfo(SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            12345,
+                        )))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        async fn response_json(response: axum::response::Response) -> serde_json::Value {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        fn authorization(value: &str) -> Vec<axum::http::HeaderValue> {
+            vec![axum::http::HeaderValue::from_str(value).unwrap()]
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_reject_invalid_credentials() {
+            use axum::http::header;
+            let router = two_issuer_management_with(&[], 100).await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            for method in [Method::PUT, Method::PATCH] {
+                let missing = security_write(
+                    &router,
+                    method.clone(),
+                    &list_id,
+                    &[],
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(
+                    missing.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} missing"
+                );
+                assert_eq!(missing.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                assert_eq!(response_json(missing).await["error"], "missing_token");
+                for (index, case) in security_cases(&tokens).iter().enumerate() {
+                    let rejected = security_write(
+                        &router,
+                        method.clone(),
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(
+                        rejected.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {}",
+                        case.name
+                    );
+                    let challenge = if case.error == "missing_token" {
+                        "Bearer"
+                    } else {
+                        "Bearer error=\"invalid_token\""
+                    };
+                    assert_eq!(
+                        rejected.headers()[header::WWW_AUTHENTICATE],
+                        challenge,
+                        "{method} {}",
+                        case.name
+                    );
+                    let body = axum::body::to_bytes(rejected.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(error["error"], case.error, "{method} {}", case.name);
+                    let body = String::from_utf8_lossy(&body);
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !body.contains(marker),
+                                    "{method} {} exposed a credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn management_write_routes_preserve_issuer_ownership() {
+            use axum::http::header;
+            let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+            let tokens = security_tokens();
+            let list_id = uuid::Uuid::new_v4().to_string();
+            let published = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                1,
+            )
+            .await;
+            assert_eq!(published.status(), StatusCode::CREATED);
+            let location = published.headers()[header::LOCATION].clone();
+            let initial = security_read(&public, &list_id).await;
+            assert_eq!(initial.status(), StatusCode::OK);
+            let etag = initial.headers()[header::ETAG].clone();
+            let body = axum::body::to_bytes(initial.into_body(), usize::MAX)
+                .await
+                .unwrap();
+
+            let owner_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                r#"{"statuses":[]}"#,
+                2,
+            )
+            .await;
+            assert_eq!(owner_republish.status(), StatusCode::CONFLICT);
+            assert_eq!(owner_republish.headers()[header::LOCATION], location);
+            assert_eq!(
+                response_json(owner_republish).await["error"],
+                "status_list_already_exists"
+            );
+            let other_republish = security_write(
+                &management,
+                Method::PUT,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                r#"{"statuses":[]}"#,
+                3,
+            )
+            .await;
+            assert_eq!(other_republish.status(), StatusCode::CONFLICT);
+            assert!(other_republish.headers().get(header::LOCATION).is_none());
+            assert_eq!(
+                response_json(other_republish).await["error"],
+                "status_list_already_exists"
+            );
+
+            let change = r#"{"statuses":[{"index":0,"status":1}]}"#;
+            let other_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_b),
+                change,
+                4,
+            )
+            .await;
+            assert_eq!(other_update.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response_json(other_update).await["error"],
+                "issuer_mismatch"
+            );
+            let after_other = security_read(&public, &list_id).await;
+            assert_eq!(after_other.status(), StatusCode::OK);
+            assert_eq!(after_other.headers()[header::ETAG], etag);
+            assert_eq!(
+                axum::body::to_bytes(after_other.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+
+            let owner_update = security_write(
+                &management,
+                Method::PATCH,
+                &list_id,
+                &authorization(&tokens.issuer_a),
+                change,
+                5,
+            )
+            .await;
+            assert_eq!(owner_update.status(), StatusCode::OK);
+            let after_owner = security_read(&public, &list_id).await;
+            assert_eq!(after_owner.status(), StatusCode::OK);
+            assert_ne!(after_owner.headers()[header::ETAG], etag);
+            assert_ne!(
+                axum::body::to_bytes(after_owner.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+                body
+            );
+        }
+
+        #[tokio::test]
+        async fn management_and_public_routes_do_not_log_credentials_or_signing_key() {
+            use std::io::Write;
+            use tracing::instrument::WithSubscriber;
+            struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+            impl Write for LogWriter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || LogWriter(sink.clone()))
+                .finish();
+            async {
+                tracing::trace!("security log capture ready");
+                let (management, public) = two_issuer_routers_tiered(&[], 100, "standard").await;
+                let tokens = security_tokens();
+                let cases = security_cases(&tokens);
+                let list_id = uuid::Uuid::new_v4().to_string();
+                let published = security_write(
+                    &management,
+                    Method::PUT,
+                    &list_id,
+                    &authorization(&tokens.issuer_a),
+                    r#"{"statuses":[]}"#,
+                    1,
+                )
+                .await;
+                assert_eq!(published.status(), StatusCode::CREATED);
+                for (index, case) in cases.iter().enumerate() {
+                    let response = security_write(
+                        &management,
+                        Method::PATCH,
+                        &list_id,
+                        &case.headers,
+                        r#"{"statuses":[]}"#,
+                        (index + 2) as u8,
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{}", case.name);
+                }
+                let public_response = security_read(&public, &list_id).await;
+                assert_eq!(public_response.status(), StatusCode::OK);
+                let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+                assert!(logs.contains("security log capture ready"));
+                assert!(logs.contains("Management JWT rejected"));
+                for sensitive in [
+                    &tokens.issuer_a,
+                    &tokens.forged,
+                    &tokens.unknown,
+                    &tokens.admin_type,
+                    &tokens.expired,
+                    &tokens.hmac,
+                    &tokens.none,
+                ] {
+                    let token = sensitive.strip_prefix("Bearer ").unwrap_or(sensitive);
+                    assert!(!logs.contains(token), "logs exposed credential material");
+                }
+                for case in &cases {
+                    for value in &case.headers {
+                        let credential = String::from_utf8_lossy(value.as_bytes());
+                        for marker in [
+                            credential.as_ref(),
+                            credential.strip_prefix("Bearer ").unwrap_or(&credential),
+                            credential.strip_prefix("Basic ").unwrap_or(&credential),
+                        ] {
+                            if marker.len() >= 8 {
+                                assert!(
+                                    !logs.contains(marker),
+                                    "logs exposed {} credential",
+                                    case.name
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(!logs.contains("sensitive-fragment"));
+                for line in include_str!("../test_data/ec-private.pem").lines() {
+                    if line.len() > 40 {
+                        assert!(!logs.contains(line), "logs exposed signing key");
+                    }
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+        }
     }
 
     #[tokio::test]

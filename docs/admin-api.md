@@ -99,3 +99,116 @@ another replica. This reserves historical static identities from hosted use.
 
 Run the [admin demo](../demo/README.md#admin-issuer-reads) to list issuers and
 inspect a detail response without placing the bearer token in shell history.
+
+## Hosted profile local setup
+
+Hosted mode needs a SQL backend and an operator registry containing the portal
+backend's admin principal with `issuers:read` and `issuers:write` scopes. For
+a local single-node trial, prepare the admin key and registry below, then run
+with SQLite, the development signing material, and a distinct admin audience:
+
+```bash
+mkdir -p issuer-registry
+APP_SERVER__PROFILE=hosted \
+APP_DATABASE__BACKEND=sqlite \
+APP_DATABASE__URL='sqlite://issuer-registry/status-list.db?mode=rwc' \
+APP_ADMIN_AUTH__AUDIENCES='http://localhost:8002/admin/v1' \
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml \
+APP_SERVER__CERT__STORE__CERTIFICATE_PATH=test_data/certs/dev.crt \
+APP_SERVER__CERT__STORE__SIGNING_KEY_PATH=test_data/certs/dev.key \
+cargo run --features sqlite
+```
+
+The `issuer-registry/` directory is ignored by Git and holds this local
+database and registry. File-backed SQLite does not need the single-connection
+limit used for shared in-memory SQLite.
+
+For a local admin key, generate a separate P-256 private key outside the
+repository and write its public JWK into the ignored registry directory:
+
+```bash
+umask 077
+mkdir -p issuer-registry
+install -d -m 700 "$HOME/.local/share/status-list-server"
+export ADMIN_KEY
+ADMIN_KEY=$(mktemp "$HOME/.local/share/status-list-server/admin.XXXXXXXX")
+openssl ecparam -name prime256v1 -genkey -noout -out "$ADMIN_KEY"
+printf 'Private key: %s\n' "$ADMIN_KEY"
+uv run --project demo --locked python - > issuer-registry/admin-public.jwk <<'PY'
+import json
+import os
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from jwt.algorithms import ECAlgorithm
+
+with open(os.environ["ADMIN_KEY"], "rb") as key_file:
+    public_key = load_pem_private_key(key_file.read(), password=None).public_key()
+jwk = ECAlgorithm.to_jwk(public_key, as_dict=True)
+print(json.dumps({field: jwk[field] for field in ("kty", "crv", "x", "y")}))
+PY
+```
+
+Add the public key to `issuer-registry/issuers.yaml`. If the file does not
+exist yet, start with `version: 1` and `issuers: []`. This example uses a
+local-only key ID; keep it unique across all registry keys:
+
+```yaml
+version: 1
+issuers: []
+admins:
+  - id: portal-backend
+    scopes: ["issuers:read", "issuers:write"]
+    keys:
+      - kid: local-admin-key
+        alg: ES256
+        jwk: # replace this mapping with the fields in issuer-registry/admin-public.jwk
+          kty: EC
+          crv: P-256
+          x: <public JWK x>
+          y: <public JWK y>
+```
+
+Validate the edited registry with
+`APP_MANAGEMENT_AUTH__ISSUERS_FILE=issuer-registry/issuers.yaml cargo run --features sqlite -- issuer-registry`.
+Then start the hosted server with the command above. To sign a short-lived admin
+token for a local request, run:
+
+```bash
+export ADMIN_KEY='<private key path printed above>'
+export ADMIN_ID=portal-backend ADMIN_KID=local-admin-key
+export ADMIN_AUDIENCE='http://localhost:8002/admin/v1'
+ADMIN_TOKEN=$(uv run --project demo --locked python - <<'PY'
+import os
+import time
+import jwt
+
+now = int(time.time())
+with open(os.environ["ADMIN_KEY"], encoding="utf-8") as key_file:
+    token = jwt.encode(
+        {"iss": os.environ["ADMIN_ID"], "aud": os.environ["ADMIN_AUDIENCE"],
+         "iat": now, "exp": now + 60},
+        key_file.read(), algorithm="ES256",
+        headers={"typ": "statuslist-admin+jwt", "kid": os.environ["ADMIN_KID"]},
+    )
+print(token)
+PY
+)
+printf 'Authorization: Bearer %s\n' "$ADMIN_TOKEN" | \
+  curl -i -H @- http://localhost:8002/admin/v1/issuers
+unset ADMIN_TOKEN ADMIN_ID ADMIN_KID ADMIN_AUDIENCE ADMIN_KEY
+```
+
+The portal backend calls `POST /admin/v1/issuers` with the required
+`display_name`, `owner`, `public_key` (a public JWK), and `alg` fields, then
+reads the assigned issuer and key IDs from the response. `expires_at` is
+optional. See the `createIssuer` operation in the
+[Admin OpenAPI contract](openapi-admin.yaml) and the
+[hosted issuer creation demo](../demo/README.md#hosted-issuer-creation-and-renewal)
+for the request shape. The developer signs management tokens as described in the
+[registry issuer onboarding steps](issuer-onboarding.md#onboard-a-registry-issuer).
+For overlap rotation, read the issuer's `ETag`, add the new public key with
+`POST /admin/v1/issuers/{issuer_id}/keys` and `If-Match`, verify writes with
+the new key, then revoke the old key with
+`PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}`, body
+`{"state":"revoked"}`, and a fresh `If-Match`.
+See the [portal ownership trust boundary](trust-model.md#portal-ownership)
+for the backend's authorization responsibility.
