@@ -282,9 +282,9 @@ spec:
             dashboard_url: {{ .Values.alerting.dashboardUrl | default "http://localhost:3000/d/status-list-slo" | quote }}
         - alert: ListQuotaNotEnforced
           expr: list_quota_enforced{otel_scope_name="status-list-server",namespace="{{ .Release.Namespace }}"} == 0
-          for: 15m
+          for: 30m
           labels:
-            severity: page
+            severity: warn
             team: statuslist
             service: status-list-server
             namespace: {{ .Release.Namespace | quote }}

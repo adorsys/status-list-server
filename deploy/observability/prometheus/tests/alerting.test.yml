@@ -523,14 +523,14 @@ tests:
     input_series:
       - series: >-
           list_quota_enforced{otel_scope_name="status-list-server",namespace="ns1"}
-        values: '0x40'
+        values: '0x60'
     alert_rule_test:
-      - eval_time: 20m
+      - eval_time: 40m
         alertname: ListQuotaNotEnforced
         exp_alerts:
           - exp_labels:
               service: "status-list-server"
-              severity: "page"
+              severity: "warn"
               team: "statuslist"
               sli: "list_quota"
               namespace: "ns1"
@@ -544,8 +544,8 @@ tests:
     input_series:
       - series: >-
           list_quota_enforced{otel_scope_name="status-list-server",namespace="ns1"}
-        values: '1x40'
+        values: '1x60'
     alert_rule_test:
-      - eval_time: 20m
+      - eval_time: 40m
         alertname: ListQuotaNotEnforced
         exp_alerts: []

@@ -844,6 +844,10 @@ it has no file for and exits. Only pods already running can still write, which i
 for them to be gone. To start one anyway, see
 [Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations).
 
+The `list_quota_enforced` gauge updates at startup and on each publish, so the `ListQuotaNotEnforced`
+alert can keep firing for a short while after `list-quota enable` on a quiet environment — it clears
+on the next publish or a pod restart.
+
 `enable` checks every issuer against the lists that exist and the configured cap. If any issuer
 has more lists than the cap, or a `list_count` that differs from its lists, it leaves the quota off
 and names them:

@@ -267,9 +267,9 @@ groups:
       - alert: ListQuotaNotEnforced
         expr: |
           list_quota_enforced{otel_scope_name="status-list-server"} == 0
-        for: 15m
+        for: 30m
         labels:
-          severity: page
+          severity: warn
           team: statuslist
           service: status-list-server
           sli: list_quota
