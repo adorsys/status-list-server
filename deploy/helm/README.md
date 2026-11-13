@@ -381,39 +381,12 @@ most 10 requests in any second, while its tier allows a burst of 100 and then on
 request a second. One `PATCH` can change up to 5000 statuses, so most issuers
 stay well below the limit; raise `managementRequestsPerSecond` if yours do not.
 
-Enable `global` only once the platform runs Envoy Gateway's rate limit service
-with Redis. Envoy Gateway cannot apply a policy with global rules without that
-service, and answers `500` on every route the policy targets.
-
-Gateway mode needs `APP_RATE_LIMIT__TRUSTED_PROXIES` to cover the Envoy pods in
-every environment, and the render fails without it. The server keys its own
-limits on the address Envoy appends to `X-Forwarded-For`; without trusted
-proxies it would key every client on the Envoy pod.
-
-The reference setup installs Envoy Gateway with
-[`envoy-gateway.yaml`](envoy-gateway.yaml) and applies
-[`envoy-gateway-platform.yaml`](envoy-gateway-platform.yaml): a GatewayClass, an
-EnvoyProxy, a Gateway and a ClientTrafficPolicy. Apply
-[`chart/values-envoy-gateway.yaml`](chart/values-envoy-gateway.yaml) after any
-environment overlays and before your site values, which set the trusted
-proxies:
-
-```bash
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
-  --namespace envoy-gateway-system --create-namespace -f deploy/helm/envoy-gateway.yaml
-kubectl apply -f deploy/helm/envoy-gateway-platform.yaml
-helm upgrade --install statuslist deploy/helm/chart --namespace statuslist \
-  -f deploy/helm/chart/values-envoy-gateway.yaml -f my-values.yaml
-```
-
-The overlay turns the NetworkPolicy on and admits only the `statuslist`
-Gateway's Envoy proxies in `envoy-gateway-system` to the public and management
-ports. Over `values-production.yaml`, it also undoes that file's `connect_info`
-stopgap, so the server keys each client by address with the default permissive
-limit. The
-[deployment runbook](../../docs/deployment-runbook.md#expose-the-service-through-envoy-gateway)
-covers the topology this assumes, the rollout, and how to verify the cap across
-replicas and a Redis outage. [`scripts/check-envoy-gateway-kind.sh`](../../scripts/check-envoy-gateway-kind.sh)
+To deploy it, follow the
+[deployment runbook](../../docs/deployment-runbook.md#expose-the-service-through-envoy-gateway):
+it covers the topology this assumes, installing Envoy Gateway, the values the
+render requires, applying [`chart/values-envoy-gateway.yaml`](chart/values-envoy-gateway.yaml),
+enabling the global rules, and verifying the cap across replicas and a Redis
+outage. [`scripts/check-envoy-gateway-kind.sh`](../../scripts/check-envoy-gateway-kind.sh)
 checks the edge limits, routing and `429` responses in a throwaway kind cluster.
 
 ## Configure Signing Credentials

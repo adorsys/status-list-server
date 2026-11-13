@@ -308,8 +308,11 @@ explains how the edge and server limits fit together.
 - **Envoy must see each client's own address.** The edge limits key on the peer
   of each connection Envoy accepts, and Envoy appends that address to
   `X-Forwarded-For` for the server. If a load balancer replaces it, every client
-  behind it shares one bucket at the edge and at the server, and nothing logs a
-  warning. On AWS:
+  behind it shares one bucket at the edge, and nothing logs a warning. The
+  server keys them on the load balancer too, unless its address is in
+  `APP_RATE_LIMIT__TRUSTED_PROXIES`, as an internal NLB in the EKS node subnets
+  can be. Then the server skips it and keys on the `X-Forwarded-For` entry the
+  client wrote, so keep such a load balancer out of the trusted range. On AWS:
   - An NLB with `ip` targets does not preserve client addresses for TCP or TLS
     by default. Set
     `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true`
@@ -368,8 +371,11 @@ explains how the edge and server limits fit together.
    overlays and before your site values, which set
    `APP_RATE_LIMIT__TRUSTED_PROXIES`. The overlay sets
    `APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for`, and the render
-   fails without it or the trusted proxies. Check that the routes and policies
-   are accepted and that no server pod warns about an untrusted proxy:
+   fails without it or the trusted proxies. Over `values-production.yaml`, the
+   overlay also undoes that file's `connect_info` stopgap, so the server keys
+   each client by address with the default permissive limit. Check that the
+   routes and policies are accepted and that no server pod warns about an
+   untrusted proxy:
 
    ```bash
    kubectl get httproute,backendtrafficpolicy -n <namespace>
