@@ -850,11 +850,15 @@ jobs:
         # release is attempted.
         run: |
           set -euo pipefail
-          if ! kubectl get configmap status-list-server-issuers \
-              -n "${{ env.HELM_NAMESPACE }}" >/dev/null 2>&1; then
-            echo "::error::ConfigMap 'status-list-server-issuers' does not exist in namespace '${{ env.HELM_NAMESPACE }}'."
-            echo "The deployment mounts the issuer trust registry from it, and nothing creates it."
-            echo "Create it before the first release; see docs/deployment-runbook.md, 'Issuer trust registry'."
+          if ! out=$(kubectl get configmap status-list-server-issuers \
+              -n "${{ env.HELM_NAMESPACE }}" 2>&1); then
+            if grep -qi forbidden <<<"$out"; then
+              echo "::error::Deploy role cannot read configmaps in namespace '${{ env.HELM_NAMESPACE }}' (RBAC). Its EKS access entry and 'statuslist-deployer' binding must cover this namespace."
+            else
+              echo "::error::ConfigMap 'status-list-server-issuers' does not exist in namespace '${{ env.HELM_NAMESPACE }}'."
+              echo "The deployment mounts the issuer trust registry from it, and nothing creates it."
+              echo "Create it before the first release; see docs/deployment-runbook.md, 'Issuer trust registry'."
+            fi
             exit 1
           fi
           echo "ConfigMap 'status-list-server-issuers' is present."
@@ -887,8 +891,10 @@ jobs:
         run: |
           set -euo pipefail
           NAMESPACE="${{ env.HELM_NAMESPACE }}"
-          kubectl auth can-i create certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
-          kubectl auth can-i patch certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes
+          kubectl auth can-i create certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes \
+            || { echo "::error::Deploy role can't create cert-manager Certificates in $NAMESPACE"; exit 1; }
+          kubectl auth can-i patch certificates.cert-manager.io -n "$NAMESPACE" | grep -qx yes \
+            || { echo "::error::Deploy role can't patch cert-manager Certificates in $NAMESPACE"; exit 1; }
           helm template "${{ env.HELM_RELEASE_NAME }}" "$CHART_DIR" \
             --namespace "$NAMESPACE" \
             $HELM_VALUES_ARGS \
@@ -978,7 +984,7 @@ jobs:
             -n ${{ env.HELM_NAMESPACE }} \
             --timeout 2m
 
-      - name: Verify database secret and signing certificate
+      - name: Verify database secret
         # Ready=True can be stale from before the upgrade, so require refreshTime to move past the baseline.
         # Helm already succeeded, so on failure roll back (or uninstall a fresh install) here.
         env:
@@ -1002,7 +1008,7 @@ jobs:
             if [ -f "$PREV_REVISION_FILE" ]; then
               prev_rev=$(cat "$PREV_REVISION_FILE")
             fi
-            echo "::warning::Secret or certificate verification failed; restoring the previous release state"
+            echo "::warning::Database secret verification failed; restoring the previous release state"
             if [ -n "$prev_rev" ]; then
               if ! helm rollback "$RELEASE" "$prev_rev" --namespace "$NAMESPACE" --wait --timeout 5m; then
                 echo "::warning::helm rollback to revision $prev_rev failed; manual intervention required"
