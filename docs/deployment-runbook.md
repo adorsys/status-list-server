@@ -926,8 +926,8 @@ Before triggering a tagged release, provide the `status-list-server-issuers`
 ConfigMap in `statuslist`; the workflow checks for it before running Helm. The
 deploy role's EKS access entry and `statuslist-deployer` RoleBinding must also
 cover `statuslist` (see ADORSYS-GIS/wallet-eks-env#68; they currently point at
-`statuslist-production`), or the check fails with a 403 that it reports as a
-missing ConfigMap. Set the repository-level GitHub Actions variable
+`statuslist-production`), or the check fails with an RBAC error. Set the
+repository-level GitHub Actions variable
 `IMAGE_VARIANT` to `fscert` before the first deployment. The workflow rejects
 any other value, and the scheduled image scan reads the same repository-level
 variable. The workflow uses short-lived AWS credentials through OIDC.
@@ -936,8 +936,8 @@ The first `fscert` release boots in list-quota transition mode (the overlay sets
 `APP_LIMITS__LIST_QUOTA_TRANSITION=true`) so the pod starts across the
 non-rollback-safe list-quota and issuer-ownership migrations. Follow [Upgrading
 to the list quota](troubleshooting.md#upgrading-to-the-list-quota): once no old
-pod remains, run `list-quota recount` then `list-quota enable`, then have a
-follow-up PR drop the flag.
+pod remains, run `list-quota recount` then `list-quota enable`, then drop the
+flag (tracked in #776).
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
