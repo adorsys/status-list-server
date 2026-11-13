@@ -1,65 +1,48 @@
 # API Testing
 
-This project ships ready-to-import Postman assets and an automated Newman
-runner for checking the live HTTP API.
-
-## Postman Quickstart
-
-Import these files into Postman, Bruno, or another client that accepts Postman
-Collection v2.1 exports:
+This project ships a Postman collection, a local environment, and a Newman
+runner for checking the live HTTP API:
 
 - [`postman/status-list-server.postman_collection.json`](../postman/status-list-server.postman_collection.json)
 - [`postman/status-list-server.postman_environment.json`](../postman/status-list-server.postman_environment.json)
 
-The environment exposes these variables:
+## Postman Quickstart
 
-| Variable          | Default                                | Purpose                                                               |
-| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `baseUrl`         | `http://localhost:8000`                | Running status-list-server endpoint.                                  |
-| `list_id`         | `477121aa-b598-419e-916f-1e74654ff38b` | Status list UUID used by publish, update, and retrieve requests.      |
-| `issuer_id`       | `my-issuer`                            | Issuer identifier generated for the temporary Newman test key.         |
-| `adminToken`      | empty                                  | Signed admin JWT with the scopes required by the selected request.    |
-| `token`           | empty                                  | Signed issuer JWT for protected `PUT` and `PATCH` requests.           |
-| `historical_time` | `1686925000`                           | Unix timestamp used by historical resolution.                         |
-| `adminUrl`        | `http://localhost:8002`                | Admin listener for issuer lifecycle requests.                         |
-| `kid`             | empty                                  | Portal key ID used by the hosted lifecycle folder.                   |
-| `portalOwner`     | `github\|5821374`                     | Owner assigned when creating a portal issuer.                         |
-| `portalPublicJwk` | `{}`                                   | Public JWK supplied for issuer creation.                              |
-| `renewalExpiry`   | `0`                                    | New Unix expiry for a renewal request.                                |
-| `issuer_etag`     | `"paste-current-etag"`                 | Current issuer ETag for lifecycle writes.                             |
+Import both files and select the included environment. Set the public,
+management, and admin listener URLs for your server. The defaults are
+`http://localhost:8000`, `http://localhost:8001`, and
+`http://localhost:8002`. Set `issuer_id` to an issuer already provisioned by
+the operator, and set the secret `token` variable to a signed management JWT
+for that issuer. The token must use a registered key and the audience required
+by the server. See [issuer onboarding](issuer-onboarding.md) for local setup.
 
-The collection is organized into Health & Metrics, Status Lists, Aggregation,
-and Admin API (Issuer Management) folders. Requests include Postman test scripts that check
-status codes, content types, token response headers, and JSON response shapes.
+Send **Start new test run** to generate a fresh `list_id`, then **Verify issuer
+credentials**. The latter calls the authenticated
+`GET {{managementUrl}}/api/v1/credentials` endpoint. The management writes
+inherit the collection's bearer token. Public reads and negative authentication
+tests do not use it. The collection cannot register an issuer: the server's
+management API no longer has a registration route.
 
-The final **Issuer Lifecycle (destructive, hosted profile)** folder requires a
-hosted server, a portal issuer, its key ID, and an admin JWT with
-`issuers:write`. Set `issuer_id`, `kid`, and `adminToken` in Postman before
-running that folder. Its suspend and revoke requests change live issuer state.
-The private profile Newman check omits this folder because it has no portal
-issuer or admin token; the hosted lifecycle is covered by the Rust HTTP tests.
+The environment also contains `adminToken` for admin reads and optional hosted
+issuer lifecycle requests. The **Issuer Lifecycle (destructive, hosted
+profile)** folder requires a hosted server, a portal issuer, its key ID, and
+an admin JWT with `issuers:write`. Set `issuer_id`, `kid`, and `adminToken`
+before running that folder; suspend and revoke change live issuer state.
+The Newman check omits this folder because it runs against the private profile.
 
-Protected management routes require a Bearer JWT signed by the private key that
-matches the issuer public JWK provisioned in the operator-managed issuer
-registry. The Newman script generates separate temporary issuer and admin keys and
-tokens, writes their public keys to the registry file named by `POSTMAN_ISSUER_REGISTRY_FILE`,
-and waits until the running server reloads that file.
-
-## Local Prerequisites
-
-The Postman/Newman runner expects these host tools:
-
-- Rust/Cargo to start the local server with `cargo run`.
-- Node.js for generating ephemeral issuer keys and JWTs.
-- `curl` for readiness checks.
-- Newman or Docker when running the Postman collection from the command line.
-  The CI path uses the pinned Newman container by default.
+Keep bearer tokens private. The checked-in environment contains empty secret
+values; do not export populated local values to the repository or a public
+workspace.
 
 ## Newman Collection Check
 
-Create an empty valid registry file, then start the API with that same path and
-the distinct management and admin audiences used by the Newman script. The
-script replaces the empty registry with its temporary issuer and admin entries; the server's registry watcher reloads it.
+The runner requires Rust/Cargo to start the server, Node.js to generate
+temporary test keys and JWTs, `curl` for readiness checks, and Newman or Docker.
+It replaces a dedicated registry file with temporary issuer and admin entries,
+then waits until both identities authenticate. Run it only against a local or
+isolated server with a dedicated registry file.
+
+Create an empty registry and start the server with that file:
 
 ```bash
 registry_file="$PWD/target/postman-test-issuers.json"
@@ -78,8 +61,7 @@ APP_ADMIN_AUTH__AUDIENCES=status-list-server-admin \
 cargo run
 ```
 
-In another terminal, run the same collection check used by CI and point it at
-the same registry file:
+In another terminal, run the collection check against that server:
 
 ```bash
 POSTMAN_ISSUER_REGISTRY_FILE="$PWD/target/postman-test-issuers.json" \
@@ -88,28 +70,11 @@ ADMIN_AUDIENCE=status-list-server-admin \
 ./scripts/test-postman-collection.sh
 ```
 
-The script writes the issuer's and admin's public JWKs to the registry file, then runs Newman
-with a temporary collection and environment containing `baseUrl`, `list_id`,
-`issuer_id`, `token`, `adminToken`, and `historical_time`. It waits until both
-identities can authenticate before running the assertions. It fails early if
-`POSTMAN_ISSUER_REGISTRY_FILE` is unset. No generated collection or environment
-is written into the repository. Set `NEWMAN_RUNNER=docker` to use the pinned
-Newman container instead of a locally installed Newman binary.
-
-Useful environment overrides:
-
-| Variable                   | Default                             | Purpose                                                           |
-| -------------------------- | ----------------------------------- | ----------------------------------------------------------------- |
-| `MANAGEMENT_AUDIENCE` | `status-list-server-management` | Must match the server management audience. |
-| `ADMIN_AUDIENCE` | `status-list-server-admin` | Must match the server admin audience and differ from management. |
-| `API_ENDPOINT`             | `http://localhost:8000`             | Live API endpoint under test.                                     |
-| `NEWMAN_API_READY_TIMEOUT` | `180`                               | Maximum seconds to wait for the live API before running Newman.   |
-| `NEWMAN_RUNNER`            | `auto`                              | Newman runner selection: `auto`, `local`, or `docker`.            |
-| `NEWMAN_DOCKER_IMAGE`      | `postman/newman@sha256:02dc...e04f` | Pinned Newman container used by CI and `NEWMAN_RUNNER=docker`.    |
-| `POSTMAN_ISSUER_REGISTRY_FILE` | required                          | Dedicated registry file loaded by the server through `APP_MANAGEMENT_AUTH__ISSUERS_FILE`. |
-
-The script replaces the registry file with its temporary test issuer and admin. Run it
-only against a local or isolated test server with a dedicated registry file;
-never point it at a production registry or a registry shared with other
-issuers. For a remote test server, the Newman runner and server must both have
-access to the same dedicated registry file.
+The runner writes only temporary collection and environment copies. It
+filters the hosted lifecycle folder and runs the remaining requests with the
+generated tokens. `POSTMAN_ISSUER_REGISTRY_FILE` is required. `API_ENDPOINT`
+defaults to `http://localhost:8000`; `MANAGEMENT_URL` and `ADMIN_URL`
+default to the same host on ports 8001 and 8002. The runner selects a local
+Newman binary when available, otherwise Docker; set `NEWMAN_RUNNER=local` or
+`NEWMAN_RUNNER=docker` to choose explicitly. `NEWMAN_API_READY_TIMEOUT`
+defaults to 180 seconds.
