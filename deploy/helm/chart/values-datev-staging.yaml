@@ -7,6 +7,11 @@ statuslist:
     type: Recreate
   env:
     APP_CACHE__BACKEND: memory
+    # The live release predates the list quota; boot the first fscert release in transition mode so
+    # the pod starts across the non-rollback-safe migrations. After rollout run `list-quota recount`
+    # then `list-quota enable` (troubleshooting.md#upgrading-to-the-list-quota); a follow-up removes
+    # this flag, which only logs a warning once the quota is already enforced.
+    APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
   secretMounts:
     - name: database-credentials
       secretName: statuslist-secret

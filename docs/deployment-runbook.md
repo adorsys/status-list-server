@@ -932,6 +932,13 @@ missing ConfigMap. Set the repository-level GitHub Actions variable
 any other value, and the scheduled image scan reads the same repository-level
 variable. The workflow uses short-lived AWS credentials through OIDC.
 
+The first `fscert` release boots in list-quota transition mode (the overlay sets
+`APP_LIMITS__LIST_QUOTA_TRANSITION=true`) so the pod starts across the
+non-rollback-safe list-quota and issuer-ownership migrations. Follow [Upgrading
+to the list quota](troubleshooting.md#upgrading-to-the-list-quota): once no old
+pod remains, run `list-quota recount` then `list-quota enable`, then have a
+follow-up PR drop the flag.
+
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
 the existing `issuer` and `public_key` columns. `duplicate_kid_count > 1` blocks
