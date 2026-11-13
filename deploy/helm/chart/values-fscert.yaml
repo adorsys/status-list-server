@@ -5,11 +5,13 @@ statuslist:
   aws:
     mountCredentials: false
   env:
-    # Nulling a base-chart key removes it from the rendered env; only these three are defined in
-    # the base `values.yaml`. EMAIL/ORGANIZATION/DNS__PROVIDER come from values-aws.yaml, where a
-    # null renders as an empty value and the empty DNS provider fails config parsing, so they are
-    # deliberately not nulled here (fscert ignores them).
+    # fscert signs from a mounted file, so clear every ACME setting the base chart or an ACME
+    # overlay would otherwise inject. deployment.yaml skips null env values, so a null removes
+    # the key regardless of which overlay set it.
     APP_SERVER__CERT__ACME_DIRECTORY_URL: null
     APP_SERVER__CERT__EKU: null
     APP_SERVER__CERT__RENEWAL_CRON_SCHEDULE: null
+    APP_SERVER__CERT__EMAIL: null
+    APP_SERVER__CERT__ORGANIZATION: null
+    APP_SERVER__CERT__DNS__PROVIDER: null
 

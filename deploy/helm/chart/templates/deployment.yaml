@@ -152,7 +152,9 @@ spec:
           env:
             {{- $env := dict }}
             {{- range $name, $value := .Values.statuslist.env }}
+            {{- if not (kindIs "invalid" $value) }}
             {{- $_ := set $env $name $value }}
+            {{- end }}
             {{- end }}
             {{- $secretFileEnv := dict }}
             {{- range $mount := .Values.statuslist.secretMounts }}
