@@ -21,6 +21,7 @@ helm lint "$CHART_DIR"
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml
 helm lint "$CHART_DIR" -f "$CHART_DIR"/values-aws.yaml -f "$CHART_DIR"/values-production.yaml
+helm lint "$CHART_DIR" -f "$CHART_DIR"/values-envoy-gateway.yaml
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values.yaml --output-dir "${RENDER_TEMP}/rendered/default"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-local.yaml --output-dir "${RENDER_TEMP}/rendered/local"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml \
@@ -39,6 +40,8 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml
   --set statuslist.env.APP_ADMIN_AUTH__AUDIENCES=https://sandbox.helm-ci.invalid/admin \
   --set statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
   --output-dir "${RENDER_TEMP}/rendered/hosted-separate"
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-envoy-gateway.yaml \
+  --output-dir "${RENDER_TEMP}/rendered/envoy-gateway"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir "${RENDER_TEMP}/rendered/rotation"
 helm template status-list-server "$CHART_DIR" --set serviceAccount.create=false --output-dir "${RENDER_TEMP}/rendered/no-sa"

@@ -1,0 +1,11 @@
+# Values for the Envoy Gateway chart, not the application chart.
+config:
+  envoyGateway:
+    rateLimit:
+      backend:
+        type: Redis
+        redis:
+          # A Redis for the limiter alone, not the server's cache.
+          url: redis.envoy-gateway-system.svc.cluster.local:6379
+      # Fail open: the per-replica and server limits still apply.
+      failClosed: false
