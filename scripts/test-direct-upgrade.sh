@@ -108,7 +108,6 @@ issuers_present=$(psql_in_cluster "SELECT to_regclass('public.issuers') IS NOT N
 if [[ "$issuers_present" == t ]]; then
   psql_in_cluster "INSERT INTO issuers (issuer, aggregation_id) VALUES ('upgrade-fixture', '11111111-1111-4111-8111-111111111111')"
   psql_in_cluster "INSERT INTO issuers (issuer, aggregation_id) SELECT 'upgrade-load-' || n, ('11111111-1111-4111-8111-' || lpad(n::text, 12, '0'))::uuid FROM generate_series(1, 3) AS n"
-  aggregation_before=$(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'")
 fi
 
 # Keep this seed compatible with the previous release's schema; it must be written before upgrading.
@@ -194,6 +193,20 @@ APP_MANAGEMENT_AUTH__ISSUERS_FILE=/out/issuers.yaml \
   docker run --rm --user "$(id -u):$(id -g)" \
     --env APP_MANAGEMENT_AUTH__ISSUERS_FILE \
     --volume "$fixture_dir:/out:ro" "$image@$candidate_digest" issuer-registry
+
+assert_exported_aggregation_ids() {
+  local issuer stored_id
+  for issuer in upgrade-fixture upgrade-load-{1..3}; do
+    stored_id=$(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = '$issuer'")
+    if ! bash scripts/assert-direct-upgrade-issuer-id.sh "$fixture_dir/issuers.yaml" "$issuer" "$stored_id"; then
+      echo "::error::Aggregation ID for $issuer does not match its exported registry entry."
+      exit 1
+    fi
+  done
+}
+if [[ "$issuers_present" == t ]]; then
+  assert_exported_aggregation_ids
+fi
 kubectl create configmap direct-upgrade-issuers -n "$namespace" \
   --from-file="issuers.yaml=$fixture_dir/issuers.yaml"
 if [[ "$quota_present" == t ]]; then
@@ -232,16 +245,7 @@ fetch_list "$pod" "$fixture_dir/candidate-list.jwt"
   echo "::error::The candidate changed the seeded list payload."
   exit 1
 }
-aggregation_first=$(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'")
-[[ -n "$aggregation_first" ]] || { echo "::error::The migrated issuer has no aggregation ID."; exit 1; }
-grep -Fq "$aggregation_first" "$fixture_dir/issuers.yaml" || {
-  echo "::error::The candidate did not adopt the pre-upgrade registry aggregation ID."
-  exit 1
-}
-if [[ "$issuers_present" == t && "$aggregation_first" != "$aggregation_before" ]]; then
-  echo "::error::The pre-upgrade aggregation ID changed."
-  exit 1
-fi
+assert_exported_aggregation_ids
 
 if [[ "$quota_present" == f ]]; then
   kubectl exec -n "$namespace" "pod/$pod" -- /app/status-list-server list-quota recount

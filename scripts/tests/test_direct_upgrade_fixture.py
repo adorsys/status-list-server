@@ -12,6 +12,9 @@ import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _FIXTURE = _ROOT / "scripts/generate-direct-upgrade-fixture.js"
+_CHECK_ID = _ROOT / "scripts/assert-direct-upgrade-issuer-id.sh"
+
+
 @unittest.skipIf(shutil.which("node") is None, "Node.js is required")
 class DirectUpgradeFixtureTest(unittest.TestCase):
     def test_keys_are_distinct_and_token_uses_exported_kid(self) -> None:
@@ -41,3 +44,23 @@ class DirectUpgradeFixtureTest(unittest.TestCase):
 
             self.assertEqual(decode(header)["kid"], jwk["kid"])
             self.assertEqual(decode(payload)["iss"], "upgrade-fixture")
+
+    @unittest.skipIf(shutil.which("yq") is None, "yq is required")
+    def test_exported_aggregation_id_must_belong_to_issuer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = pathlib.Path(directory) / "issuers.yaml"
+            registry.write_text(
+                "issuers:\n"
+                "  - id: upgrade-fixture\n    aggregation_id: fixture-id\n"
+                "  - id: upgrade-load-1\n    aggregation_id: load-id\n"
+            )
+
+            def check(issuer: str, stored_id: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["bash", str(_CHECK_ID), str(registry), issuer, stored_id],
+                    cwd=_ROOT, capture_output=True, text=True,
+                )
+
+            self.assertEqual(check("upgrade-fixture", "fixture-id").returncode, 0)
+            self.assertNotEqual(check("upgrade-fixture", "load-id").returncode, 0)
+            self.assertNotEqual(check("upgrade-load-2", "load-id").returncode, 0)
