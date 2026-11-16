@@ -189,9 +189,16 @@ fn parse_entry(
     issuer: issuers::Model,
     key: hosted_issuer_keys::Model,
 ) -> Result<HostedIssuerKeyEntry, RepositoryError> {
+    let key = parse_key(key)?;
+    if key.state == HostedIssuerKeyState::Reserved
+        && issuer.source == super::migrations::issuer_keys_carry_over::CARRIED_SOURCE
+        && issuer.aggregation_id.is_none()
+    {
+        return Err(RepositoryError::ReservedUnmapped);
+    }
     Ok(HostedIssuerKeyEntry {
         issuer: parse_issuer(issuer)?,
-        key: parse_key(key)?,
+        key,
     })
 }
 
@@ -410,6 +417,7 @@ async fn classify_key_insert_failure(
     match load_entry(&key.kid, db).await {
         Ok(Some(_)) => return RepositoryError::DuplicateEntry,
         Ok(None) => {}
+        Err(RepositoryError::ReservedUnmapped) => return RepositoryError::DuplicateEntry,
         Err(error) => return error,
     }
     match find_key_by_material_hash(material_hash, db).await {
@@ -1569,6 +1577,7 @@ impl From<RepositoryError> for HostedIssuerError {
             RepositoryError::Contention { code } => HostedIssuerError::Contention { code },
             RepositoryError::Unavailable => HostedIssuerError::Unavailable,
             RepositoryError::DataError(message) => HostedIssuerError::Corrupt(message),
+            RepositoryError::ReservedUnmapped => HostedIssuerError::ReservedUnmapped,
             other => HostedIssuerError::Backend(Box::new(other)),
         }
     }

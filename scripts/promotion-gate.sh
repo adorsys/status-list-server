@@ -57,13 +57,9 @@ fi
 
 if [[ "$head_branch" == hotfix/* ]]; then
   # Untagged is not enough: release-plz tags whatever main carries, so an older version would be released below the current one.
-  latest_final=$(git -C "$repository" tag --list 'v*' \
-    | sed 's/^v//' \
-    | grep -E "$semver" \
-    | sort -V \
-    | tail -n 1 || true)
-  if [[ -n "$latest_final" && "$(printf '%s\n%s\n' "$version" "$latest_final" | sort -V | tail -n 1)" == "$latest_final" ]]; then
-    echo "::error::Hotfix version $version must be newer than the latest release v$latest_final; bump Cargo.toml before promoting."
+  latest_final=$(git -C "$repository" tag --list 'v*' | bash "${script_dir}/select-latest-final.sh")
+  if [[ -n "$latest_final" && "$(printf '%s\n%s\n' "v$version" "$latest_final" | sort -V | tail -n 1)" == "$latest_final" ]]; then
+    echo "::error::Hotfix version $version must be newer than the latest release $latest_final; bump Cargo.toml before promoting."
     exit 1
   fi
 fi

@@ -10,6 +10,9 @@ pub enum RepositoryError {
     /// JWK). A permanent data fault, not a transient connectivity error.
     #[error("Data error: {0}")]
     DataError(String),
+    /// A carried key is reserved while its issuer awaits a registry mapping.
+    #[error("carried issuer key is reserved pending registry adoption")]
+    ReservedUnmapped,
     #[error("Update error: {0}")]
     UpdateError(String),
     #[error("Delete error: {0}")]
