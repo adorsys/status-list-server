@@ -7,10 +7,29 @@
    ```bash
    docker run --rm --env DATABASE_URL --user "$(id -u):$(id -g)" \
      --volume "$PWD:/out" \
-     ghcr.io/adorsys/status-list-server:TAG issuer-export --output /out/issuers.yaml
+     ghcr.io/adorsys/status-list-server@sha256:<candidate-digest> \
+       issuer-export --output /out/issuers.yaml
    ```
 
-   Replace `TAG` with the server image tag used by your deployment. Export refuses to replace an existing file; pass `--force` only when replacement is intended. Review the issuer IDs, keys, and aggregation IDs, then store the private registry draft wherever you manage the source for the registry mount.
+   Replace `<candidate-digest>` with the candidate image digest. The v1.2.0
+   runtime image has no `issuer-export` command; use the candidate binary to
+   read the old database before upgrading it. Export refuses to replace an
+   existing file; pass `--force` only when replacement is intended. Review the
+   issuer IDs, keys, and aggregation IDs, then validate the complete draft with
+   `APP_MANAGEMENT_AUTH__ISSUERS_FILE=./issuers.yaml status-list-server issuer-registry`
+   using the candidate binary and the deployment's configuration. Do this
+   before stopping the old pods: the new server refuses to start with an invalid
+   registry. Store the validated draft wherever you manage the registry mount.
+
+   Legacy issuers can share one public key, but the registry requires globally
+   unique `kid` values. The export assigns RFC 7638 thumbprints, so shared key
+   material produces duplicate `kid` values and validation fails. Arrange a
+   distinct key for each affected issuer before cutover, or remove the affected
+   issuer entries from the draft until their keys are replaced. Follow the
+   [credential repair procedure](deployment-runbook.md#preparing-existing-management-credentials)
+   for database changes. An omitted issuer cannot authenticate on the new
+   release; its published lists remain readable. Re-export and validate after
+   reconciling the keys.
 2. Agree one management-token audience with every issuer and configure it in `APP_MANAGEMENT_AUTH__AUDIENCES`. Give each issuer the exact `kid` for its key from the exported draft. Issuers should send `typ: statuslist-management+jwt`, that `kid`, and the agreed `aud` claim before the upgrade. v1.2.0 ignores `typ` and `kid`, and checks `aud` only when `APP_MANAGEMENT_AUTH__AUDIENCES` is set, so issuers can add these fields before cutover. Exported `kid` values are RFC 7638 SHA-256 JWK thumbprints.
 3. Upgrade the server and Helm chart together, mounting the reviewed registry through `statuslist.issuerRegistry.volume`. The registry keeps each issuer ID and aggregation ID from the database.
 4. Have each issuer call `GET /api/v1/credentials` on the management listener. Confirm that the returned `aggregation_uri` matches the value previously published in its tokens.
