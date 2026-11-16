@@ -1,0 +1,64 @@
+# Applied with kubectl; not part of the application chart.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: statuslist
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: statuslist
+    namespace: envoy-gateway-system
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: statuslist
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        # Keeps the client address; Cluster would rewrite it to a node address.
+        externalTrafficPolicy: Local
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: statuslist
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: statuslist
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          # A Secret in this namespace, covering both hostnames.
+          - name: statuslist-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              # The application chart's namespace.
+              kubernetes.io/metadata.name: statuslist
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: statuslist
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: statuslist
+  clientIPDetection:
+    xForwardedFor:
+      # Add one per CDN or L7 load balancer in front of Envoy.
+      numTrustedHops: 0
