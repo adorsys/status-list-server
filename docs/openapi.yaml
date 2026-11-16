@@ -28,7 +28,7 @@ info:
     ## Rate limiting
 
     The server applies independent token-bucket limits. Each allows a burst,
-    then one request per period. Two are keyed by the client address and
+    then one request per period. Three are keyed by the client address and
     configured through the `APP_RATE_LIMIT__*` environment variables (see
     `RateLimitConfig`). `APP_RATE_LIMIT__CLIENT_IP_SOURCE` says where that
     address comes from: the TCP peer (`connect_info`), or, behind a proxy
@@ -58,6 +58,12 @@ info:
         Tunables: `permissive_burst_size`, `permissive_period_secs`, which
         may be a fraction of a second (defaults: a burst of 1000, then one
         every 5 milliseconds).
+      * **admin**: every `/admin/v1` route on the admin listener. Only
+        requests that pass admin authentication spend this budget.
+        Tunables: `admin_burst_size`, `admin_period_secs`
+        (`APP_RATE_LIMIT__ADMIN_BURST_SIZE`,
+        `APP_RATE_LIMIT__ADMIN_PERIOD_SECS`; defaults: a burst of 100, then
+        one every second).
 
     Behind authentication, each issuer also has a request budget set by its
     tier (`APP_TIERS__<TIER>__WRITE_BURST_SIZE` and `..._WRITE_PERIOD_SECS`;
@@ -111,7 +117,7 @@ info:
 
     ### Authentication and authorization
 
-    Every operation requires an admin token (`AdminBearer`). Scopes come from
+    Every admin operation requires an admin token (`AdminBearer`). Scopes come from
     the principal's entry in the issuer registry file, never from the token:
 
     | Scope | Grants |
@@ -142,7 +148,7 @@ info:
       a stale value returns `412 precondition_failed`, and a missing one
       returns `428 precondition_required`. Live usage counts and derived
       expiry state do not invalidate hosted issuer validators. `createIssuer`
-      is exempt because a new issuer has no version.
+      is exempt because there is no existing issuer to match against.
     - Request bodies reject unknown members. A caller-supplied `id`,
       `aggregation_id`, `kid`, `source`, `tier` or `state` (where not
       writable) is a `400 invalid_input`.
@@ -257,7 +263,7 @@ paths:
       security: []
       servers:
         - url: http://{admin_host}
-          description: Admin listener (/health/ready and /metrics, default :8002).
+          description: Admin listener (`server.admin`, default :8002). Private network only.
           variables:
             admin_host:
               default: localhost:8002
@@ -293,7 +299,7 @@ paths:
       security: []
       servers:
         - url: http://{admin_host}
-          description: Admin listener (/health/ready and /metrics, default :8002).
+          description: Admin listener (`server.admin`, default :8002). Private network only.
           variables:
             admin_host:
               default: localhost:8002
@@ -989,24 +995,18 @@ paths:
           $ref: "#/components/responses/ServiceUnavailable"
 
   /admin/v1/issuers:
-    servers:
-      - url: "{scheme}://{host}:{port}"
-        description: Admin listener (private network only)
-        variables:
-          scheme:
-            enum: [http, https]
-            default: http
-          host:
-            default: localhost
-            description: "`server.admin.host`"
-          port:
-            default: "8002"
-            description: "`server.admin.port`"
     get:
       operationId: listIssuers
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: List issuers
       description: |
         Static and portal issuers together, ordered by `id` ascending, one
@@ -1060,7 +1060,7 @@ paths:
           description: One page of issuers.
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
             Link:
               description: '`<…>; rel="next"` (RFC 8288) while a next page exists.'
               schema:
@@ -1087,6 +1087,13 @@ paths:
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: Create a portal (sandbox) issuer
       description: |
         Creates a `source: portal`, `tier: sandbox` issuer with one key.
@@ -1110,11 +1117,11 @@ paths:
             Location:
               $ref: "#/components/headers/IssuerLocation"
             ETag:
-              $ref: "#/components/headers/ETag"
+              $ref: "#/components/headers/IssuerETag"
             Issuer-Version:
               $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1132,7 +1139,7 @@ paths:
             registered for another issuer or admin.
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1146,7 +1153,7 @@ paths:
           description: "`invalid_public_jwk` or `invalid_expiry`."
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1159,19 +1166,6 @@ paths:
           $ref: "#/components/responses/AdminServiceUnavailable"
 
   /admin/v1/issuers/{issuer_id}:
-    servers:
-      - url: "{scheme}://{host}:{port}"
-        description: Admin listener (private network only)
-        variables:
-          scheme:
-            enum: [http, https]
-            default: http
-          host:
-            default: localhost
-            description: "`server.admin.host`"
-          port:
-            default: "8002"
-            description: "`server.admin.port`"
     parameters:
       - $ref: "#/components/parameters/IssuerId"
     get:
@@ -1179,6 +1173,13 @@ paths:
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: Get one issuer
       description: Requires `issuers:read`.
       responses:
@@ -1186,11 +1187,11 @@ paths:
           description: The issuer, its keys and its quota usage.
           headers:
             ETag:
-              $ref: "#/components/headers/ETag"
+              $ref: "#/components/headers/IssuerETag"
             Issuer-Version:
               $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1215,6 +1216,13 @@ paths:
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: Suspend, resume or renew a portal issuer
       description: |
         Changes exactly one thing: `state` (`suspended` or `active`) or
@@ -1241,11 +1249,11 @@ paths:
           description: The updated issuer.
           headers:
             ETag:
-              $ref: "#/components/headers/ETag"
+              $ref: "#/components/headers/IssuerETag"
             Issuer-Version:
               $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1264,7 +1272,7 @@ paths:
             `write_contention`: a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1275,7 +1283,7 @@ paths:
           description: "`invalid_expiry`: `expires_at` is outside the sandbox lifetime window, or this issuer tier does not support renewal."
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1293,19 +1301,6 @@ paths:
           $ref: "#/components/responses/AdminServiceUnavailable"
 
   /admin/v1/issuers/{issuer_id}/keys:
-    servers:
-      - url: "{scheme}://{host}:{port}"
-        description: Admin listener (private network only)
-        variables:
-          scheme:
-            enum: [http, https]
-            default: http
-          host:
-            default: localhost
-            description: "`server.admin.host`"
-          port:
-            default: "8002"
-            description: "`server.admin.port`"
     parameters:
       - $ref: "#/components/parameters/IssuerId"
     post:
@@ -1313,6 +1308,13 @@ paths:
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: Add a key to a portal issuer
       description: |
         Adds an `active` key, for example to start a rotation overlap. The
@@ -1337,11 +1339,11 @@ paths:
               schema:
                 type: string
             ETag:
-              $ref: "#/components/headers/ETag"
+              $ref: "#/components/headers/IssuerETag"
             Issuer-Version:
               $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1363,7 +1365,7 @@ paths:
             a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1387,19 +1389,6 @@ paths:
           $ref: "#/components/responses/AdminServiceUnavailable"
 
   /admin/v1/issuers/{issuer_id}/keys/{kid}:
-    servers:
-      - url: "{scheme}://{host}:{port}"
-        description: Admin listener (private network only)
-        variables:
-          scheme:
-            enum: [http, https]
-            default: http
-          host:
-            default: localhost
-            description: "`server.admin.host`"
-          port:
-            default: "8002"
-            description: "`server.admin.port`"
     parameters:
       - $ref: "#/components/parameters/IssuerId"
       - name: kid
@@ -1414,6 +1403,13 @@ paths:
       tags: [issuers]
       security:
         - AdminBearer: []
+      servers:
+        - url: http://{admin_host}
+          description: Admin listener (`server.admin`, default :8002). Private network only.
+          variables:
+            admin_host:
+              default: localhost:8002
+              description: Host name and port of the admin listener.
       summary: Revoke a key of a portal issuer
       description: |
         Revocation is permanent and takes effect on the next management
@@ -1435,11 +1431,11 @@ paths:
           description: The key, now revoked.
           headers:
             ETag:
-              $ref: "#/components/headers/ETag"
+              $ref: "#/components/headers/IssuerETag"
             Issuer-Version:
               $ref: "#/components/headers/IssuerVersion"
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1454,7 +1450,7 @@ paths:
           description: "`issuer_not_found` or `key_not_found`."
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -1468,7 +1464,7 @@ paths:
             `write_contention`: a concurrent database writer held a lock; retry.
           headers:
             Cache-Control:
-              $ref: "#/components/headers/CacheControl"
+              $ref: "#/components/headers/AdminCacheControl"
           content:
             application/json:
               schema:
@@ -2038,7 +2034,7 @@ components:
             - invalid_input
             - invalid_index
             - invalid_historical_time
-            - invalid_public_jwk
+            - invalid_public_jwk # 400 on the management listener, 422 on the admin listener
             - too_many_statuses
             - index_too_large
             - index_out_of_range
@@ -2156,12 +2152,12 @@ components:
         example: '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"'
 
   headers:
-    CacheControl:
+    AdminCacheControl:
       description: Success responses use `no-store`; errors use `no-store, max-age=0`.
       schema:
         type: string
         enum: [no-store, "no-store, max-age=0"]
-    ETag:
+    IssuerETag:
       description: |
         For hosted issuers, an opaque validator derived from the persisted
         issuer version; usage and derived expiry do not change it. For static
@@ -2569,7 +2565,7 @@ components:
       description: "`invalid_query`: a filter, `limit` or `cursor` is invalid."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2584,7 +2580,7 @@ components:
         precondition headers, or the issuer path parameter is not valid UTF-8.
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2602,7 +2598,7 @@ components:
         WWW-Authenticate:
           $ref: "#/components/headers/WwwAuthenticate"
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2618,7 +2614,7 @@ components:
           schema:
             type: string
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2630,7 +2626,7 @@ components:
       description: "`issuer_not_found`: no issuer has this id."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2642,7 +2638,7 @@ components:
       description: "`issuer_managed_by_configuration`: the issuer is static; change the registry file instead."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2654,11 +2650,11 @@ components:
       description: "`precondition_failed`: the supplied issuer validator is stale."
       headers:
         ETag:
-          $ref: "#/components/headers/ETag"
+          $ref: "#/components/headers/IssuerETag"
         Issuer-Version:
           $ref: "#/components/headers/IssuerVersion"
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2670,7 +2666,7 @@ components:
       description: "`precondition_required`: both `If-Issuer-Version` and `If-Match` are missing."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2682,7 +2678,7 @@ components:
       description: "`payload_too_large`: the body exceeds `limits.max_body_size_bytes`."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2697,7 +2693,7 @@ components:
         does not match the key type.
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2715,7 +2711,7 @@ components:
             type: integer
             minimum: 1
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2727,7 +2723,7 @@ components:
       description: "`internal_error`."
       headers:
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:
@@ -2741,7 +2737,7 @@ components:
           schema:
             type: integer
         Cache-Control:
-          $ref: "#/components/headers/CacheControl"
+          $ref: "#/components/headers/AdminCacheControl"
       content:
         application/json:
           schema:

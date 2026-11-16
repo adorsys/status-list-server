@@ -49,6 +49,7 @@ jobs:
           changed=$(git diff --name-only "$base_ref...HEAD" -- \
             .github/workflows/api-contract-tests.yml \
             docs/openapi.yaml \
+            docs/schemas \
             postman \
             scripts/test-postman-collection.sh \
             scripts/check-api-test-images.sh \

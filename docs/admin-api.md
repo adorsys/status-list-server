@@ -3,7 +3,8 @@
 The admin listener (default `localhost:8002`) serves issuer reads and writes.
 The public and management listeners return 404 for these routes. Keep the admin
 listener on a private network.
-The Admin API section of the [OpenAPI contract](openapi.yaml) describes the response fields.
+The `issuers` operations in the [OpenAPI contract](openapi.yaml) describe the
+response fields (the `Issuer`, `IssuerKey` and `IssuerUsage` schemas).
 
 ## Authentication and configuration
 
