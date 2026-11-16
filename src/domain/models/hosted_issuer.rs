@@ -196,6 +196,9 @@ pub enum HostedIssuerError {
     /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]
     Corrupt(String),
+    /// A carried key cannot authenticate before its issuer is adopted.
+    #[error("carried issuer key is reserved pending registry adoption")]
+    ReservedUnmapped,
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
     /// The store could not be reached: retry later with the same request.

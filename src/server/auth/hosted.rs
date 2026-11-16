@@ -101,6 +101,10 @@ impl IssuerKeyResolver for CompositeIssuerKeyResolver {
                             entry.resolved_key(time::OffsetDateTime::now_utc())
                         }
                         Ok(None) => Err(KeyResolveError::UnknownKid),
+                        Err(HostedIssuerError::ReservedUnmapped) => {
+                            tracing::debug!(kid, "carried issuer key awaits registry adoption");
+                            Err(KeyResolveError::Reserved)
+                        }
                         Err(error) => {
                             if matches!(error, HostedIssuerError::Corrupt(_)) {
                                 tracing::warn!(
@@ -244,11 +248,29 @@ pub async fn validate_static_candidate_against_dynamic(
         // A new kid (absent from the active snapshot) must not collide with a
         // hosted kid, unless it is the same identity adopted into the registry.
         if !active_material_by_kid.contains_key(kid) {
-            match store
-                .find_key_by_kid(kid)
-                .await
-                .map_err(dynamic_check_failed)?
-            {
+            let existing = match store.find_key_by_kid(kid).await {
+                Ok(existing) => existing,
+                Err(HostedIssuerError::ReservedUnmapped) => {
+                    // The issuer has no aggregation ID until this registry is
+                    // adopted, so compare the reserved key by material and owner.
+                    let reserved = store
+                        .find_key_by_material(material)
+                        .await
+                        .map_err(dynamic_check_failed)?;
+                    if reserved.as_ref().is_some_and(|key| {
+                        key.kid == *kid
+                            && key.issuer_id == *principal_id
+                            && key.state == HostedIssuerKeyState::Reserved
+                    }) {
+                        continue;
+                    }
+                    return Err(RegistryError::Semantic(format!(
+                        "candidate key `{kid}` collides with a carried issuer key"
+                    )));
+                }
+                Err(error) => return Err(dynamic_check_failed(error)),
+            };
+            match existing {
                 Some(entry)
                     if entry.issuer.id == *principal_id
                         && entry.key.jwk.normalized_material().ok().as_deref()
