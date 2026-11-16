@@ -71,7 +71,9 @@ info:
     budget.
 
     Limits are held per server replica. When a quota is exhausted the server
-    returns `429 Too Many Requests` with a `Retry-After` header.
+    returns `429 Too Many Requests` with a `Retry-After` header. A gateway in
+    front of the server may also limit each client address; its `429` uses the
+    same body, with `Retry-After: 1`.
 
     ## Request bounds
 
@@ -1556,7 +1558,8 @@ components:
       description: |
         The client has exceeded a configured rate limit: the address-keyed
         writes or permissive limit, or the issuer's tier request budget (see the Rate
-        limiting section in the API description).
+        limiting section in the API description). A gateway in front of the
+        server may answer with the same response.
       headers:
         Retry-After:
           description: |
