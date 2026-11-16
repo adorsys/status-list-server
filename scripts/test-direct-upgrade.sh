@@ -207,6 +207,7 @@ assert_exported_aggregation_ids() {
 if [[ "$issuers_present" == t ]]; then
   assert_exported_aggregation_ids
 fi
+aggregation_first=$(ISSUER=upgrade-fixture yq -er '.issuers[] | select(.id == strenv(ISSUER)) | .aggregation_id' "$fixture_dir/issuers.yaml")
 kubectl create configmap direct-upgrade-issuers -n "$namespace" \
   --from-file="issuers.yaml=$fixture_dir/issuers.yaml"
 if [[ "$quota_present" == t ]]; then
@@ -287,10 +288,7 @@ fi
   echo "::error::The pre-upgrade load fixture was not preserved."
   exit 1
 }
-[[ $(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'") == "$aggregation_first" ]] || {
-  echo "::error::The upgraded issuer's aggregation ID changed."
-  exit 1
-}
+assert_exported_aggregation_ids
 [[ $(psql_in_cluster "SELECT COUNT(*) = 1 AND COUNT(*) FILTER (WHERE key_id IS NOT NULL AND key_id <> '') = 1 FROM credentials WHERE issuer = 'upgrade-load-1'") == t ]] || {
   echo "::error::The missing legacy key ID was not generated."
   exit 1
@@ -305,10 +303,7 @@ fi
 kubectl rollout restart "deployment/$deployment" -n "$namespace"
 kubectl rollout status "deployment/$deployment" -n "$namespace" --timeout 2m
 assert_candidate_ready
-[[ $(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'") == "$aggregation_first" ]] || {
-  echo "::error::The aggregation ID changed after candidate restart."
-  exit 1
-}
+assert_exported_aggregation_ids
 node scripts/generate-direct-upgrade-fixture.js token "$fixture_dir"
 kubectl port-forward -n "$namespace" "pod/$pod" 18081:8001 > "$fixture_dir/management-forward.log" 2>&1 &
 port_forward_pid=$!
