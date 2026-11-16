@@ -464,6 +464,10 @@ type, which Kubernetes rejects for `Recreate`. The patch removes those fields
 before Helm applies the new chart. Confirm old pods have stopped before allowing
 the new version to serve traffic.
 
+The EKS release workflow applies the same patch to an existing Deployment and
+sets `statuslist.strategy.type=Recreate` on its Helm upgrade. This release
+therefore incurs a short outage while the old pods stop and the new pods start.
+
 Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
 `maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
 two incompatible versions overlap. Scaling `statuslist.replicaCount`/HPA min/max down to `1`

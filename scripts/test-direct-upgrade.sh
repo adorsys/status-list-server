@@ -18,10 +18,15 @@ values=scripts/direct-upgrade-values.yaml
 candidate_values=scripts/direct-upgrade-candidate-values.yaml
 fixture_dir=$(mktemp -d)
 port_forward_pid=
+postgres_forward_pid=
 cleanup() {
   if [[ -n "$port_forward_pid" ]]; then
     kill "$port_forward_pid" 2>/dev/null || true
     wait "$port_forward_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$postgres_forward_pid" ]]; then
+    kill "$postgres_forward_pid" 2>/dev/null || true
+    wait "$postgres_forward_pid" 2>/dev/null || true
   fi
   rm -rf "$fixture_dir"
 }
@@ -89,8 +94,6 @@ list_fields() {
 
 deployment="${release}-status-list-server-deployment"
 kubectl create namespace "$namespace"
-kubectl create configmap direct-upgrade-issuers -n "$namespace" \
-  --from-file="issuers.yaml=$fixture_dir/issuers.yaml"
 
 helm install "$release" "$previous_chart" -n "$namespace" \
   -f "$values" \
@@ -111,17 +114,15 @@ fi
 # Keep this seed compatible with the previous release's schema; it must be written before upgrading.
 fixture_jwk=$(cat "$fixture_dir/public-jwk.json")
 psql_in_cluster "INSERT INTO credentials (issuer, public_key) VALUES ('upgrade-fixture', '$fixture_jwk'::json)"
+for n in 1 2 3; do
+  load_jwk=$(cat "$fixture_dir/load-$n-public-jwk.json")
+  psql_in_cluster "INSERT INTO credentials (issuer, public_key) VALUES ('upgrade-load-$n', '$load_jwk'::json)"
+done
 psql_in_cluster "$(cat <<'SQL'
 INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at) VALUES (
   'upgrade-fixture-list', 'upgrade-fixture', '{"bits":1,"lst":"eJxjAAAAAQAB"}',
   'upgrade-fixture-sub', 1700000000
 );
-INSERT INTO credentials (issuer, public_key)
-SELECT 'upgrade-load-' || n,
-  CASE WHEN n = 1
-    THEN '{"kty":"EC","crv":"P-256","alg":"ES256","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}'::json
-    ELSE format('{"kty":"EC","crv":"P-256","alg":"ES256","kid":"upgrade-load-key-%s","x":"NeyFv_2L67OEplNbJpR02IFis4_lFW9HYmhfF5Or6m8","y":"eAH2qe8Pg3GQ28uxA8-qNAqdwQ_zfV2uKAvJ2sLpY9M"}', n)::json END
-FROM generate_series(1, 3) AS n;
 INSERT INTO status_lists (list_id, issuer, status_list, sub, updated_at)
 SELECT 'upgrade-load-' || issuer_n || '-' || list_n,
   'upgrade-load-' || issuer_n,
@@ -166,6 +167,35 @@ old_pod=$(kubectl get pods -n "$namespace" \
   | jq -er 'first(.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name)')
 fetch_list "$old_pod" "$fixture_dir/old-list.jwt"
 old_fields=$(list_fields "$fixture_dir/old-list.jwt")
+
+# Export and validate the same registry draft an operator mounts for the upgrade.
+kubectl port-forward -n "$namespace" statefulset/statuslist-postgres 15432:5432 \
+  > "$fixture_dir/postgres-forward.log" 2>&1 &
+postgres_forward_pid=$!
+for _ in {1..20}; do
+  if (echo > /dev/tcp/127.0.0.1/15432) 2>/dev/null; then break; fi
+  kill -0 "$postgres_forward_pid" 2>/dev/null || {
+    cat "$fixture_dir/postgres-forward.log" >&2
+    exit 1
+  }
+  sleep 1
+done
+encoded_password=$(kubectl get secret statuslist-secret -n "$namespace" \
+  -o jsonpath='{.data.postgres-password}' | base64 --decode \
+  | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')
+DATABASE_URL="postgres://postgres:${encoded_password}@127.0.0.1:15432/status-list" \
+  docker run --rm --network host --user "$(id -u):$(id -g)" \
+    --env DATABASE_URL --volume "$fixture_dir:/out" "$image@$candidate_digest" \
+    issuer-export --output /out/issuers.yaml
+kill "$postgres_forward_pid" 2>/dev/null || true
+wait "$postgres_forward_pid" 2>/dev/null || true
+postgres_forward_pid=
+APP_MANAGEMENT_AUTH__ISSUERS_FILE=/out/issuers.yaml \
+  docker run --rm --user "$(id -u):$(id -g)" \
+    --env APP_MANAGEMENT_AUTH__ISSUERS_FILE \
+    --volume "$fixture_dir:/out:ro" "$image@$candidate_digest" issuer-registry
+kubectl create configmap direct-upgrade-issuers -n "$namespace" \
+  --from-file="issuers.yaml=$fixture_dir/issuers.yaml"
 if [[ "$quota_present" == t ]]; then
   psql_in_cluster "UPDATE issuers SET list_count = 1 WHERE issuer = 'upgrade-fixture'"
   psql_in_cluster "UPDATE issuers SET list_count = 1000 WHERE issuer LIKE 'upgrade-load-%'"
@@ -204,8 +234,7 @@ fetch_list "$pod" "$fixture_dir/candidate-list.jwt"
 }
 aggregation_first=$(psql_in_cluster "SELECT aggregation_id FROM issuers WHERE issuer = 'upgrade-fixture'")
 [[ -n "$aggregation_first" ]] || { echo "::error::The migrated issuer has no aggregation ID."; exit 1; }
-registry_id=$(jq -r '.issuers[0].aggregation_id' "$fixture_dir/issuers.yaml")
-[[ "$aggregation_first" == "$registry_id" ]] || {
+grep -Fq "$aggregation_first" "$fixture_dir/issuers.yaml" || {
   echo "::error::The candidate did not adopt the pre-upgrade registry aggregation ID."
   exit 1
 }

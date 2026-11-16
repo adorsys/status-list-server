@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Create a disposable issuer key shared by the legacy row and candidate registry.
+// Create disposable issuer keys for the previous release's credential rows.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,24 +15,18 @@ const audience = 'https://upgrade.example.invalid/api/v1';
 const writePrivate = (name, value) => fs.writeFileSync(path.join(directory, name), value, { mode: 0o600 });
 
 if (mode === 'prepare') {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
-  const material = publicKey.export({ format: 'jwk' });
-  const kid = crypto.createHash('sha256').update(JSON.stringify({
-    crv: material.crv, kty: material.kty, x: material.x, y: material.y,
-  })).digest('base64url');
-  const jwk = { ...material, alg: 'ES256', kid };
-  writePrivate('public-jwk.json', JSON.stringify(jwk));
-  writePrivate('issuers.yaml', JSON.stringify({
-    version: 1,
-    issuers: [{
-      id: 'upgrade-fixture',
-      aggregation_id: '11111111-1111-4111-8111-111111111111',
-      tier: 'standard',
-      keys: [{ kid, alg: 'ES256', jwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } }],
-    }],
-    admins: [],
-  }));
-  writePrivate('private-key.pem', privateKey.export({ format: 'pem', type: 'pkcs8' }));
+  for (let n = 0; n <= 3; n++) {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const material = publicKey.export({ format: 'jwk' });
+    const kid = crypto.createHash('sha256').update(JSON.stringify({
+      crv: material.crv, kty: material.kty, x: material.x, y: material.y,
+    })).digest('base64url');
+    const jwk = { ...material, alg: 'ES256', ...(n === 1 ? {} : { kid }) };
+    writePrivate(n === 0 ? 'public-jwk.json' : `load-${n}-public-jwk.json`, JSON.stringify(jwk));
+    if (n === 0) {
+      writePrivate('private-key.pem', privateKey.export({ format: 'pem', type: 'pkcs8' }));
+    }
+  }
 } else {
   const kid = JSON.parse(fs.readFileSync(path.join(directory, 'public-jwk.json'))).kid;
   const now = Math.floor(Date.now() / 1000);

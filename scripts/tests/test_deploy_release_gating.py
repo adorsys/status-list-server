@@ -349,6 +349,15 @@ class DeployReleaseGatingTest(unittest.TestCase):
     def test_deploy_needs_a_successful_promotion(self) -> None:
         self.assertIn("promote-tags", self.needs("deploy"))
         self.assertTrue(self.runs("deploy", _FINAL_GREEN))
+
+    def test_eks_upgrade_stops_old_pods_before_incompatible_migrations(self) -> None:
+        steps = {step["name"]: step for step in self.jobs["deploy"]["steps"]}
+        command = steps["Deploy chart"]["run"]
+        patch = command.index("kubectl patch deployment")
+        upgrade = command.index("helm upgrade --install")
+        self.assertLess(patch, upgrade)
+        self.assertIn('"path":"/spec/strategy","value":{"type":"Recreate"}', command)
+        self.assertIn('--set "statuslist.strategy.type=Recreate"', command[upgrade:])
         for result in ("failure", "skipped"):
             with self.subTest(promote_tags=result):
                 self.assertFalse(self.runs("deploy", {**_FINAL_GREEN, **_outcome(promote_tags=result)}))

@@ -1025,6 +1025,9 @@ jobs:
           if helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" --max 1 >/dev/null 2>&1; then
             PREV_REVISION=$(helm history "${{ env.HELM_RELEASE_NAME }}" -n "${{ env.HELM_NAMESPACE }}" \
               --output json | jq -r 'max_by(.revision) | .revision' 2>/dev/null || true)
+            kubectl patch deployment "${{ env.HELM_RELEASE_NAME }}-status-list-server-deployment" \
+              -n "${{ env.HELM_NAMESPACE }}" --type=json \
+              -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
           fi
           printf '%s\n' "${PREV_REVISION:-}" > "$RUNNER_TEMP/eso-prev-revision"
 
@@ -1037,6 +1040,7 @@ jobs:
             --set-string "externalSecret.spec.secretStoreRef.name=datev-secret-store" \
             --set-string "externalSecret.spec.secretStoreRef.kind=ClusterSecretStore" \
             --set "secretStore.enabled=false" \
+            --set "statuslist.strategy.type=Recreate" \
             --wait \
             --rollback-on-failure \
             --timeout 10m \

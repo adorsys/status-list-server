@@ -2649,13 +2649,8 @@ mod carry_over_tests {
             "legacy aggregation ID must await adoption on {backend:?}"
         );
 
-        db.execute_unprepared(&format!(
-            "UPDATE issuers SET aggregation_id = '{exported_aggregation_id}' WHERE issuer = 'legacy-1'"
-        ))
-        .await
-        .unwrap();
-
-        // A reserved carried key must never authenticate, until adopted.
+        // A carried key omitted from the registry remains reserved while its
+        // issuer has no aggregation mapping.
         let store: Arc<dyn HostedIssuerStore> = Arc::new(SqlHostedIssuerStore::new(db.clone()));
         let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
             Arc::new(crate::server::auth::issuer_registry::RegistryHandle::empty()),
@@ -2668,6 +2663,31 @@ mod carry_over_tests {
             ),
             "a reserved carried key must not authenticate on {backend:?}"
         );
+
+        let mut same_kid_registry = registry.clone();
+        same_kid_registry["issuers"][0]["keys"][0]["kid"] = "key-1".into();
+        let same_kid_yaml = serde_saphyr::to_string(&same_kid_registry).unwrap();
+        let same_kid =
+            crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&same_kid_yaml)
+                .unwrap();
+        crate::server::auth::hosted::validate_static_candidate_against_dynamic(
+            &store,
+            &crate::server::auth::issuer_registry::RegistryHandle::empty().snapshot(),
+            &same_kid.snapshot(),
+        )
+        .await
+        .unwrap();
+
+        db.execute_unprepared(&format!(
+            "UPDATE issuers SET aggregation_id = '{exported_aggregation_id}' WHERE issuer = 'legacy-1'"
+        ))
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            resolver.resolve("key-1").await,
+            Err(KeyResolveError::Reserved)
+        ));
         let resolver = crate::server::auth::hosted::CompositeIssuerKeyResolver::new(
             Arc::new(
                 crate::server::auth::issuer_registry::RegistryHandle::from_yaml(&registry_yaml)
