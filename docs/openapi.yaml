@@ -2034,7 +2034,6 @@ components:
             - invalid_input
             - invalid_index
             - invalid_historical_time
-            - invalid_public_jwk # 400 on the management listener, 422 on the admin listener
             - too_many_statuses
             - index_too_large
             - index_out_of_range
@@ -2076,6 +2075,7 @@ components:
             - payload_too_large
             # 422
             - status_too_large
+            - invalid_public_jwk # admin listener only
             - unsupported_algorithm
             - invalid_expiry
             # 428
