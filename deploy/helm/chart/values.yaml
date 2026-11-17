@@ -13,6 +13,17 @@ global:
 # Merged on top of the prometheus.io annotations when those are enabled.
 podAnnotations: {}
 
+# Dedicated cert-manager certificate for token signing, separate from ingress TLS.
+tokenSigningCertificate:
+  enabled: false
+  dnsName: ""
+  # cert-manager issuerRef: name is required; kind/group default below. Override them for a
+  # non-cluster issuer (e.g. a step-ca / step-issuer or a Vault-backed issuer).
+  issuerName: ""
+  issuerKind: ClusterIssuer
+  issuerGroup: cert-manager.io
+  renewBefore: 720h
+
 statuslist:
   enabled: true
   # Waits for the database. deployment.yaml overwrites each entry's resources, volumeMounts and
