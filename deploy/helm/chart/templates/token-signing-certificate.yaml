@@ -1,0 +1,30 @@
+{{- if and .Values.statuslist.enabled .Values.tokenSigningCertificate.enabled }}
+{{- if or (empty .Values.tokenSigningCertificate.dnsName) (empty .Values.tokenSigningCertificate.issuerName) }}
+{{- fail "tokenSigningCertificate requires dnsName and issuerName" }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: statuslist-token-signing
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "status-list-server-chart.labels" . | nindent 4 }}
+spec:
+  secretName: statuslist-token-signing
+  renewBefore: {{ .Values.tokenSigningCertificate.renewBefore | quote }}
+  dnsNames:
+    - {{ .Values.tokenSigningCertificate.dnsName | quote }}
+  issuerRef:
+    name: {{ .Values.tokenSigningCertificate.issuerName | quote }}
+    kind: {{ .Values.tokenSigningCertificate.issuerKind | default "ClusterIssuer" | quote }}
+    {{- with .Values.tokenSigningCertificate.issuerGroup }}
+    group: {{ . | quote }}
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+{{- end }}

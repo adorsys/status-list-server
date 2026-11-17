@@ -807,7 +807,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
         Arc::new(CachingCredentialRepo::new(credential_repo)),
         status_list_cache,
         snapshot_option,
-        cert_provider,
+        cert_provider.clone(),
     ));
 
     let mut readiness = Readiness::default();
@@ -834,8 +834,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
     #[cfg(not(feature = "acme"))]
     {
         readiness = readiness.with_check(crate::server::health::FilesystemCertCheck::new(
-            config.server.cert.store.certificate_path.clone(),
-            config.server.cert.store.signing_key_path.clone(),
+            cert_provider,
         ));
     }
 
