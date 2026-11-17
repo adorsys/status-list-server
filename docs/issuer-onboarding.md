@@ -64,7 +64,7 @@ The lifetime must not exceed `APP_MANAGEMENT_AUTH__MAX_TOKEN_LIFETIME_SECS`
 management listener (default `localhost:8001`). A `PUT` to
 `/api/v1/status-lists/{list_id}/statuses` with a fresh UUID and
 `{"statuses":[]}` publishes an empty list. The returned URI is served from
-the public listener. See the [public OpenAPI contract](openapi.yaml) for
+the public listener. See the [OpenAPI contract](openapi.yaml) for
 status update requests.
 
 To publish the first list, copy the generated `id` and `keys[0].kid` from
