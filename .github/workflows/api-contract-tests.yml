@@ -54,6 +54,7 @@ jobs:
             scripts/test-postman-collection.sh \
             scripts/check-api-test-images.sh \
             src/config.rs \
+            src/setup.rs \
             src/startup.rs \
             src/domain \
             src/server \
