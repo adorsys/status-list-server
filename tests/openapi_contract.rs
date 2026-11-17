@@ -39,6 +39,11 @@ fn admin_operations_use_admin_bearer_and_the_admin_listener() {
     assert!(!uses_admin_bearer(root_security));
     assert!(!server_urls(root_servers).contains(&ADMIN_SERVER));
 
+    // OpenAPI 3.1 cannot `$ref` a server, so every admin operation repeats the
+    // block. Compare whole objects so a copy with a wrong default also fails.
+    let admin_servers = &openapi["paths"]["/health/ready"]["get"]["servers"];
+    assert_eq!(server_urls(admin_servers), [ADMIN_SERVER]);
+
     let mut admin_operations = 0;
     for (path, item) in openapi["paths"].as_object().unwrap() {
         for method in METHODS {
@@ -60,8 +65,7 @@ fn admin_operations_use_admin_bearer_and_the_admin_listener() {
                     "{id} must require AdminBearer"
                 );
                 assert_eq!(
-                    server_urls(servers),
-                    [ADMIN_SERVER],
+                    servers, admin_servers,
                     "{id} must be served on the admin listener"
                 );
             } else {

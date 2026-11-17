@@ -28,11 +28,11 @@ info:
     ## Rate limiting
 
     The server applies independent token-bucket limits. Each allows a burst,
-    then one request per period. Three are keyed by the client address and
-    configured through the `APP_RATE_LIMIT__*` environment variables (see
-    `RateLimitConfig`). `APP_RATE_LIMIT__CLIENT_IP_SOURCE` says where that
-    address comes from: the TCP peer (`connect_info`), or, behind a proxy
-    listed in `APP_RATE_LIMIT__TRUSTED_PROXIES`, the rightmost
+    then one request per period. The limits below are keyed by the client
+    address and configured through the `APP_RATE_LIMIT__*` environment
+    variables (see `RateLimitConfig`). `APP_RATE_LIMIT__CLIENT_IP_SOURCE` says
+    where that address comes from: the TCP peer (`connect_info`), or, behind a
+    proxy listed in `APP_RATE_LIMIT__TRUSTED_PROXIES`, the rightmost
     `X-Forwarded-For` entry that is not a trusted proxy
     (`rightmost_x_forwarded_for`). `X-Forwarded-For` from any other peer is
     ignored, so a client cannot choose its own key. IPv6 clients share one
