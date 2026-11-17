@@ -1,0 +1,48 @@
+# Values held by the operator on the previous release and reused during upgrade.
+statuslist:
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+  fallbackSecret:
+    enabled: true
+    generatedCertificate:
+      enabled: false
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: postgres-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: local-signing-material
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/cert
+      items:
+        - key: statuslist.crt
+          path: statuslist.crt
+        - key: statuslist.key
+          path: statuslist.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: statuslist.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: statuslist.key
+  env:
+    APP_ENV: production
+    APP_TELEMETRY__ENVIRONMENT: production
+    APP_MANAGEMENT_AUTH__AUDIENCES: https://upgrade.example.invalid/api/v1
+
+postgres:
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: standard
+externalSecret:
+  enabled: false
+
+secretStore:
+  enabled: false
+
+opentelemetry-collector:
+  enabled: false
