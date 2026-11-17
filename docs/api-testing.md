@@ -129,7 +129,8 @@ Portal Admin Contract folder. The script then gives its temporary admin the
 another audience that the folder uses. Start the server with a SQL backend:
 
 ```bash
-mkdir -p target/postman-hosted
+registry_file="$PWD/target/postman-hosted/issuers.json"
+mkdir -p "$(dirname "$registry_file")"
 printf '{"version":1,"issuers":[],"admins":[]}\n' > "$registry_file"
 
 APP_SERVER__PROFILE=hosted \

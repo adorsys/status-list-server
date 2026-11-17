@@ -59,6 +59,7 @@ jobs:
             src/server \
             src/outbound/memory.rs \
             src/outbound/cache.rs \
+            src/outbound/sql \
             Cargo.toml \
             Cargo.lock \
             package.json \

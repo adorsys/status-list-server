@@ -943,6 +943,57 @@
           ]
         },
         {
+          "name": "List the owner's issuers as the portal does",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOwner}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "owner",
+                  "value": "{{portalOwner}}"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuers are listed\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"The owner's issuer is listed, on the last page\", () => {",
+                  "  const page = pm.response.json();",
+                  "  pm.expect(page.issuers.map((issuer) => issuer.id)).to.eql([pm.collectionVariables.get(\"contractIssuerId\")]);",
+                  "  pm.expect(page.next_cursor).to.eql(null);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "List the owner's active sandbox issuers",
           "request": {
             "auth": {
@@ -1025,7 +1076,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOtherOwner}}&limit=10",
+              "raw": "{{adminUrl}}/admin/v1/issuers?owner={{portalOtherOwner}}",
               "host": [
                 "{{adminUrl}}"
               ],
@@ -1038,10 +1089,6 @@
                 {
                   "key": "owner",
                   "value": "{{portalOtherOwner}}"
-                },
-                {
-                  "key": "limit",
-                  "value": "10"
                 }
               ]
             }
@@ -1890,6 +1937,78 @@
               }
             }
           ]
+        }
+      ],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Every issuer the portal reads must deserialize into its Issuer and IssuerPage types, so a",
+              "// field the server drops or renames fails here and not in the portal.",
+              "const nullable = (type) => ({ type: [type, \"null\"] });",
+              "const key = {",
+              "  type: \"object\",",
+              "  required: [\"kid\", \"alg\", \"state\", \"not_before\", \"not_after\", \"created_at\", \"public_key\"],",
+              "  properties: {",
+              "    kid: { type: \"string\" },",
+              "    alg: { enum: [\"ES256\", \"ES384\", \"EdDSA\", \"PS256\"] },",
+              "    state: { enum: [\"active\", \"reserved\", \"revoked\"] },",
+              "    not_before: nullable(\"integer\"),",
+              "    not_after: nullable(\"integer\"),",
+              "    created_at: nullable(\"integer\"),",
+              "    public_key: {",
+              "      type: \"object\",",
+              "      required: [\"kty\"],",
+              "      properties: {",
+              "        kty: { enum: [\"EC\", \"OKP\", \"RSA\"] },",
+              "        crv: { type: \"string\" },",
+              "        x: { type: \"string\" },",
+              "        y: { type: \"string\" },",
+              "        n: { type: \"string\" },",
+              "        e: { type: \"string\" },",
+              "      },",
+              "    },",
+              "  },",
+              "};",
+              "const count = { type: \"integer\", minimum: 0, maximum: 4294967295 };",
+              "const issuer = {",
+              "  type: \"object\",",
+              "  required: [\"id\", \"aggregation_id\", \"source\", \"tier\", \"state\", \"created_at\", \"expires_at\", \"keys\", \"usage\"],",
+              "  properties: {",
+              "    id: { type: \"string\" },",
+              "    aggregation_id: { type: \"string\" },",
+              "    aggregation_uri: nullable(\"string\"),",
+              "    display_name: nullable(\"string\"),",
+              "    source: { enum: [\"static\", \"portal\"] },",
+              "    tier: { enum: [\"standard\", \"sandbox\"] },",
+              "    state: { enum: [\"active\", \"suspended\", \"expired\"] },",
+              "    owner: nullable(\"string\"),",
+              "    created_at: nullable(\"integer\"),",
+              "    expires_at: nullable(\"integer\"),",
+              "    keys: { type: \"array\", items: key },",
+              "    usage: {",
+              "      type: \"object\",",
+              "      required: [\"lists\", \"lists_limit\", \"keys\"],",
+              "      properties: { lists: count, lists_limit: count, keys: count, keys_limit: { anyOf: [count, { type: \"null\" }] } },",
+              "    },",
+              "  },",
+              "};",
+              "const page = {",
+              "  type: \"object\",",
+              "  required: [\"issuers\"],",
+              "  properties: { issuers: { type: \"array\", items: issuer }, next_cursor: nullable(\"string\") },",
+              "};",
+              "const path = pm.request.url.getPath();",
+              "if (pm.response.code < 300 && /^\\/admin\\/v1\\/issuers(\\/[^/]+)?$/.test(path)) {",
+              "  const isPage = path === \"/admin/v1/issuers\" && pm.request.method === \"GET\";",
+              "  pm.test(`Response parses as the portal's ${isPage ? \"IssuerPage\" : \"Issuer\"}`, () => {",
+              "    pm.response.to.have.jsonSchema(isPage ? page : issuer);",
+              "  });",
+              "}"
+            ]
+          }
         }
       ]
     },
