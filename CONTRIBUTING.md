@@ -94,6 +94,10 @@ done
 
 ## Release and versioning
 
+Feature branches target `develop` through reviewed pull requests; `develop`
+allows squash or merge commits. Promotions from `develop` to `stage` and from
+`stage` or `hotfix/*` to `main` use merge commits so branch ancestry is retained.
+
 `release-plz` is the single source of release versions and changelog entries. It
 uses the Conventional Commit history and the configuration in `release-plz.toml`
 and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
@@ -193,6 +197,10 @@ newer prepared version, resolve `Cargo.toml` and `CHANGELOG.md` by keeping the
 development version and adding the hotfix changelog section. The merge commit
 keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
 run to calculate from the latest release.
+
+For a first end-to-end exercise of these paths, use the
+[release validation checklist](docs/release-validation.md) to record the
+candidate, deployment, digest, approval, and hotfix evidence.
 
 ## Coding style and architecture
 
