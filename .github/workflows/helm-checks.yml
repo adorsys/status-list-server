@@ -22,6 +22,8 @@ on:
       - 'scripts/check-dashboard-drift.sh'
       - 'scripts/render-helm-templates.sh'
       - 'scripts/validate-alertmanager-crd.sh'
+      - 'scripts/validate-envoy-gateway-crds.sh'
+      - 'scripts/validate-envoy-gateway-crds.py'
 
 permissions:
   contents: read
@@ -67,6 +69,8 @@ jobs:
               - 'scripts/check-dashboard-drift.sh'
               - 'scripts/render-helm-templates.sh'
               - 'scripts/validate-alertmanager-crd.sh'
+              - 'scripts/validate-envoy-gateway-crds.sh'
+              - 'scripts/validate-envoy-gateway-crds.py'
 
   trivy-config:
     name: Trivy Config Scan (Helm Chart)

@@ -43,6 +43,10 @@ helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-hosted.yaml
   --output-dir "${RENDER_TEMP}/rendered/hosted-separate"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-envoy-gateway.yaml \
   --output-dir "${RENDER_TEMP}/rendered/envoy-gateway"
+# Global rules render only when enabled; the gateway CRD check needs them.
+helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-envoy-gateway.yaml \
+  --set statuslist.gateway.rateLimit.global.enabled=true \
+  --output-dir "${RENDER_TEMP}/rendered/envoy-gateway-global"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-external-secrets.yaml --output-dir "${RENDER_TEMP}/rendered/external-secrets"
 helm template status-list-server "$CHART_DIR" -f "$CHART_DIR"/values-rotation-example.yaml --output-dir "${RENDER_TEMP}/rendered/rotation"
 helm template status-list-server "$CHART_DIR" --set serviceAccount.create=false --output-dir "${RENDER_TEMP}/rendered/no-sa"
