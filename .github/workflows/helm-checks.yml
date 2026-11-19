@@ -1,7 +1,7 @@
 name: "Helm Checks"
 
 # Runs on every PR so helm-success can be a required check; the heavy jobs skip
-# when the changes job finds no Helm or observability edits. workflow_call always runs them.
+# when the changes job finds no Helm or observability edits. workflow_call always runs them, except the kind job.
 on:
   workflow_dispatch:
   workflow_call:
@@ -24,6 +24,8 @@ on:
       - 'scripts/validate-alertmanager-crd.sh'
       - 'scripts/validate-envoy-gateway-crds.sh'
       - 'scripts/validate-envoy-gateway-crds.py'
+      - 'scripts/check-envoy-gateway-kind.sh'
+      - 'scripts/testdata/envoy-gateway-kind.yaml'
 
 permissions:
   contents: read
@@ -45,6 +47,7 @@ jobs:
       pull-requests: read
     outputs:
       helm: ${{ steps.filter.outputs.helm }}
+      gateway: ${{ steps.filter.outputs.gateway }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +74,11 @@ jobs:
               - 'scripts/validate-alertmanager-crd.sh'
               - 'scripts/validate-envoy-gateway-crds.sh'
               - 'scripts/validate-envoy-gateway-crds.py'
+            gateway:
+              - 'deploy/helm/**'
+              - '.github/workflows/helm-checks.yml'
+              - 'scripts/check-envoy-gateway-kind.sh'
+              - 'scripts/testdata/envoy-gateway-kind.yaml'
 
   trivy-config:
     name: Trivy Config Scan (Helm Chart)
@@ -389,6 +397,54 @@ jobs:
         env:
           NODE_ENV: production
 
+  envoy-gateway-kind:
+    name: Envoy Gateway Check (kind)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Not on tags: promote-tags waits for this workflow, and the change already passed on its PR.
+    if: ${{ needs.changes.outputs.gateway == 'true' && !startsWith(github.ref, 'refs/tags/') }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Install kind and kubectl
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          # Matches the script's v1.35 node; the default kubectl is two minor versions ahead.
+          kubectl_version: v1.35.8
+          install_only: true
+
+      - name: Check edge limits, routing and 429 responses in kind
+        env:
+          # Leaves the cluster for the diagnostics step.
+          KEEP_CLUSTER: "1"
+        run: bash scripts/check-envoy-gateway-kind.sh
+
+      - name: Collect cluster diagnostics on failure
+        if: failure()
+        run: |
+          kind export kubeconfig --name statuslist-edge || exit 0
+          kubectl get gatewayclass,gateway,httproute,backendtrafficpolicy,clienttrafficpolicy -A -o yaml || true
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp || true
+          kubectl logs -n envoy-gateway-system deployment/envoy-gateway --tail=200 || true
+          kubectl logs -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=statuslist \
+            --all-containers --prefix --tail=100 || true
+          kubectl logs -n statuslist -l app.kubernetes.io/name=status-list-server \
+            --all-containers --prefix --tail=200 || true
+
   # The required check: with if: always(), skipped Helm jobs count as passing.
   helm-success:
     name: Helm Checks Success
@@ -400,6 +456,7 @@ jobs:
       - kube-linter
       - otel-config-validation
       - prometheus-rules-validation
+      - envoy-gateway-kind
     runs-on: ubuntu-latest
     permissions: {}
     steps:

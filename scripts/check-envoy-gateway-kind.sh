@@ -193,7 +193,9 @@ fi
 edge=$(first_with_status client-a 429)
 expected=$(kubectl --namespace "$NAMESPACE" get "backendtrafficpolicy/$NAME-route" \
   -o 'jsonpath={.spec.responseOverride[0].response.body.inline}')
-if [ "$(printf '%s\n' "$edge" | body)" = "$expected" ] &&
+if [ -z "$expected" ]; then
+  fail "the policy has no inline 429 body to compare the edge 429 with"
+elif [ "$(printf '%s\n' "$edge" | body)" = "$expected" ] &&
   [ "$(printf '%s\n' "$edge" | header content-type)" = "application/json" ] &&
   [ "$(printf '%s\n' "$edge" | header retry-after)" = "1" ] &&
   [ "$(printf '%s\n' "$edge" | header cache-control)" = "no-store, max-age=0" ]; then
