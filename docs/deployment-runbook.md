@@ -346,9 +346,10 @@ explains how the edge and server limits fit together.
 - The overlay selects the Envoy pods of the reference `statuslist` Gateway in
   `envoy-gateway-system`, where Envoy Gateway runs proxies by default. Adjust
   its selectors for another Gateway or namespace.
-- Use Envoy Gateway v1.9.2 or newer: earlier releases keep only 20 client
-  addresses per route in each replica. The reference was checked with v1.9.3,
-  and v1.9 reaches end of life on 14 February 2027.
+- Use Envoy Gateway v1.10.0 on Kubernetes v1.34–v1.37. Check the cluster
+  version before upgrading; v1.10 does not support Kubernetes v1.33. The
+  reference was checked with v1.10.0, which retains 10,000 client addresses
+  per route in each replica.
 - Leave `preserveRouteOrder` unset in the EnvoyProxy, so that on a shared
   hostname the management route's regular expression is matched before the
   public `/` prefix.
@@ -360,7 +361,7 @@ explains how the edge and server limits fit together.
    Envoy Gateway and apply the platform resources:
 
    ```bash
-   helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
+   helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 \
      --namespace envoy-gateway-system --create-namespace -f deploy/helm/envoy-gateway.yaml
    kubectl apply -f deploy/helm/envoy-gateway-platform.yaml
    ```
@@ -1434,7 +1435,7 @@ Do not bypass this gate. It is the only check that establishes a signed statemen
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
 - **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
-- **Envoy Gateway**: needed only for the Gateway API mode, v1.9.2 or newer.
+- **Envoy Gateway**: needed only for the Gateway API mode, v1.10.0 on Kubernetes v1.34–v1.37.
 - **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
 
 ## Upgrading to the Three-Listener Architecture
