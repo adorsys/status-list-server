@@ -94,6 +94,14 @@ done
 
 ## Release and versioning
 
+Feature branches target `develop` through reviewed pull requests; `develop`
+allows squash or merge commits for them, and release-plz PRs merge into the
+branch they were prepared for. Promotions from `develop` to `stage` and from
+`stage` or `hotfix/*` to `main` use merge commits so branch ancestry is retained.
+Back-merges of `main` into `develop` also use a merge commit, never a squash:
+a squash drops the final tag from `develop`'s history, so release-plz cannot
+calculate the next version and `stage` stops containing `main`.
+
 `release-plz` is the single source of release versions and changelog entries. It
 uses the Conventional Commit history and the configuration in `release-plz.toml`
 and `cliff.toml`; do not maintain a second version-bump or release-notes flow.
@@ -111,9 +119,12 @@ protections are active. Until then, a write-access push or hotfix workflow
 dispatch could deploy unreviewed code to production.
 
 The `gate` workflow enforces the promotion path on pull requests into `stage`
-and `main`. Make its `gate` check required on both branches, together with
-"Require branches to be up to date before merging", so a pull request that
-passed before a newer release cannot merge unchecked. The check runs on
+and `main`. Make its `gate` check required on both branches. On `main` only,
+also enable "Require branches to be up to date before merging", so a pull
+request that passed before a newer release cannot merge unchecked. Do not
+enable it on `stage`: the `develop` → `stage` merge commit exists only on
+`stage`, so the setting would block the next promotion in the same cycle
+until `stage` is merged back into `develop`. The check runs on
 `pull_request_target` from the base branch's copy of the workflow and
 `scripts/promotion-gate.sh`. Both files must therefore be on `stage` and
 `main` before the check is required, or pull requests wait for it
@@ -193,6 +204,18 @@ newer prepared version, resolve `Cargo.toml` and `CHANGELOG.md` by keeping the
 development version and adding the hotfix changelog section. The merge commit
 keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
 run to calculate from the latest release.
+
+Back-merge `main` after every final release, not only after hotfixes: the
+`stage` to `main` merge commit reaches `stage` only through `develop`, and the
+gate refuses a candidate whose head does not contain `main`. `develop` requires
+branches to be up to date, which a pull request with `main` as its head cannot
+satisfy, and updating that head would push to `main`. Create a branch from
+`main` instead, merge `develop` into it and resolve any conflicts there, then
+open the pull request from that branch and merge it with a merge commit.
+
+Use the [release validation checklist](docs/release-validation.md) to check
+each promotion and record its candidate, deployment, digest, approval, and
+back-merge evidence.
 
 ## Coding style and architecture
 
