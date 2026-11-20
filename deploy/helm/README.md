@@ -391,10 +391,6 @@ render requires, applying [`chart/values-envoy-gateway.yaml`](chart/values-envoy
 enabling the global rules, and verifying the cap across replicas and a Redis
 outage. [`scripts/check-envoy-gateway-kind.sh`](../../scripts/check-envoy-gateway-kind.sh)
 checks the edge limits, routing and `429` responses in a throwaway kind cluster.
-Helm Checks runs it when the chart or the script changes, and validates the
-rendered gateway resources and
-[`envoy-gateway-platform.yaml`](envoy-gateway-platform.yaml) against the pinned
-Envoy Gateway CRDs, rejecting unknown fields.
 
 ## Configure Signing Credentials
 
