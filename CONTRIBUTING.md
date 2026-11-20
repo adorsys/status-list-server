@@ -115,9 +115,12 @@ protections are active. Until then, a write-access push or hotfix workflow
 dispatch could deploy unreviewed code to production.
 
 The `gate` workflow enforces the promotion path on pull requests into `stage`
-and `main`. Make its `gate` check required on both branches, together with
-"Require branches to be up to date before merging", so a pull request that
-passed before a newer release cannot merge unchecked. The check runs on
+and `main`. Make its `gate` check required on both branches. On `main` only,
+also enable "Require branches to be up to date before merging", so a pull
+request that passed before a newer release cannot merge unchecked. Do not
+enable it on `stage`: the `develop` → `stage` merge commit exists only on
+`stage`, so the setting would block the next promotion in the same cycle
+until `stage` is merged back into `develop`. The check runs on
 `pull_request_target` from the base branch's copy of the workflow and
 `scripts/promotion-gate.sh`. Both files must therefore be on `stage` and
 `main` before the check is required, or pull requests wait for it

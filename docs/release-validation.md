@@ -18,8 +18,9 @@ release records, not temporary test tags to delete afterward.
 ## Before a live promotion
 
 - [ ] Confirm the `gate` workflow and `scripts/promotion-gate.sh` are on both
-  `stage` and `main`. Require the `gate` check and up-to-date branches on both
-  targets; verify the check actually runs before making it required.
+  `stage` and `main`. Require the `gate` check on both targets, and require
+  up-to-date branches on `main` only; verify the check actually runs before
+  making it required.
 - [ ] Confirm `stage`, `main`, and `hotfix/*` protections enforce the branch
   flow and review rules in [Contributing](../CONTRIBUTING.md#release-and-versioning).
   Confirm `v*` tag creation is restricted to the release-bot App.
