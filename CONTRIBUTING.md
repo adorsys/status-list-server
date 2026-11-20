@@ -95,8 +95,12 @@ done
 ## Release and versioning
 
 Feature branches target `develop` through reviewed pull requests; `develop`
-allows squash or merge commits. Promotions from `develop` to `stage` and from
+allows squash or merge commits for them, and release-plz PRs merge into the
+branch they were prepared for. Promotions from `develop` to `stage` and from
 `stage` or `hotfix/*` to `main` use merge commits so branch ancestry is retained.
+Back-merges of `main` into `develop` also use a merge commit, never a squash:
+a squash drops the final tag from `develop`'s history, so release-plz cannot
+calculate the next version and `stage` stops containing `main`.
 
 `release-plz` is the single source of release versions and changelog entries. It
 uses the Conventional Commit history and the configuration in `release-plz.toml`
@@ -201,9 +205,17 @@ development version and adding the hotfix changelog section. The merge commit
 keeps the final hotfix tag in `develop`'s history, allowing the next release-plz
 run to calculate from the latest release.
 
-For a first end-to-end exercise of these paths, use the
-[release validation checklist](docs/release-validation.md) to record the
-candidate, deployment, digest, approval, and hotfix evidence.
+Back-merge `main` after every final release, not only after hotfixes: the
+`stage` to `main` merge commit reaches `stage` only through `develop`, and the
+gate refuses a candidate whose head does not contain `main`. `develop` requires
+branches to be up to date, which a pull request with `main` as its head cannot
+satisfy, and updating that head would push to `main`. Create a branch from
+`main` instead, merge `develop` into it and resolve any conflicts there, then
+open the pull request from that branch and merge it with a merge commit.
+
+Use the [release validation checklist](docs/release-validation.md) to check
+each promotion and record its candidate, deployment, digest, approval, and
+back-merge evidence.
 
 ## Coding style and architecture
 
