@@ -104,6 +104,25 @@ header() {
 
 body() { awk 'found { print } $0 == "" { found = 1 }'; }
 
+direct() {
+  local count="$1" path="$2" i
+  shift 2
+  rm -rf "$WORK/direct"
+  mkdir -p "$WORK/direct"
+  for i in $(seq "$count"); do
+    printf 'url = "http://127.0.0.1:18001%s"\noutput = "%s/direct/%04d"\n' "$path" "$WORK" "$i"
+  done >"$WORK/direct.curl"
+  curl -s -i "$@" --config "$WORK/direct.curl" || true
+  for i in $(seq "$count"); do
+    head -n 1 "$WORK/direct/$(printf '%04d' "$i")" 2>/dev/null | cut -d ' ' -f 2 || true
+  done
+}
+
+close_to() {
+  case "$1:$2" in *[!0-9:]* | :* | *:) return 1 ;; esac
+  [ "$1" -ge $(($2 - 2)) ] && [ "$1" -le $(($2 + 2)) ]
+}
+
 status_list_requests() {
   curl -s http://127.0.0.1:18002/metrics | awk '
     index($0, "http_server_requests_total{") == 1 && index($0, "listener=\"public\"") &&
@@ -158,7 +177,7 @@ ENVOY_IP=$(kubectl --namespace envoy-gateway-system get service \
 until_equals 200 status_of client-a /
 until_equals 401 status_of client-a /api/v1/credentials
 
-kubectl --namespace "$NAMESPACE" port-forward "service/$NAME-internal-service" 18002:8002 >/dev/null 2>&1 &
+kubectl --namespace "$NAMESPACE" port-forward "service/$NAME-internal-service" 18001:8001 18002:8002 >/dev/null 2>&1 &
 PORT_FORWARD=$!
 until_equals 200 curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18002/health/ready
 
@@ -193,7 +212,9 @@ fi
 edge=$(first_with_status client-a 429)
 expected=$(kubectl --namespace "$NAMESPACE" get "backendtrafficpolicy/$NAME-route" \
   -o 'jsonpath={.spec.responseOverride[0].response.body.inline}')
-if [ "$(printf '%s\n' "$edge" | body)" = "$expected" ] &&
+if [ -z "$expected" ]; then
+  fail "the policy has no inline 429 body to compare the edge 429 with"
+elif [ "$(printf '%s\n' "$edge" | body)" = "$expected" ] &&
   [ "$(printf '%s\n' "$edge" | header content-type)" = "application/json" ] &&
   [ "$(printf '%s\n' "$edge" | header retry-after)" = "1" ] &&
   [ "$(printf '%s\n' "$edge" | header cache-control)" = "no-store, max-age=0" ]; then
@@ -231,16 +252,20 @@ expect "the admin API is not routed" 404 "" GET /admin/v1/issuers
 
 printf '== server 429s pass through\n'
 codes=$(send client-b 1 11 /api/v1/credentials --rate 5/s -H 'Authorization: Bearer not-a-jwt' | tr '\n' ' ')
-server=$(response_of client-b 001-0011)
-retry_after=$(printf '%s\n' "$server" | header retry-after)
-if [ "$codes" = "401 401 401 401 401 401 401 401 401 401 429 " ] &&
-  printf '%s\n' "$server" | body | grep -q 'Too many failed authentications from this address' &&
-  [ "${retry_after:-0}" -gt 1 ] &&
-  [ "$(printf '%s\n' "$server" | header cache-control)" = "no-store, max-age=0" ] &&
-  ! printf '%s\n' "$server" | grep -qi '^x-ratelimit'; then
-  pass "the server's own 429 arrives unchanged (Retry-After: $retry_after)"
+via=$(response_of client-b 001-0011)
+direct_codes=$(direct 11 /api/v1/credentials --rate 5/s -H 'Authorization: Bearer not-a-jwt' | tr '\n' ' ')
+direct=$(tr -d '\r' 2>/dev/null <"$WORK/direct/0011" || true)
+via_retry=$(printf '%s\n' "$via" | header retry-after)
+direct_retry=$(printf '%s\n' "$direct" | header retry-after)
+if [ "$codes" = "$direct_codes" ] && [ "$(printf '%s' "$codes" | awk '{ print $NF }')" = 429 ] &&
+  [ "$(printf '%s\n' "$via" | body)" = "$(printf '%s\n' "$direct" | body)" ] &&
+  [ "$(printf '%s\n' "$via" | header content-type)" = "$(printf '%s\n' "$direct" | header content-type)" ] &&
+  [ "$(printf '%s\n' "$via" | header cache-control)" = "$(printf '%s\n' "$direct" | header cache-control)" ] &&
+  close_to "$via_retry" "$direct_retry" &&
+  ! printf '%s\n' "$via" | grep -qi '^x-ratelimit'; then
+  pass "the server's 429 through Envoy matches a direct one (Retry-After $via_retry, direct $direct_retry)"
 else
-  fail "server 429 pass-through: codes [$codes], response: $server"
+  fail "server 429 pass-through: through Envoy [$codes] $via; direct [$direct_codes] $direct"
 fi
 
 printf '== network policy\n'
