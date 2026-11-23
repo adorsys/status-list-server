@@ -19,6 +19,8 @@ pub enum StatusListError {
     AlreadyExists,
     #[error("status list was not found")]
     NotFound,
+    #[error("status list is retired")]
+    Retired,
     #[error("historical status list token not found")]
     HistoricalNotFound,
     #[error("invalid historical time")]

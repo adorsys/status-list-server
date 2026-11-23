@@ -67,13 +67,14 @@ issuers receive their row together with the immutable aggregation mapping.
 | ---------------- | ----------- | ---- | --- | ------------------------------------------------ |
 | `issuer`         | TEXT        | NO   | PK  | Unique issuer identifier and status-list owner   |
 | `aggregation_id` | VARCHAR(36) | YES  | UQ  | Public aggregation identifier, when assigned     |
-| `list_count`     | BIGINT      | NO   |     | Status lists published; backs the per-issuer quota |
+| `list_count`     | BIGINT      | NO   |     | Active status lists; backs the per-issuer quota |
 
 Publishes increment `issuers.list_count` transactionally before
 inserting into `status_lists`. The status-list owner foreign key references
 `issuers.issuer`. Credentials also reference `issuers.issuer`, so a credential
 cannot be registered without its ownership row. The two rows are created in one
 transaction.
+Retiring and unretiring a list adjust the counter in the same transaction.
 
 #### Indexes
 
@@ -93,6 +94,7 @@ by its `list_id`, which acts as the primary key.
 | `status_list` | JSON   | NO   |     | The status list entry                               |
 | `sub`         | TEXT   | NO   |     | String identifier for the Status List Token         |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp of last status update                |
+| `retired`     | BOOLEAN | NO  |     | Excluded from aggregation and active-list quota    |
 
 #### Indexes
 

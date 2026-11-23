@@ -4,12 +4,13 @@
 use std::fmt::Write;
 
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeriveIden, FromQueryResult,
-    Statement,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeriveIden,
+    EntityTrait, FromQueryResult, QueryFilter, Statement,
     sea_query::{Expr, ExprTrait, LockType, Query},
 };
 
 use super::migrations::RECOUNT_LIST_COUNT_SQL;
+use super::models::{issuers, status_lists};
 use super::store::begin_read_committed;
 use crate::utils::metrics::record_list_quota_enforced;
 
@@ -44,6 +45,20 @@ pub enum ListQuotaError {
         over_quota: Vec<IssuerCount>,
         miscounted: Vec<IssuerCount>,
     },
+    #[error("status list {0} was not found")]
+    ListNotFound(String),
+    #[error("status list {0} is already retired")]
+    AlreadyRetired(String),
+    #[error("status list {0} is not retired")]
+    NotRetired(String),
+    #[error("issuer {issuer} has {count} active lists; unretiring would exceed {max}")]
+    UnretireOverQuota {
+        issuer: String,
+        count: i64,
+        max: u64,
+    },
+    #[error("issuer {0} has a stale list count; run `list-quota recount` with enforcement off")]
+    CounterDrift(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, FromQueryResult)]
@@ -59,7 +74,7 @@ fn describe_refusal(max: &u64, over_quota: &[IssuerCount], miscounted: &[IssuerC
     if !over_quota.is_empty() {
         let _ = write!(
             out,
-            "\n  {} issuer(s) have more than {max} status lists; delete lists or raise \
+            "\n  {} issuer(s) have more than {max} active status lists; retire lists or raise \
              limits.max_lists_per_issuer:",
             over_quota.len()
         );
@@ -190,12 +205,112 @@ fn issuer_counts(condition: &str) -> String {
     format!(
         "SELECT issuer, list_count, actual FROM (\
            SELECT a.issuer AS issuer, a.list_count AS list_count, COUNT(s.list_id) AS actual \
-           FROM issuers a LEFT JOIN status_lists s ON s.issuer = a.issuer \
+           FROM issuers a LEFT JOIN status_lists s ON s.issuer = a.issuer AND s.retired = FALSE \
            GROUP BY a.issuer, a.list_count\
          ) counts \
          WHERE {condition} \
          ORDER BY issuer"
     )
+}
+
+pub async fn set_retired(
+    db: &DatabaseConnection,
+    list_ids: &[String],
+    retired: bool,
+    standard_max_lists: u64,
+    sandbox_max_lists: u64,
+) -> Result<(), ListQuotaError> {
+    let txn = begin_read_committed(db).await?;
+    // The switch lock serializes this operation with recount and enable when either is running.
+    read_switch(&txn, Some(LockType::Share)).await?;
+    for list_id in list_ids {
+        if let Err(error) = set_retired_one(
+            &txn,
+            list_id,
+            retired,
+            standard_max_lists,
+            sandbox_max_lists,
+        )
+        .await
+        {
+            txn.rollback().await?;
+            return Err(error);
+        }
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+async fn set_retired_one(
+    txn: &DatabaseTransaction,
+    list_id: &str,
+    retired: bool,
+    standard_max: u64,
+    sandbox_max: u64,
+) -> Result<(), ListQuotaError> {
+    let row = status_lists::Entity::find_by_id(list_id)
+        .one(txn)
+        .await?
+        .ok_or_else(|| ListQuotaError::ListNotFound(list_id.to_owned()))?;
+    let issuer = row.issuer;
+    let owner = issuers::Entity::find_by_id(issuer.as_str())
+        .one(txn)
+        .await?
+        .ok_or_else(|| ListQuotaError::CounterDrift(issuer.clone()))?;
+    let max = if owner.tier == "sandbox" {
+        sandbox_max
+    } else {
+        standard_max
+    };
+    let limit = i64::try_from(max).unwrap_or(i64::MAX);
+    let mut update = issuers::Entity::update_many().col_expr(
+        issuers::Column::ListCount,
+        if retired {
+            Expr::col(issuers::Column::ListCount).sub(1)
+        } else {
+            Expr::col(issuers::Column::ListCount).add(1)
+        },
+    );
+    update = update.filter(issuers::Column::Issuer.eq(issuer.as_str()));
+    update = if retired {
+        update.filter(issuers::Column::ListCount.gt(0))
+    } else {
+        update.filter(issuers::Column::ListCount.lt(limit))
+    };
+    let changed = update.exec(txn).await?;
+    if changed.rows_affected == 0 {
+        let count = issuers::Entity::find_by_id(issuer.as_str())
+            .one(txn)
+            .await?
+            .ok_or_else(|| ListQuotaError::CounterDrift(issuer.clone()))?
+            .list_count;
+        return if retired {
+            Err(ListQuotaError::CounterDrift(issuer))
+        } else {
+            Err(ListQuotaError::UnretireOverQuota { issuer, count, max })
+        };
+    }
+
+    let current = status_lists::Entity::find_by_id(list_id)
+        .one(txn)
+        .await?
+        .ok_or_else(|| ListQuotaError::ListNotFound(list_id.to_owned()))?;
+    if current.issuer != issuer {
+        return Err(ListQuotaError::CounterDrift(issuer));
+    }
+    if current.retired == retired {
+        return Err(if retired {
+            ListQuotaError::AlreadyRetired(list_id.to_owned())
+        } else {
+            ListQuotaError::NotRetired(list_id.to_owned())
+        });
+    }
+    status_lists::Entity::update_many()
+        .col_expr(status_lists::Column::Retired, Expr::value(retired))
+        .filter(status_lists::Column::ListId.eq(list_id))
+        .exec(txn)
+        .await?;
+    Ok(())
 }
 
 pub async fn disable(db: &DatabaseConnection) -> Result<(), ListQuotaError> {

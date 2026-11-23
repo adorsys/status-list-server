@@ -213,6 +213,7 @@ impl Service {
         existing.status_list = existing.status_list.update(statuses)?;
 
         if existing.status_list == current_status_list {
+            self.status_list_repo.ensure_writable(list_id).await?;
             return Ok(existing);
         }
 

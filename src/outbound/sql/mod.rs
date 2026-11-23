@@ -218,6 +218,13 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
+    async fn ensure_writable(&self, list_id: &str) -> Result<(), StatusListError> {
+        self.store
+            .ensure_writable(list_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
         self.store
             .create_status_list(
@@ -366,6 +373,7 @@ impl From<StatusListRecord> for models::StatusListRecord {
             },
             updated_at: record.updated_at,
             version: i64::try_from(record.version).unwrap_or(i64::MAX),
+            retired: false,
         }
     }
 }
@@ -430,6 +438,7 @@ impl From<RepositoryError> for StatusListError {
                 StatusListError::QuotaExceeded { count, max }
             }
             RepositoryError::NotFound => StatusListError::NotFound,
+            RepositoryError::Retired => StatusListError::Retired,
             RepositoryError::IssuerMismatch => StatusListError::IssuerMismatch,
             RepositoryError::ListNotFixedSize => StatusListError::ListNotFixedSize,
             RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,

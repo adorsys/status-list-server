@@ -33,7 +33,10 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     if args.first().map(String::as_str) == Some("list-quota") {
         let action = args.get(1).map(String::as_str).unwrap_or_default();
-        println!("{}", run_list_quota_command(&config, action).await?);
+        println!(
+            "{}",
+            run_list_quota_command(&config, action, args.get(2..).unwrap_or(&[])).await?
+        );
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("issuer-registry") {

@@ -49,6 +49,8 @@ pub enum RepositoryError {
     QuotaExceeded { count: u64, max: u64 },
     #[error("Status list not found")]
     NotFound,
+    #[error("Status list is retired")]
+    Retired,
     #[error("Issuer mismatch")]
     IssuerMismatch,
     #[error("Status list is not fixed-size")]

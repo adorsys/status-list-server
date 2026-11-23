@@ -202,6 +202,7 @@ pub(crate) mod status_lists {
         pub sub: String,
         pub updated_at: i64,
         pub version: i64,
+        pub retired: bool,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

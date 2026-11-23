@@ -313,18 +313,28 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
 }
 
 pub const LIST_QUOTA_USAGE: &str =
-    "usage: status-list-server list-quota <status|recount|enable|disable>
+    "usage: status-list-server list-quota <status|recount|enable|disable|retire|unretire> [list_id...]
 
   status   show whether limits.max_lists_per_issuer is enforced
-  recount  recompute every issuer's list count (refused while enforced)
+  recount  recompute every issuer's active-list count (refused while enforced)
   enable   enforce the quota; refused, naming the issuers, while any issuer
            has more lists than the cap or a stale count
-  disable  stop enforcing the quota";
+  disable  stop enforcing the quota
+  retire   stop writes and aggregation for each list; free its quota slot
+  unretire restore writes and aggregation for each list if quota allows";
 
 /// Does not run migrations.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
-    if !matches!(action, "status" | "recount" | "enable" | "disable") {
+pub async fn run_list_quota_command(
+    config: &AppConfig,
+    action: &str,
+    list_ids: &[String],
+) -> EyeResult<String> {
+    if !matches!(
+        action,
+        "status" | "recount" | "enable" | "disable" | "retire" | "unretire"
+    ) || (matches!(action, "retire" | "unretire") != !list_ids.is_empty())
+    {
         return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
     }
     if config.database.backend == DatabaseBackend::Memory {
@@ -346,21 +356,39 @@ pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResu
         }
         "recount" => {
             list_quota::recount(&db).await?;
-            Ok("recomputed every issuer's list count".to_string())
+            Ok("recomputed every issuer's active-list count".to_string())
         }
         "enable" => {
             list_quota::enable(&db, max).await?;
             Ok(format!("list quota enforced: max {max} lists per issuer"))
         }
-        _ => {
+        "disable" => {
             list_quota::disable(&db).await?;
             Ok("list quota no longer enforced".to_string())
         }
+        "retire" | "unretire" => {
+            let retired = action == "retire";
+            let tiers = config.tier_limits()?;
+            list_quota::set_retired(
+                &db,
+                list_ids,
+                retired,
+                tiers.standard.max_lists,
+                tiers.sandbox.max_lists,
+            )
+            .await?;
+            Ok(format!("{action}d {} status list(s)", list_ids.len()))
+        }
+        _ => unreachable!(),
     }
 }
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
-pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeResult<String> {
+pub async fn run_list_quota_command(
+    _config: &AppConfig,
+    _action: &str,
+    _list_ids: &[String],
+) -> EyeResult<String> {
     Err(color_eyre::eyre::eyre!(
         "this build has no SQL backend; the memory backend enforces the list quota from startup"
     ))
@@ -546,7 +574,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     tracing::warn!(
                         "server.aggregation_uri is not advertised in the tokens of {} issuer(s) \
                          that have more status lists than one aggregation page \
-                         ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
+                         ({AGGREGATION_DEFAULT_LIMIT}); retire lists until none does, then \
                          restart:{}",
                         over.len(),
                         list_quota::name_issuers(&over)
@@ -2470,7 +2498,7 @@ mod general_tests {
             let fresh = build_state(&config).await.expect("first start");
             assert!(fresh.aggregation_uri.is_some());
 
-            run_list_quota_command(&config, "disable")
+            run_list_quota_command(&config, "disable", &[])
                 .await
                 .expect("disable the quota");
             let mut transition = deployment.to_vec();
@@ -2503,7 +2531,7 @@ mod general_tests {
             let state = build_state(&config).await.expect("first start");
             assert!(state.aggregation_uri.is_some());
 
-            run_list_quota_command(&config, "disable")
+            run_list_quota_command(&config, "disable", &[])
                 .await
                 .expect("disable the quota");
             register_issuer(&state.service, "issuer1").await;

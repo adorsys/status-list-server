@@ -261,9 +261,11 @@ type UsageGauge = (&'static str, &'static str, fn(&IssuerUsage) -> u64);
 fn register_issuer_usage_observers(provider: &SdkMeterProvider) {
     let meter = provider.meter("status-list-server");
     let gauges: [UsageGauge; 4] = [
-        ("issuer_lists", "Status lists the issuer holds.", |usage| {
-            usage.lists
-        }),
+        (
+            "issuer_lists",
+            "Active status lists the issuer holds.",
+            |usage| usage.lists,
+        ),
         (
             "issuer_lists_limit",
             "The issuer's tier list quota.",

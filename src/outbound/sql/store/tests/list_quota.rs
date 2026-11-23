@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 
 use super::fixtures;
 use crate::outbound::sql::list_quota::{self, IssuerCount, ListQuotaError, StartupState};
-use crate::outbound::sql::models::StatusListRecord;
+use crate::outbound::sql::models::{StatusListHistoryRecord, StatusListRecord};
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
 #[cfg(feature = "mysql")]
@@ -158,6 +158,116 @@ on_every_backend!(assert_upgrade_with_transition_counts_until_enabled:
     test_sqlite_upgrade_with_transition_counts_until_enabled,
     test_mysql_upgrade_with_transition_counts_until_enabled,
     test_postgres_upgrade_with_transition_counts_until_enabled);
+
+async fn assert_retirement_releases_quota_without_losing_reads(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    fixtures::seed_credential(&db, "issuer").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let history = SeaOrmStore::<StatusListHistoryRecord>::new(db.clone());
+    store
+        .insert_one_with_snapshot(
+            fixtures::record("first", "issuer", "initial", "sub-first", 10),
+            fixtures::snapshot(
+                "first-snapshot",
+                "first",
+                "issuer",
+                "initial",
+                "sub-first",
+                10,
+                20,
+            ),
+            2,
+        )
+        .await
+        .unwrap();
+    publish(&store, "second", "issuer", 2).await.unwrap();
+    fixtures::insert_list_as_old_pod(&db, "third", "issuer").await;
+    list_quota::recount(&db).await.unwrap();
+    assert!(matches!(
+        list_quota::enable(&db, 2).await,
+        Err(ListQuotaError::Refused { .. })
+    ));
+
+    assert!(matches!(
+        list_quota::set_retired(&db, &["first".into(), "missing".into()], true, 2, 2).await,
+        Err(ListQuotaError::ListNotFound(_))
+    ));
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 3, "on {backend}");
+    assert!(!store.find_one_by("first").await.unwrap().unwrap().retired);
+
+    list_quota::set_retired(&db, &["first".into()], true, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    assert_eq!(
+        store.count_status_lists_by_issuer("issuer").await.unwrap(),
+        2
+    );
+    assert!(store.find_one_by("first").await.unwrap().is_some());
+    assert!(history.find_valid_at("first", 15).await.unwrap().is_some());
+    assert!(matches!(
+        store.ensure_writable("first").await,
+        Err(RepositoryError::Retired)
+    ));
+    let uris = store
+        .find_status_list_uris_after(Some("issuer"), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(uris.len(), 2, "on {backend}");
+    assert!(!uris.iter().any(|(id, _)| id == "first"));
+    let mut updated = store.find_one_by("first").await.unwrap().unwrap();
+    updated.version += 1;
+    assert!(matches!(
+        store.update_one("first", updated, 1).await,
+        Err(RepositoryError::Retired)
+    ));
+    assert!(matches!(
+        store.allocate_indices("first", "issuer", 1).await,
+        Err(RepositoryError::Retired)
+    ));
+    assert!(matches!(
+        store.allocate_indices("first", "another-issuer", 1).await,
+        Err(RepositoryError::IssuerMismatch)
+    ));
+
+    list_quota::recount(&db).await.unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    list_quota::enable(&db, 2).await.unwrap();
+    assert!(matches!(
+        list_quota::set_retired(&db, &["first".into()], false, 2, 2).await,
+        Err(ListQuotaError::UnretireOverQuota { .. })
+    ));
+    list_quota::set_retired(&db, &["second".into()], true, 2, 2)
+        .await
+        .unwrap();
+    list_quota::set_retired(&db, &["first".into()], false, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    assert!(
+        store
+            .find_status_list_uris_after(Some("issuer"), None, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "first")
+    );
+
+    db.execute_unprepared("UPDATE issuers SET tier = 'sandbox' WHERE issuer = 'issuer'")
+        .await
+        .unwrap();
+    assert!(matches!(
+        list_quota::set_retired(&db, &["second".into()], false, 3, 2).await,
+        Err(ListQuotaError::UnretireOverQuota { max: 2, .. })
+    ));
+}
+
+on_every_backend!(assert_retirement_releases_quota_without_losing_reads:
+    test_sqlite_retirement_releases_quota_without_losing_reads,
+    test_mysql_retirement_releases_quota_without_losing_reads,
+    test_postgres_retirement_releases_quota_without_losing_reads);
 
 async fn assert_enable_succeeds_within_cap(db: Arc<DatabaseConnection>, backend: &str) {
     fixtures::seed_credential(&db, "issuer-full").await;

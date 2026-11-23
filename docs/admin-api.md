@@ -62,7 +62,7 @@ inserts before that position are observed on a new traversal.
 
 ## Usage and validators
 
-Usage reports the actual number of persisted lists, including during a quota
+Usage reports the actual number of active lists, including during a quota
 transition, and the issuer tier's `max_lists`. Key usage counts the keys that
 hold one of the tier's `max_keys` slots: active keys whose `not_after` has not
 passed, including keys staged for rotation. `keys_limit` is the tier's
