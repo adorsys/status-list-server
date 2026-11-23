@@ -6,7 +6,7 @@ This guide shows you how to deploy the Status List Server on Kubernetes with the
 
 * A Kubernetes cluster (EKS, GKE, AKS, or any standard `apps/v1` cluster) running version 1.24 or newer.
 * [Helm](https://helm.sh/docs/intro/install/) and [`kubectl`](https://kubernetes.io/docs/tasks/tools/).
-* An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS, or [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.2 or newer for [Gateway API mode](#gateway-api-mode).
+* An ingress controller and [cert-manager](https://cert-manager.io/docs/installation/) if you expose the server over HTTPS, or [Envoy Gateway](https://gateway.envoyproxy.io/) v1.10.0 on Kubernetes v1.34–v1.37 for [Gateway API mode](#gateway-api-mode).
 * Access to the public images at `ghcr.io/adorsys/status-list-server`.
 * [External Secrets Operator (ESO)](https://external-secrets.io/latest/) if you enable `externalSecret.enabled=true`. With ESO enabled, the chart renders `ExternalSecret` and `SecretStore` resources with `apiVersion: external-secrets.io/v1beta1` to match the API version served by the currently-deployed ESO. A `ClusterSecretStore` referenced through `externalSecret.spec.secretStoreRef` is cluster-scoped and must already exist (and serve the same API group) before installing or upgrading this chart.
 * (Optional) The `AlertmanagerConfig` CRD if you use alert configuration. It is provided by [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) or the [standalone Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator).
