@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-EG_VERSION="${EG_VERSION:-v1.9.3}"
+EG_VERSION="${EG_VERSION:-v1.10.0}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0}"
 CURL_IMAGE="${CURL_IMAGE:-curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40}"
 CLUSTER="${CLUSTER:-statuslist-edge}"
