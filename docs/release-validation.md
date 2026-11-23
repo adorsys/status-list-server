@@ -28,8 +28,7 @@ and advances the version, none of which can be cleanly undone.
   promotion instead.
 - [ ] Confirm `stage`, `main`, and `hotfix/*` protections enforce the branch
   flow, merge methods, and review rules in [Contributing](../CONTRIBUTING.md#release-and-versioning).
-  Confirm `v*` tag creation is restricted to the release-bot App and that `v*`
-  tags cannot be deleted.
+  Confirm only the release-bot App can create, move, or delete `v*` tags.
 - [ ] Confirm the `production` environment requires deployment approval for RC
   and final tags. Record the protection rules on the `release` environment,
   which the **Release-plz release** job runs in before it creates the final tag.
