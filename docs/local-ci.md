@@ -92,9 +92,9 @@ Dedicated local-runner tests compare version constants with the workflows and
 pinned action references. Release variants are read directly from CI.yml. All
 CI Helm jobs explicitly pin the same version.
 Some versions come from pinned action implementations rather than workflow
-inputs: cargo-deny-action v2.1.1 embeds cargo-deny 0.20.2;
-markdownlint-cli2-action v24.2.0 embeds markdownlint-cli2 0.23.2;
-setup-tombi v1.8.9 defaults to Tombi 1.8.9; trivy-action v0.36.0 defaults to
+inputs: cargo-deny-action v2.1.2 embeds cargo-deny 0.21.0;
+markdownlint-cli2-action v25.0.0 embeds markdownlint-cli2 0.24.0;
+setup-tombi v1.11.3 defaults to Tombi 1.11.3; trivy-action v0.36.0 defaults to
 Trivy 0.70.0. Zizmor, OpenTelemetry Collector, Prometheus, and Jaeger use the same
 digest-pinned images as CI. Multi-platform manifest digests preserve architecture
 selection while preventing mutable tags from changing the checked image. A matching
