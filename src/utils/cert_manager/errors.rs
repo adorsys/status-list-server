@@ -8,7 +8,6 @@ use serde_json::Error as SerdeError;
 use thiserror::Error;
 use tokio_cron_scheduler::JobSchedulerError;
 
-/// List of errors that can occur during certificate management
 #[derive(Error, Debug)]
 pub enum CertError {
     #[error("ACME error: {0}")]
@@ -40,9 +39,6 @@ pub enum CertError {
 }
 
 impl CertError {
-    /// Build a `Validation` error from a plain message. `Box<dyn Error>` is used
-    /// so real error causes can be carried as a `#[source]` instead of being
-    /// flattened to a string, keeping the full error chain intact.
     pub fn validation(msg: impl Into<String>) -> Self {
         CertError::Validation(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

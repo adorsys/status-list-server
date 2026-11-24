@@ -2,10 +2,10 @@ pub(crate) const ACCEPT_STATUS_LISTS_HEADER_JWT: &str = "application/statuslist+
 pub(crate) const ACCEPT_STATUS_LISTS_HEADER_CWT: &str = "application/statuslist+cwt";
 pub(crate) const STATUS_LISTS_HEADER_JWT: &str = "statuslist+jwt";
 
-/// COSE label 16 ("type") value — unlike JWT's abbreviated `typ`, CWT's MUST be the full media type (§5.2).
+/// COSE "type" (label 16) must be the full media type, unlike JWT's short typ (§5.2).
 pub(crate) const STATUS_LISTS_CWT_TYPE_VALUE: &str = "application/statuslist+cwt";
 
-// CBOR Web Token (CWT) constants
+// CWT and COSE integer labels.
 pub(crate) const CWT_TYPE: i64 = 16;
 pub(crate) const SUBJECT: i32 = 2;
 pub(crate) const ISSUED_AT: i32 = 6;

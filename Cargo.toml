@@ -1,6 +1,6 @@
 [package]
 name = "status-list-server"
-version = "1.0.1"
+version = "1.2.0"
 edition = "2024"
 
 [workspace]
@@ -31,7 +31,7 @@ aws = [
   "dep:aws-sdk-route53",
   "dep:aws-sdk-secretsmanager",
 ]
-acme = ["dep:instant-acme", "dep:rcgen"]
+acme = ["dep:instant-acme", "dep:public-suffix", "dep:rcgen", "dep:webpki-roots"]
 # Opt-in gate for the Postgres container test. `--all-features` enables it in CI.
 postgres-tests = ["postgres"]
 
@@ -95,7 +95,7 @@ der = { version = "0.8", features = ["alloc"] }
 coset = "0.4"
 instant-acme = { version = "0.8", optional = true }
 rustls = "0.23"
-webpki-roots = "1"
+webpki-roots = { version = "1", optional = true }
 rustls-pki-types = "1.15"
 secrecy = { version = "0.10", features = ["serde"] }
 rcgen = { version = "0.14", features = ["pem"], optional = true }
@@ -127,16 +127,17 @@ metrics-process = { version = "2.4", default-features = false }
 thiserror = "2.0"
 color-eyre = "0.6"
 
-uuid = { version = "1.28", features = ["serde", "v4"] }
+uuid = { version = "1.28", features = ["serde", "v4", "v7"] }
 base64 = "0.23"
 time = { version = "0.3", features = ["formatting", "macros"] }
 base64url = "0.1"
 flate2 = "1.1"
 x509-parser = "0.18"
-public-suffix = "0.1"
+public-suffix = { version = "0.1", optional = true }
 tokio-cron-scheduler = "0.15"
 url = { version = "2.5", features = ["serde"] }
 dashmap = "6.2"
+ipnet = "2.12"
 
 [dependencies.sea-orm]
 version = "2.0"
@@ -177,7 +178,7 @@ version = "1"
 optional = true
 
 [dependencies.azure_security_keyvault_secrets]
-version = "1"
+version = "1.0.1"
 optional = true
 
 [dependencies.azure_identity]

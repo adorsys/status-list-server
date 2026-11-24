@@ -2,34 +2,15 @@ use crate::domain::models::status_list::{StatusListError, StatusListRecord, Stat
 use crate::server::cache::TokenEncoding;
 use sha2::{Digest, Sha256};
 
-/// Strong ETag for the live representation, derived from the *served
-/// representation bytes* (proposal #3 of ticket 564).
-///
-/// A strong ETag must change whenever the representation bytes change (RFC 9110
-/// §8.8.3.1), so this digests the exact bytes served to the client. Within a
-/// window the signed bytes are cached and reused, so the digest — and therefore
-/// the ETag — is stable for the whole window: a client revalidating with that
-/// ETag gets a `304` with no signing, and a matching ETag proves the client
-/// holds the current window's token for this content and signer.
-///
-/// Because ES256 (and the other supported algorithms) randomize their
-/// signatures, the signed bytes differ across replicas, restarts, cold caches
-/// and window rollovers. The ETag therefore differs across replicas: this is a
-/// documented, accepted deviation from cross-replica ETag equality (ticket 564
-/// acceptance criterion: "two replicas return matching ETags *or the issue
-/// documents why they don't*"). The randomized signature is precisely why the
-/// validator must be strong — it proves the exact byte-for-byte token the
-/// client holds — rather than a weak validator that only certifies the
-/// representation identity.
+/// Strong ETag over the exact served bytes, stable within a window because those bytes are cached.
+/// Signatures are randomized, so replicas disagree on it; that's accepted.
 pub(crate) fn generate_token_etag(representation_bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(representation_bytes);
     format!("\"{}\"", hex::encode(hasher.finalize()))
 }
 
-/// Content hash over the representation-driving fields of `record`, excluding
-/// the window: used to key the signed-token bytes cache so any content change
-/// immediately produces a fresh sign.
+/// Cache-key input: any content change forces a fresh sign.
 pub(crate) fn content_hash(record: &StatusListRecord) -> String {
     let mut hasher = Sha256::new();
     hasher.update(record.status_list.bits.to_string().as_bytes());
@@ -39,17 +20,7 @@ pub(crate) fn content_hash(record: &StatusListRecord) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Weak ETag for the historical representation, derived from the *snapshot
-/// identity* plus the format and encoding the token was served in.
-///
-/// Historical tokens are signed fresh on every request, so ES256 randomized
-/// signatures make the served bytes differ between requests for the very same
-/// snapshot. A strong ETag (RFC 9110 §8.8.3.1 requires it to change whenever
-/// the bytes change) would therefore be wrong and would let a byte-different
-/// response claim a cached validator. This is deliberately a **weak** validator
-/// (`W/"..."`) over the snapshot fields that pin the identity of the replayed
-/// state, together with `format` and `encoding`, so JWT vs CWT and gzip vs
-/// identity responses (which carry distinct bytes) never share a validator.
+/// Weak on purpose: historical tokens are re-signed per request, so their bytes never repeat.
 pub(crate) fn generate_historical_etag(
     snapshot: &StatusListSnapshot,
     format: &str,
@@ -123,20 +94,15 @@ mod tests {
 
     #[test]
     fn test_generate_token_etag_changes_with_bytes() {
-        // A strong ETag must change whenever the representation bytes change.
         assert_ne!(
             generate_token_etag(b"representation A"),
             generate_token_etag(b"representation B")
         );
-        // Even a single differing byte changes the digest.
         assert_ne!(generate_token_etag(b"aaa"), generate_token_etag(b"aab"));
     }
 
     #[test]
     fn test_generate_token_etag_identity_vs_gzip_bytes_differ() {
-        // gzip and identity representations carry distinct bytes, so their
-        // strong ETags must differ (a client that cached the gzip form must not
-        // revalidate against the identity form).
         let identity = b"the status list token";
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         use std::io::Write as _;
@@ -201,8 +167,6 @@ mod tests {
 
     #[test]
     fn test_generate_historical_etag_changes_with_format_and_encoding() {
-        // The same snapshot served as JWT vs CWT, or gzip vs identity, carries
-        // distinct bytes, so those representations must not share a validator.
         let base = base_snapshot();
         let jwt = generate_historical_etag(&base, "jwt", TokenEncoding::Identity).unwrap();
         let cwt = generate_historical_etag(&base, "cwt", TokenEncoding::Identity).unwrap();

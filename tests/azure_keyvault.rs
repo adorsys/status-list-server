@@ -36,7 +36,6 @@ impl TokenCredential for DummyTokenCredential {
     }
 }
 
-// Custom HTTP transport that accepts self-signed certificates.
 #[derive(Debug)]
 struct InsecureHttpClient {
     inner: reqwest::Client,
@@ -157,7 +156,6 @@ async fn start_emulator(
         .await
         .expect("Failed to resolve host port");
 
-    // the emulator serves HTTPS with our self-signed cert.
     let url = url::Url::parse(&format!("https://127.0.0.1:{port}")).expect("Failed to parse URL");
     let http_client: Arc<dyn azure_core::http::HttpClient> = Arc::new(InsecureHttpClient::new());
 
@@ -180,31 +178,25 @@ async fn test_azure_keyvault_storage_lifecycle() {
     let secret_value =
         "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEF\n-----END PRIVATE KEY-----";
 
-    // Secret should not exist initially
     let initial_load = client
         .load(secret_key)
         .await
         .expect("Failed to check secret existence");
     assert!(initial_load.is_none(), "Secret should not exist initially");
 
-    // Store secret
     client
         .store(secret_key, secret_value)
         .await
         .expect("Failed to store secret");
 
-    // Load secret and verify payload
     let loaded = client
         .load(secret_key)
         .await
         .expect("Failed to load secret");
     assert_eq!(loaded.as_deref(), Some(secret_value));
 
-    // Overwrite secret with a new version. The emulator resolves the "latest"
-    // version by ordering on the `updated` attribute, which it records with
-    // one-second granularity, and ties resolve to the oldest row. Sleeping a
-    // full second guarantees the two versions land in distinct second buckets.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let wait_past_emulator_second = Duration::from_millis(1100);
+    tokio::time::sleep(wait_past_emulator_second).await;
     let updated_value =
         "-----BEGIN PRIVATE KEY-----\nUPDATED_KEY_MATERIAL\n-----END PRIVATE KEY-----";
     client
@@ -222,7 +214,6 @@ async fn test_azure_keyvault_storage_lifecycle() {
         "Loaded secret payload should match updated value"
     );
 
-    // Delete secret
     client
         .delete(secret_key)
         .await
@@ -250,7 +241,6 @@ async fn test_azure_keyvault_cache_behavior() {
     let first_load = client.load(secret_key).await.expect("Failed first load");
     assert_eq!(first_load.as_deref(), Some(secret_value));
 
-    // Second fetch should be served from cache
     let second_load = client.load(secret_key).await.expect("Failed second load");
     assert_eq!(second_load.as_deref(), Some(secret_value));
 }

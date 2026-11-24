@@ -13,12 +13,10 @@ use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::cert_manager::CertError;
 
-/// Default HTTP client used for ACME flow
 #[derive(Clone)]
 pub struct DefaultHttpClient(ClientInner);
 
 impl DefaultHttpClient {
-    /// Create a new instance of [DefaultHttpClient] with optional root certificate chain pem
     pub fn new(root_cert_pem: Option<&[u8]>) -> Result<Self, CertError> {
         Ok(Self(ClientInner::try_new(root_cert_pem)?))
     }

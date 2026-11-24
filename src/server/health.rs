@@ -1,6 +1,3 @@
-//! Liveness and readiness HTTP endpoints plus the small readiness-check
-//! abstraction they rely on.
-
 use axum::{
     extract::State,
     http::StatusCode,
@@ -16,21 +13,14 @@ use crate::server::AppState;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const READINESS_CACHE_TTL: Duration = Duration::from_secs(1);
 
-/// A single, independent readiness probe.
-///
-/// `#[async_trait]` matches the rest of the codebase's port/adaptor trait style
-/// (see `domain/ports.rs`). Implementations are constructed in the composition
-/// root (`setup.rs`) from the same adapters the application already uses.
 #[async_trait::async_trait]
 pub trait ReadinessCheck: Send + Sync {
-    /// Human-readable name for logging and the readiness body.
     fn name(&self) -> &'static str;
 
     /// `Ok(())` when the dependency is reachable or not needed; `Err` carries the reason.
     async fn check(&self) -> Result<(), String>;
 }
 
-/// Aggregator that runs all registered readiness checks concurrently.
 #[derive(Clone, Default)]
 pub struct Readiness {
     checks: Vec<Arc<dyn ReadinessCheck>>,
@@ -52,7 +42,6 @@ impl std::fmt::Debug for Readiness {
 }
 
 impl Readiness {
-    /// Build from an explicit list of checks.
     pub fn new(checks: Vec<Arc<dyn ReadinessCheck>>) -> Self {
         Self {
             checks,
@@ -60,17 +49,12 @@ impl Readiness {
         }
     }
 
-    /// Register a single check.
     pub fn with_check<T: ReadinessCheck + 'static>(mut self, check: T) -> Self {
         self.checks.push(Arc::new(check));
         self.cache = Arc::new(Mutex::new(None));
         self
     }
 
-    /// Run every check concurrently and report per-dependency results.
-    ///
-    /// Each check runs under a timeout so a hung dependency cannot block the
-    /// readiness probe forever.
     pub async fn run(&self) -> ReadinessReport {
         let mut cached = self.cache.lock().await;
         if let Some(cached_report) = cached.as_ref()
@@ -119,14 +103,12 @@ impl Readiness {
     }
 }
 
-/// Serialized outcome of running every readiness check.
 #[derive(Clone, Debug, Serialize)]
 pub struct ReadinessReport {
     ready: bool,
     checks: Vec<CheckResult>,
 }
 
-/// Outcome of a single readiness check.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
     name: String,
@@ -135,16 +117,12 @@ pub struct CheckResult {
     reason: Option<String>,
 }
 
-/// Liveness: the HTTP process is up and able to serve requests. Deliberately
-/// does not depend on any downstream dependency so a healthy process is never
-/// restarted merely because a dependency is down.
+/// Never checks dependencies, so a DB outage doesn't get pods restarted.
 pub async fn live() -> impl IntoResponse {
     (StatusCode::OK, "OK")
 }
 
-/// Readiness: `200` only when every critical dependency is reachable, else
-/// `503`. Detailed dependency failures are logged internally instead of being
-/// exposed in the unauthenticated HTTP response.
+/// Failure details go to the logs, not the unauthenticated response.
 pub async fn ready(State(state): State<AppState>) -> Response {
     let report = state.readiness.run().await;
     if report.ready {
@@ -155,7 +133,6 @@ pub async fn ready(State(state): State<AppState>) -> Response {
     }
 }
 
-/// A readiness check that is always ready (used for in-memory backends).
 pub struct AlwaysReady {
     name: &'static str,
 }
@@ -177,7 +154,6 @@ impl ReadinessCheck for AlwaysReady {
     }
 }
 
-/// Readiness check for a relational database backend.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub struct DbCheck {
     db: std::sync::Arc<crate::outbound::sql::SwappableDatabaseConnection>,
@@ -205,9 +181,7 @@ impl ReadinessCheck for DbCheck {
     }
 }
 
-/// Readiness check for the certificate/key store backend used by the ACME
-/// certificate manager. Only verifies reachability — it never reads or parses
-/// the private signing key.
+/// Checks reachability only; never reads the signing key.
 #[cfg(feature = "acme")]
 pub struct CertStoreCheck {
     manager: std::sync::Arc<crate::utils::cert_manager::CertManager>,
@@ -239,22 +213,17 @@ impl ReadinessCheck for CertStoreCheck {
     }
 }
 
-/// Readiness check for the filesystem certificate/key store used when the ACME
-/// feature is disabled. Verifies the configured files exist *and* are readable —
-/// it never parses the private signing key.
+/// Checks the signer can still produce valid, non-expired signing material by delegating to the
+/// same provider the signer uses, so readiness reflects its actual view instead of re-parsing files.
 #[cfg(not(feature = "acme"))]
 pub struct FilesystemCertCheck {
-    cert_path: Option<String>,
-    key_path: Option<String>,
+    provider: Arc<dyn crate::domain::ports::CertificateProvider>,
 }
 
 #[cfg(not(feature = "acme"))]
 impl FilesystemCertCheck {
-    pub fn new(cert_path: Option<String>, key_path: Option<String>) -> Self {
-        Self {
-            cert_path: cert_path.filter(|p| !p.trim().is_empty()),
-            key_path: key_path.filter(|p| !p.trim().is_empty()),
-        }
+    pub fn new(provider: Arc<dyn crate::domain::ports::CertificateProvider>) -> Self {
+        Self { provider }
     }
 }
 
@@ -266,17 +235,11 @@ impl ReadinessCheck for FilesystemCertCheck {
     }
 
     async fn check(&self) -> Result<(), String> {
-        for path in self.cert_path.iter().chain(self.key_path.iter()) {
-            tokio::fs::metadata(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' unavailable: {e}"))?;
-            tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(path)
-                .await
-                .map_err(|e| format!("cert store file '{path}' not readable: {e}"))?;
-        }
-        Ok(())
+        self.provider
+            .signing_material()
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("signing material unavailable: {e}"))
     }
 }
 
@@ -379,8 +342,6 @@ mod tests {
         );
     }
 
-    /// Simulates a specific dependency being unreachable, so each readiness
-    /// dependency's failure can be exercised independently.
     struct FailingNamedCheck {
         name: &'static str,
     }
@@ -396,7 +357,6 @@ mod tests {
         }
     }
 
-    /// Build an `AppState` whose readiness is backed only by the supplied checks.
     async fn app_state_with_checks(checks: Vec<Arc<dyn ReadinessCheck>>) -> AppState {
         let mut state = crate::test_utils::test_app_state(None).await;
         state.readiness = Readiness::new(checks);
@@ -455,7 +415,6 @@ mod tests {
         assert_eq!(response_body(resp).await, "READY");
     }
 
-    /// Each readiness dependency failure must flip `/health/ready` to 503.
     #[tokio::test]
     async fn ready_fails_when_any_dependency_is_down() {
         for dep in ["database", "cert_store"] {
@@ -469,6 +428,34 @@ mod tests {
             );
             assert_eq!(response_body(resp).await, "NOT_READY");
         }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    struct ExpiredSigningProvider;
+
+    #[cfg(not(feature = "acme"))]
+    #[async_trait::async_trait]
+    impl crate::domain::ports::CertificateProvider for ExpiredSigningProvider {
+        async fn signing_material(
+            &self,
+        ) -> Result<
+            Arc<crate::domain::ports::SigningMaterial>,
+            crate::domain::models::status_list::StatusListError,
+        > {
+            Err(
+                crate::domain::models::status_list::StatusListError::Backend(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Other, "signing certificate expired"),
+                )),
+            )
+        }
+    }
+
+    #[cfg(not(feature = "acme"))]
+    #[tokio::test]
+    async fn certificate_readiness_fails_when_signing_material_is_unavailable() {
+        let check = FilesystemCertCheck::new(Arc::new(ExpiredSigningProvider));
+        let result = check.check().await;
+        assert!(result.is_err());
     }
 
     #[cfg(feature = "acme")]

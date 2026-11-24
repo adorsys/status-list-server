@@ -14,18 +14,11 @@ const HIT_METRIC: &str = "certificate_chain_cache_hits";
 const MISS_METRIC: &str = "certificate_chain_cache_misses";
 const REPLACEMENT_METRIC: &str = "certificate_chain_cache_replacements";
 
-/// An in-memory cache of type [`CertificateChain`] keyed by the cert storage
-/// key (`cert_key`). One [`CertManager`](crate::cert_manager::CertManager)
-/// instance owns exactly one `CertChainCache`, so the cache holds at most one
-/// entry per running process.
-///
-/// Entries do not expire by time. They stay cached until provisioning or
-/// renewal replaces the entry through the certificate manager.
+/// No time-based expiry; renewal replaces the entry.
 #[derive(Clone)]
 pub(crate) struct CertChainCache {
     inner: Cache<String, CertificateChain>,
-    /// Domain label attached to every emitted counter. Empty string means
-    /// "no label".
+    /// Empty means no label.
     domain_label: String,
     hit_counter: Counter<u64>,
     miss_counter: Counter<u64>,
@@ -33,16 +26,7 @@ pub(crate) struct CertChainCache {
 }
 
 impl CertChainCache {
-    /// Construct a `CertChainCache`.
-    ///
-    /// `domain` is used as the value of the `domain` label on every emitted
-    /// counter so multi-domain deployments don't aggregate blindly. Pass an
-    /// empty string to opt out of the label entirely.
-    ///
-    /// Counters are created eagerly from the OpenTelemetry global meter
-    /// provider. Telemetry initialization must install the provider before
-    /// application state constructs this cache; otherwise these handles would
-    /// remain no-op for the lifetime of the process.
+    /// Build after telemetry init: counters taken earlier stay no-ops forever.
     pub(crate) fn new(domain: impl AsRef<str>) -> Self {
         let meter = global::meter("status-list-server");
 
@@ -69,8 +53,7 @@ impl CertChainCache {
         }
     }
 
-    /// Zero-initialise all counters so they appear in Prometheus scrapes
-    /// before first use.
+    /// So the series exist in scrapes before the first hit.
     pub(crate) fn init_counters(&self) {
         self.hit_counter.add(0, &self.attributes());
         self.miss_counter.add(0, &self.attributes());
@@ -91,10 +74,6 @@ impl CertChainCache {
         self.inner.insert(key, value).await;
     }
 
-    /// Replace the cached entry for `key` with `value`.
-    ///
-    /// Used after a new certificate is provisioned so the next read returns
-    /// the fresh chain without an extra storage load and parse.
     pub(crate) async fn replace(&self, key: String, value: CertificateChain) {
         self.replacement_counter.add(1, &self.attributes());
         self.inner.insert(key, value).await;
@@ -150,11 +129,8 @@ mod tests {
             let chain: CertificateChain = Arc::from(vec!["a".to_string()]);
             cache.insert("k".to_string(), chain.clone()).await;
 
-            // hit
             assert!(cache.get("k").await.is_some());
-            // miss
             assert!(cache.get("missing").await.is_none());
-            // replacement
             let new_chain: CertificateChain = Arc::from(vec!["b".to_string()]);
             cache.replace("k".to_string(), new_chain).await;
         });

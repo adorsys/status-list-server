@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.azure_security_keyvault_secrets]]
+who = "Christiantyemele <yemelechristian2@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.0 -> 1.0.1"
+notes = "Reviewed the 1.0.0 to 1.0.1 delta. The only runtime source change moves cached challenge scope assignment after challenge resource validation, preventing an unverified resource from poisoning later authentication. Added test covers rejected challenges; no new runtime API, dependency, or unsafe code in this crate delta."
+
 [[audits.granit-parser]]
 who = "Christiantyemele <yemelechristian2@gmail.com>"
 criteria = "safe-to-deploy"

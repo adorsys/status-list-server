@@ -18,9 +18,7 @@ pub(crate) struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// Create a watcher for a set of paths. Relative paths are made absolute
-    /// (without resolving symlinks) so native inotify watch roots work; duplicates
-    /// are ignored and the fallback poll interval is clamped to at least one second.
+    /// Makes paths absolute without resolving symlinks, so native watch roots work.
     pub(crate) fn new(paths: Vec<PathBuf>, poll_interval: Duration) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut unique = HashSet::new();
@@ -51,8 +49,7 @@ impl FileWatcher {
         }
     }
 
-    /// Spawn background watching with 500ms debouncing. The callback runs
-    /// serially, so a later change waits for any in-flight reload to finish.
+    /// Debounced 500 ms; callbacks run one at a time.
     pub(crate) fn spawn<F, Fut>(self, target: &'static str, on_change: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -107,8 +104,7 @@ fn spawn_notify_watcher(
         let mut watcher = match RecommendedWatcher::new(
             move |event: notify::Result<Event>| match event {
                 Ok(event) => {
-                    // Only react to real content changes; the app's own reads
-                    // emit IN_OPEN events that would otherwise loop rotation.
+                    // Our own reads emit IN_OPEN events, which would otherwise loop rotation.
                     if !is_content_change(&event.kind) {
                         return;
                     }
@@ -159,8 +155,7 @@ fn spawn_notify_watcher(
             return;
         }
 
-        // Keep the notify watcher in scope for the process lifetime. File
-        // watchers are installed once during startup for long-lived credentials.
+        // Parks forever so the watcher lives as long as the process.
         loop {
             std::thread::park();
         }
@@ -213,8 +208,7 @@ fn spawn_debouncer<F, Fut>(
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {
-        // Only dispatch when content actually changed; guards against spurious
-        // events that slip past the event-kind filter.
+        // Fingerprints catch spurious events the kind filter lets through.
         let mut last_fingerprints = fingerprint_all(&paths).await;
         if let Some(ready) = ready {
             ready.wait().await;
@@ -288,8 +282,6 @@ fn path_relevant(changed: &Path, watched: &Path) -> bool {
             && changed.parent() == watched.parent())
 }
 
-/// True for real content changes (Create/Remove/Rename/Modify(Data)); false
-/// for Access/Open and metadata events that the app's own reads emit.
 fn is_content_change(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -453,10 +445,8 @@ mod tests {
             false,
         );
 
-        // Let the debouncer establish its baseline fingerprint.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // One content change followed by a burst of events coalesces into one callback.
         tokio::fs::write(&path, "v2").await.expect("write update");
         tx.send(()).await.expect("first event");
         tx.send(()).await.expect("second event");
@@ -502,15 +492,12 @@ mod tests {
             false,
         );
 
-        // Let the debouncer establish its baseline fingerprint.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // First content change + event.
         tokio::fs::write(&path, "v2").await.expect("write update 1");
         tx.send(()).await.expect("first event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(50)).await;
 
-        // Second content change + event.
         tokio::fs::write(&path, "v3").await.expect("write update 2");
         tx.send(()).await.expect("second event");
         tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
@@ -544,10 +531,8 @@ mod tests {
             false,
         );
 
-        // Let the debouncer establish its baseline fingerprint.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // A spurious event with unchanged content must NOT trigger the callback.
         tx.send(()).await.expect("send spurious event");
         tokio::time::sleep(Duration::from_millis(1200)).await;
 
@@ -579,10 +564,8 @@ mod tests {
             false,
         );
 
-        // Let the debouncer establish its baseline fingerprint.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // A real content change must trigger the callback.
         tokio::fs::write(&path, "new").await.expect("write update");
         tx.send(()).await.expect("send event");
         tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -596,7 +579,6 @@ mod tests {
             AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode,
         };
 
-        // The app's own reads emit these; they must NOT trigger rotation.
         assert!(!is_content_change(&EventKind::Access(AccessKind::Open(
             AccessMode::Read
         ))));
@@ -611,7 +593,6 @@ mod tests {
             ModifyKind::Metadata(MetadataKind::Any)
         )));
 
-        // Real content changes MUST trigger rotation.
         assert!(is_content_change(&EventKind::Create(CreateKind::File)));
         assert!(is_content_change(&EventKind::Remove(RemoveKind::File)));
         assert!(is_content_change(&EventKind::Modify(ModifyKind::Data(
@@ -657,7 +638,6 @@ mod tests {
         let watched = data.join("password");
         let before = fingerprint(&watched).await.unwrap();
 
-        // Atomic symlink swap (..data -> dir2) with identical content: fingerprint unchanged.
         let tmp = dir.path.join("..data_tmp");
         symlink(&dir2, &tmp).unwrap();
         std::fs::remove_file(&data).unwrap();
@@ -665,7 +645,6 @@ mod tests {
         let unchanged = fingerprint(&watched).await.unwrap();
         assert_eq!(before, unchanged);
 
-        // Swap target to content that changed: fingerprint must differ.
         std::fs::write(dir2.join("password"), "new").unwrap();
         let tmp = dir.path.join("..data_tmp2");
         symlink(&dir2, &tmp).unwrap();

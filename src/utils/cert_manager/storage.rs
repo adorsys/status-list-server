@@ -13,24 +13,16 @@ pub enum StorageError {
     InvalidData(String),
 }
 
-/// Abstract interface for storage backends used by the certificate manager.
 #[async_trait]
 pub trait Storage: Send + Sync {
-    /// Store the value identified by the given key
     async fn store(&self, key: &str, value: &str) -> Result<(), StorageError>;
-    /// Get the value specified by the given key
     async fn load(&self, key: &str) -> Result<Option<String>, StorageError>;
-    /// Update the value associated with the given key
     async fn update(&self, key: &str, value: &str) -> Result<(), StorageError> {
         self.store(key, value).await
     }
-    /// Delete the value associated with the given key
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
 
-    /// Verify the backend is reachable without reading or storing any secret
-    /// material. Used by the readiness probe: the default implementation
-    /// considers the backend reachable, and concrete adapters that can cheaply
-    /// prove reachability (e.g. a bucket `HEAD`) override this.
+    /// Must not read or write secrets. Defaults to Ok for backends with no cheap probe.
     async fn reachable(&self) -> Result<(), StorageError> {
         Ok(())
     }
@@ -58,19 +50,8 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
 use sha2::{Digest, Sha256};
 
-/// Normalize a storage key so it is valid and consistent across all secrets backends
-/// (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault, Memory).
-///
-/// Azure Key Vault is the most restrictive provider, requiring 1–127 characters
-/// and admitting only ASCII alphanumeric characters and hyphens `[0-9a-zA-Z-]`.
-/// This function replaces any character outside `[0-9a-zA-Z-]` with `-`.
-///
-/// If the sanitized key exceeds 127 characters, it is truncated to 110 characters
-/// and appended with a hyphen and a 16-character hex SHA-256 digest of the full original
-/// key (`110 + 1 + 16 = 127` chars). This disambiguates distinct keys exceeding 127
-/// characters that would otherwise collide due to sharing a common prefix (e.g. multi-domain
-/// signing secret keys). Note: for keys under 127 characters, normalization is a character-replacement
-/// mapping and does not hash.
+/// Azure Key Vault is strictest: 127 chars of `[0-9a-zA-Z-]`, so anything else becomes '-'.
+/// Longer keys keep 110 chars plus a hash suffix so shared prefixes don't collide.
 pub fn normalize_key(key: &str) -> String {
     let sanitized: String = key
         .chars()
@@ -87,9 +68,7 @@ pub fn normalize_key(key: &str) -> String {
         hasher.update(key.as_bytes());
         let digest = hex::encode(hasher.finalize());
         let hash_suffix = &digest[..16];
-        // Invariant: `sanitized` contains only single-byte ASCII characters `[0-9a-zA-Z-]`
-        // due to the character mapping above, so byte index 110 is guaranteed to be a valid
-        // UTF-8 character boundary.
+        // ASCII only after the mapping above, so slicing at byte 110 is safe.
         let prefix = &sanitized[..110];
         format!("{prefix}-{hash_suffix}")
     } else {
@@ -129,11 +108,7 @@ impl Storage for MemoryStorage {
     }
 }
 
-/// Cache policy for server cryptographic material.
-///
-/// Certificate material is always cached until explicit invalidation during
-/// provisioning or renewal. Private-key material remains policy-controlled so
-/// deployments can force each private-key read to hit the backing secrets system.
+/// Certs are cached until renewal; the key's TTL is configurable, down to no caching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CryptoCachePolicy {
     pub signing_key_ttl: Duration,
@@ -155,8 +130,6 @@ impl Default for CryptoCachePolicy {
     }
 }
 
-/// Consolidated storage backend for the server certificate chain, signing key,
-/// and adjacent ACME account material.
 pub struct CryptoStorage {
     backend: Box<dyn Storage>,
     certificate_cache: Cache<String, String>,

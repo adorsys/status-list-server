@@ -62,6 +62,8 @@ That the claim is *specific* rather than repository-scoped is load-bearing. `scr
 - `promote-tags` resolves the release tag and verifies what it resolves to, then separately asserts that is the built and scanned digest.
 - `deploy` verifies the digest *it* resolved, which is the one that reaches the cluster. `promote-tags` read the tag earlier; a tag is mutable, and verifying anything other than the value about to be deployed verifies an artifact production is not going to run.
 
+A final tag (`v<version>`) builds nothing and promotes its release candidate's digest, so nothing in its own run signs. It skips `verify-provenance`, and `promote-tags` verifies the candidate's digest before applying any tag instead. All three points pin the identity to the candidate's ref, `refs/tags/v<version>-rc.<N>`, because the candidate's run is the one that signed. The placement above is otherwise unchanged.
+
 `verify-provenance` is deliberately not gated on `push`, so it runs on `workflow_dispatch` too. A stub cannot show that a flag combination is one `gh` accepts, that the token carries the right scope, or that the certificate identity is the one we predicted; without a non-release path exercising the real command, the first execution of it would be during a release, on the last step before a deploy.
 
 **A future move to a private repository breaks the signed attestation unless the organisation is on GitHub Enterprise Cloud.** This is the mirror image of the argument for the decision and must be checked before any such change. BuildKit's `mode=max` provenance would survive it — degraded to `mode=min` unless the explicit pin is kept, which is why the pin stays.

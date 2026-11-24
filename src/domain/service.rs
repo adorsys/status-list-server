@@ -1,5 +1,3 @@
-//! Service container holding injected outbound adapter ports and domain business operations.
-
 use std::sync::Arc;
 
 use crate::domain::models::credential::{AggregationId, Credential, CredentialError, Issuer};
@@ -31,7 +29,6 @@ pub struct PublishStatusListCommand {
     pub default_status: Option<Status>,
 }
 
-/// Container struct for building and exposing external service ports injected into handlers.
 #[derive(Clone)]
 pub struct Service {
     pub(crate) status_list_repo: Arc<dyn StatusListRepo>,
@@ -100,16 +97,11 @@ impl Service {
         self.cert_provider.as_ref()
     }
 
-    /// Whether historical snapshot retention is enabled.
     pub fn snapshots_enabled(&self) -> bool {
         self.snapshot_repo.is_some()
     }
 
-    /// Create and publish a new status list record, enforcing uniqueness, size
-    /// invariants and the per-issuer list quota.
-    ///
-    /// The quota is checked by the repository inside creation, since a
-    /// count-then-insert here would race concurrent publishes.
+    /// The repo enforces the quota inside the insert; counting here first would race.
     pub async fn publish_status_list(
         &self,
         command: PublishStatusListCommand,
@@ -174,18 +166,8 @@ impl Service {
         Ok(record)
     }
 
-    /// Mutate statuses in an existing status list record with optimistic concurrency checks and cache invalidation.
-    ///
-    /// Request-shape validation (count bound, index bound, duplicate indices)
-    /// runs before any storage access so a malformed request is rejected with
-    /// `400` consistently and without a wasted `find` or write. The
-    /// duplicate-index invariant is re-enforced in the domain model as defense
-    /// in depth in case this service boundary is bypassed.
-    ///
-    /// An update that leaves the list unchanged — including a literal empty
-    /// `statuses` payload and a non-empty payload that re-sets every affected
-    /// index to its current value — is a successful no-op: the list version and
-    /// history are untouched and no redundant snapshot is written.
+    /// A request that changes nothing is a no-op: no version bump and no new snapshot.
+    /// `max_status_index` bounds growth only, so an issuer moved to a lower tier can still revoke.
     pub async fn update_statuses(
         &self,
         issuer: &Issuer,
@@ -193,22 +175,25 @@ impl Service {
         statuses: Vec<StatusEntry>,
         policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
-        validate_request_shape(
-            &statuses,
-            policy.max_status_index,
-            policy.max_statuses_per_request,
-        )?;
+        validate_status_count(&statuses, policy.max_statuses_per_request)?;
+        // The index bound is checked before duplicates. An index above the
+        // bound needs the stored list to tell growth from an existing entry.
+        let beyond_bound = statuses
+            .iter()
+            .any(|entry| entry.index > policy.max_status_index);
+        let checked = if beyond_bound {
+            let existing = self.find_owned_list(issuer, list_id).await?;
+            validate_update_indices(&existing.status_list, &statuses, policy.max_status_index)?;
+            Some(existing)
+        } else {
+            None
+        };
         validate_unique_indices(&statuses)?;
 
-        let mut existing = self
-            .status_list_repo
-            .find(list_id)
-            .await?
-            .ok_or(StatusListError::NotFound)?;
-
-        if &existing.issuer != issuer {
-            return Err(StatusListError::IssuerMismatch);
-        }
+        let mut existing = match checked {
+            Some(existing) => existing,
+            None => self.find_owned_list(issuer, list_id).await?,
+        };
 
         existing
             .status_list
@@ -227,10 +212,6 @@ impl Service {
         let current_status_list = existing.status_list.clone();
         existing.status_list = existing.status_list.update(statuses)?;
 
-        // A request that does not change the list is a successful no-op. It must
-        // not bump the version or `updated_at`, or insert a redundant history
-        // snapshot, which would bloat history with a duplicate entry for an
-        // unchanged state.
         if existing.status_list == current_status_list {
             return Ok(existing);
         }
@@ -239,19 +220,9 @@ impl Service {
             return Err(StatusListError::TooLarge);
         }
 
-        // Optimistic-concurrency version: strictly monotonic, bumped on every
-        // committed change and used for conflict detection and cache fencing. It
-        // is deliberately separate from `updated_at`, which stays a real
-        // wall-clock timestamp so a burst of writes to one list can never push a
-        // token's `iat` into the future (RPs reject a future `iat`).
         let previous_version = existing.version;
         existing.version = next_version(previous_version);
-        // `updated_at` stays a real wall-clock timestamp and never moves
-        // backwards, even on a replica with a slightly slow clock: two writes in
-        // the same second can therefore share an `updated_at`, which is fine
-        // because the monotonic `version` is the concurrency guard and the
-        // snapshot/history tie-breaker. Advancing it with `max(now, previous)`
-        // (rather than `previous + 1`) keeps it from drifting ahead of the clock.
+        // max(), not +1: two writes in one second may share updated_at, and that's fine.
         existing.updated_at = existing.updated_at.max(current_unix_timestamp());
 
         let landed = if self.snapshots_enabled() {
@@ -270,6 +241,22 @@ impl Service {
         }
 
         invalidate_after_commit(self.status_list_cache.as_ref(), &existing).await;
+        Ok(existing)
+    }
+
+    async fn find_owned_list(
+        &self,
+        issuer: &Issuer,
+        list_id: &str,
+    ) -> Result<StatusListRecord, StatusListError> {
+        let existing = self
+            .status_list_repo
+            .find(list_id)
+            .await?
+            .ok_or(StatusListError::NotFound)?;
+        if &existing.issuer != issuer {
+            return Err(StatusListError::IssuerMismatch);
+        }
         Ok(existing)
     }
 
@@ -296,7 +283,6 @@ impl Service {
             .await
     }
 
-    /// Retrieve a status list record from cache or fallback to persistent storage.
     pub async fn get_status_list(
         &self,
         list_id: &str,
@@ -317,7 +303,6 @@ impl Service {
         Ok(record)
     }
 
-    /// List one page of published status list URIs, starting after `after`.
     pub async fn list_uris(
         &self,
         after: Option<&str>,
@@ -328,6 +313,19 @@ impl Service {
 
     pub async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError> {
         self.status_list_repo.issuers_with_status_lists().await
+    }
+
+    /// Count the status lists currently owned by one issuer.
+    pub async fn issuer_status_list_count(&self, issuer: &str) -> Result<u64, StatusListError> {
+        self.status_list_repo.count_by_issuer(issuer).await
+    }
+
+    /// Count lists for a page of issuer IDs with one grouped query where supported.
+    pub async fn issuer_status_list_counts(
+        &self,
+        issuers: &[String],
+    ) -> Result<std::collections::HashMap<String, u64>, StatusListError> {
+        self.status_list_repo.count_by_issuers(issuers).await
     }
 
     /// Like [`Self::list_uris`], for the issuer with this aggregation ID only.
@@ -380,7 +378,6 @@ impl Service {
             .ok_or(StatusListError::HistoricalNotFound)
     }
 
-    /// Purge snapshots older than `cutoff` timestamp.
     pub async fn cleanup_snapshots(&self, cutoff: i64) -> Result<u64, StatusListError> {
         let Some(snapshot_repo) = &self.snapshot_repo else {
             return Ok(0);
@@ -388,19 +385,7 @@ impl Service {
         snapshot_repo.delete_older_than(cutoff).await
     }
 
-    /// Publish new credentials for an issuer.
-    ///
-    /// Uniqueness is enforced by the primary key on `credentials.issuer`, not by
-    /// a `find` pre-check — same reasoning as [`Self::publish_status_list`]: the
-    /// pre-check is a TOCTOU race that still has to defer to the constraint when
-    /// two registrations for one issuer arrive together, so it buys a round trip
-    /// and no guarantee. `insert_one` classifies the violation through
-    /// `map_insert_err` (proven on SQLite and MySQL by
-    /// `test_*_duplicate_insert_maps_to_duplicate_entry`) and
-    /// `impl From<RepositoryError> for CredentialError` maps it to
-    /// `AlreadyExists`, so the 409 is unchanged.
-    ///
-    /// Returns the aggregation ID the issuer was registered under.
+    /// No find pre-check: the primary key catches duplicates, and a pre-check would race anyway.
     pub async fn publish_credential(
         &self,
         credential: Credential,
@@ -419,7 +404,6 @@ impl Service {
             .await
     }
 
-    /// The issuer's aggregation ID, or `None` for an unknown issuer.
     pub async fn find_aggregation_id(
         &self,
         issuer: &Issuer,
@@ -427,7 +411,6 @@ impl Service {
         self.credential_repo.find_aggregation_id(&issuer.0).await
     }
 
-    /// Retrieve credentials by issuer identifier.
     pub async fn find_credential(
         &self,
         issuer: &str,
@@ -435,7 +418,6 @@ impl Service {
         self.credential_repo.find(issuer).await
     }
 
-    /// Retrieve credentials by the registered management-token key ID.
     pub async fn find_credential_by_kid(
         &self,
         kid: &str,
@@ -475,30 +457,17 @@ pub fn current_unix_timestamp() -> i64 {
     time::UtcDateTime::now().unix_timestamp()
 }
 
-/// The next monotonic optimistic-concurrency version for a record currently at
-/// `previous`.
-///
-/// The version is the concurrency guard and distributed cache-fencing stamp; it
-/// is deliberately decoupled from `updated_at` (which stays a real wall-clock
-/// timestamp) so a burst of writes to one list can never push the token's `iat`
-/// into the future. `saturating_add` keeps a saturated version monotonic rather
-/// than wrapping.
 pub fn next_version(previous: u64) -> u64 {
     previous.saturating_add(1)
 }
 
-/// Enforce the request-level count and index bounds shared by publish and update.
+/// Enforce the request-level count and index bounds of a publish.
 fn validate_request_shape(
     statuses: &[StatusEntry],
     max_status_index: i32,
     max_statuses_per_request: usize,
 ) -> Result<(), StatusListError> {
-    if statuses.len() > max_statuses_per_request {
-        return Err(StatusListError::TooManyStatuses {
-            count: statuses.len(),
-            max: max_statuses_per_request,
-        });
-    }
+    validate_status_count(statuses, max_statuses_per_request)?;
     for entry in statuses {
         if entry.index > max_status_index {
             return Err(StatusListError::IndexTooLarge {
@@ -510,14 +479,44 @@ fn validate_request_shape(
     Ok(())
 }
 
-/// Computes the `exp` claim (`iat + token_exp_secs`) failing closed on overflow.
-///
-/// Used by every expiry-construction site (`build_snapshot` and the default token
-/// validity window) so the two stay in sync. Configuration validation normally
-/// keeps `token_exp_secs` within `MAX_TOKEN_LIFETIME_SECS`, but a directly
-/// constructed `AppState`/`Service` can bypass it, so this converts through
-/// `i64::try_from` before `checked_add` (a raw `as i64` would turn `u64::MAX`
-/// into `-1` and let the addition "succeed" with a bogus exp).
+fn validate_status_count(
+    statuses: &[StatusEntry],
+    max_statuses_per_request: usize,
+) -> Result<(), StatusListError> {
+    if statuses.len() > max_statuses_per_request {
+        return Err(StatusListError::TooManyStatuses {
+            count: statuses.len(),
+            max: max_statuses_per_request,
+        });
+    }
+    Ok(())
+}
+
+/// Rejects an update index above `max_status_index` unless the list already
+/// covers it, so the bound limits growth without blocking existing entries.
+fn validate_update_indices(
+    list: &StatusList,
+    statuses: &[StatusEntry],
+    max_status_index: i32,
+) -> Result<(), StatusListError> {
+    let mut beyond_bound = statuses
+        .iter()
+        .filter(|entry| entry.index > max_status_index)
+        .peekable();
+    if beyond_bound.peek().is_none() {
+        return Ok(());
+    }
+    let entries = list.entry_count()?;
+    match beyond_bound.find(|entry| !u64::try_from(entry.index).is_ok_and(|i| i < entries)) {
+        Some(entry) => Err(StatusListError::IndexTooLarge {
+            index: entry.index,
+            max: max_status_index,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Use this for every exp: a raw `as i64` would turn u64::MAX into -1 and "succeed".
 pub(crate) fn token_expiry(iat: i64, token_exp_secs: u64) -> Result<i64, StatusListError> {
     let token_exp =
         i64::try_from(token_exp_secs).map_err(|_| StatusListError::TokenExpiryOverflow {
@@ -592,10 +591,6 @@ mod tests {
 
     #[test]
     fn snapshot_exp_guards_against_iat_plus_exp_overflow() {
-        // Synthetic issuance-time boundary: an `updated_at` (the iat used for the
-        // exp claim) near i64::MAX with a representable token_exp_secs still overflows
-        // `iat + token_exp_secs`. `checked_add` must fail closed rather than wrap exp
-        // negative (which previously panicked in debug and wrapped in release).
         let record = record_with_updated_at(i64::MAX - 5);
         let err = build_snapshot(&record, 10)
             .expect_err("iat near i64::MAX with token_exp_secs=10 must overflow and be rejected");
@@ -605,7 +600,6 @@ mod tests {
             "expected TokenExpiryOverflow, got {err:?}"
         );
 
-        // A representable value that does not overflow still builds the snapshot.
         let ok = build_snapshot(&record_with_updated_at(1_000), 900)
             .expect("non-overflowing iat + token_exp_secs should build a snapshot");
         assert_eq!(ok.exp, 1_900);
@@ -613,11 +607,6 @@ mod tests {
 
     #[test]
     fn snapshot_exp_rejects_u64_max_token_exp_secs_via_try_from() {
-        // Direct-construction bypass: an AppState/Service caller could pass
-        // `token_exp_secs = u64::MAX` without going through config validation.
-        // The guard must convert via `i64::try_from` before `checked_add`, so
-        // `u64::MAX` does NOT silently become `-1` and produce a bogus (lower)
-        // exp. It must fail closed instead.
         let record = record_with_updated_at(1_000);
         let err = build_snapshot(&record, u64::MAX)
             .expect_err("u64::MAX token_exp_secs must be rejected via i64::try_from");
@@ -666,5 +655,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page, None);
+    }
+
+    async fn assert_list_counts_cover_only_issuers_with_lists(service: &Service, backend: &str) {
+        register_issuer(service, "busy").await;
+        register_issuer(service, "idle").await;
+        for list_id in ["usage-1", "usage-2"] {
+            publish_list(service, "busy", list_id).await;
+        }
+
+        let counts = service
+            .status_list_repo()
+            .list_counts_by_issuer()
+            .await
+            .unwrap();
+        assert_eq!(counts.get("busy"), Some(&2), "{backend}");
+        assert_eq!(counts.get("idle"), None, "{backend}");
+    }
+
+    #[tokio::test]
+    async fn list_counts_cover_only_issuers_with_lists() {
+        let state = test_app_state(None).await;
+        assert_list_counts_cover_only_issuers_with_lists(&state.service, "memory").await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn list_counts_cover_only_issuers_with_lists_on_sqlite() {
+        let db = crate::test_utils::sqlite_test_db(None).await;
+        let state = test_app_state(Some(db)).await;
+        assert_list_counts_cover_only_issuers_with_lists(&state.service, "sqlite").await;
     }
 }

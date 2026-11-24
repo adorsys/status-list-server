@@ -100,24 +100,33 @@ The chart's `statuslist.env` holds the application configuration. Set the values
 - **Certificate files or ACME**: the default `-fscert` image reads the certificate and signing key from files mounted into the pod. ACME-enabled image variants perform DNS-01 certificate issuance at startup, so configure `APP_SERVER__CERT__*` values for the DNS provider and deliver provider credentials from a Secret, not plain env values. See [dns-providers.md](dns-providers.md) for what each provider (`route53`, `cloudflare`, `gcloud`, `azure`, `acmedns`) requires.
 - **Region** (`statuslist.aws.region`, renders `APP_AWS__REGION`): only required when you use an AWS-backed secret or DNS backend; omit it for other providers.
 - **Issuer trust registry**: provide an operator-managed `issuers.yaml` file through any volume the chart mounts as a directory at `/etc/status-list-server` (a ConfigMap, a Secret, or a CSI volume) and set `statuslist.issuerRegistry.volume` to that volume source (for example `configMap: {name: issuers}`). The chart mounts the registry only when a volume is provided; do not use `subPath`, because the server watches the whole mounted directory for rotation. ConfigMap propagation is eventual, so verify the reload log after publishing a rotation. Production Helm renders fail without a registry volume; without one in development, the server warns and trusts no issuers. The release-tag workflow deploys with `statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers` and nothing creates that ConfigMap, so it must already exist in the target namespace before the first release; the deploy job fails fast with a clear message when it is missing, and without it the pods would sit in `ContainerCreating` for the whole `--wait` window and then roll back.
-- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material.
+- To validate a registry before starting the server, run `status-list-server issuer-registry`; it reads `APP_MANAGEMENT_AUTH__ISSUERS_FILE` and exits non-zero for invalid YAML, schema, or key material, or for an issuer holding more keys than its tier's `max_keys`.
 - **Telemetry / limits / rate limiting / cache**: defaults are sensible; over-ride only what your sizing needs.
+
+The admin listener serves authenticated issuer reads as well as readiness and
+metrics. It is not exposed through an Ingress and has a per-client rate limit.
+The chart's NetworkPolicy is disabled by default; enable it and configure
+`statuslist.networkPolicy.adminIngress` to restrict which pods can reach the
+admin service when cluster-wide pod access is not acceptable. Set a distinct
+`APP_ADMIN_AUTH__AUDIENCES` in every environment that defines admin principals;
+staging must not reuse the production audience. During upgrades, configure the
+admin audience before adding admin principals to the mounted registry.
+
+### Onboard a registry issuer
+
+For local key generation, registry setup, and a first authenticated publish, use
+the [local issuer onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer).
+For hosted issuers, see the [hosted onboarding steps](issuer-onboarding.md#onboard-a-hosted-issuer).
 
 ### Rotate or revoke issuer keys
 
 Keep the registry in the operator-controlled source used to publish the mount.
 It contains public keys only. Never put an issuer's private key in the registry.
 
-To start a new registry (there is no committed file), create the three-line skeleton:
-
-```yaml
-version: 1
-issuers: []
-admins: []
-```
-
 `cargo xtask issuer add` and `issuer add-key` write into an existing file, so the
-file must exist with at least this structure before you add keys.
+file must exist with at least the structure in the
+[local onboarding guide](issuer-onboarding.md#onboard-a-registry-issuer)
+before you add keys.
 
 For a zero-downtime rotation:
 
@@ -126,11 +135,92 @@ For a zero-downtime rotation:
 2. Validate the complete file with `APP_MANAGEMENT_AUTH__ISSUERS_FILE=<registry-file> status-list-server issuer-registry`.
 3. Publish the updated registry (the ConfigMap/Secret/CSI volume backing the mount) and wait for Kubernetes to propagate it to every pod. Hash the exact bytes delivered by the selected volume source, then compare the result with the `fingerprint` in each pod's `issuer_registry_reloaded` log. For a ConfigMap, use `kubectl get configmap <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | shasum -a 256`. For a Secret, decode the base64 value first: `kubectl get secret <name> -n <namespace> -o jsonpath='{.data.issuers\.yaml}' | base64 --decode | shasum -a 256` (use the platform's equivalent decode flag if needed). For a CSI volume, hash the file from the provider's source or another copy of the exact mounted bytes; there is no Kubernetes API object to query. `issuer_registry_keys` shows the count but cannot identify a key replacement.
 4. Move the issuer to the new key. Keep both keys trusted for the agreed overlap period.
-5. Remove the old key from that issuer's `keys` list, validate the file again, and publish the registry. Confirm reload on every pod; requests signed with the removed key should then be rejected.
+5. Move the old key from that issuer's `keys` list to the top-level `revoked_keys` list, validate the file again, and publish the registry. Tombstones do not authenticate and permanently reserve both the `kid` and the public-key material in the durable history. Confirm reload on every pod; requests signed with the removed key should then be rejected. Simply deleting the key from `keys` stops trusting it in the current registry but creates no tombstone, so restoring an older registry can trust it again.
 
-To revoke one key, remove its entry from `keys`; to disable the whole issuer, set its `disabled` field to `true`. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer still needs to authenticate. Do not delete the durable mapping while published tokens may still reference its URL. Validate and publish the file, then confirm every pod reloaded it. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted registry source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two; for an urgent revocation, update the mounted registry (or use `kubectl rollout restart` so new pods mount it), then verify the fingerprint and rejection on every pod.
+For emergency revocation, move the compromised key from `keys` to the top-level `revoked_keys` list; to suspend the whole issuer, set its `disabled` field to `true`. Commit the change when the operator-managed registry is version-controlled, validate the file, then publish it to the mounted source. Removing a registry-only issuer stops trusting its keys, but the durable issuer mapping remains in the database, so its aggregation URL continues resolving while its lists remain public. Keep the registry entry only while the issuer needs to authenticate, and do not delete the durable mapping while published tokens may still reference its URL. Public status-list reads continue while the issuer is disabled.
+
+Static registry tombstones are recorded in the SQL database. A candidate that reuses a revoked `kid` or normalized public-key material is rejected even after restoring an older registry file and restarting **on a release that enforces this history**. An older binary ignores the table: rolling back that binary and restoring an old registry file can trust the revoked key again. Do not rely on tombstone enforcement during a binary rollback; use a registry compatible with the older release that excludes the revoked key from active `keys`, and verify rejection on every pod. The same records prevent portal registration of a revoked key on the current release. Database backups must retain the revocation table, and normal migrations create it. Finish propagating one registry revision before publishing the next. Hosted-profile and static-key revocations share the database durability boundary.
+
+Confirm the new fingerprint in every pod's `issuer_registry_reloaded` log. Then send an authenticated `GET /api/v1/credentials` with a token signed by the removed key or disabled issuer directly to each pod's management listener; each must return `401`. This checks the same authentication path as writes without risking a state change on a pod that has not reloaded yet. An invalid update leaves the previous registry active, so a failed reload does not complete a revocation. Monitor `issuer_registry_reload_failures_total` and repair the mounted source if it increases. ConfigMap delivery can take a kubelet sync period plus cache delay, often a minute or two. If that delay is unacceptable, update the mounted source and use `kubectl rollout restart` so new pods mount it; repeat the fingerprint and rejection checks before declaring the emergency action complete.
+
+For a hosted issuer, use the admin listener with a registry admin JWT carrying
+`issuers:write`. See [the admin API guide](admin-api.md) for how to mint it
+(header `typ: statuslist-admin+jwt`, the admin's `kid`, `iss` equal to the
+admin id, `aud` from `APP_ADMIN_AUTH__AUDIENCES`, `exp - iat` within
+`APP_ADMIN_AUTH__MAX_TOKEN_LIFETIME_SECS`, default 300s). Read the issuer and
+its `ETag` with `GET /admin/v1/issuers/{issuer_id}`, then send
+`PATCH /admin/v1/issuers/{issuer_id}` with `If-Match: "<ETag>"` and
+`{"state":"suspended"}`. A missing `If-Match` returns `428
+precondition_required`; a stale `ETag` returns `412 precondition_failed`, so
+re-read and retry. `PATCH /admin/v1/issuers/{issuer_id}/keys/{kid}` with
+`If-Match` and `{"state":"revoked"}` permanently revokes one key; repeating it
+returns the key unchanged. The committed state and actor audit event are
+written in one database transaction. The admin routes have their own
+rate-limit tier (`admin_burst_size`/`admin_period_secs`, defaults to a burst of 100 and one replenished request per second per client address),
+and a write that already authenticated before the change can still commit.
+Send the old issuer token to each pod's management listener
+(`GET /api/v1/credentials` must answer `401`); public status-list reads remain
+available. A revoked `kid` remains stored and cannot be reused. An expired
+hosted issuer is rejected at verification time, even if no cleanup job has
+run.
 
 When migrating an issuer with a stored credential, preserve its existing issuer and `aggregation_id`; `cargo xtask issuer add` generates fresh IDs and is for new issuers. The server adopts the registry's `aggregation_id` for a legacy credential that has no stored ID, and rejects a conflicting stored mapping.
+
+### Issuer tiers
+
+Each registry issuer has a `tier`, `standard` (the default) or `sandbox`, which
+selects its rate limit, list quota and request bounds from
+`APP_TIERS__*` (see [architecture](architecture.md#issuer-tiers-app_tiers__)).
+A registry with any other tier value is rejected, and a failed reload keeps the
+previous registry. A registry is also rejected when an issuer holds more keys
+whose `not_after` has not passed than its tier's `max_keys`: a pod refuses to
+start with it, and a reload with it keeps the previous registry.
+`status-list-server issuer-registry` reports the same error before a
+deployment. Retire a key by setting its `not_after` before adding a new one
+beyond the limit.
+
+Moving an issuer to another tier takes effect on the next reload. Lists it
+already holds are kept even when they exceed the new quota, and statuses at
+indices those lists already hold stay updatable even above the new tier's
+`max_status_index`. The issuer starts with a full bucket of the new tier.
+
+Per-issuer usage is exported with `issuer` and `tier` labels:
+
+| Metric                      | Meaning                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| `issuer_lists`              | Status lists counted against the issuer's quota                       |
+| `issuer_lists_limit`        | The tier's `max_lists`                                                |
+| `issuer_keys`               | Active keys whose `not_after` has not passed                          |
+| `issuer_keys_limit`         | The tier's `max_keys`                                                 |
+| `issuer_rate_limited_total` | Management requests refused with `429` by the issuer's tier rate limit |
+
+The gauges list exactly the issuers of the current registry and, in the
+`hosted` profile, every active hosted issuer the registry does not own, each
+under its current tier. Each pod reads them from the database at startup and
+every 60 seconds, so every pod reports the cluster-wide value, at most a minute
+old: aggregate `issuer_lists` across pods with `max`, not `sum`.
+`issuer_lists` is the per-issuer counter the list quota is enforced against;
+while the quota awaits `list-quota enable`, pods of the previous release leave
+it short.
+`issuer_rate_limited_total` is per pod, so `sum` it. Rate limits are held per
+replica, so an issuer's cluster-wide budget is the tier budget times the
+replica count; set a global cap at the ingress or API gateway.
+
+Every limit keyed on an address uses `APP_RATE_LIMIT__CLIENT_IP_SOURCE`, which
+production must set. Behind an ingress, set it to `rightmost_x_forwarded_for`
+(the chart default) and set `APP_RATE_LIMIT__TRUSTED_PROXIES` to the ingress
+controller's addresses or CIDRs, so the limits key on the client address the
+ingress appends to `X-Forwarded-For`. Production refuses to start with
+`rightmost_x_forwarded_for` and no trusted proxies, and the chart refuses to
+render it. Use `connect_info` only when the pods see client addresses
+directly: behind a proxy, every client shares the proxy's public, admin,
+failure and admission budgets. Every management request spends admission
+(`APP_RATE_LIMIT__ADMISSION_*`) before its token is checked. The failure
+budget never refuses a request that authenticates. Make sure the ingress
+appends the peer address it saw rather than passing a client's
+`X-Forwarded-For` through unchanged. Each pod exports `rate_limiter_keys`,
+labelled by `limiter`: the keys each limiter still holds after its last prune,
+every 60 seconds.
 
 ## Redis Status-List Cache
 
@@ -205,6 +295,196 @@ reachable only on a non-443 port, put the port in `APP_SERVER__PUBLIC_BASE_URL`
 
 The subject URI is fixed when a status list is published. Changing
 `server.public_base_url` or `server.domain` affects only new lists; existing lists retain their original URI. Keep the old endpoint serving those lists because already-issued credentials still reference it. A hostname change does not migrate published lists or update those credentials.
+
+### Expose the service through Envoy Gateway
+
+Instead of the Ingresses, the chart can render Gateway API routes with Envoy
+Gateway rate limits. [`deploy/helm/README.md`](../deploy/helm/README.md#gateway-api-mode)
+lists the values, and [architecture](architecture.md#edge-and-server-layers)
+explains how the edge and server limits fit together.
+
+#### Topology requirements
+
+- **Envoy must see each client's own address.** The edge limits key on the peer
+  of each connection Envoy accepts, and Envoy appends that address to
+  `X-Forwarded-For` for the server. If a load balancer replaces it, every client
+  behind it shares one bucket at the edge, and nothing logs a warning. The
+  server keys them on the load balancer too, unless its address is in
+  `APP_RATE_LIMIT__TRUSTED_PROXIES`, as an internal NLB in the EKS node subnets
+  can be. Then the server skips it and keys on the `X-Forwarded-For` entry the
+  client wrote, so keep such a load balancer out of the trusted range. On AWS:
+  - An NLB with `ip` targets does not preserve client addresses for TCP or TLS
+    by default. Set
+    `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true`
+    in the EnvoyProxy's `envoyService.annotations`, or enable proxy protocol v2
+    on the NLB and in the ClientTrafficPolicy.
+  - An NLB with `instance` targets preserves them while the Service keeps
+    `externalTrafficPolicy: Local`, which the reference EnvoyProxy sets.
+  - IPv6 clients that reach IPv4 targets always arrive with the NLB's address.
+    Use proxy protocol v2, or keep the load balancer IPv4-only.
+  - An L7 load balancer or CDN in front, such as an ALB or CloudFront, becomes
+    Envoy's peer and passes the client address in `X-Forwarded-For`. For each
+    one, raise `numTrustedHops` in the ClientTrafficPolicy by one and add its
+    addresses to `APP_RATE_LIMIT__TRUSTED_PROXIES`; otherwise the server keys
+    every client on it. Clients must not reach Envoy around it, or they choose
+    their own edge key.
+- **Only Envoy may reach the public and management ports.** Set
+  `APP_RATE_LIMIT__TRUSTED_PROXIES` to the Envoy pods' addresses, in practice the
+  pod CIDR. Trusting the whole CIDR is safe only because the overlay's
+  NetworkPolicy admits the Envoy proxies alone, so the CNI must enforce
+  NetworkPolicy. On EKS, turn on network policy in the VPC CNI; pods there take
+  addresses from the node subnets, so the trusted range is wider still.
+- **Callers inside the trusted range choose their server-side key.** A pod in
+  that range that calls through Envoy is treated as a proxy: the server skips
+  the address Envoy appended for it and keys on the next `X-Forwarded-For` entry
+  to the left, which the pod wrote itself. Envoy's own limit still keys on the
+  pod's address.
+- **Turning the NetworkPolicy on closes more than the edge.** It also closes the
+  admin port and restricts egress: set `adminIngress` or `prometheusIngress` for
+  Prometheus and the portal, `databaseEgress` for an external database and
+  `cacheEgress` for Redis.
+- The overlay selects the Envoy pods of the reference `statuslist` Gateway in
+  `envoy-gateway-system`, where Envoy Gateway runs proxies by default. Adjust
+  its selectors for another Gateway or namespace.
+- Use Envoy Gateway v1.10.0 on Kubernetes v1.34–v1.37. Check the cluster
+  version before upgrading; v1.10 does not support Kubernetes v1.33. The
+  reference was checked with v1.10.0, which retains 10,000 client addresses
+  per route in each replica.
+- Leave `preserveRouteOrder` unset in the EnvoyProxy, so that on a shared
+  hostname the management route's regular expression is matched before the
+  public `/` prefix.
+
+#### Rollout
+
+1. Edit the Redis URL in `deploy/helm/envoy-gateway.yaml`, and the TLS Secret
+   and route namespace in `deploy/helm/envoy-gateway-platform.yaml`. Then install
+   Envoy Gateway and apply the platform resources:
+
+   ```bash
+   helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 \
+     --namespace envoy-gateway-system --create-namespace -f deploy/helm/envoy-gateway.yaml
+   kubectl apply -f deploy/helm/envoy-gateway-platform.yaml
+   ```
+
+   Only global rules need Redis. Until it runs, the rate limit service cannot
+   start, and the local limits work regardless.
+2. Upgrade the release with `values-envoy-gateway.yaml` after your environment
+   overlays and before your site values, which set
+   `APP_RATE_LIMIT__TRUSTED_PROXIES`. The overlay sets
+   `APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for`, and the render
+   fails without it or the trusted proxies. Over `values-production.yaml`, the
+   overlay also undoes that file's `connect_info` stopgap, so the server keys
+   each client by address with the default permissive limit. Check that the
+   routes and policies are accepted and that no server pod warns about an
+   untrusted proxy:
+
+   ```bash
+   kubectl get httproute,backendtrafficpolicy -n <namespace>
+   kubectl logs -l app.kubernetes.io/name=status-list-server -n <namespace> --tail=-1 \
+     | grep 'ignoring X-Forwarded-For' || echo "no untrusted proxy"
+   ```
+
+3. Point DNS at the Envoy Service's address and issue the certificate the
+   Gateway listener references. external-dns reads HTTPRoute hostnames through
+   its `gateway-httproute` source; the Ingress annotations no longer apply.
+4. Send one request from each of two networks, then check that Envoy's access
+   log shows two different `downstream_remote_address` values. If both show the
+   same address, the load balancer is hiding clients; fix that first.
+
+   ```bash
+   kubectl logs -n envoy-gateway-system -c envoy --tail=20 \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist
+   ```
+
+5. For a cap across Envoy replicas, run Redis for the rate limit service, then
+   set `statuslist.gateway.rateLimit.global.enabled=true`. The rules start in
+   shadow mode, which counts without rejecting. Right after the upgrade, check
+   that both policies are still accepted: Envoy Gateway answers `500` on the
+   routes of a policy it cannot apply. Once the counts look right, set
+   `statuslist.gateway.rateLimit.global.shadowMode=false`.
+6. To roll back, set `statuslist.gateway.enabled=false`. The Ingresses render
+   again, and DNS has to move back with them.
+
+#### Verify the cap across two Envoy replicas
+
+This sends sustained load from one address; run it in a test cluster or a quiet
+window, with the global rules enforced (`shadowMode=false`).
+
+1. Give the Gateway two Envoy replicas and wait for both:
+
+   ```bash
+   kubectl patch envoyproxy statuslist -n envoy-gateway-system --type merge \
+     -p '{"spec":{"provider":{"kubernetes":{"envoyDeployment":{"replicas":2}}}}}'
+   kubectl wait pod -n envoy-gateway-system --for condition=Ready --timeout 120s \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist
+   ```
+
+2. From one client address, send requests faster than the public limit for ten
+   seconds, each on a new connection so they spread over both replicas:
+
+   ```bash
+   end=$((SECONDS + 10))
+   while [ "$SECONDS" -lt "$end" ]; do
+     seq 50 | xargs -P 50 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+       https://<host>/api/v1/status-lists/<list-id>
+   done | sort | uniq -c
+   ```
+
+3. Confirm that both replicas served the run:
+
+   ```bash
+   for pod in $(kubectl get pods -n envoy-gateway-system -o name \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist); do
+     printf '%s ' "$pod"
+     kubectl logs -n envoy-gateway-system "$pod" -c envoy --since=1m | grep -c '/api/v1/status-lists/'
+   done
+   ```
+
+4. Count the requests that passed in each second, across both replicas. The
+   busiest second stays near the 100 a second limit; a few more can pass where
+   Envoy's clock and the rate limit service's one-second window disagree:
+
+   ```bash
+   for pod in $(kubectl get pods -n envoy-gateway-system -o name \
+     -l gateway.envoyproxy.io/owning-gateway-name=statuslist); do
+     kubectl logs -n envoy-gateway-system "$pod" -c envoy --since=2m
+   done | jq -rR 'fromjson? | select(.response_code != 429)
+     | select((.["x-envoy-origin-path"] // "") | startswith("/api/v1/status-lists/"))
+     | .start_time[0:19]' | sort | uniq -c | sort -rn | head -n 1
+   ```
+
+5. Repeat with `shadowMode=true`. The busiest second now goes well past the
+   limit, because only the per-replica limits reject.
+
+#### Verify a Redis outage
+
+With the global rules enforced:
+
+1. Stop Redis, for example `kubectl scale deployment <redis> -n <redis-namespace> --replicas=0`.
+2. Repeat step 2 of the previous section, faster than 100 requests a second per
+   replica. Requests keep passing, none fails with `500`, and each replica still
+   answers `429` above its own limit.
+3. Check that the server's own limits still apply. Send eleven requests with an
+   invalid token, slower than the management limit:
+
+   ```bash
+   for i in $(seq 11); do
+     curl -s -o /dev/null -w '%{http_code} ' -H 'Authorization: Bearer invalid' \
+       https://<host>/api/v1/credentials
+     sleep 0.2
+   done
+   ```
+
+   The first ten get `401` and the eleventh gets the server's own `429`, whose
+   body says `Too many failed authentications from this address`.
+4. Envoy counts the requests it let through without an answer:
+
+   ```bash
+   kubectl port-forward -n envoy-gateway-system <envoy-pod> 19000:19000 &
+   curl -s localhost:19000/stats | grep 'ratelimit.failure_mode_allowed'
+   ```
+
+5. Start Redis again.
 
 ### Content negotiation at the edge
 
@@ -360,10 +640,24 @@ run concurrently. The chart exposes the Deployment strategy through
 `statuslist.strategy`; set its type to `Recreate` for this upgrade:
 
 ```bash
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> \
+  --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
 helm upgrade --install statuslist ./deploy/helm/chart \
   --set statuslist.strategy.type=Recreate \
   ... # your other values
 ```
+
+Patch the live Deployment first when upgrading an existing release. Helm 4's
+server-side apply can retain the old `rollingUpdate` fields while changing the
+type, which Kubernetes rejects for `Recreate`. The patch removes those fields
+before Helm applies the new chart. Confirm old pods have stopped before allowing
+the new version to serve traffic.
+
+The EKS release workflow applies the same patch to an existing Deployment and
+sets `statuslist.strategy.type=Recreate` on every Helm upgrade. Every EKS
+upgrade of an existing release therefore incurs a short outage while the old
+pods stop and the new pods start, including upgrades after this one.
 
 Do **not** use the default rolling update for this release: with a plain `RollingUpdate`,
 `maxSurge` rounds up to 1, so the new pod starts while the old one is still running and the
@@ -379,6 +673,9 @@ kubectl scale deployment statuslist-status-list-server-deployment -n <namespace>
 # gone before upgrading, otherwise the helm upgrade on the next line scales
 # replicas back up and new pods can start while old ones are still draining.
 kubectl wait --for=delete pod -l app.kubernetes.io/instance=statuslist,app.kubernetes.io/name=status-list-server -n <namespace> --timeout=120s
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> \
+  --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
 helm upgrade --install statuslist ./deploy/helm/chart --set statuslist.strategy.type=Recreate ...
 kubectl scale deployment statuslist-status-list-server-deployment -n <namespace> --replicas=<n>
 ```
@@ -722,26 +1019,132 @@ here; a test fails until it does.
 | `m20261023_000002_issuer_keys` | Yes: an older release ignores the table | None; keep the table | Created empty; the next migration fills it with `reserved` rows |
 | `m20261023_000003_issuer_audit_events` | Yes: the table is empty and append-only, and an older release ignores it | None; keep the table and its history | Empty table |
 | `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
+| `m20261105_000001_static_key_revocations` | Schema-compatible: an older release ignores the table, but rollback does not preserve revocation enforcement if an old registry file is restored | Keep the table and revocations; use a registry compatible with the older release that excludes revoked keys from active `keys`, then verify rejection | Current releases retain static key revocations across restarts and registry file restores |
+| `m20261109_000001_registry_coordination` | Schema-compatible: an older release ignores the lock and claims tables, but does not enforce cross-pod hosted/static serialization | Keep both tables; do not rely on cross-pod coordination until all pods run the new release | Current releases reserve admitted static identities and serialize registry reloads with hosted key writes |
 
 ### Preparing existing management credentials
 
 Helm deployments must explicitly set
 `statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES` to an audience unique to that
 deployment (for example, `https://statuslist.prod.example.com/api/v1`). Give
-staging a different value, even if both environments register the same issuer
-key. Production chart rendering fails if the audience is empty. Issuers must
+an independent staging deployment a different value, even if both environments
+register the same issuer key. The release-tag profile below upgrades the existing
+production release, so it retains that release's production audience. The
+`values-datev-staging.yaml` filename reflects the #733 migration objective; it
+does not create an isolated staging release. Production chart rendering fails if
+the audience is empty. Issuers must
 include that configured value in their management tokens' `aud` claim.
 
-The release-tag deployment uses `values-aws.yaml` followed by
-`values-production.yaml`. Its management audience is
-`https://statuslist.eudi-adorsys.com/api/v1`. Issuers calling that production
-deployment must put this exact value in `aud` (as a string or an array member).
-The release workflow selects the `status-list-server-issuers` ConfigMap as its
-registry source; the production values file leaves the source empty so other
-deployments can choose a ConfigMap, Secret, or CSI volume.
-Deployments reusing the production overlay for another environment or hostname
-must explicitly override `APP_MANAGEMENT_AUTH__AUDIENCES`; staging must not use
-the production value.
+The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`,
+`values-fscert.yaml`, and `values-datev-staging.yaml`, in that order, in the
+existing `statuslist` namespace.
+`values-fscert.yaml` selects the `fscert` image; the last overlay
+(`values-datev-staging.yaml`) selects the in-memory cache, disables
+autoscaling, and runs one application replica. The in-memory cache is local to
+that pod, so status updates invalidate the cache used by subsequent reads. Its
+management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
+Issuers calling this deployment must put this value in their management tokens'
+`aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as
+its registry source.
+
+The reusable `values-fscert.yaml` selects the file-backed image. The
+EKS-specific overlay supplies the public cert-manager issuer,
+hostname, and Secret mounts. This deployment exercises the file-backed signer
+and ESO database password, but it does not exercise Datev's ESO certificate/key
+seeding, remote property names, PEM encoding, refresh interval, or private CA.
+Validate those against Datev's own SecretStore and ExternalSecret manifests in
+an integration environment before treating #733's Datev parity criterion as met.
+
+### Existing EKS release with file-backed signing
+
+Before the first switch, check whether the existing `statuslist` Helm release
+in `statuslist`
+owns Redis HA resources. Redis is not part of this chart or the EKS file-backed
+profile, so upgrading a release that owns Redis will remove those resources.
+Review any other consumers before that upgrade, and do not switch the image
+until the signing material and the chart's prerequisites are ready. The workflow
+creates the signing Certificate and waits for Ready before upgrading the release.
+This profile keeps `Recreate` for every deployment. Later upgrades must avoid
+overlapping application pods:
+each pod has its own in-memory status-list cache, so a write on one pod cannot
+invalidate a cached list on another. **Expect a brief service outage on every
+release**, including RC and final deployments, while the old pod stops and the
+new one becomes ready. Plan deployments around integrator traffic.
+
+The first upgrade must reconcile the rollout strategy in place: the live
+Deployment was created without a `strategy`, so the API server defaulted it to
+`RollingUpdate`, and Helm v4's server-side apply rejects switching straight to
+`Recreate` while that `rollingUpdate` block is still present. The workflow
+patches `spec.strategy` to `{type: Recreate}` before upgrading (it does not touch
+the pod template, so nothing restarts):
+
+```bash
+kubectl patch deployment statuslist-status-list-server-deployment -n <namespace> --type=json \
+  -p '[{"op":"replace","path":"/spec/strategy","value":{"type":"Recreate"}}]'
+```
+
+The existing AWS Secrets Manager entry `statuslist-secret` supplies
+`POSTGRES_PASSWORD` to the namespaced `statuslist-secret-store`. The chart's
+ExternalSecret writes it to `statuslist-secret` as both `database-password` and
+`postgres-password`. The existing `REDIS_PASSWORD` property is no longer mapped
+into the application Secret by the new profile.
+
+Before the first upgrade, inspect the existing store with
+`kubectl get secretstore statuslist-secret-store -n statuslist -o yaml`.
+Verify Helm release ownership, the AWS provider configuration, and whether ESO
+uses controller identity or explicit credentials. The chart renders the store
+without an `auth` block, so its controller identity must still be able to read
+the existing `statuslist-secret` entry. Helm will reject an existing store that
+belongs to another release.
+This identity may be shared across the cluster. Restrict who can edit this
+namespace's SecretStore and ExternalSecret until a dedicated ESO service account
+and AWS role limited to the statuslist entries are in place (tracked in #773).
+
+The `fscert` image reads a dedicated token-signing certificate and private key
+from `statuslist-token-signing`. The chart creates a cert-manager `Certificate`
+for the exact host `statuslist.eudi-adorsys.com`, issued by the
+`letsencrypt-prod` ClusterIssuer, with an ECDSA P-256 key that rotates on
+renewal, starting 30 days before expiry. Integrators that pin the public key
+must update their pin when cert-manager rotates the key. Verify that cert-manager
+and this ClusterIssuer are available before
+upgrading. cert-manager writes `tls.crt` and `tls.key` to the Secret; the pod
+mounts them as `statuslist.crt` and `statuslist.key`. Do not reuse the
+`statuslist-tls` ingress Secret for token signing. Verify
+`kubectl get certificate statuslist-token-signing -n statuslist` reports Ready
+and check the certificate-expiry alerts after deployment.
+
+The public ACME certificate has the `serverAuth` extended key usage, as the
+current AWS signer does. Confirm integrator profiles accept that usage; a
+document-signing certificate requires a different issuer.
+
+Once the file-backed release is stable and rollback to the AWS signer is no
+longer planned, deactivate the IAM key in `statuslist-aws-credentials`, remove
+the old app-managed ACME material, and delete the unused `REDIS_PASSWORD` from
+Secrets Manager. Keep all three until that decision. A Helm uninstall or
+rollback does not remove the `statuslist-token-signing` Secret; delete it and
+its private key manually only when no deployment still uses it.
+
+Before deploying this chart to either EKS or Datev, verify that the installed
+ESO CRDs serve `external-secrets.io/v1beta1` for ExternalSecret and SecretStore.
+The chart still renders that version; Datev's own ExternalSecret uses `v1`.
+Plan a separate chart migration to `v1` after checking both clusters.
+
+Before triggering a tagged release, provide the `status-list-server-issuers`
+ConfigMap in `statuslist`; the workflow checks for it before running Helm. The
+deploy role's EKS access entry and `statuslist-deployer` RoleBinding must also
+cover `statuslist` (see ADORSYS-GIS/wallet-eks-env#68; they currently point at
+`statuslist-production`), or the check fails with an RBAC error. Set the
+repository-level GitHub Actions variable
+`IMAGE_VARIANT` to `fscert` before the first deployment. The workflow rejects
+any other value, and the scheduled image scan reads the same repository-level
+variable. The workflow uses short-lived AWS credentials through OIDC.
+
+The first `fscert` release boots in list-quota transition mode (the overlay sets
+`APP_LIMITS__LIST_QUOTA_TRANSITION=true`) so the pod starts across the
+non-rollback-safe list-quota and issuer-ownership migrations. Follow [Upgrading
+to the list quota](troubleshooting.md#upgrading-to-the-list-quota): once no old
+pod remains, run `list-quota recount` then `list-quota enable`, then drop the
+flag (tracked in #776).
 
 Before upgrading, back up the database and inventory existing credentials with
 the read-only queries below. Run them before the new migration: they use only
@@ -1032,6 +1435,7 @@ Do not bypass this gate. It is the only check that establishes a signed statemen
 
 - **External Secrets Operator**: needed only when you choose ESO secret delivery; the default fallback Secret path does not require ESO CRDs.
 - **Ingress controller + cert-manager**: needed only if you enable the Ingress / TLS path.
+- **Envoy Gateway**: needed only for the Gateway API mode, v1.10.0 on Kubernetes v1.34–v1.37.
 - **Your cloud provider**: for Workload Identity roles and any AWS/GCP/Azure backends the application uses.
 
 ## Upgrading to the Three-Listener Architecture

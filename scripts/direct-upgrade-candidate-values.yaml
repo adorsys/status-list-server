@@ -1,0 +1,10 @@
+# Operator additions required by the candidate release.
+statuslist:
+  issuerRegistry:
+    path: /etc/status-list-server/issuers.yaml
+    volume:
+      configMap:
+        name: direct-upgrade-issuers
+  env:
+    APP_SERVER__PUBLIC_BASE_URL: https://upgrade.example.invalid/api/v1
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: connect_info

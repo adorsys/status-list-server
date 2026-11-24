@@ -28,6 +28,14 @@
         "$ref": "#/$defs/admin"
       },
       "default": []
+    },
+    "revoked_keys": {
+      "description": "Public records of revoked static keys. These keys never authenticate, and their kid and key material are permanently reserved in durable revocation history.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/key"
+      },
+      "default": []
     }
   },
   "$defs": {

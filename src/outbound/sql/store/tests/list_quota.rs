@@ -1,5 +1,3 @@
-//! The list quota gate: a fresh database enforces from the first start, an
-//! upgraded one needs the transition, and `enable` checks every issuer.
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
 use std::sync::Arc;
@@ -16,7 +14,6 @@ use crate::outbound::sql::test_containers::mysql_helpers;
 #[cfg(feature = "postgres-tests")]
 use crate::outbound::sql::test_containers::postgres_helpers;
 
-/// Generates one test per backend for an `assert_*` scenario.
 macro_rules! on_every_backend {
     ($scenario:ident: $sqlite:ident, $mysql:ident, $postgres:ident) => {
         #[cfg(feature = "sqlite")]
@@ -195,7 +192,6 @@ on_every_backend!(assert_enable_succeeds_within_cap:
     test_mysql_enable_succeeds_within_cap,
     test_postgres_enable_succeeds_within_cap);
 
-/// A pre-quota pod pushed the issuer past the cap during the rollout.
 async fn assert_enable_refuses_and_names_over_cap_issuer(
     db: Arc<DatabaseConnection>,
     backend: &str,
@@ -253,7 +249,6 @@ on_every_backend!(assert_enable_refuses_and_names_over_cap_issuer:
     test_mysql_enable_refuses_and_names_over_cap_issuer,
     test_postgres_enable_refuses_and_names_over_cap_issuer);
 
-/// The recount was skipped, so a pre-quota pod's list is not counted.
 async fn assert_enable_refuses_stale_count_until_recount(
     db: Arc<DatabaseConnection>,
     backend: &str,

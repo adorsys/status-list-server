@@ -10,7 +10,6 @@ use thiserror::Error;
 use crate::domain::models::token::TokenSignerError;
 pub use crate::domain::{models::token::SigningAlgorithm, ports::TokenSigner};
 
-// Standard Cryptographic OIDs
 const OID_ID_EC_PUBLIC_KEY: pkcs8::ObjectIdentifier =
     pkcs8::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const OID_SECP256R1: pkcs8::ObjectIdentifier =
@@ -20,7 +19,6 @@ const OID_ED25519: pkcs8::ObjectIdentifier = pkcs8::ObjectIdentifier::new_unwrap
 const OID_RSA_ENCRYPTION: pkcs8::ObjectIdentifier =
     pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
 
-/// Errors occurring during cryptographic key management and signing.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Cryptographic operation failed: {0}")]
@@ -57,7 +55,6 @@ pub enum Error {
     UnsupportedKeygen(String),
 }
 
-/// Unified signing key supporting ECDSA (P-256, P-384), Ed25519, and RSA (RS256).
 pub struct SigningKey {
     algorithm: SigningAlgorithm,
     inner: SigningKeyInner,
@@ -96,7 +93,6 @@ impl fmt::Debug for SigningKey {
 }
 
 impl SigningKey {
-    /// Generate a new random signing key for the specified algorithm.
     pub fn generate(algorithm: SigningAlgorithm) -> Result<Self, Error> {
         let rng = SystemRandom::new();
         match algorithm {
@@ -116,10 +112,7 @@ impl SigningKey {
         }
     }
 
-    /// Load and automatically detect one signing key from PEM text.
-    ///
-    /// PKCS#8, SEC1, and PKCS#1 private-key blocks are supported. Auxiliary PEM blocks, such as
-    /// OpenSSL EC parameters, are ignored; multiple private-key blocks are rejected.
+    /// Skips extra blocks like OpenSSL EC parameters, but rejects more than one private key.
     pub fn from_pem(pem_str: &str) -> Result<Self, Error> {
         let mut private_keys = pem::parse_many(pem_str.as_bytes())?
             .into_iter()
@@ -149,7 +142,6 @@ impl SigningKey {
         }
     }
 
-    /// Parse PKCS#8 DER bytes and auto-detect the algorithm.
     fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
         let pki = pkcs8::PrivateKeyInfoRef::from_der(der)?;
         let algorithm = detect_pkcs8_algorithm(&pki)?;
@@ -185,7 +177,6 @@ impl SigningKey {
         })
     }
 
-    /// Convert to PKCS#8 PEM string.
     pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
         let p = pem::Pem::new("PRIVATE KEY", self.inner.to_pkcs8_der()?);
         #[cfg(windows)]
@@ -201,7 +192,6 @@ impl SigningKey {
         ))
     }
 
-    /// Sign arbitrary payload bytes using the configured backend algorithm.
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         match &self.inner.pair {
             KeyPairInner::Ecdsa(kp) => {
@@ -220,12 +210,10 @@ impl SigningKey {
         }
     }
 
-    /// Return the algorithm of this key.
     pub fn algorithm(&self) -> SigningAlgorithm {
         self.algorithm
     }
 
-    /// Return raw public key bytes.
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
     }

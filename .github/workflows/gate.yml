@@ -1,0 +1,41 @@
+name: gate
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] This gate runs the base branch's trusted code and never checks out PR files.
+    branches: [stage, main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Branch protection requires this check by name; renaming it detaches the requirement.
+    name: gate
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history: the gate reads tags, the head's Cargo.toml and main's ancestry locally.
+      - name: Check out trusted policy and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce promotion policy
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/promotion-gate.sh "$BASE_BRANCH" "$HEAD_BRANCH" "$HEAD_SHA" "$HEAD_REPOSITORY" "$BASE_REPOSITORY" .

@@ -24,7 +24,6 @@ fn dns_err(source: impl Into<Report>) -> ChallengeError {
     }
 }
 
-/// A DNS provider for AWS Route 53
 pub struct AwsRoute53DnsProvider {
     client: Route53Client,
     zones: RwLock<Option<Vec<ZoneInfo>>>,
@@ -42,13 +41,11 @@ impl AwsRoute53DnsProvider {
         }
     }
 
-    // Find the hosted zone for the given domain and return its ID
     async fn find_hosted_zone(&self, domain: &str) -> Result<String, ChallengeError> {
         self.try_cache_zones().await?;
 
         let read_guard = self.zones.read().await;
         let zones = read_guard.as_ref().unwrap();
-        // remove the trailing dot from the domain if any
         let domain = domain.trim_end_matches('.');
 
         if let Some((zone_id, zone_name)) = find_best_match(domain, zones) {
@@ -60,7 +57,6 @@ impl AwsRoute53DnsProvider {
     }
 
     async fn try_cache_zones(&self) -> Result<(), ChallengeError> {
-        // Check if zones are already cached
         let read_guard = self.zones.read().await;
         if read_guard.is_some() {
             return Ok(());
@@ -70,7 +66,6 @@ impl AwsRoute53DnsProvider {
         let mut all_zones = Vec::new();
         let mut next_marker = None;
 
-        // try to get all hosted zones
         loop {
             let mut req = self.client.list_hosted_zones();
             if let Some(marker) = &next_marker {
@@ -81,7 +76,6 @@ impl AwsRoute53DnsProvider {
             for zone in hosted_zones {
                 all_zones.push(ZoneInfo::new(zone.name(), zone.id()));
             }
-            // Check if there are more hosted zones
             if resp.is_truncated() {
                 next_marker = resp.next_marker().map(|s| s.to_string());
             } else {
@@ -102,7 +96,6 @@ impl AwsRoute53DnsProvider {
         let record_name = format!("_acme-challenge.{domain}");
         let hosted_zone_id = self.find_hosted_zone(domain).await?;
 
-        // Prepare the TXT record to change
         let change = Change::builder()
             .action(change_action)
             .resource_record_set(
@@ -126,7 +119,6 @@ impl AwsRoute53DnsProvider {
             .build()
             .map_err(dns_err)?;
 
-        // Try to change the record in Route53
         let output = self
             .client
             .change_resource_record_sets()
@@ -145,7 +137,6 @@ impl AwsRoute53DnsProvider {
         Ok((record_name, change_id))
     }
 
-    // wait for the change to propagate across all Route53 authoritative name servers
     async fn wait_for_propagation(&self, change_id: &str) -> Result<(), ChallengeError> {
         use tokio::time::{sleep, timeout};
 
@@ -179,7 +170,6 @@ impl AwsRoute53DnsProvider {
                     }
                 }
 
-                // We double the delay after each attempt
                 let delay = 2u32
                     .checked_pow(retries)
                     .and_then(|factor| initial_delay.checked_mul(factor))
@@ -205,19 +195,16 @@ impl AwsRoute53DnsProvider {
 #[async_trait]
 impl DnsProvider for AwsRoute53DnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
-        // Try to upsert the record in Route53
         let (record_name, change_id) = self
             .change_records(domain, ChangeAction::Upsert, value)
             .await?;
 
         info!("DNS record {record_name} created for {domain}");
-        // Wait for the change to propagate before returning
         self.wait_for_propagation(&change_id).await?;
         Ok(())
     }
 
     async fn delete_txt_record(&self, domain: &str, value: &str) -> Result<(), ChallengeError> {
-        // Try to delete the record in Route53
         let (record_name, _) = self
             .change_records(domain, ChangeAction::Delete, value)
             .await?;

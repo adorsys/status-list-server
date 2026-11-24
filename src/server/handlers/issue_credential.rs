@@ -15,7 +15,6 @@ use crate::{
 pub struct RegistrationResponse {
     pub issuer: String,
     pub aggregation_id: AggregationId,
-    /// Present when the server advertises an aggregation endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation_uri: Option<String>,
 }

@@ -32,7 +32,6 @@ impl Serialize for Status {
     }
 }
 
-/// Map a `u32` to `Status`, rejecting values outside Draft-21's registered set.
 fn status_from_u32<E: serde::de::Error>(v: u32) -> Result<Status, E> {
     match v {
         0 => Ok(Status::VALID),
@@ -93,7 +92,6 @@ pub struct StatusEntry {
     pub status: Status,
 }
 
-/// Request payload for creating or updating status entries in a status list.
 #[derive(Deserialize)]
 pub struct StatusesRequest {
     pub statuses: Vec<StatusEntry>,

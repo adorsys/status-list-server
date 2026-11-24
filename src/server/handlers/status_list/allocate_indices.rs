@@ -33,8 +33,8 @@ pub async fn allocate_indices(
         ));
     }
 
+    let policy = appstate.status_list_policy(principal.tier());
     let issuer = principal.into();
-    let policy = appstate.status_list_policy();
     let indices = appstate
         .service
         .allocate_indices(&issuer, &list_id, payload.count, &policy)
@@ -63,6 +63,7 @@ mod tests {
     use super::*;
     use crate::domain::models::credential::Issuer;
     use crate::domain::models::status_list::{Status, StatusList, StatusListRecord};
+    use crate::domain::models::tier::IssuerTier;
     use crate::test_utils::{authenticated_issuer, test_app_state};
     use axum::{Router, body::Body, body::to_bytes, routing::post};
     use tower::ServiceExt;
@@ -186,7 +187,9 @@ mod tests {
     async fn allocation_route_rejects_zero_and_over_limit_counts() {
         let list_id = uuid::Uuid::new_v4().to_string();
         let mut app_state = test_app_state(None).await;
-        app_state.max_statuses_per_request = 2;
+        app_state
+            .tier_limits_mut(IssuerTier::Standard)
+            .max_statuses_per_request = 2;
         app_state
             .service
             .status_list_repo()

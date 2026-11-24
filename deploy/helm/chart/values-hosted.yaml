@@ -1,0 +1,109 @@
+# Apply without the production/AWS overlays; supply site-specific values last.
+global:
+  domain: ""
+
+statuslist:
+  image:
+    variant: fscert
+  service:
+    type: ClusterIP
+  ingress:
+    className: hosted-sandbox
+    externalDnsHostname: ""
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/limit-rps: "100"
+      nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    tls:
+      secretName: ""
+    management:
+      enabled: true
+      hostname: ""
+      annotations:
+        nginx.ingress.kubernetes.io/ssl-redirect: "true"
+        nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+        nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+        nginx.ingress.kubernetes.io/limit-rps: "10"
+        nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+  env:
+    APP_ENV: "production"
+    APP_SERVER__PROFILE: "hosted"
+    APP_DATABASE__BACKEND: "postgres"
+    APP_DATABASE__POOL__MAX_CONNECTIONS: "5"
+    APP_MANAGEMENT_AUTH__AUDIENCES: ""
+    # Set a site-specific value distinct from the management audience.
+    APP_ADMIN_AUTH__AUDIENCES: ""
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
+    # Set the dedicated controller pods' addresses or CIDR in the site overlay.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: ""
+  issuerRegistry:
+    volume:
+      configMap:
+        name: sandbox-issuers
+  secretMounts:
+    - name: database-credentials
+      secretName: statuslist-secret
+      mountPath: /var/run/status-list-server/database
+      items:
+        - key: database-password
+          path: password
+      fileEnv:
+        APP_DATABASE__PASSWORD_FILE: password
+    - name: sandbox-signing
+      secretName: sandbox-signing
+      mountPath: /var/run/status-list-server/signing
+      items:
+        - key: tls.crt
+          path: tls.crt
+        - key: tls.key
+          path: tls.key
+      fileEnv:
+        APP_SERVER__CERT__STORE__CERTIFICATE_PATH: tls.crt
+        APP_SERVER__CERT__STORE__SIGNING_KEY_PATH: tls.key
+  networkPolicy:
+    enabled: true
+    ingress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx-hosted
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: hosted-sandbox-ingress
+    managementIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx-hosted
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: hosted-sandbox-ingress
+    adminIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: sandbox-portal
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: sandbox-portal-backend
+    prometheusIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+
+postgres:
+  enabled: true
+  persistence:
+    enabled: true
+
+serviceMonitor:
+  enabled: true
+
+prometheusRule:
+  enabled: true
+
+opentelemetry-collector:
+  enabled: false

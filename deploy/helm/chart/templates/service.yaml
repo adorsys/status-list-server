@@ -1,7 +1,5 @@
 {{- if .Values.statuslist.service.enabled }}
-# Public listener: the http port only. This is the Service the public Ingress and
-# the configured Service type (ClusterIP / NodePort / LoadBalancer) act on, so an
-# internet-facing LoadBalancer overlay never exposes management or admin.
+# Public port only, so a LoadBalancer service type never exposes management or admin.
 apiVersion: v1
 kind: Service
 metadata:
@@ -27,11 +25,7 @@ spec:
   selector:
     {{- include "status-list-server-chart.selectorLabels" . | nindent 4 }}
 ---
-# Internal listener: management and admin ports on a ClusterIP Service. Keeping
-# these on their own Service (instead of sharing the public Service) means the
-# management API and /metrics are never exposed by the public Service type (e.g.
-# an internet-facing LoadBalancer). ClusterIP is fixed regardless of the public
-# Service type. The ServiceMonitor scrapes the admin port here by name.
+# Management and admin, always ClusterIP; the ServiceMonitor scrapes admin here by port name.
 apiVersion: v1
 kind: Service
 metadata:

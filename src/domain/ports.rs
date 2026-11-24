@@ -1,6 +1,10 @@
 //! Outbound secondary ports defining contracts.
 
-use std::{collections::HashSet, fmt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 
@@ -8,7 +12,7 @@ use crate::domain::models::credential::{
     AggregationId, Credential, CredentialError, Issuer, KeyResolveError, ResolvedKey,
 };
 use crate::domain::models::hosted_issuer::{
-    HostedIssuer, HostedIssuerError, HostedIssuerKey, HostedIssuerKeyEntry,
+    HostedIssuer, HostedIssuerError, HostedIssuerFilter, HostedIssuerKey, HostedIssuerKeyEntry,
 };
 
 /// Resolve a trusted signing key without exposing the backing trust source to
@@ -21,12 +25,94 @@ pub trait IssuerKeyResolver: Send + Sync + fmt::Debug {
     async fn resolve(&self, kid: &str) -> Result<Arc<ResolvedKey>, KeyResolveError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticKeyRevocation {
+    pub kid: String,
+    pub material: String,
+}
+
+/// Keeps a database transaction open while cross-source trust is checked.
+/// Releasing the value releases the database lock.
+pub trait RegistryWriteGuard: Send {}
+impl<T: Send> RegistryWriteGuard for T {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaticClaimConflict {
+    PrincipalId,
+    KeyId,
+    KeyMaterial,
+}
+
 /// A hosted-profile issuer store behind the dynamic trust source. `issuer_keys`
 /// is looked up by its `kid` primary key with no cache: every resolution reads
 /// the row, so revocation takes effect on the next request (ADR 0002, no
 /// cached authorization outlives a change).
 #[async_trait]
 pub trait HostedIssuerStore: Send + Sync + 'static {
+    async fn registry_write_guard(&self) -> Result<Box<dyn RegistryWriteGuard>, HostedIssuerError>;
+
+    async fn record_static_registry_claims(
+        &self,
+        keys: &[(String, String, String)],
+    ) -> Result<(), HostedIssuerError>;
+
+    async fn static_claim_conflict(
+        &self,
+        issuer_id: &str,
+        kid: Option<&str>,
+        material: Option<&str>,
+    ) -> Result<Option<StaticClaimConflict>, HostedIssuerError>;
+
+    /// Persist static-key revocations so registry snapshots cannot restore a
+    /// revoked key after rollback or restart.
+    async fn record_static_key_revocations(
+        &self,
+        revocations: &[StaticKeyRevocation],
+    ) -> Result<(), HostedIssuerError>;
+
+    /// Check whether either the key id or normalized key material was revoked
+    /// from the static registry.
+    async fn static_key_was_revoked(
+        &self,
+        kid: &str,
+        material: &str,
+    ) -> Result<bool, HostedIssuerError>;
+
+    async fn static_keys_were_revoked(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<Vec<String>, HostedIssuerError> {
+        let mut revoked = Vec::new();
+        for (kid, material) in keys {
+            if self.static_key_was_revoked(kid, material).await? {
+                revoked.push(kid.clone());
+            }
+        }
+        Ok(revoked)
+    }
+
+    /// Return a bounded page ordered by issuer id, strictly after `after`.
+    async fn list_issuers_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        filters: &HostedIssuerFilter,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
+    /// Return all signing-key metadata for one hosted issuer.
+    async fn issuer_keys(&self, issuer_id: &str)
+    -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
+    /// Return signing-key metadata for a page of hosted issuers in one read.
+    async fn issuer_keys_for(
+        &self,
+        issuer_ids: &[String],
+    ) -> Result<HashMap<String, Vec<HostedIssuerKey>>, HostedIssuerError> {
+        let mut result = HashMap::with_capacity(issuer_ids.len());
+        for issuer_id in issuer_ids {
+            result.insert(issuer_id.clone(), self.issuer_keys(issuer_id).await?);
+        }
+        Ok(result)
+    }
     /// The issuer owning a registered management-token key ID.
     async fn find_key_by_kid(
         &self,
@@ -40,14 +126,37 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     /// mapping in one unit; both rows commit or neither does. Returns the
     /// stored issuer: an aggregation ID that collided with one already in use
     /// was regenerated server-side, because identifiers are server-assigned.
-    async fn create_issuer(&self, issuer: HostedIssuer) -> Result<HostedIssuer, HostedIssuerError>;
+    async fn create_issuer(
+        &self,
+        issuer: HostedIssuer,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    /// Create an issuer with its first key and audit records in one unit.
+    async fn create_issuer_with_key(
+        &self,
+        issuer: HostedIssuer,
+        key: HostedIssuerKey,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
 
     /// Register a signing key for an existing hosted issuer.
-    async fn add_key(&self, key: HostedIssuerKey) -> Result<(), HostedIssuerError>;
+    async fn add_key(&self, key: HostedIssuerKey, actor: &str) -> Result<(), HostedIssuerError>;
+
+    /// Register a signing key only while the issuer is still at `expected_version`.
+    async fn add_key_if_version(
+        &self,
+        key: HostedIssuerKey,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<(), HostedIssuerError>;
 
     /// Every registered hosted key row, for the adapter's quarantine scan and
     /// tests; resolution uses [`find_key_by_kid`](HostedIssuerStore::find_key_by_kid).
     async fn all_keys(&self) -> Result<Vec<HostedIssuerKey>, HostedIssuerError>;
+
+    /// Every hosted issuer, for the per-issuer usage gauges.
+    async fn all_issuers(&self) -> Result<Vec<HostedIssuer>, HostedIssuerError>;
 
     /// The hosted key that already holds the given normalized key material
     /// (RFC 7638 §7 parameters), if any. Returns `None` when the material is
@@ -65,6 +174,37 @@ pub trait HostedIssuerStore: Send + Sync + 'static {
     async fn find_issuer_ids(&self, ids: &[String]) -> Result<HashSet<String>, HostedIssuerError>;
 }
 
+/// Durable lifecycle changes for hosted issuers. Each method commits the state
+/// transition and its audit record in one transaction.
+#[async_trait]
+pub trait HostedIssuerLifecycleStore: Send + Sync + 'static {
+    async fn get_issuer(&self, issuer_id: &str) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_state(
+        &self,
+        issuer_id: &str,
+        state: crate::domain::models::hosted_issuer::HostedIssuerState,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn set_issuer_expiry(
+        &self,
+        issuer_id: &str,
+        expires_at: time::OffsetDateTime,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuer, HostedIssuerError>;
+
+    async fn revoke_key(
+        &self,
+        issuer_id: &str,
+        kid: &str,
+        expected_version: u64,
+        actor: &str,
+    ) -> Result<HostedIssuerKey, HostedIssuerError>;
+}
+
 /// Public aggregation mappings supplied by the active issuer source.
 pub trait IssuerDirectory: Send + Sync + fmt::Debug {
     fn issuer_aggregation_id(&self, issuer: &str) -> Option<AggregationId>;
@@ -75,20 +215,15 @@ use crate::domain::models::status_list::{
 };
 pub use crate::domain::models::token::{SigningAlgorithm, TokenSignerError};
 
-/// Pluggable cache interface for recently used status-list records.
 #[async_trait]
 pub trait StatusListCache: Send + Sync + 'static {
-    /// Retrieve a cached status-list record by list identifier.
     async fn get(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Store a status-list record in the cache.
     async fn put(&self, status_list: StatusListRecord) -> Result<(), StatusListError>;
 
-    /// Invalidate a cached status-list entry upon mutation.
     async fn invalidate(&self, list_id: &str) -> Result<(), StatusListError>;
 
-    /// Invalidate a cached entry after a committed update, carrying the committed
-    /// monotonic version for distributed caches that need stale-fill fencing.
+    /// Carries the version so a shared cache can refuse a stale refill.
     async fn invalidate_after_update(
         &self,
         list_id: &str,
@@ -115,20 +250,34 @@ pub struct AllocateStatusListIndices {
 
 #[async_trait]
 pub trait StatusListRepo: Send + Sync + 'static {
+    /// Count all lists owned by one issuer, including during quota transitions.
+    async fn count_by_issuer(&self, issuer: &str) -> Result<u64, StatusListError>;
+
+    /// Count lists for a page of issuers, allowing SQL adapters to group the counts.
+    async fn count_by_issuers(
+        &self,
+        issuers: &[String],
+    ) -> Result<HashMap<String, u64>, StatusListError> {
+        let mut counts = HashMap::with_capacity(issuers.len());
+        for issuer in issuers {
+            counts.insert(issuer.clone(), self.count_by_issuer(issuer).await?);
+        }
+        Ok(counts)
+    }
+
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Create a status list and any initial child records atomically.
+    /// Atomic: the list and its first snapshot land together or not at all.
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 
-    /// Concurrently update an existing status list record matching `expected_version`.
     async fn update(
         &self,
         status_list: StatusListRecord,
         expected_version: u64,
     ) -> Result<bool, StatusListError>;
 
-    /// Concurrently update an existing record and atomically record a historical snapshot.
+    /// The update and its snapshot commit together.
     async fn update_with_snapshot(
         &self,
         status_list: StatusListRecord,
@@ -136,9 +285,7 @@ pub trait StatusListRepo: Send + Sync + 'static {
         snapshot: StatusListSnapshot,
     ) -> Result<bool, StatusListError>;
 
-    /// Return up to `limit` (non-zero) status list URIs in `list_id` order,
-    /// starting strictly after `after`, from one issuer's lists when `issuer`
-    /// is given and from every issuer's otherwise.
+    /// Ordered by list_id; `limit` must be non-zero.
     async fn list_uris(
         &self,
         issuer: Option<&str>,
@@ -149,14 +296,16 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Issuer identifiers that currently own at least one status list.
     async fn issuers_with_status_lists(&self) -> Result<Vec<String>, StatusListError>;
 
-    /// Reserve `count` unused indices for `list_id`, returning the newly
-    /// allocated indices in ascending order.
+    /// Number of status lists each issuer holds against its list quota.
+    /// Issuers without a list are absent.
+    async fn list_counts_by_issuer(&self) -> Result<HashMap<String, u64>, StatusListError>;
+
+    /// Returns the new indices in ascending order.
     async fn allocate_indices(
         &self,
         command: AllocateStatusListIndices,
     ) -> Result<Vec<i32>, StatusListError>;
 
-    /// Return the first requested index that has not been allocated, if any.
     async fn first_unallocated_index(
         &self,
         list_id: &str,
@@ -164,23 +313,18 @@ pub trait StatusListRepo: Send + Sync + 'static {
     ) -> Result<Option<i32>, StatusListError>;
 }
 
-/// Interface for issuer public key credentials.
 #[async_trait]
 pub trait CredentialRepo: Send + Sync + 'static {
-    /// Find issuer credential details by issuer identifier.
     async fn find(&self, issuer: &str) -> Result<Option<Credential>, CredentialError>;
 
-    /// Find the credential owning a registered management-token key ID.
     async fn find_by_kid(&self, kid: &str) -> Result<Option<Credential>, CredentialError>;
 
-    /// Insert new issuer credential details into storage.
     async fn insert(
         &self,
         credential: Credential,
         aggregation_id: AggregationId,
     ) -> Result<AggregationId, CredentialError>;
 
-    /// The issuer's aggregation ID, or `None` for an unknown issuer.
     async fn find_aggregation_id(
         &self,
         issuer: &str,
@@ -215,46 +359,30 @@ pub trait CredentialRepo: Send + Sync + 'static {
     ) -> Result<(), CredentialError>;
 }
 
-/// Persistence interface for historical status list snapshots.
 #[async_trait]
 pub trait StatusListSnapshotRepo: Send + Sync + 'static {
-    /// Save a historical status list snapshot.
     async fn insert(&self, record: StatusListSnapshot) -> Result<(), StatusListError>;
 
-    /// Find a historical snapshot active at a specific Unix timestamp.
     async fn find_valid_at(
         &self,
         list_id: &str,
         time: i64,
     ) -> Result<Option<StatusListSnapshot>, StatusListError>;
 
-    /// Purge historical snapshots with expiration timestamps older than `cutoff`.
     async fn delete_older_than(&self, cutoff: i64) -> Result<u64, StatusListError>;
 }
 
-/// Certificate chain and signing key captured from one provider snapshot.
-///
-/// The base64 chain (`certificate_chain`) is kept for the JWT `x5c` header, and
-/// decoded once at construction into DER bytes (`certificate_der`) for the CWT
-/// `x5chain` hot path. Both views are derived from the same source and exposed
-/// through accessors, so they can never fall out of sync.
+/// Holds the chain twice: base64 for JWT x5c and DER for CWT x5chain, decoded once.
 #[derive(Clone)]
 pub struct SigningMaterial {
-    /// Base64 DER-encoded x509 certificate chain parts for JWT `x5c`.
     certificate_chain: Option<Vec<String>>,
-    /// DER-encoded x509 certificate chain, decoded once at construction.
     certificate_der: Option<Arc<[Box<[u8]>]>>,
-    /// Pre-parsed signer; retains no PEM/DER encoding.
+    /// Keeps no PEM or DER copy of the key.
     pub signing_key: Arc<dyn TokenSigner>,
 }
 
 impl SigningMaterial {
-    /// Construct material from a validated, pre-parsed signer.
-    ///
-    /// Rejects an empty chain, an empty entry, or a non-base64 entry so a
-    /// malformed chain fails at load/renewal time rather than surfacing later
-    /// as a missing or empty CWT `x5chain`. Callers should treat this as a
-    /// provisioning error.
+    /// Rejects a malformed chain here so it fails at load, not as an empty x5chain later.
     pub fn new(
         certificate_chain: Option<Vec<String>>,
         signing_key: Arc<dyn TokenSigner>,
@@ -295,12 +423,10 @@ impl SigningMaterial {
         })
     }
 
-    /// Base64 DER-encoded x509 certificate chain parts for the JWT `x5c` header.
     pub fn certificate_chain(&self) -> Option<&[String]> {
         self.certificate_chain.as_deref()
     }
 
-    /// DER-encoded x509 certificate chain for the CWT `x5chain` header.
     pub fn certificate_der(&self) -> Option<&[Box<[u8]>]> {
         self.certificate_der.as_deref()
     }
@@ -323,31 +449,18 @@ impl fmt::Debug for SigningMaterial {
     }
 }
 
-/// Provider interface for certificate chains and signing keys used for VC/token signatures.
 #[async_trait]
 pub trait CertificateProvider: Send + Sync + 'static {
-    /// Retrieve the current certificate chain and signing key from one
-    /// internally consistent snapshot.
-    ///
-    /// Returns an [`Arc`] so a per-request clone of the chain is avoided; token
-    /// encoders move the cheap `Arc` clone into a blocking task and borrow the
-    /// material inside it.
+    /// Chain and key come from one consistent snapshot; the Arc keeps per-request clones cheap.
     async fn signing_material(&self) -> Result<Arc<SigningMaterial>, StatusListError>;
 }
 
-/// Cryptographic port used by token encoders.
-///
-/// `sign` receives exactly the bytes defined by the caller's token format and
-/// returns the raw signature bytes for the selected algorithm: fixed-width
-/// IEEE P1363 for ECDSA, 64-byte Ed25519, and PKCS#1 v1.5 for RS256.
+/// Signatures are raw: IEEE P1363 for ECDSA (not DER), 64 bytes for Ed25519, PKCS#1 v1.5 for RS256.
 pub trait TokenSigner: Send + Sync {
-    /// Return the algorithm associated with this signer.
     fn algorithm(&self) -> SigningAlgorithm;
 
-    /// Sign the supplied token-format signing input.
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, TokenSignerError>;
 
-    /// Return raw public-key bytes for X.509 certificate validation.
     fn public_key_bytes(&self) -> &[u8];
 }
 

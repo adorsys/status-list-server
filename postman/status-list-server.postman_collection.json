@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests.",
+    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests. Send exactly one Authorization header on management writes; duplicate headers return 401 invalid_token.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,
@@ -715,6 +715,300 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Admin API",
+      "item": [
+        {
+          "name": "List issuers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers?limit=50",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Issuer read succeeds\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Issuer metadata is not cached\", () => pm.expect(pm.response.headers.get(\"Cache-Control\")).to.eql(\"no-store\"));",
+                  "pm.test(\"Detail has an opaque ETag\", () => pm.expect(pm.response.headers.get(\"ETag\")).to.match(/^\"[^\"\\r\\n]+\"$/));",
+                  "pm.collectionVariables.set(\"issuerEtag\", pm.response.headers.get(\"ETag\"));",
+                  "pm.test(\"Key usage reports the tier's key limit\", () => { const usage = pm.response.json().usage; pm.expect(Number.isInteger(usage.keys_limit), \"keys_limit is an integer\").to.be.true; pm.expect(usage.keys_limit).to.be.at.least(1); pm.expect(Number.isInteger(usage.keys), \"keys is an integer\").to.be.true; pm.expect(usage.keys).to.be.at.least(0); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Issuer Lifecycle (destructive, hosted profile)",
+      "description": "Manual hosted-profile writes. Supply an adminToken with issuers:write, portalOwner, portalPublicJwk, issuer_id and issuer_etag. Excluded from the automated Newman run.",
+      "item": [
+        {
+          "name": "Create portal issuer",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"display_name\":\"Sandbox issuer\",\"owner\":\"{{portalOwner}}\",\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"public_key\":{{portalPublicJwk}},\"alg\":\"ES256\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}/keys",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Renew issuer",
+          "request": {
+            "description": "Renew a sandbox issuer. Portal issuers with the standard tier never expire and reject renewal.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"expires_at\":{{renewalExpiry}}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Revoke issuer key",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "If-Match",
+                "value": "{{issuer_etag}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"state\":\"revoked\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{adminUrl}}/admin/v1/issuers/{{issuer_id}}/keys/{{kid}}",
+              "host": [
+                "{{adminUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "issuers",
+                "{{issuer_id}}",
+                "keys",
+                "{{kid}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
     }
   ],
   "variable": [
@@ -745,6 +1039,30 @@
     {
       "key": "historical_time",
       "value": "1686925000"
+    },
+    {
+      "key": "adminToken",
+      "value": ""
+    },
+    {
+      "key": "portalOwner",
+      "value": "github|5821374"
+    },
+    {
+      "key": "portalPublicJwk",
+      "value": "{}"
+    },
+    {
+      "key": "renewalExpiry",
+      "value": "0"
+    },
+    {
+      "key": "issuer_etag",
+      "value": "\"paste-current-etag\""
+    },
+    {
+      "key": "kid",
+      "value": "paste-key-id"
     }
   ]
 }

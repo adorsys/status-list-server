@@ -1,12 +1,4 @@
-//! Database query latency SLI instruments.
-//!
-//! These back the DB-latency series used by the SLO dashboards and burn-rate
-//! alerts in `deploy/observability/`:
-//! - `db_query_duration_seconds` – histogram of storage-query latency
-//!
-//! Handles are cached on first use (they are only ever needed after
-//! `init_telemetry`/`setup_metrics` has installed the global provider, so the
-//! cached handles are valid).
+//! deploy/observability dashboards and alerts query db_query_duration_seconds by name.
 
 use opentelemetry::{KeyValue, global, metrics::Histogram};
 use std::{
@@ -17,7 +9,7 @@ use std::{
 
 const QUERY_DURATION_METRIC: &str = "db_query_duration";
 
-/// Bucket boundaries (seconds) tuned to this service's DB SLO target of p95 < 50 ms.
+/// Dense around the p95 < 50 ms DB SLO target.
 const QUERY_BUCKETS: &[f64] = &[
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
 ];
@@ -42,7 +34,6 @@ fn db_metrics() -> DbMetrics {
     })
 }
 
-/// Record a completed query's latency.
 pub(crate) fn record_db_query(operation: &'static str, resource: &'static str, seconds: f64) {
     db_metrics().duration.record(
         seconds,
@@ -53,7 +44,6 @@ pub(crate) fn record_db_query(operation: &'static str, resource: &'static str, s
     );
 }
 
-/// Run `fut`, timing it and recording the query latency.
 pub(crate) async fn time_query<T, E, F>(
     operation: &'static str,
     resource: &'static str,

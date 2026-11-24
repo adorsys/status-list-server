@@ -1,0 +1,17 @@
+# Values for a dedicated ingress-nginx controller, not the application chart.
+# Direct edge topology: preserve the client address at the load balancer.
+controller:
+  ingressClass: hosted-sandbox
+  ingressClassResource:
+    name: hosted-sandbox
+    default: false
+    controllerValue: k8s.io/hosted-sandbox-ingress-nginx
+  electionID: hosted-sandbox-ingress-leader
+  config:
+    use-forwarded-headers: "false"
+    compute-full-forwarded-for: "false"
+    enable-real-ip: "false"
+    use-proxy-protocol: "false"
+    limit-req-status-code: "429"
+  service:
+    externalTrafficPolicy: Local

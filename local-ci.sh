@@ -547,7 +547,11 @@ otel_validation() {
     run docker manifest inspect "$JAEGER_IMAGE" >/dev/null
     run docker run --rm -v "$PWD/deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro" "$OTEL_COLLECTOR_IMAGE" validate --config /etc/otelcol/config.yaml
     helm_deps
-    helm template statuslist "$CHART_DIR" --namespace statuslist --set-string statuslist.env.APP_DATABASE__PORT="5432" > "$RUNNER_TEMP/statuslist-rendered.yaml"
+    helm template statuslist "$CHART_DIR" \
+        --set-string statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://helm-ci.invalid/api/v1 \
+        --set statuslist.issuerRegistry.volume.configMap.name=helm-ci-issuers \
+        --set-string statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=10.244.0.0/16 \
+        --namespace statuslist --set-string statuslist.env.APP_DATABASE__PORT="5432" > "$RUNNER_TEMP/statuslist-rendered.yaml"
     python3 - <<'PY2'
 from pathlib import Path
 import os, yaml

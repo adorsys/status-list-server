@@ -8,10 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::cert_manager::challenge::ChallengeError;
 
-/// Cache for short-lived OAuth2 access tokens.
-///
-/// The lock is held across minting so concurrent callers wait for the
-/// in-flight mint instead of minting duplicate tokens.
+/// Holds the lock while minting so concurrent callers share one token.
 pub(crate) struct TokenCache {
     inner: Mutex<Option<CachedToken>>,
 }
@@ -22,7 +19,6 @@ struct CachedToken {
 }
 
 impl TokenCache {
-    // Refresh tokens slightly before they expire
     const EXPIRY_SKEW: Duration = Duration::from_secs(60);
 
     pub(crate) fn new() -> Self {
@@ -31,7 +27,6 @@ impl TokenCache {
         }
     }
 
-    /// Return the cached token, or mint a new one when absent or expired
     pub(crate) async fn get_or_mint<F, Fut>(&self, mint: F) -> Result<SecretString, ChallengeError>
     where
         F: FnOnce() -> Fut,
@@ -83,7 +78,6 @@ mod tests {
         let mints = AtomicU32::new(0);
 
         for _ in 0..2 {
-            // A TTL below the expiry skew is expired immediately
             cache
                 .get_or_mint(|| async {
                     mints.fetch_add(1, Ordering::SeqCst);

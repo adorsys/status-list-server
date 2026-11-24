@@ -9,20 +9,21 @@ use time::OffsetDateTime;
 use crate::domain::models::credential::{
     AggregationId, KeyResolveError, Principal, PublicJwk, ResolvedKey,
 };
+use crate::domain::models::tier::IssuerTier;
 
-/// Lifecycle of a hosted issuer row. Stored as a string in `issuers.state`.
+/// Persisted state of a hosted issuer row, stored in `issuers.state`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HostedIssuerState {
     Active,
-    Disabled,
+    Suspended,
 }
 
 impl HostedIssuerState {
     pub fn as_str(&self) -> &'static str {
         match self {
             HostedIssuerState::Active => "active",
-            HostedIssuerState::Disabled => "disabled",
+            HostedIssuerState::Suspended => "suspended",
         }
     }
 }
@@ -44,12 +45,45 @@ pub struct HostedIssuer {
     pub aggregation_id: AggregationId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedIssuerReadState {
+    Active,
+    Suspended,
+    Expired,
+}
+
 impl HostedIssuer {
+    /// Expiry is derived at verification time, without a cleanup job.
+    /// Suspension wins over expiry so an operator never sees a suspended
+    /// issuer reported as merely expired.
+    pub fn effective_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
+        if self.state == HostedIssuerState::Suspended {
+            HostedIssuerReadState::Suspended
+        } else if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            HostedIssuerReadState::Expired
+        } else {
+            HostedIssuerReadState::Active
+        }
+    }
+
     /// Whether the issuer may authenticate right now: the persisted state is
     /// active and a configured expiry has not passed.
     pub fn is_currently_enabled(&self, now: OffsetDateTime) -> bool {
-        self.state == HostedIssuerState::Active && self.expires_at.is_none_or(|expiry| now < expiry)
+        self.effective_state(now) == HostedIssuerReadState::Active
     }
+
+    /// Admin-visible lifecycle at the supplied instant.
+    pub fn read_state(&self, now: OffsetDateTime) -> HostedIssuerReadState {
+        self.effective_state(now)
+    }
+}
+
+/// Metadata filters applied before bounding an admin issuer page.
+#[derive(Clone, Debug, Default)]
+pub struct HostedIssuerFilter {
+    pub tier: Option<String>,
+    pub state: Option<HostedIssuerReadState>,
+    pub owner: Option<String>,
 }
 
 /// Input to create a hosted issuer through `HostedIssuerService`. Identifiers
@@ -115,6 +149,13 @@ impl HostedIssuerKeyState {
 }
 
 impl HostedIssuerKey {
+    /// Whether the key holds one of its issuer's `max_keys` slots at `now`.
+    /// Like a registry key, it counts until `not_after` passes; a reserved or
+    /// revoked key never authenticates, so it counts against nothing.
+    pub fn counts_against_quota(&self, now: OffsetDateTime) -> bool {
+        self.state == HostedIssuerKeyState::Active && self.not_after.is_none_or(|end| now < end)
+    }
+
     /// Whether the key is inside its validity window at `now`.
     pub fn is_currently_valid(&self, now: OffsetDateTime) -> bool {
         self.state == HostedIssuerKeyState::Active
@@ -142,16 +183,27 @@ pub enum HostedIssuerError {
     /// the owner is logged server-side, never returned to the caller.
     #[error("key material was already registered by another issuer")]
     KeyMaterialReused,
+    /// The issuer already holds its tier's `max_keys` keys.
+    #[error("the issuer already holds its tier's maximum of {max_keys} keys")]
+    KeyQuotaExceeded { max_keys: usize },
     #[error("invalid public JWK: {0}")]
     InvalidPublicJwk(String),
     #[error("invalid expiry: {0}")]
     InvalidExpiry(String),
+    #[error("issuer version has changed; read the current state before retrying")]
+    VersionMismatch,
     /// A persisted hosted row is malformed and can never parse: a permanent
     /// data fault that fails closed for that key, not a retryable 503.
     #[error("stored hosted issuer data is corrupt: {0}")]
     Corrupt(String),
+    /// A carried key cannot authenticate before its issuer is adopted.
+    #[error("carried issuer key is reserved pending registry adoption")]
+    ReservedUnmapped,
     #[error("the write lost a lock race ({code}) and can be retried unchanged")]
     Contention { code: &'static str },
+    /// The store could not be reached: retry later with the same request.
+    #[error("the issuer store is currently unavailable")]
+    Unavailable,
     #[error("storage error: {0}")]
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -186,6 +238,7 @@ impl HostedIssuerKeyEntry {
             principal: Principal::Issuer {
                 id: self.issuer.id.clone(),
                 aggregation_id: self.issuer.aggregation_id,
+                tier: IssuerTier::from_name_or_strictest(&self.issuer.tier),
             },
             public_key: Arc::new(self.key.jwk.clone()),
             enabled: true,
@@ -242,9 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn disabled_issuer_fails_closed() {
+    fn suspended_issuer_fails_closed() {
         let entry = entry_with(
-            HostedIssuerState::Disabled,
+            HostedIssuerState::Suspended,
             None,
             HostedIssuerKeyState::Active,
             (None, None),
@@ -264,10 +317,28 @@ mod tests {
             HostedIssuerKeyState::Active,
             (None, None),
         );
+        assert_eq!(
+            entry.issuer.effective_state(now()),
+            HostedIssuerReadState::Expired
+        );
         assert!(matches!(
             entry.resolved_key(now()),
             Err(KeyResolveError::PrincipalDisabled)
         ));
+    }
+
+    #[test]
+    fn suspension_takes_precedence_over_expiry() {
+        let entry = entry_with(
+            HostedIssuerState::Suspended,
+            Some(now() - time::Duration::seconds(1)),
+            HostedIssuerKeyState::Active,
+            (None, None),
+        );
+        assert_eq!(
+            entry.issuer.effective_state(now()),
+            HostedIssuerReadState::Suspended
+        );
     }
 
     #[test]
@@ -310,6 +381,28 @@ mod tests {
     }
 
     #[test]
+    fn resolved_principal_carries_the_stored_tier_or_the_strictest() {
+        for (stored, expected) in [
+            ("standard", IssuerTier::Standard),
+            ("sandbox", IssuerTier::Sandbox),
+            ("premium", IssuerTier::Sandbox),
+            ("", IssuerTier::Sandbox),
+        ] {
+            let mut entry = entry_with(
+                HostedIssuerState::Active,
+                None,
+                HostedIssuerKeyState::Active,
+                (None, None),
+            );
+            entry.issuer.tier = stored.into();
+            match entry.resolved_key(now()).unwrap().principal {
+                Principal::Issuer { tier, .. } => assert_eq!(tier, expected, "{stored:?}"),
+                Principal::Admin { .. } => panic!("hosted issuer must resolve as an issuer"),
+            }
+        }
+    }
+
+    #[test]
     fn active_entry_resolves_an_issuer_principal() {
         let aggregation_id = AggregationId::generate();
         let mut entry = entry_with(
@@ -324,6 +417,7 @@ mod tests {
             Principal::Issuer {
                 id,
                 aggregation_id: agg,
+                ..
             } => {
                 assert_eq!(id, &entry.issuer.id);
                 assert_eq!(*agg, aggregation_id);

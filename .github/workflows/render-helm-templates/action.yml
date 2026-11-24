@@ -9,3 +9,6 @@ runs:
     - name: Validate enabled AlertmanagerConfig route against pinned 91.4.0 CRD
       shell: bash
       run: bash scripts/validate-alertmanager-crd.sh
+    - name: Validate gateway resources against pinned Envoy Gateway CRDs
+      shell: bash
+      run: bash scripts/validate-envoy-gateway-crds.sh

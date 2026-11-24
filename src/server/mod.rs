@@ -1,5 +1,3 @@
-//! Inbound HTTP web server module containing handlers, auth middleware, and shared application state.
-
 pub mod auth;
 pub mod cache;
 pub mod error;
@@ -8,13 +6,13 @@ pub mod health;
 pub mod rate_limit;
 
 use crate::domain::models::credential::{AggregationId, Issuer};
+use crate::domain::models::tier::{IssuerTier, Tiers};
 use crate::domain::service::{Service, StatusListPolicy};
 use axum::{Json, extract::State};
 use std::collections::HashSet;
 use std::sync::Arc;
 use url::Url;
 
-/// JWT policy for protected management endpoints.
 #[derive(Debug, Clone)]
 pub struct ManagementAuthConfig {
     pub leeway_secs: u64,
@@ -42,6 +40,23 @@ impl From<&crate::config::ManagementAuthConfig> for ManagementAuthConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AdminAuthConfig {
+    pub leeway_secs: u64,
+    pub max_token_lifetime_secs: u64,
+    pub audiences: Vec<String>,
+}
+
+impl From<&crate::config::AdminAuthConfig> for AdminAuthConfig {
+    fn from(config: &crate::config::AdminAuthConfig) -> Self {
+        Self {
+            leeway_secs: config.leeway_secs,
+            max_token_lifetime_secs: config.max_token_lifetime_secs,
+            audiences: config.audiences.clone(),
+        }
+    }
+}
+
 /// Links exposed in the `GET /` service document.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceLinks {
@@ -50,7 +65,6 @@ pub struct ServiceLinks {
     pub portal: Option<String>,
 }
 
-/// The minimal `application/json` service document returned by `GET /`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServiceDocument {
     pub service: &'static str,
@@ -58,42 +72,64 @@ pub struct ServiceDocument {
 }
 
 /// Shared application state injected into web handlers.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
-    /// Domain service container holding secondary ports.
     pub service: Arc<Service>,
-    /// Resolved public base URL (e.g. `https://statuslist.example.com/api/v1`).
-    /// Used to build the `sub` URI signed into issued tokens and returned to
-    /// issuers as the publish `Location`.
+    /// Base of every sub URI; changing it doesn't rewrite lists already published.
     pub public_base_url: String,
-    /// The aggregation endpoint's URL. Tokens and registrations advertise it
-    /// scoped to one issuer; see [`AppState::aggregation_uri_for`].
+    /// Unscoped; use aggregation_uri_for to get an issuer's URI.
     pub aggregation_uri: Option<Url>,
     /// Issuers that were over one aggregation page at startup.
     pub aggregation_withheld_from: Arc<HashSet<Issuer>>,
     pub token_exp_secs: u64,
     pub token_ttl_secs: u64,
-    pub max_status_index: i32,
-    pub max_statuses_per_request: usize,
     pub max_serialized_list_size: usize,
-    pub max_lists_per_issuer: u64,
+    /// Per-tier quotas and request bounds, resolved from `tiers.*`.
+    pub tiers: Arc<Tiers>,
+    /// Per-replica write budgets keyed on the authenticated issuer.
+    pub issuer_rate_limiter: Arc<rate_limit::IssuerRateLimiter>,
     pub snapshot_retention_secs: u64,
     pub management_auth: ManagementAuthConfig,
+    pub admin_auth: AdminAuthConfig,
+    pub admin_registry: Arc<auth::issuer_registry::RegistryHandle>,
+    pub hosted_issuer_store: Option<Arc<dyn crate::domain::ports::HostedIssuerStore>>,
     /// Last-known-good operator-managed issuer trust registry snapshot.
     pub issuer_registry: Arc<dyn crate::domain::ports::IssuerDirectory>,
     /// Trust-source port used by authentication.
     pub issuer_key_resolver: Arc<dyn crate::domain::ports::IssuerKeyResolver>,
+    /// Hosted-profile lifecycle commands, absent in the private profile.
+    pub hosted_lifecycle_service: Option<Arc<auth::hosted_service::HostedIssuerLifecycleService>>,
     /// Links exposed in the `GET /` service document.
     pub links: ServiceLinks,
-    /// Per-replica cache of signed status-list token bytes.
     pub token_bytes_cache: crate::server::cache::TokenBytesCache,
-    /// Dependency readiness checks backing the `/health/ready` endpoint.
     pub readiness: health::Readiness,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("public_base_url", &self.public_base_url)
+            .field(
+                "hosted_issuer_store_configured",
+                &self.hosted_issuer_store.is_some(),
+            )
+            .field("admin_audience_count", &self.admin_auth.audiences.len())
+            .field(
+                "management_audience_count",
+                &self.management_auth.audiences.len(),
+            )
+            .field(
+                "issuer_registry_fingerprint",
+                &self.admin_registry.snapshot().fingerprint(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppState {
     pub fn set_issuer_registry(&mut self, registry: Arc<auth::issuer_registry::RegistryHandle>) {
         self.issuer_key_resolver = registry.clone();
+        self.admin_registry = registry.clone();
         self.issuer_registry = registry;
     }
     /// The issuer's aggregation URI, or `None` when aggregation is not
@@ -113,21 +149,31 @@ impl AppState {
         Some(uri.into())
     }
 
-    pub fn status_list_policy(&self) -> StatusListPolicy {
+    pub fn status_list_policy(&self, tier: IssuerTier) -> StatusListPolicy {
+        let limits = self.tiers.get(tier);
         StatusListPolicy {
             token_exp_secs: self.token_exp_secs,
-            max_status_index: self.max_status_index,
-            max_statuses_per_request: self.max_statuses_per_request,
+            max_status_index: limits.max_status_index,
+            max_statuses_per_request: limits.max_statuses_per_request,
             max_serialized_list_size: self.max_serialized_list_size,
-            max_lists_per_issuer: self.max_lists_per_issuer,
+            max_lists_per_issuer: limits.max_lists,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tier_limits_mut(
+        &mut self,
+        tier: IssuerTier,
+    ) -> &mut crate::domain::models::tier::TierLimits {
+        let tiers = Arc::make_mut(&mut self.tiers);
+        match tier {
+            IssuerTier::Standard => &mut tiers.standard,
+            IssuerTier::Sandbox => &mut tiers.sandbox,
         }
     }
 }
 
-/// `GET /` service document: a minimal `application/json` body naming the
-/// service and its documentation (and portal when configured). No version and
-/// no HTML, so a proxy/ingress health-checking the root sees a stable JSON
-/// contract.
+/// No version and no HTML, so proxies probing `/` see a stable JSON contract.
 pub async fn service_document(State(state): State<AppState>) -> Json<ServiceDocument> {
     Json(ServiceDocument {
         service: "Status List Server",

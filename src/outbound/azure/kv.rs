@@ -1,5 +1,3 @@
-//! Azure Key Vault secret storage adapter implementing [`Storage`].
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,10 +16,6 @@ use url::Url;
 use crate::cert_manager::storage::{Storage, StorageError, normalize_key};
 use crate::outbound::azure::identity::DefaultAzureCredential;
 
-/// Azure Key Vault secret storage adapter.
-///
-/// Implements the [`Storage`] trait so it can be used as a secrets backend
-/// by the certificate manager.
 pub struct AzureKeyVaultClient {
     client: SecretClient,
     cache: Option<Cache<String, String>>,
@@ -30,20 +24,15 @@ pub struct AzureKeyVaultClient {
 impl AzureKeyVaultClient {
     const CACHE_MAX_CAPACITY: u64 = 100;
 
-    /// Return an [`AzureKeyVaultClientBuilder`] for constructing an adapter
-    /// for the given Key Vault URL.
     pub fn builder(vault_url: Url) -> AzureKeyVaultClientBuilder {
         AzureKeyVaultClientBuilder::new(vault_url)
     }
 
-    /// Sanitize key to satisfy Azure Key Vault object naming rules:
-    /// 1-127 characters, containing only 0-9, a-z, A-Z, and -.
     pub(crate) fn qualify_key(key: &str) -> String {
         normalize_key(key)
     }
 }
 
-/// Builder for constructing an [`AzureKeyVaultClient`] adapter.
 #[derive(Clone)]
 pub struct AzureKeyVaultClientBuilder {
     vault_url: Url,
@@ -84,7 +73,6 @@ impl std::fmt::Debug for AzureKeyVaultClientBuilder {
 }
 
 impl AzureKeyVaultClientBuilder {
-    /// Create a new [`AzureKeyVaultClientBuilder`] with the vault URL.
     pub fn new(vault_url: Url) -> Self {
         Self {
             vault_url,
@@ -98,7 +86,6 @@ impl AzureKeyVaultClientBuilder {
         }
     }
 
-    /// Set explicit service principal credentials.
     pub fn service_principal(
         mut self,
         tenant_id: Option<&str>,
@@ -111,35 +98,27 @@ impl AzureKeyVaultClientBuilder {
         self
     }
 
-    /// Provide a custom [`TokenCredential`].
     pub fn credential(mut self, credential: Arc<dyn TokenCredential>) -> Self {
         self.custom_credential = Some(credential);
         self
     }
 
-    /// Configure whether to verify the challenge resource matches the vault URL.
     pub fn verify_challenge_resource(mut self, verify: bool) -> Self {
         self.verify_challenge_resource = verify;
         self
     }
 
-    /// Set the in-memory cache TTL for secret values.
-    ///
-    /// Setting `secrets_cache_ttl` to `Duration::ZERO` disables caching completely.
+    /// `Duration::ZERO` disables caching.
     pub fn secrets_cache_ttl(mut self, secrets_cache_ttl: Duration) -> Self {
         self.secrets_cache_ttl = secrets_cache_ttl;
         self
     }
 
-    /// Provide a custom HTTP client for testing or specific transport configurations.
-    ///
-    /// This replaces the default HTTP transport used by the Azure SDK client.
     pub fn http_client(mut self, http_client: Arc<dyn HttpClient>) -> Self {
         self.http_client = Some(http_client);
         self
     }
 
-    /// Build the [`AzureKeyVaultClient`] adapter instance.
     pub fn build(self) -> Result<AzureKeyVaultClient, StorageError> {
         let credential: Arc<dyn TokenCredential> = if let Some(cred) = self.custom_credential {
             cred
@@ -221,7 +200,7 @@ impl Storage for AzureKeyVaultClient {
         match set_res {
             Ok(_) => {}
             Err(err) if err.http_status() == Some(StatusCode::Conflict) => {
-                // Secret is in soft-deleted state. Trigger recovery and poll until available.
+                // 409 means the secret is soft-deleted; recover it first.
                 info!("Azure secret '{key}' is in soft-deleted state; initiating recovery");
                 self.client
                     .recover_deleted_secret(&secret_name, None)
@@ -235,7 +214,7 @@ impl Storage for AzureKeyVaultClient {
                         ))
                     })?;
 
-                // Recovery in Azure Key Vault is asynchronous; poll with bounded backoff
+                // Recovery is async, so poll.
                 let mut recovered = false;
                 for attempt in 1..=10 {
                     tokio::time::sleep(Duration::from_millis(attempt * 200)).await;
@@ -337,7 +316,7 @@ impl Storage for AzureKeyVaultClient {
                 if let Some(cache) = &self.cache {
                     cache.invalidate(key).await;
                 }
-                // Try purging the soft-deleted secret if purge is allowed on the vault
+                // Best effort: purge protection may forbid it.
                 if let Err(e) = self.client.purge_deleted_secret(&secret_name, None).await {
                     warn!("Azure purge for deleted secret '{key}' skipped/failed: {e}");
                 }
