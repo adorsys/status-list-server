@@ -94,7 +94,7 @@ by its `list_id`, which acts as the primary key.
 | `status_list` | JSON   | NO   |     | The status list entry                               |
 | `sub`         | TEXT   | NO   |     | String identifier for the Status List Token         |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp of last status update                |
-| `retired`     | BOOLEAN | NO  |     | Excluded from aggregation and active-list quota    |
+| `retired_at`  | BIGINT | YES |     | Unix retirement time; null for active lists        |
 
 #### Indexes
 
@@ -173,7 +173,7 @@ erDiagram
     issuers {
         TEXT issuer PK "Issuer owner"
         VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
-        BIGINT list_count "Status lists published by the issuer"
+        BIGINT list_count "Active status lists owned by the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
@@ -181,6 +181,7 @@ erDiagram
         JSON status_list "The status list entry"
         TEXT sub "String identifier for the Status List Token"
         BIGINT updated_at "UNIX timestamp of last update"
+        BIGINT retired_at "UNIX retirement timestamp, null while active"
     }
     status_list_history {
         TEXT id PK "Unique snapshot ID"

@@ -268,11 +268,6 @@ pub trait StatusListRepo: Send + Sync + 'static {
     /// Retrieve a status list record by list identifier.
     async fn find(&self, list_id: &str) -> Result<Option<StatusListRecord>, StatusListError>;
 
-    /// Used when a no-op update would otherwise bypass storage's write guard.
-    async fn ensure_writable(&self, _list_id: &str) -> Result<(), StatusListError> {
-        Ok(())
-    }
-
     /// Atomic: the list and its first snapshot land together or not at all.
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError>;
 

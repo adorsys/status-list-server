@@ -436,7 +436,7 @@ paths:
       summary: List every issuer's status list URIs, one page at a time
       deprecated: true
       description: |
-        Returns the `sub` URIs of every hosted status list, across issuers,
+        Returns the `sub` URIs of every active hosted status list, across issuers,
         one bounded page per request. Kept for status list tokens issued
         before `aggregation_uri` named one issuer; use
         `GET /api/v1/aggregation/{aggregation_id}` instead. A client that
@@ -1788,7 +1788,8 @@ components:
       description: |
         Response body of `GET /api/v1/aggregation/{aggregation_id}` and
         `GET /api/v1/aggregation`: one page of the `sub` URIs of one issuer's
-        status lists, or of every issuer's. The `status_lists` member is the
+        active status lists, or of every issuer's active lists. Retired lists
+        remain directly readable but are omitted here. The `status_lists` member is the
         draft-21 §9.3 Status List Aggregation structure; `next_cursor` is an
         extension for paging.
       required:
@@ -2458,7 +2459,7 @@ components:
         the list is explicitly grown first.
 
         `status_list_retired` — an operator retired this list. Direct reads
-        still work, but writes are refused until an operator un-retires it.
+        still work, but writes are refused until an operator unretires it.
 
         > Note for integrators: 409 is not a status most generic HTTP clients,
         > SDKs or service meshes retry automatically. `write_contention` is

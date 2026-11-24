@@ -112,11 +112,12 @@ pub(super) async fn begin_read_committed(
 async fn is_retired(txn: &DatabaseTransaction, list_id: &str) -> Result<bool, DbErr> {
     Ok(status_lists::Entity::find_by_id(list_id)
         .select_only()
-        .column(status_lists::Column::Retired)
-        .into_tuple::<bool>()
+        .column(status_lists::Column::RetiredAt)
+        .into_tuple::<Option<i64>>()
         .one(txn)
         .await?
-        .unwrap_or(false))
+        .flatten()
+        .is_some())
 }
 
 /// Run before the status_lists INSERT, whose FK lock deadlocks racing publishes on InnoDB (1213).
@@ -247,7 +248,7 @@ impl SeaOrmStore<StatusListRecord> {
                 sub: Set(entity.sub),
                 updated_at: Set(entity.updated_at),
                 version: Set(entity.version),
-                retired: Set(false),
+                retired_at: Set(None),
             };
             if let Err(insert_err) = status_lists::Entity::insert(active)
                 .exec_without_returning(&txn)
@@ -337,7 +338,7 @@ impl SeaOrmStore<StatusListRecord> {
                     sub: Set(entity.sub),
                     updated_at: Set(entity.updated_at),
                     version: Set(entity.version),
-                    retired: Set(false),
+                    retired_at: Set(None),
                 };
                 if let Err(insert_err) = status_lists::Entity::insert(active)
                     .exec_without_returning(&txn)
@@ -404,22 +405,6 @@ impl SeaOrmStore<StatusListRecord> {
         .await
     }
 
-    pub async fn ensure_writable(&self, list_id: &str) -> Result<(), RepositoryError> {
-        let db = self.db.current();
-        let row = status_lists::Entity::find_by_id(list_id)
-            .select_only()
-            .column(status_lists::Column::Retired)
-            .into_tuple::<bool>()
-            .one(&*db)
-            .await
-            .map_err(find_err)?;
-        match row {
-            Some(true) => Err(RepositoryError::Retired),
-            Some(false) => Ok(()),
-            None => Err(RepositoryError::NotFound),
-        }
-    }
-
     #[tracing::instrument(skip(self), fields(issuer))]
     pub async fn find_all_by(
         &self,
@@ -472,7 +457,7 @@ impl SeaOrmStore<StatusListRecord> {
                 .col_expr(status_lists::Column::Version, Expr::value(entity.version))
                 .filter(status_lists::Column::ListId.eq(list_id))
                 .filter(status_lists::Column::Version.eq(expected_version))
-                .filter(status_lists::Column::Retired.eq(false))
+                .filter(status_lists::Column::RetiredAt.is_null())
                 .exec(&txn)
                 .await;
 
@@ -543,7 +528,7 @@ impl SeaOrmStore<StatusListRecord> {
                 .col_expr(status_lists::Column::Version, Expr::value(entity.version))
                 .filter(status_lists::Column::ListId.eq(list_id))
                 .filter(status_lists::Column::Version.eq(expected_version))
-                .filter(status_lists::Column::Retired.eq(false))
+                .filter(status_lists::Column::RetiredAt.is_null())
                 .exec(&txn)
                 .await;
 
@@ -654,7 +639,7 @@ impl SeaOrmStore<StatusListRecord> {
                 .select_only()
                 .column(status_lists::Column::ListId)
                 .column(status_lists::Column::Sub)
-                .filter(status_lists::Column::Retired.eq(false));
+                .filter(status_lists::Column::RetiredAt.is_null());
             if let Some(issuer) = issuer {
                 query = query.filter(status_lists::Column::Issuer.eq(issuer));
             }
@@ -676,7 +661,7 @@ impl SeaOrmStore<StatusListRecord> {
         time_query("count", "status_list", async {
             status_lists::Entity::find()
                 .filter(status_lists::Column::Issuer.eq(issuer))
-                .filter(status_lists::Column::Retired.eq(false))
+                .filter(status_lists::Column::RetiredAt.is_null())
                 .count(self.db.current().as_ref())
                 .await
                 .map_err(find_err)
@@ -697,7 +682,7 @@ impl SeaOrmStore<StatusListRecord> {
                 .column(status_lists::Column::Issuer)
                 .column_as(status_lists::Column::ListId.count(), "list_count")
                 .filter(status_lists::Column::Issuer.is_in(issuer_ids.iter().cloned()))
-                .filter(status_lists::Column::Retired.eq(false))
+                .filter(status_lists::Column::RetiredAt.is_null())
                 .group_by(status_lists::Column::Issuer)
                 .into_tuple::<(String, i64)>()
                 .all(self.db.current().as_ref())
@@ -722,7 +707,6 @@ impl SeaOrmStore<StatusListRecord> {
                 .select_only()
                 .column(status_lists::Column::Issuer)
                 .distinct()
-                .filter(status_lists::Column::Retired.eq(false))
                 .order_by_asc(status_lists::Column::Issuer)
                 .into_tuple::<String>()
                 .all(&*db)
@@ -824,7 +808,7 @@ impl SeaOrmStore<StatusListRecord> {
                 })?;
                 return Err(RepositoryError::IssuerMismatch);
             }
-            if parent.retired {
+            if parent.retired_at.is_some() {
                 txn.rollback().await.map_err(map_update_err)?;
                 return Err(RepositoryError::Retired);
             }

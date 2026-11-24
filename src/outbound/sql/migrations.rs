@@ -55,19 +55,14 @@ pub(crate) mod status_list_retirement {
     #[allow(elided_lifetimes_in_paths)]
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-            if manager.has_column("status_lists", "retired").await? {
+            if manager.has_column("status_lists", "retired_at").await? {
                 return Ok(());
             }
             manager
                 .alter_table(
                     Table::alter()
                         .table(StatusLists::Table)
-                        .add_column(
-                            ColumnDef::new(StatusLists::Retired)
-                                .boolean()
-                                .not_null()
-                                .default(false),
-                        )
+                        .add_column(ColumnDef::new(StatusLists::RetiredAt).big_integer().null())
                         .to_owned(),
                 )
                 .await
@@ -81,7 +76,7 @@ pub(crate) mod status_list_retirement {
     #[derive(Iden)]
     enum StatusLists {
         Table,
-        Retired,
+        RetiredAt,
     }
 }
 
@@ -267,7 +262,7 @@ async fn name_unknown_migrations<M: MigratorTrait>(
 
 /// Quoted verbatim in docs/troubleshooting.md as the operator repair; keep them in sync.
 pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
-     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired = FALSE)";
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired_at IS NULL)";
 const LEGACY_RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer)";
 const BACKFILL_CREDENTIAL_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \

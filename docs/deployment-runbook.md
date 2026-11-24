@@ -200,6 +200,8 @@ under its current tier. Each pod reads them from the database at startup and
 every 60 seconds, so every pod reports the cluster-wide value, at most a minute
 old: aggregate `issuer_lists` across pods with `max`, not `sum`.
 `issuer_lists` is the per-issuer counter the list quota is enforced against;
+it counts active lists only, including after retirement, so existing metric consumers keep the
+same series with a reduced value when lists are retired;
 while the quota awaits `list-quota enable`, pods of the previous release leave
 it short.
 `issuer_rate_limited_total` is per pod, so `sum` it. Rate limits are held per
@@ -1021,7 +1023,7 @@ here; a test fails until it does.
 | `m20261024_000001_issuer_keys_carry_over` | Yes: an older release resolves keys from the registry and ignores `issuer_keys` and the `source` marker | None; keep the rows (re-running is not supported) | Holds legacy `credentials` kids and key material as `reserved` rows. Nothing authenticates until an operator adopts the key into the registry. Credentials created after the upgrade are not carried |
 | `m20261105_000001_static_key_revocations` | Schema-compatible: an older release ignores the table, but rollback does not preserve revocation enforcement if an old registry file is restored | Keep the table and revocations; use a registry compatible with the older release that excludes revoked keys from active `keys`, then verify rejection | Current releases retain static key revocations across restarts and registry file restores |
 | `m20261109_000001_registry_coordination` | Schema-compatible: an older release ignores the lock and claims tables, but does not enforce cross-pod hosted/static serialization | Keep both tables; do not rely on cross-pod coordination until all pods run the new release | Current releases reserve admitted static identities and serialize registry reloads with hosted key writes |
-| `m20261123_000001_status_list_retirement` | **No, if any list is retired:** older releases ignore the flag, advertise retired lists and allow writes to them | Roll forward; keep the column and active-list counts | Existing lists start active. Retired rows and their history remain readable; `recount` counts only active rows |
+| `m20261123_000001_status_list_retirement` | **No, if any list is retired:** older releases ignore the timestamp, advertise retired lists and allow writes to them | Roll forward; keep the column and active-list counts | Existing lists start with `retired_at` null. Retired rows and their history remain readable; `recount` counts only active rows |
 
 ### Preparing existing management credentials
 

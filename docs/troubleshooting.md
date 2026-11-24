@@ -808,12 +808,17 @@ example `kubectl exec deploy/<release> -- /app/status-list-server list-quota sta
 
 | Command                                 | Does                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------- |
-| `status-list-server list-quota status`  | Prints whether the quota is enforced                                            |
+| `status-list-server list-quota status`  | Prints enforcement and each issuer's active and retired counts                   |
 | `status-list-server list-quota recount` | Recomputes every `list_count` from active lists; refused while enforced        |
 | `status-list-server list-quota enable`  | Enforces the quota; refused while any issuer is over the cap or miscounted      |
 | `status-list-server list-quota disable` | Stops enforcing the quota                                                       |
 | `status-list-server list-quota retire <list_id>...` | Retires lists and releases quota slots in one transaction |
 | `status-list-server list-quota unretire <list_id>...` | Restores lists if the issuer stays within the cap |
+
+For a large retirement batch, pass `--ids-file <path>` or `-` to read one list ID per line
+from a file or standard input. Duplicate IDs in one batch are processed once. The command
+prints the resulting active count for each touched issuer and logs each changed list with its
+issuer and count.
 
 The issuer must confirm that no live Referenced Token points to a list before the operator
 retires it. The server cannot verify token expiry. Retirement keeps the list URI and retained
@@ -867,14 +872,18 @@ refusing to enable the list quota
 ```
 
 - **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` (up to `1000`) and roll the
-  Deployment, or retire lists that no live tokens use,
-  then run `enable` again. An issuer with more than 1000 lists can only be brought under the cap by
-  deleting lists; until then the quota stays off and pods need `APP_LIMITS__LIST_QUOTA_TRANSITION`.
+  Deployment, or retire lists that no live tokens use. Once all older pods are gone, run
+  `list-quota recount`, then `list-quota enable`. Remove
+  `APP_LIMITS__LIST_QUOTA_TRANSITION` and restart the pods. An issuer with more than 1000 active
+  lists must retire enough lists to fit one aggregation page before enforcement can resume.
 - **`list_count` does not match:** a pod of an older release published after the recount, or the
   recount was skipped. Make sure none is left, then run `recount` and `enable` again.
 
 `enable` and `recount` wait for publishes that are in flight and hold off new ones until they
 finish, so a publish is either counted by the check or refused by the enforced quota.
+
+Older pods ignore retirement and can still write to retired lists or advertise them in aggregation.
+Stop them before retiring lists or enabling enforcement.
 
 **Rolling back** to a release that predates the quota: run `list-quota disable` first, then follow
 [Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations). Its pods
@@ -1031,7 +1040,7 @@ server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have 
 
 ### Recomputing issuer list counts
 
-Recomputes every issuer's counter from the lists that exist. Needed before
+Recomputes every issuer's counter from active lists. Needed before
 [enabling the quota](#upgrading-to-the-list-quota) and after any manual `DELETE` from `status_lists`.
 Because a recount racing enforced publishes could miss one, it only runs with the quota off:
 
@@ -1048,7 +1057,7 @@ refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 backfill; both are portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
-UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired = FALSE);
+UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired_at IS NULL);
 ```
 
 Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the

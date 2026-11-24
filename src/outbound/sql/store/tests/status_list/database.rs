@@ -237,7 +237,7 @@ pub(super) async fn assert_duplicate_list_id_is_conflict(
         sub: format!("sub-{list_id}"),
         updated_at,
         version: 1,
-        retired: false,
+        retired_at: None,
     };
     let snapshot = |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
         snapshot_id: snapshot_id.to_string(),

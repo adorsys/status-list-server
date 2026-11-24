@@ -17,6 +17,8 @@ use sea_orm::{ConnectOptions, DbErr};
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use std::collections::BTreeMap;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU64,
@@ -315,13 +317,44 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
 pub const LIST_QUOTA_USAGE: &str =
     "usage: status-list-server list-quota <status|recount|enable|disable|retire|unretire> [list_id...]
 
-  status   show whether limits.max_lists_per_issuer is enforced
+  status   show enforcement and each issuer's active and retired counts
   recount  recompute every issuer's active-list count (refused while enforced)
   enable   enforce the quota; refused, naming the issuers, while any issuer
            has more lists than the cap or a stale count
   disable  stop enforcing the quota
   retire   stop writes and aggregation for each list; free its quota slot
-  unretire restore writes and aggregation for each list if quota allows";
+  unretire restore writes and aggregation for each list if quota allows
+
+For retire or unretire, pass IDs directly, `-` for newline-delimited stdin,
+or `--ids-file <path>` for newline-delimited IDs from a file.";
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListQuotaAction {
+    Status,
+    Recount,
+    Enable,
+    Disable,
+    Retire,
+    Unretire,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+impl TryFrom<&str> for ListQuotaAction {
+    type Error = color_eyre::eyre::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "status" => Ok(Self::Status),
+            "recount" => Ok(Self::Recount),
+            "enable" => Ok(Self::Enable),
+            "disable" => Ok(Self::Disable),
+            "retire" => Ok(Self::Retire),
+            "unretire" => Ok(Self::Unretire),
+            _ => Err(color_eyre::eyre::eyre!(LIST_QUOTA_USAGE)),
+        }
+    }
+}
 
 /// Does not run migrations.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
@@ -330,10 +363,11 @@ pub async fn run_list_quota_command(
     action: &str,
     list_ids: &[String],
 ) -> EyeResult<String> {
-    if !matches!(
-        action,
-        "status" | "recount" | "enable" | "disable" | "retire" | "unretire"
-    ) || (matches!(action, "retire" | "unretire") != !list_ids.is_empty())
+    let parsed_action = ListQuotaAction::try_from(action)?;
+    if matches!(
+        parsed_action,
+        ListQuotaAction::Retire | ListQuotaAction::Unretire
+    ) != !list_ids.is_empty()
     {
         return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
     }
@@ -345,41 +379,58 @@ pub async fn run_list_quota_command(
     }
     let db = connect_database_pool(config).await?;
     let max = config.limits.max_lists_per_issuer;
-    match action {
-        "status" => {
+    match parsed_action {
+        ListQuotaAction::Status => {
             let enforced = list_quota::is_enforced(&db).await?;
-            Ok(if enforced {
+            let mut output = if enforced {
                 format!("list quota: enforced (max {max} lists per issuer)")
             } else {
                 "list quota: not enforced".to_string()
-            })
+            };
+            for issuer in list_quota::issuer_status(&db).await? {
+                output.push_str(&format!(
+                    "\n  {}: {} active, {} retired",
+                    issuer.issuer, issuer.active, issuer.retired
+                ));
+            }
+            Ok(output)
         }
-        "recount" => {
+        ListQuotaAction::Recount => {
             list_quota::recount(&db).await?;
             Ok("recomputed every issuer's active-list count".to_string())
         }
-        "enable" => {
+        ListQuotaAction::Enable => {
             list_quota::enable(&db, max).await?;
             Ok(format!("list quota enforced: max {max} lists per issuer"))
         }
-        "disable" => {
+        ListQuotaAction::Disable => {
             list_quota::disable(&db).await?;
             Ok("list quota no longer enforced".to_string())
         }
-        "retire" | "unretire" => {
-            let retired = action == "retire";
+        ListQuotaAction::Retire | ListQuotaAction::Unretire => {
+            let retired = parsed_action == ListQuotaAction::Retire;
             let tiers = config.tier_limits()?;
-            list_quota::set_retired(
-                &db,
-                list_ids,
-                retired,
-                tiers.standard.max_lists,
-                tiers.sandbox.max_lists,
-            )
-            .await?;
-            Ok(format!("{action}d {} status list(s)", list_ids.len()))
+            let registry_tiers = if let Some(path) = &config.management_auth.issuers_file {
+                crate::server::auth::issuer_registry::IssuerRegistry::from_file(path)?
+                    .issuers()
+                    .iter()
+                    .map(|issuer| (issuer.id.clone(), issuer.tier))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            let changes =
+                list_quota::set_retired(&db, list_ids, retired, &tiers, &registry_tiers).await?;
+            let mut output = format!("{action}d {} status list(s)", changes.len());
+            let mut touched = BTreeMap::new();
+            for change in changes {
+                touched.insert(change.issuer, change.active_count);
+            }
+            for (issuer, active_count) in touched {
+                output.push_str(&format!("\n  {issuer}: {active_count} active"));
+            }
+            Ok(output)
         }
-        _ => unreachable!(),
     }
 }
 

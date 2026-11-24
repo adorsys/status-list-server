@@ -218,13 +218,6 @@ impl StatusListRepo for SqlStatusListRepo {
             .map_err(Into::into)
     }
 
-    async fn ensure_writable(&self, list_id: &str) -> Result<(), StatusListError> {
-        self.store
-            .ensure_writable(list_id)
-            .await
-            .map_err(Into::into)
-    }
-
     async fn create(&self, command: CreateStatusList) -> Result<(), StatusListError> {
         self.store
             .create_status_list(
@@ -355,6 +348,7 @@ impl From<models::StatusListRecord> for StatusListRecord {
             },
             updated_at: record.updated_at,
             version: u64::try_from(record.version).unwrap_or(0),
+            retired_at: record.retired_at,
         }
     }
 }
@@ -373,7 +367,7 @@ impl From<StatusListRecord> for models::StatusListRecord {
             },
             updated_at: record.updated_at,
             version: i64::try_from(record.version).unwrap_or(i64::MAX),
-            retired: false,
+            retired_at: record.retired_at,
         }
     }
 }

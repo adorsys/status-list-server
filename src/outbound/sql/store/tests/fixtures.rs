@@ -32,7 +32,7 @@ pub(super) fn record(
         sub: sub.to_string(),
         updated_at,
         version: 1,
-        retired: false,
+        retired_at: None,
     }
 }
 
