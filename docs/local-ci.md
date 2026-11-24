@@ -132,6 +132,8 @@ change host limits, remove unrelated containers, or skip failing tests.
 GitHub-only behavior is intentionally excluded: checkout token permissions,
 workflow scheduling/concurrency, Actions caches and annotations, SARIF/code
 scanning uploads, artifact uploads, and `ci-success` aggregation of job statuses.
+The Envoy Gateway kind job in Helm Checks is not mirrored either: run
+`scripts/check-envoy-gateway-kind.sh` by hand, with kind and Docker installed.
 Local gates execute sequentially, collect failures, and return a non-zero final
 status if any gate fails or is skipped. Individual commands still stop their
 gate on failure. Coverage HTML and KubeLinter SARIF are still produced locally. The
