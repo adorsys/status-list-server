@@ -40,7 +40,7 @@ const AGGREGATION_ID_RETRIES: u32 = 3;
 /// The `source` value marking a row as a hosted-profile issuer. Rows
 /// written by the registry or credential paths carry the migration default and
 /// must never be treated as hosted.
-const PORTAL_SOURCE: &str = "portal";
+pub(super) const PORTAL_SOURCE: &str = "portal";
 
 #[derive(Clone)]
 pub(crate) enum HostedIssuerRow {}
@@ -300,7 +300,7 @@ async fn insert_issuer_row(
         aggregation_id: Set(Some(issuer.aggregation_id.to_string())),
         list_count: Set(0),
         display_name: Set(issuer.display_name.clone()),
-        source: Set("portal".to_string()),
+        source: Set(PORTAL_SOURCE.to_string()),
         tier: Set(issuer.tier.clone()),
         state: Set(issuer.state.as_str().to_string()),
         owner: Set(issuer.owner.clone()),

@@ -817,8 +817,7 @@ example `kubectl exec deploy/<release> -- /app/status-list-server list-quota sta
 
 For a large retirement batch, pass `--ids-file <path>` or `-` to read one list ID per line
 from a file or standard input. Duplicate IDs in one batch are processed once. The command
-prints the resulting active count for each touched issuer and logs each changed list with its
-issuer and count.
+prints each changed list ID, its issuer, and that issuer's resulting active count.
 
 The issuer must confirm that no live Referenced Token points to a list before the operator
 retires it. The server cannot verify token expiry. Retirement keeps the list URI and retained
@@ -847,9 +846,10 @@ quota starts off on such a database, and a pod does not serve without it unless 
 1. Deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`. Pods then start with the quota off and log
    `limits.max_lists_per_issuer is NOT enforced` at `ERROR` on every start; `list_quota_enforced`
    reads `0`. Until step 2, tokens carry no `aggregation_uri`.
-2. Once the rollout has finished and **no pod of an older release is left**, run
-   `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
-3. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
+2. Once the rollout has finished and **no pod of an older release is left**, retire lists whose
+   issuers have confirmed that no live token still points to them, if needed to get below the cap.
+3. Run `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
+4. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
    database, pods warn `limits.list_quota_transition is set, but the list quota is already enforced`.
 
 No pod of an older release can start once a new pod has migrated the database: it finds a migration
@@ -872,10 +872,10 @@ refusing to enable the list quota
 ```
 
 - **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` (up to `1000`) and roll the
-  Deployment, or retire lists that no live tokens use. Once all older pods are gone, run
-  `list-quota recount`, then `list-quota enable`. Remove
-  `APP_LIMITS__LIST_QUOTA_TRANSITION` and restart the pods. An issuer with more than 1000 active
-  lists must retire enough lists to fit one aggregation page before enforcement can resume.
+  Deployment, or follow steps 2–4 above: finish the rollout and stop every older pod, retire
+  lists that no live token uses, recount, enable, remove the transition setting, and restart.
+  An issuer with more than 1000 active lists must retire enough lists to fit one aggregation
+  page before enforcement can resume.
 - **`list_count` does not match:** a pod of an older release published after the recount, or the
   recount was skipped. Make sure none is left, then run `recount` and `enable` again.
 

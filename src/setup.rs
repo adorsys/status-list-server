@@ -17,8 +17,6 @@ use sea_orm::{ConnectOptions, DbErr};
     feature = "redis"
 ))]
 use secrecy::ExposeSecret;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-use std::collections::BTreeMap;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU64,
@@ -422,12 +420,11 @@ pub async fn run_list_quota_command(
             let changes =
                 list_quota::set_retired(&db, list_ids, retired, &tiers, &registry_tiers).await?;
             let mut output = format!("{action}d {} status list(s)", changes.len());
-            let mut touched = BTreeMap::new();
             for change in changes {
-                touched.insert(change.issuer, change.active_count);
-            }
-            for (issuer, active_count) in touched {
-                output.push_str(&format!("\n  {issuer}: {active_count} active"));
+                output.push_str(&format!(
+                    "\n  {}: {} ({} active)",
+                    change.issuer, change.list_id, change.active_count
+                ));
             }
             Ok(output)
         }
@@ -2322,6 +2319,36 @@ mod general_tests {
                 "admins": []
             }))
             .expect("serialize registry")
+        }
+
+        #[tokio::test]
+        async fn list_quota_retire_reports_each_changed_list() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let config = startable.config(&[
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", &database),
+            ]);
+            let state = build_state(&config).await.expect("first start");
+            register_issuer(&state.service, "issuer").await;
+            let list_ids = [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ];
+            for list_id in &list_ids {
+                publish_list(&state.service, "issuer", list_id).await;
+            }
+
+            let output = run_list_quota_command(&config, "retire", &list_ids)
+                .await
+                .expect("retire lists");
+            for list_id in &list_ids {
+                assert!(output.contains(list_id));
+            }
+            assert!(output.contains("issuer"));
+            assert!(output.contains("0 active"));
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[tokio::test]

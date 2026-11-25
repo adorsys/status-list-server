@@ -9,6 +9,7 @@ use sea_orm::{
     sea_query::{Expr, ExprTrait, LockType, Query},
 };
 
+use super::hosted::PORTAL_SOURCE;
 use super::migrations::RECOUNT_LIST_COUNT_SQL;
 use super::models::{issuers, status_lists};
 use super::store::begin_read_committed;
@@ -273,15 +274,6 @@ pub async fn set_retired(
         }
     }
     txn.commit().await?;
-    for change in &changes {
-        tracing::info!(
-            list_id = %change.list_id,
-            issuer = %change.issuer,
-            active_count = change.active_count,
-            retired,
-            "status list retirement changed"
-        );
-    }
     Ok(changes)
 }
 
@@ -313,7 +305,7 @@ async fn set_retired_one(
         });
     }
 
-    let tier = if owner.source == "portal" {
+    let tier = if owner.source == PORTAL_SOURCE {
         IssuerTier::from_name_or_strictest(&owner.tier)
     } else {
         registry_tiers

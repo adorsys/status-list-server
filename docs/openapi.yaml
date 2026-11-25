@@ -446,12 +446,11 @@ paths:
         URIs (default and maximum 1000). While `next_cursor` is non-null, pass
         it back as `cursor` to fetch the next page; the same next page is also
         advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
-        returns exactly once every list that existed when the walk started
-        and still exists when its page is read; lists are never deleted
-        through the API, but an operator may delete them directly in the
-        database. A list published during a walk may be missed, and not only
-        because it was published late: `list_id` is chosen by the publisher
-        and can be any UUID, so a new list can sort before the current cursor.
+        returns each URI at most once. A list retired or deleted before its page
+        is read can be omitted; lists are never deleted through the API, but an
+        operator may delete them directly in the database. A list published or
+        unretired during a walk may also be missed: `list_id` is chosen by the
+        publisher and can be any UUID, so it can sort before the current cursor.
         The same applies to the paged exceptions of `getIssuerAggregation`.
 
         There is no total count: counting every list is itself an unbounded
