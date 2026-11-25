@@ -5,10 +5,72 @@ statuslist:
   replicaCount: 1
   strategy:
     type: Recreate
+  ingress:
+    # The hosted profile requires the hostname to be explicit.
+    externalDnsHostname: statuslist.eudi-adorsys.com
   env:
+    # Also trusts issuers the developer portal registers through the admin API.
+    APP_SERVER__PROFILE: "hosted"
     APP_CACHE__BACKEND: memory
     # List-quota transition mode for the first rollout; drop after recount and enable.
     APP_LIMITS__LIST_QUOTA_TRANSITION: "true"
+    # Each portal pod is one admin client, and every issuer page view or registration
+    # makes admin calls. The period refills one request per second, so the burst
+    # absorbs the peaks above it.
+    APP_RATE_LIMIT__ADMIN_BURST_SIZE: "300"
+    # The shared nginx controller is this release's edge. With its
+    # use-forwarded-headers and compute-full-forwarded-for defaults (off), it
+    # replaces X-Forwarded-For with the address the NLB preserves, so the
+    # rightmost untrusted entry is the client.
+    APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
+    # The private node subnets the VPC CNI assigns pod addresses from, the
+    # controller pods' included. Trusting them is only safe while the policy
+    # below admits the controller alone to the public and management ports.
+    APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.3.0/24,10.0.4.0/24,10.0.5.0/24"
+    # Restores the defaults that values-production.yaml lifts for connect_info.
+    APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"
+    APP_RATE_LIMIT__PERMISSIVE_PERIOD_SECS: "0.005"
+  networkPolicy:
+    # Database egress is the chart default for the bundled PostgreSQL.
+    enabled: true
+    ingress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ingress-nginx
+            app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: ingress-nginx
+    managementIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: ingress-nginx
+            app.kubernetes.io/component: controller
+            app.kubernetes.io/instance: ingress-nginx
+    adminIngress:
+      # The portal server and its reminders CronJob call the admin API; its
+      # migration job does not.
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: status-list-portal
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: status-list-portal
+          matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values: [server, reminders]
+    prometheusIngress:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
   secretMounts:
     - name: database-credentials
       secretName: statuslist-secret

@@ -900,6 +900,8 @@ jobs:
         -f deploy/helm/chart/values-fscert.yaml
         -f deploy/helm/chart/values-datev-staging.yaml
         --set statuslist.issuerRegistry.volume.configMap.name=status-list-server-issuers
+      # The hostname values-datev-staging.yaml publishes; the published-surface check probes it.
+      PUBLIC_HOST: statuslist.eudi-adorsys.com
     steps:
       - name: Checkout source code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1163,6 +1165,24 @@ jobs:
           await_synced "$PRIMARY_ES" "ExternalSecret $PRIMARY_ES ($NAMESPACE)"
 
           rollback_done=1
+
+      - name: Check the published surface
+        # Through the public edge: admin routes must not exist there, and management
+        # writes must demand a token. A failure leaves the release in place. Retries
+        # cover edge propagation after Recreate; a persistent exposure still fails.
+        run: |
+          passed=0
+          for attempt in 1 2 3; do
+            if python3 scripts/check-hosted-sandbox.py "$PUBLIC_HOST"; then
+              passed=1
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep 20; fi
+          done
+          if [ "$passed" -ne 1 ]; then
+            echo "::error::$PUBLIC_HOST failed the published-surface check above: an unreachable host, an exposed admin or readiness route, or a management write that does not demand a token. See docs/hosted-sandbox.md, \"External acceptance check\"."
+            exit 1
+          fi
 
   record-release-candidate:
     name: Record Validated Release Candidate

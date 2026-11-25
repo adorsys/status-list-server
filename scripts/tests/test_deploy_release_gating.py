@@ -362,6 +362,17 @@ class DeployReleaseGatingTest(unittest.TestCase):
             with self.subTest(promote_tags=result):
                 self.assertFalse(self.runs("deploy", {**_FINAL_GREEN, **_outcome(promote_tags=result)}))
 
+    def test_deploy_checks_the_published_surface_after_the_release_settles(self) -> None:
+        names = [step["name"] for step in self.jobs["deploy"]["steps"]]
+        check = names.index("Check the published surface")
+        self.assertLess(names.index("Verify application rollout"), check)
+        self.assertLess(names.index("Verify database secret"), check)
+        step = self.jobs["deploy"]["steps"][check]
+        self.assertNotIn("if", step)
+        self.assertEqual(self.jobs["deploy"]["env"]["PUBLIC_HOST"], "statuslist.eudi-adorsys.com")
+        self.assertIn('python3 scripts/check-hosted-sandbox.py "$PUBLIC_HOST"', step["run"])
+        self.assertIn("exit 1", step["run"])
+
     def test_source_values_come_only_from_image_source(self) -> None:
         for name in ("scan-image", "promote-tags", "deploy"):
             env = self.jobs[name].get("env", {})

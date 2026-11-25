@@ -19,6 +19,15 @@ egressInternal shares the database port; 443 and 53 are open to 0.0.0.0/0. */}}
 {{- if and (eq $backend "mysql") (empty $databaseEgress) }}
 {{- fail "statuslist.networkPolicy.databaseEgress must be set when NetworkPolicy is enabled with APP_DATABASE__BACKEND=mysql because this chart does not deploy the database" }}
 {{- end }}
+{{- $edge := or .Values.statuslist.ingress.enabled .Values.statuslist.gateway.enabled -}}
+{{- if and (eq ($env.APP_SERVER__PROFILE | default "private") "hosted") $edge }}
+{{- if empty .Values.statuslist.networkPolicy.ingress }}
+{{- fail "hosted NetworkPolicy requires statuslist.networkPolicy.ingress for the edge pods: an empty list admits every pod in the cluster to the public port" }}
+{{- end }}
+{{- if and .Values.statuslist.ingress.management.enabled (empty .Values.statuslist.networkPolicy.managementIngress) }}
+{{- fail "hosted NetworkPolicy requires statuslist.networkPolicy.managementIngress for the edge pods while management is routed: an empty list denies every management request" }}
+{{- end }}
+{{- end }}
 {{- if and (eq $cacheBackend "redis") (empty $cacheEgress) }}
 {{- fail "statuslist.networkPolicy.cacheEgress must be set when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis because this chart does not deploy Redis" }}
 {{- end }}

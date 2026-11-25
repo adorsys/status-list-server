@@ -33,6 +33,24 @@ in the list. Do not interpret the URL or possession of a token as permission to
 write or to administer an issuer. Management JWTs have their own required type,
 issuer ownership, audience, lifetime, and registered public-key checks.
 
+## Hosted profile on an existing release
+
+An existing release can switch to the hosted profile instead of a dedicated
+sandbox release. It then keeps its hostname, signing key and certificate chain,
+issuer registry, management audience, namespace, and database, and shares all
+of them with the issuers the portal registers. Anyone the portal admits can
+publish lists under that hostname, signed by that identity, so the release
+becomes the hosted trust domain as a whole: its registry issuers' lists are no
+longer distinguishable from portal issuers' lists by signer or hostname.
+
+Switch only a release whose signing identity no production relying party
+trusts, and tell its relying parties before the switch. A release that serves
+production status assertions must stay on the private profile; a hosted
+deployment beside it needs the dedicated boundaries above. Registry issuers keep
+their identifiers and keys, and the server resolves registry keys before portal
+keys, so a portal registration cannot take over a registry issuer's identity or
+key material.
+
 ## Portal ownership
 
 In the hosted profile, an admin principal with `issuers:write` can create or
