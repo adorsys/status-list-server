@@ -111,7 +111,7 @@ function siblingUrl(baseUrl, port) {
   return url.toString().replace(/\/$/, '');
 }
 
-const now = Math.floor(Date.now() / 1000);
+const now = Math.floor(Date.now() / 1000) - 5;
 const issuerId = `newman-issuer-${Date.now()}`;
 const listId = crypto.randomUUID();
 
@@ -201,6 +201,7 @@ collection_artifact="$tmp_dir/status-list-server.postman_collection.json"
 environment_artifact="$tmp_dir/status-list-server.postman_environment.json"
 collection_mount="/etc/newman/status-list-server.postman_collection.json"
 environment_mount="/etc/newman/status-list-server.postman_environment.json"
+newman_report="$tmp_dir/newman-report.json"
 
 _sibling_url() {
   local url="$1" port="$2"
@@ -238,7 +239,7 @@ until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $t
     echo "Timed out waiting for generated issuer key to authenticate" >&2
     exit 14
   fi
-  sleep 1
+  sleep 20
 done
 
 admin_token="$(node -e 'const values=require(process.argv[1]).values; process.stdout.write(values.find(v=>v.key==="adminToken").value)' "$environment_artifact")"
@@ -256,18 +257,30 @@ until [[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $a
   sleep 1
 done
 
-if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
-  "$NEWMAN_COMMAND" run "$collection_artifact" \
-    --environment "$environment_artifact" \
-    --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
-    --color off
-else
-  docker run --rm \
-    --add-host=host.docker.internal:host-gateway \
-    --mount "type=bind,source=${tmp_dir},target=/etc/newman,readonly" \
-    "$NEWMAN_DOCKER_IMAGE" \
-    run "$collection_mount" \
-    --environment "$environment_mount" \
-    --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
-    --color off
-fi
+run_newman() {
+  local report_path="$1"
+  shift
+  if [[ "$SELECTED_NEWMAN_RUNNER" == "local" ]]; then
+    "$NEWMAN_COMMAND" run "$collection_artifact" "$@" \
+      --environment "$environment_artifact" \
+      --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
+      --reporters cli,json \
+      --reporter-json-export "$report_path" \
+      --color off
+  else
+    local report_name
+    report_name="${report_path##*/}"
+    docker run --rm \
+      --add-host=host.docker.internal:host-gateway \
+      --mount "type=bind,source=${tmp_dir},target=/etc/newman" \
+      "$NEWMAN_DOCKER_IMAGE" \
+      run "$collection_mount" "$@" \
+      --environment "$environment_mount" \
+      --timeout-request "$NEWMAN_TIMEOUT_REQUEST" \
+      --reporters cli,json \
+      --reporter-json-export "/etc/newman/$report_name" \
+      --color off
+  fi
+}
+
+run_newman "$newman_report"

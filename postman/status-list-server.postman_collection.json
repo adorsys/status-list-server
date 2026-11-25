@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4f7995-b6d6-45db-a5b9-6aca732a79b6",
     "name": "Status List Server",
-    "description": "Ready-to-run requests for exploring the status-list-server API. Set `baseUrl`, `list_id`, `issuer_id`, and a signed issuer JWT in `token` before running protected status-list write requests. Send exactly one Authorization header on management writes; duplicate headers return 401 invalid_token.",
+    "description": "Explore the status-list-server API. Set baseUrl, managementUrl, adminUrl, issuer_id and a signed issuer JWT in token. The issuer and its public key must already be provisioned. Run Start new test run, then Verify issuer credentials before protected writes.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "version": {
       "major": 0,
@@ -22,6 +22,20 @@
   },
   "event": [
     {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (pm.request.method === 'PATCH') {",
+          "  const lastModified = pm.collectionVariables.get('pre_update_last_modified') || pm.environment.get('pre_update_last_modified');",
+          "  const updateAfter = Date.parse(lastModified) + 1100;",
+          "  const delay = updateAfter - Date.now();",
+          "  if (Number.isFinite(updateAfter) && delay > 0) setTimeout(function () {}, delay);",
+          "}"
+        ]
+      }
+    },
+    {
       "listen": "test",
       "script": {
         "type": "text/javascript",
@@ -34,6 +48,49 @@
     }
   ],
   "item": [
+    {
+      "name": "Start new test run",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health/live",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health",
+            "live"
+          ]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });",
+              "pm.environment.set('list_id', uuid);",
+              "pm.collectionVariables.set('unauthenticated_list_id', 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('server is ready for a new test run', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
     {
       "name": "Health & Metrics",
       "item": [
@@ -152,11 +209,100 @@
     },
     {
       "name": "Issuer Management",
-      "item": []
+      "item": [
+        {
+          "name": "Verify issuer credentials",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{managementUrl}}/api/v1/credentials",
+              "host": [
+                "{{managementUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "credentials"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('issuer credentials are accessible', function () { pm.response.to.have.status(200); });",
+                  "pm.test('response identifies the configured issuer', function () {",
+                  "  pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json');",
+                  "  pm.expect(pm.response.json().issuer).to.equal(pm.variables.get('issuer_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "Status Lists",
       "item": [
+        {
+          "name": "Publish status list without auth",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"statuses\": [\n    { \"index\": 0, \"status\": 0 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{managementUrl}}/api/v1/status-lists/{{unauthenticated_list_id}}/statuses",
+              "host": [
+                "{{managementUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "status-lists",
+                "{{unauthenticated_list_id}}",
+                "statuses"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('missing bearer token is rejected', function () { pm.response.to.have.status(401); });",
+                  "pm.test('auth error response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
+                  "pm.test('auth error has stable shape', function () {",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('error');",
+                  "  pm.expect(body).to.have.property('error_description');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
         {
           "name": "Publish status list",
           "request": {
@@ -446,15 +592,6 @@
           "response": [],
           "event": [
             {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "setTimeout(function () {}, 1200);"
-                ]
-              }
-            },
-            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -603,60 +740,6 @@
                   "  pm.expect(payload.status_list).to.include({ bits: 2, lst: 'eNpTAQAAJQAl' });",
                   "  pm.expect(payload.status_list.lst).to.equal(pm.collectionVariables.get('pre_update_status_list_lst') || pm.environment.get('pre_update_status_list_lst'));",
                   "  pm.expect(payload.status_list.lst).to.not.equal(pm.collectionVariables.get('post_update_status_list_lst') || pm.environment.get('post_update_status_list_lst'));",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Publish status list without auth",
-          "request": {
-            "auth": {
-              "type": "noauth"
-            },
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Accept",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"statuses\": [\n    { \"index\": 0, \"status\": 0 }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{managementUrl}}/api/v1/status-lists/{{list_id}}/statuses",
-              "host": [
-                "{{managementUrl}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "status-lists",
-                "{{list_id}}",
-                "statuses"
-              ]
-            }
-          },
-          "response": [],
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('missing bearer token is rejected', function () { pm.response.to.have.status(401); });",
-                  "pm.test('auth error response is JSON', function () { pm.expect(pm.response.headers.get('Content-Type') || '').to.include('application/json'); });",
-                  "pm.test('auth error has stable shape', function () {",
-                  "  var body = pm.response.json();",
-                  "  pm.expect(body).to.have.property('error');",
-                  "  pm.expect(body).to.have.property('error_description');",
                   "});"
                 ]
               }
