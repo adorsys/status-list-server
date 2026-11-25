@@ -146,7 +146,7 @@ exit 14
         self.stub("npm", """
 [[ "$*" == *'ci --prefix'* ]] || exit 90
 mkdir -p "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin"
-printf '#!/bin/sh\\necho tombi 1.8.9\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
+printf '#!/bin/sh\\necho tombi 1.11.3\\n' > "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 chmod +x "$LOCAL_CI_TOOLS_ROOT/node/node_modules/.bin/tombi"
 """)
         result = self.shell('install_node_bin tombi "$TOMBI_VERSION"')
@@ -392,16 +392,16 @@ done
         self.assertEqual(package['dependencies']['tombi'], pins['TOMBI_VERSION'])
         self.assertEqual(package['dependencies']['markdownlint-cli2'], pins['MARKDOWNLINT_VERSION'])
         for reference in [
-            'EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25',
-            'DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff',
-            'tombi-toml/setup-tombi@dbb85e6c7616772f590af0db4a7c455dfe61fec7',
+            'EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9',
+            'DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34',
+            'tombi-toml/setup-tombi@7417bd6e820cf0d4f89d77b48d13ba5d060435bf',
             'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25',
         ]:
             self.assertIn(reference, workflow + helm_checks + deny)
-        self.assertEqual(pins['DENY_VERSION'], '0.20.2')
+        self.assertEqual(pins['DENY_VERSION'], '0.21.0')
         self.assertEqual(pins['TRIVY_VERSION'], '0.70.0')
-        self.assertEqual(pins['TOMBI_VERSION'], '1.8.9')
-        self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.23.2')
+        self.assertEqual(pins['TOMBI_VERSION'], '1.11.3')
+        self.assertEqual(pins['MARKDOWNLINT_VERSION'], '0.24.0')
         self.assertIn(pins['KUBE_LINTER_VERSION'], helm_checks)
         self.assertTrue(pins['TRIVY_IMAGE'].startswith('aquasec/trivy:' + pins['TRIVY_VERSION'] + '@sha256:'))
 
