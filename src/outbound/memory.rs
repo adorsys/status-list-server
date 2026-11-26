@@ -1106,6 +1106,7 @@ mod tests {
             sub: format!("https://example/{list_id}"),
             updated_at: 0,
             version: 1,
+            retired_at: None,
         }
     }
 

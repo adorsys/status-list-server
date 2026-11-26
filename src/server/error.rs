@@ -226,6 +226,9 @@ impl IntoApiError for StatusListError {
             StatusListError::NotFound => {
                 ApiError::not_found("status_list_not_found", "Status list was not found")
             }
+            StatusListError::Retired => {
+                ApiError::conflict("status_list_retired", "Status list is retired")
+            }
             StatusListError::HistoricalNotFound => ApiError::not_found(
                 "historical_status_list_not_found",
                 "Historical status list token not found",
@@ -361,6 +364,11 @@ mod tests {
                 StatusListError::NotFound,
                 StatusCode::NOT_FOUND,
                 "status_list_not_found",
+            ),
+            (
+                StatusListError::Retired,
+                StatusCode::CONFLICT,
+                "status_list_retired",
             ),
             (
                 StatusListError::HistoricalNotFound,

@@ -68,6 +68,7 @@ mod tests {
             sub: "https://example.com/credentials/status/3".to_string(),
             updated_at: 1234567890,
             version: 1,
+            retired_at: None,
         }
     }
 

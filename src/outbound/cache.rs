@@ -768,6 +768,7 @@ mod tests {
                 sub: "sub".into(),
                 updated_at: 0,
                 version: 1,
+                retired_at: None,
             };
             cache.put(record).await.unwrap();
             assert!(cache.get("k").await.unwrap().is_some());
@@ -805,6 +806,7 @@ mod tests {
             sub: "sub".into(),
             updated_at: 42,
             version: 3,
+            retired_at: None,
         };
 
         let value = serde_json::to_value(&record).expect("serialize record");
@@ -852,6 +854,7 @@ mod redis_tests {
             sub: "sub".into(),
             updated_at,
             version: 1,
+            retired_at: None,
         }
     }
 

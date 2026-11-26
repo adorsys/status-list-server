@@ -67,13 +67,14 @@ issuers receive their row together with the immutable aggregation mapping.
 | ---------------- | ----------- | ---- | --- | ------------------------------------------------ |
 | `issuer`         | TEXT        | NO   | PK  | Unique issuer identifier and status-list owner   |
 | `aggregation_id` | VARCHAR(36) | YES  | UQ  | Public aggregation identifier, when assigned     |
-| `list_count`     | BIGINT      | NO   |     | Status lists published; backs the per-issuer quota |
+| `list_count`     | BIGINT      | NO   |     | Active status lists; backs the per-issuer quota |
 
 Publishes increment `issuers.list_count` transactionally before
 inserting into `status_lists`. The status-list owner foreign key references
 `issuers.issuer`. Credentials also reference `issuers.issuer`, so a credential
 cannot be registered without its ownership row. The two rows are created in one
 transaction.
+Retiring and unretiring a list adjust the counter in the same transaction.
 
 #### Indexes
 
@@ -93,6 +94,7 @@ by its `list_id`, which acts as the primary key.
 | `status_list` | JSON   | NO   |     | The status list entry                               |
 | `sub`         | TEXT   | NO   |     | String identifier for the Status List Token         |
 | `updated_at`  | BIGINT | NO   |     | UNIX timestamp of last status update                |
+| `retired_at`  | BIGINT | YES |     | Unix retirement time; null for active lists        |
 
 #### Indexes
 
@@ -171,7 +173,7 @@ erDiagram
     issuers {
         TEXT issuer PK "Issuer owner"
         VARCHAR aggregation_id UK "Opaque ID used in aggregation URIs"
-        BIGINT list_count "Status lists published by the issuer"
+        BIGINT list_count "Active status lists owned by the issuer"
     }
     status_lists {
         TEXT list_id PK "Unique identifier for the status list"
@@ -179,6 +181,7 @@ erDiagram
         JSON status_list "The status list entry"
         TEXT sub "String identifier for the Status List Token"
         BIGINT updated_at "UNIX timestamp of last update"
+        BIGINT retired_at "UNIX retirement timestamp, null while active"
     }
     status_list_history {
         TEXT id PK "Unique snapshot ID"
