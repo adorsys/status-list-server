@@ -18,10 +18,12 @@ statuslist:
     # makes admin calls. The period refills one request per second, so the burst
     # absorbs the peaks above it.
     APP_RATE_LIMIT__ADMIN_BURST_SIZE: "300"
-    # The shared nginx controller is this release's edge. With its
-    # use-forwarded-headers and compute-full-forwarded-for defaults (off), it
-    # replaces X-Forwarded-For with the address the NLB preserves, so the
-    # rightmost untrusted entry is the client.
+    # The shared nginx controller is this release's edge. With
+    # use-forwarded-headers, compute-full-forwarded-for, enable-real-ip and
+    # use-proxy-protocol at their defaults (off), it replaces X-Forwarded-For
+    # with the address the NLB preserves, so the rightmost untrusted entry is
+    # the client. Turning any of them on in the shared controller's ConfigMap
+    # breaks this release's per-client limits.
     APP_RATE_LIMIT__CLIENT_IP_SOURCE: "rightmost_x_forwarded_for"
     # The private node subnets the VPC CNI assigns pod addresses from, the
     # controller pods' included. Trusting them is only safe while the policy

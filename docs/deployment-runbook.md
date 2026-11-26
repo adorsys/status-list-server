@@ -1047,7 +1047,11 @@ NetworkPolicy, and admits the developer portal and Prometheus to the admin
 port. Its edge is the shared ingress-nginx controller: the overlay admits only
 the controller pods to the public and management ports, keys rate limits on
 the rightmost untrusted `X-Forwarded-For` entry with the private node subnets
-as trusted proxies, and restores the default public limits. See
+as trusted proxies, and restores the default public limits. Those limits
+depend on the controller's `use-forwarded-headers`,
+`compute-full-forwarded-for`, `enable-real-ip` and `use-proxy-protocol`
+settings staying off. Turning any of them on lets each client choose its own
+rate-limit bucket. See
 [hosted profile on an existing release](hosted-sandbox.md#hosted-profile-on-an-existing-release).
 The in-memory cache is local to
 that pod, so status updates invalidate the cache used by subsequent reads. Its

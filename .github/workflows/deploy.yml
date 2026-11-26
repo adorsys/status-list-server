@@ -1168,19 +1168,23 @@ jobs:
 
       - name: Check the published surface
         # Through the public edge: admin routes must not exist there, and management
-        # writes must demand a token. A failure leaves the release in place. Retries
-        # cover edge propagation after Recreate; a persistent exposure still fails.
+        # writes must demand a token. A failure leaves the release in place. The wait
+        # covers edge propagation after Recreate. The check runs once, because each run
+        # spends the runner's auth-failure budget (STRICT: 10, one back per minute).
         run: |
-          passed=0
-          for attempt in 1 2 3; do
-            if python3 scripts/check-hosted-sandbox.py "$PUBLIC_HOST"; then
-              passed=1
+          for attempt in $(seq 12); do
+            if curl --fail --silent --show-error --max-time 10 --output /dev/null \
+                "https://${PUBLIC_HOST}/health/live"; then
               break
             fi
-            if [ "$attempt" -lt 3 ]; then sleep 20; fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::https://${PUBLIC_HOST}/health/live did not answer 200 after 12 tries, 10 seconds apart."
+              exit 1
+            fi
+            sleep 10
           done
-          if [ "$passed" -ne 1 ]; then
-            echo "::error::$PUBLIC_HOST failed the published-surface check above: an unreachable host, an exposed admin or readiness route, or a management write that does not demand a token. See docs/hosted-sandbox.md, \"External acceptance check\"."
+          if ! python3 scripts/check-hosted-sandbox.py "$PUBLIC_HOST"; then
+            echo "::error::$PUBLIC_HOST failed the published-surface check above: an exposed admin or readiness route, or a management write that does not demand a token. See docs/hosted-sandbox.md, \"External acceptance check\"."
             exit 1
           fi
 
