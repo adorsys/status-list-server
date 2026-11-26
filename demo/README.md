@@ -11,6 +11,8 @@ local default is `status-list-server-management`. Tokens use the required
 management type, registered key ID, and a five-minute lifetime. The RSA example
 uses PS256. Management writes require exactly one Authorization header;
 duplicate headers return `401 invalid_token`.
+An operator-retired list remains readable but disappears from aggregation;
+PATCH and allocation requests for it return `409 status_list_retired`.
 
 You'll find the following scenarios in the `./workflows` directory:
 

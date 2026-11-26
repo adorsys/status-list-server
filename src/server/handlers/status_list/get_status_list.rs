@@ -437,6 +437,7 @@ async fn handle_historical_request(
         updated_at: snapshot.iat,
         // Unused for historical tokens.
         version: 0,
+        retired_at: None,
     };
 
     let signing_material = state

@@ -1,12 +1,14 @@
 #![cfg(any(feature = "sqlite", feature = "mysql", feature = "postgres-tests"))]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use sea_orm::DatabaseConnection;
+use crate::domain::models::tier::{IssuerTier, Tiers};
+
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 
 use super::fixtures;
 use crate::outbound::sql::list_quota::{self, IssuerCount, ListQuotaError, StartupState};
-use crate::outbound::sql::models::StatusListRecord;
+use crate::outbound::sql::models::{StatusListHistoryRecord, StatusListRecord};
 use crate::outbound::sql::{RepositoryError, SeaOrmStore};
 
 #[cfg(feature = "mysql")]
@@ -36,6 +38,21 @@ macro_rules! on_every_backend {
             $scenario(test_db.db.clone(), "Postgres").await;
         }
     };
+}
+
+fn retirement_tiers(standard: u64, sandbox: u64) -> Tiers {
+    let mut tiers = crate::test_utils::test_tiers();
+    tiers.standard.max_lists = standard;
+    tiers.sandbox.max_lists = sandbox;
+    tiers
+}
+
+fn standard_registry() -> HashMap<String, IssuerTier> {
+    HashMap::from([("issuer".to_string(), IssuerTier::Standard)])
+}
+
+fn sandbox_registry() -> HashMap<String, IssuerTier> {
+    HashMap::from([("issuer".to_string(), IssuerTier::Sandbox)])
 }
 
 async fn publish(
@@ -158,6 +175,316 @@ on_every_backend!(assert_upgrade_with_transition_counts_until_enabled:
     test_sqlite_upgrade_with_transition_counts_until_enabled,
     test_mysql_upgrade_with_transition_counts_until_enabled,
     test_postgres_upgrade_with_transition_counts_until_enabled);
+
+async fn seed_retirement_lists(db: &Arc<DatabaseConnection>) {
+    fixtures::seed_credential(db, "issuer").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    store
+        .insert_one_with_snapshot(
+            fixtures::record("first", "issuer", "initial", "sub-first", 10),
+            fixtures::snapshot(
+                "first-snapshot",
+                "first",
+                "issuer",
+                "initial",
+                "sub-first",
+                10,
+                20,
+            ),
+            2,
+        )
+        .await
+        .unwrap();
+    publish(&store, "second", "issuer", 2).await.unwrap();
+    fixtures::insert_list_as_old_pod(db, "third", "issuer").await;
+    list_quota::recount(db).await.unwrap();
+}
+
+async fn assert_retirement_releases_quota_without_losing_reads(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    seed_retirement_lists(&db).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    let history = SeaOrmStore::<StatusListHistoryRecord>::new(db.clone());
+    assert!(matches!(
+        list_quota::enable(&db, 2).await,
+        Err(ListQuotaError::Refused { .. })
+    ));
+
+    assert!(matches!(
+        list_quota::set_retired(
+            &db,
+            &["first".into(), "missing".into()],
+            true,
+            &retirement_tiers(2, 2),
+            &standard_registry()
+        )
+        .await,
+        Err(ListQuotaError::ListNotFound(_))
+    ));
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 3, "on {backend}");
+    assert!(
+        !store
+            .find_one_by("first")
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some()
+    );
+
+    list_quota::set_retired(
+        &db,
+        &["first".into()],
+        true,
+        &retirement_tiers(2, 2),
+        &standard_registry(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    assert_eq!(
+        store.count_status_lists_by_issuer("issuer").await.unwrap(),
+        2
+    );
+    assert!(store.find_one_by("first").await.unwrap().is_some());
+    assert!(history.find_valid_at("first", 15).await.unwrap().is_some());
+    let uris = store
+        .find_status_list_uris_after(Some("issuer"), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(uris.len(), 2, "on {backend}");
+    assert!(!uris.iter().any(|(id, _)| id == "first"));
+    let mut updated = store.find_one_by("first").await.unwrap().unwrap();
+    updated.version += 1;
+    assert!(matches!(
+        store.update_one("first", updated, 1).await,
+        Err(RepositoryError::Retired)
+    ));
+    assert!(matches!(
+        store.allocate_indices("first", "issuer", 1).await,
+        Err(RepositoryError::Retired)
+    ));
+    assert!(matches!(
+        store.allocate_indices("first", "another-issuer", 1).await,
+        Err(RepositoryError::IssuerMismatch)
+    ));
+}
+
+on_every_backend!(assert_retirement_releases_quota_without_losing_reads:
+    test_sqlite_retirement_releases_quota_without_losing_reads,
+    test_mysql_retirement_releases_quota_without_losing_reads,
+    test_postgres_retirement_releases_quota_without_losing_reads);
+
+async fn assert_unretire_obeys_quota(db: Arc<DatabaseConnection>, backend: &str) {
+    seed_retirement_lists(&db).await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    list_quota::set_retired(
+        &db,
+        &["first".into()],
+        true,
+        &retirement_tiers(2, 2),
+        &standard_registry(),
+    )
+    .await
+    .unwrap();
+    list_quota::recount(&db).await.unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    list_quota::enable(&db, 2).await.unwrap();
+    assert!(matches!(
+        list_quota::set_retired(
+            &db,
+            &["first".into()],
+            false,
+            &retirement_tiers(2, 2),
+            &standard_registry()
+        )
+        .await,
+        Err(ListQuotaError::UnretireOverQuota { .. })
+    ));
+    list_quota::set_retired(
+        &db,
+        &["second".into()],
+        true,
+        &retirement_tiers(2, 2),
+        &standard_registry(),
+    )
+    .await
+    .unwrap();
+    list_quota::set_retired(
+        &db,
+        &["first".into()],
+        false,
+        &retirement_tiers(2, 2),
+        &standard_registry(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 2, "on {backend}");
+    assert!(
+        store
+            .find_status_list_uris_after(Some("issuer"), None, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "first")
+    );
+
+    db.execute_unprepared("UPDATE issuers SET tier = 'sandbox' WHERE issuer = 'issuer'")
+        .await
+        .unwrap();
+    assert!(matches!(
+        list_quota::set_retired(
+            &db,
+            &["second".into()],
+            false,
+            &retirement_tiers(3, 2),
+            &sandbox_registry()
+        )
+        .await,
+        Err(ListQuotaError::UnretireOverQuota { max: 2, .. })
+    ));
+}
+
+on_every_backend!(assert_unretire_obeys_quota:
+    test_sqlite_unretire_obeys_quota,
+    test_mysql_unretire_obeys_quota,
+    test_postgres_unretire_obeys_quota);
+
+async fn assert_retirement_is_atomic_and_uses_registry_tier(
+    db: Arc<DatabaseConnection>,
+    backend: &str,
+) {
+    fixtures::seed_credential(&db, "issuer").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    publish(&store, "first", "issuer", 2).await.unwrap();
+    publish(&store, "second", "issuer", 2).await.unwrap();
+    let tiers = retirement_tiers(2, 1);
+    let registry = sandbox_registry();
+
+    let changes = list_quota::set_retired(
+        &db,
+        &["first".into(), "first".into()],
+        true,
+        &tiers,
+        &registry,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        changes.len(),
+        1,
+        "duplicate IDs are processed once on {backend}"
+    );
+    assert_eq!(changes[0].active_count, 1);
+    assert!(
+        store
+            .find_one_by("first")
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some()
+    );
+    assert!(
+        store
+            .find_status_list_issuers()
+            .await
+            .unwrap()
+            .contains(&"issuer".to_string())
+    );
+
+    assert!(matches!(
+        list_quota::set_retired(&db, &["first".into()], true, &tiers, &registry).await,
+        Err(ListQuotaError::AlreadyRetired(_))
+    ));
+    assert!(matches!(
+        list_quota::set_retired(&db, &["second".into()], false, &tiers, &registry).await,
+        Err(ListQuotaError::NotRetired(_))
+    ));
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 1);
+
+    // Simulate an older pod leaving list_count stale while enforcement is off.
+    db.execute_unprepared("UPDATE issuers SET list_count = 0 WHERE issuer = 'issuer'")
+        .await
+        .unwrap();
+    assert!(matches!(
+        list_quota::set_retired(&db, &["first".into()], false, &tiers, &registry).await,
+        Err(ListQuotaError::UnretireOverQuota {
+            max: 1,
+            count: 1,
+            ..
+        })
+    ));
+    assert!(matches!(
+        list_quota::set_retired(&db, &["first".into()], false, &tiers, &HashMap::new()).await,
+        Err(ListQuotaError::UnretireOverQuota { max: 1, .. })
+    ));
+    assert!(
+        store
+            .find_one_by("first")
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some()
+    );
+
+    let status = list_quota::issuer_status(&db).await.unwrap();
+    let issuer = status.iter().find(|row| row.issuer == "issuer").unwrap();
+    assert_eq!((issuer.active, issuer.retired), (1, 1));
+    list_quota::set_retired(&db, &["second".into()], true, &tiers, &registry)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .find_status_list_issuers()
+            .await
+            .unwrap()
+            .contains(&"issuer".to_string())
+    );
+}
+
+on_every_backend!(assert_retirement_is_atomic_and_uses_registry_tier:
+    test_sqlite_retirement_is_atomic_and_uses_registry_tier,
+    test_mysql_retirement_is_atomic_and_uses_registry_tier,
+    test_postgres_retirement_is_atomic_and_uses_registry_tier);
+
+async fn assert_retirement_races_with_update(db: Arc<DatabaseConnection>, backend: &str) {
+    fixtures::seed_credential(&db, "issuer").await;
+    let store = SeaOrmStore::<StatusListRecord>::new(db.clone());
+    publish(&store, "race", "issuer", 2).await.unwrap();
+    let mut update = store.find_one_by("race").await.unwrap().unwrap();
+    update.status_list.lst = "updated".into();
+    update.version += 1;
+    let previous_version = update.version - 1;
+    let tiers = retirement_tiers(2, 1);
+    let registry = standard_registry();
+    let list_ids = ["race".into()];
+
+    let (retire, write) = tokio::join!(
+        list_quota::set_retired(&db, &list_ids, true, &tiers, &registry),
+        store.update_one("race", update.clone(), previous_version),
+    );
+    retire.unwrap_or_else(|error| panic!("retire failed on {backend}: {error}"));
+    assert!(
+        matches!(&write, Ok(true) | Err(RepositoryError::Retired)),
+        "the racing write has a serial result on {backend}: {write:?}"
+    );
+    let final_record = store.find_one_by("race").await.unwrap().unwrap();
+    assert!(final_record.retired_at.is_some());
+    assert_eq!(fixtures::list_count(&db, "issuer").await, 0);
+    assert!(matches!(
+        store.update_one("race", update, previous_version).await,
+        Err(RepositoryError::Retired)
+    ));
+}
+
+on_every_backend!(assert_retirement_races_with_update:
+    test_sqlite_retirement_races_with_update,
+    test_mysql_retirement_races_with_update,
+    test_postgres_retirement_races_with_update);
 
 async fn assert_enable_succeeds_within_cap(db: Arc<DatabaseConnection>, backend: &str) {
     fixtures::seed_credential(&db, "issuer-full").await;

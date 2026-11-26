@@ -57,6 +57,7 @@ mod database_implementation {
             sub: "sub-contention".to_string(),
             updated_at: base_timestamp,
             version: 1,
+            retired_at: None,
         };
         store_a
             .insert_one(base_record.clone(), fixtures::NO_LIST_QUOTA)
@@ -264,6 +265,7 @@ mod database_implementation {
             sub: format!("sub-{list_id}"),
             updated_at,
             version: 1,
+            retired_at: None,
         };
         let snapshot = move |snapshot_id: &str, iat: i64| StatusListHistoryRecord {
             snapshot_id: snapshot_id.to_string(),

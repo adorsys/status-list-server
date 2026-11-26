@@ -110,6 +110,7 @@ async fn test_status_list_find_all() {
             sub: "https://example.com/statuslists/list1".to_string(),
             updated_at: 0,
             version: 0,
+            retired_at: None,
         },
         status_lists::Model {
             list_id: "list2".to_string(),
@@ -123,6 +124,7 @@ async fn test_status_list_find_all() {
             sub: "https://example.com/statuslists/list2".to_string(),
             updated_at: 0,
             version: 0,
+            retired_at: None,
         },
     ];
 
@@ -199,12 +201,12 @@ async fn test_find_status_list_uris_after_is_a_bounded_keyset_scan() {
         [
             Transaction::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."retired_at" IS NULL AND "status_lists"."list_id" > $1 ORDER BY "status_lists"."list_id" ASC LIMIT $2"#,
                 ["a".into(), 3u64.into()],
             ),
             Transaction::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."issuer" = $1 AND "status_lists"."list_id" > $2 ORDER BY "status_lists"."list_id" ASC LIMIT $3"#,
+                r#"SELECT "status_lists"."list_id", "status_lists"."sub" FROM "status_lists" WHERE "status_lists"."retired_at" IS NULL AND "status_lists"."issuer" = $1 AND "status_lists"."list_id" > $2 ORDER BY "status_lists"."list_id" ASC LIMIT $3"#,
                 ["issuer-1".into(), "a".into(), 3u64.into()],
             ),
         ]
@@ -251,7 +253,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
             ),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"INSERT INTO "status_lists" ("list_id", "issuer", "status_list", "sub", "updated_at", "version") VALUES ($1, $2, $3, $4, $5, $6)"#,
+                r#"INSERT INTO "status_lists" ("list_id", "issuer", "status_list", "sub", "updated_at", "version", "retired_at") VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                 [
                     entity.list_id.into(),
                     entity.issuer.into(),
@@ -259,6 +261,7 @@ async fn test_insert_with_snapshot_reserves_quota_slot_before_insert() {
                     entity.sub.into(),
                     entity.updated_at.into(),
                     entity.version.into(),
+                    Value::from(None::<i64>),
                 ],
             ),
             Statement::from_sql_and_values(
@@ -574,7 +577,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7"#,
+                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7 AND "status_lists"."retired_at" IS NULL"#,
                 [
                     writer.issuer.clone().into(),
                     serde_json::to_value(writer.status_list.clone())
@@ -613,6 +616,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
                 rows_affected: 0,
                 last_insert_id: 0,
             }])
+            .append_query_results::<BTreeMap<String, Value>, Vec<_>, _>(vec![vec![]])
             .into_connection(),
     );
     let store = SeaOrmStore::<StatusListRecord>::new(db_conn.clone());
@@ -632,7 +636,7 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
             Statement::from_string(DatabaseBackend::Postgres, "BEGIN"),
             Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
-                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7"#,
+                r#"UPDATE "status_lists" SET "issuer" = $1, "status_list" = $2, "sub" = $3, "updated_at" = $4, "version" = $5 WHERE "status_lists"."list_id" = $6 AND "status_lists"."version" = $7 AND "status_lists"."retired_at" IS NULL"#,
                 [
                     writer.issuer.into(),
                     serde_json::to_value(writer.status_list).unwrap().into(),
@@ -642,6 +646,11 @@ async fn test_update_one_with_snapshot_transaction_log_shape() {
                     "list-txn".into(),
                     entity.version.into(),
                 ],
+            ),
+            Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"SELECT "status_lists"."retired_at" FROM "status_lists" WHERE "status_lists"."list_id" = $1 LIMIT $2"#,
+                ["list-txn".into(), 1u64.into()],
             ),
             Statement::from_string(DatabaseBackend::Postgres, "ROLLBACK"),
         ])]

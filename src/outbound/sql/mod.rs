@@ -348,6 +348,7 @@ impl From<models::StatusListRecord> for StatusListRecord {
             },
             updated_at: record.updated_at,
             version: u64::try_from(record.version).unwrap_or(0),
+            retired_at: record.retired_at,
         }
     }
 }
@@ -366,6 +367,7 @@ impl From<StatusListRecord> for models::StatusListRecord {
             },
             updated_at: record.updated_at,
             version: i64::try_from(record.version).unwrap_or(i64::MAX),
+            retired_at: record.retired_at,
         }
     }
 }
@@ -430,6 +432,7 @@ impl From<RepositoryError> for StatusListError {
                 StatusListError::QuotaExceeded { count, max }
             }
             RepositoryError::NotFound => StatusListError::NotFound,
+            RepositoryError::Retired => StatusListError::Retired,
             RepositoryError::IssuerMismatch => StatusListError::IssuerMismatch,
             RepositoryError::ListNotFixedSize => StatusListError::ListNotFixedSize,
             RepositoryError::AllocationExhausted => StatusListError::AllocationExhausted,

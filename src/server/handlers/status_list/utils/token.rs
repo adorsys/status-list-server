@@ -407,6 +407,7 @@ mod tests {
             },
             updated_at: 1000,
             version: 1,
+            retired_at: None,
         }
     }
 

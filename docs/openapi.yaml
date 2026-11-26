@@ -362,6 +362,8 @@ paths:
         Returns the `sub` URIs of one issuer's status lists as a draft-21 §9.3
         Status List Aggregation, plus a `next_cursor` for paging. Status list
         tokens advertise this URI in `aggregation_uri`.
+        Lists retired by an operator are omitted. They remain readable at their
+        direct status-list URI, including retained historical snapshots.
 
         The response is complete in one page and `next_cursor` is `null`: the
         server refuses to start when `limits.max_lists_per_issuer` exceeds the
@@ -434,7 +436,7 @@ paths:
       summary: List every issuer's status list URIs, one page at a time
       deprecated: true
       description: |
-        Returns the `sub` URIs of every hosted status list, across issuers,
+        Returns the `sub` URIs of every active hosted status list, across issuers,
         one bounded page per request. Kept for status list tokens issued
         before `aggregation_uri` named one issuer; use
         `GET /api/v1/aggregation/{aggregation_id}` instead. A client that
@@ -444,12 +446,11 @@ paths:
         URIs (default and maximum 1000). While `next_cursor` is non-null, pass
         it back as `cursor` to fetch the next page; the same next page is also
         advertised in an RFC 8288 `Link: <…>; rel="next"` header. A full walk
-        returns exactly once every list that existed when the walk started
-        and still exists when its page is read; lists are never deleted
-        through the API, but an operator may delete them directly in the
-        database. A list published during a walk may be missed, and not only
-        because it was published late: `list_id` is chosen by the publisher
-        and can be any UUID, so a new list can sort before the current cursor.
+        returns each URI at most once. A list retired or deleted before its page
+        is read can be omitted; lists are never deleted through the API, but an
+        operator may delete them directly in the database. A list published or
+        unretired during a walk may also be missed: `list_id` is chosen by the
+        publisher and can be any UUID, so it can sort before the current cursor.
         The same applies to the paged exceptions of `getIssuerAggregation`.
 
         There is no total count: counting every list is itself an unbounded
@@ -543,8 +544,8 @@ paths:
         Each issuer may hold at most its tier's `max_lists` status lists
         (default 1000 for `standard`, 10 for `sandbox`, never more than
         `limits.max_lists_per_issuer`). A publish past that is refused with `400`
-        `list_quota_exceeded`; status lists cannot be deleted through the API,
-        so retrying never succeeds until an operator raises the quota. A
+        `list_quota_exceeded`; an operator can retire lists to release slots
+        after the issuer confirms no live Referenced Token uses them. A
         `list_id` that already exists is still refused with `409`, even when
         the quota is full, so retrying a publish that did land is recognisable.
         During the upgrade of an existing SQL deployment to a release with the
@@ -615,6 +616,7 @@ paths:
       description: |
         Updates the status entries of an existing status list. The JWT Bearer
         token must belong to the issuer that originally published the list.
+        A retired list rejects writes with `409 status_list_retired`.
 
         An update that leaves the list unchanged is a successful no-op: it
         neither advances the list version nor records a history snapshot.
@@ -688,6 +690,7 @@ paths:
         `(list_id, index)` pair is recorded so it is not returned by a later
         allocation request. Lists published without `size` are caller-managed
         and return `409 list_not_fixed_size` from this endpoint.
+        A retired list rejects allocations with `409 status_list_retired`.
       requestBody:
         required: true
         content:
@@ -1784,7 +1787,8 @@ components:
       description: |
         Response body of `GET /api/v1/aggregation/{aggregation_id}` and
         `GET /api/v1/aggregation`: one page of the `sub` URIs of one issuer's
-        status lists, or of every issuer's. The `status_lists` member is the
+        active status lists, or of every issuer's active lists. Retired lists
+        remain directly readable but are omitted here. The `status_lists` member is the
         draft-21 §9.3 Status List Aggregation structure; `next_cursor` is an
         extension for paging.
       required:
@@ -1923,7 +1927,8 @@ components:
       required: [lists, lists_limit, keys, keys_limit]
       description: |
         Current use against the limits of the issuer's tier. `lists_limit` is
-        the tier's `max_lists` and `keys_limit` its `max_keys`.
+        the tier's `max_lists` and `keys_limit` its `max_keys`. `lists` counts
+        active lists; retired lists remain readable but do not use quota.
       properties:
         lists:
           type: integer
@@ -2060,6 +2065,7 @@ components:
             - status_list_already_exists
             - credentials_already_exist
             - update_conflict
+            - status_list_retired
             - index_not_allocated
             - list_not_fixed_size
             - allocation_exhausted
@@ -2247,10 +2253,10 @@ components:
 
         `list_quota_exceeded` (publish only) is different in kind: the request
         was well-formed, and is refused because the issuer already holds its
-        tier's `max_lists` status lists (default 1000 for `standard`, 10 for
+        tier's `max_lists` active status lists (default 1000 for `standard`, 10 for
         `sandbox`). No change
         to the request and no retry will succeed; the quota must be raised by
-        an operator. It carries no `Retry-After`.
+        an operator or unused lists retired. It carries no `Retry-After`.
       content:
         application/json:
           schema:
@@ -2451,6 +2457,9 @@ components:
         remaining than requested. Retrying the same request will not help unless
         the list is explicitly grown first.
 
+        `status_list_retired` — an operator retired this list. Direct reads
+        still work, but writes are refused until an operator unretires it.
+
         > Note for integrators: 409 is not a status most generic HTTP clients,
         > SDKs or service meshes retry automatically. `write_contention` is
         > transient and safe to replay, but recovering from it requires handling
@@ -2474,6 +2483,11 @@ components:
               value:
                 error: "update_conflict"
                 error_description: "The status list was modified concurrently"
+            retired:
+              summary: An operator retired this list (writes are disabled)
+              value:
+                error: "status_list_retired"
+                error_description: "Status list is retired"
             writeContention:
               summary: Rolled back by a storage lock race (retry unchanged)
               value:

@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(issuer_keys_carry_over::Migration),
             Box::new(static_key_revocations::Migration),
             Box::new(registry_coordination::Migration),
+            Box::new(status_list_retirement::Migration),
         ]
     }
 
@@ -35,6 +36,47 @@ impl MigratorTrait for Migrator {
         C: IntoSchemaManagerConnection<'c>,
     {
         Err(forward_only("dropping every table is refused"))
+    }
+}
+
+pub(crate) mod status_list_retirement {
+    use super::*;
+
+    pub(crate) struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261123_000001_status_list_retirement"
+        }
+    }
+
+    #[async_trait::async_trait]
+    // SeaORM's migration trait uses an elided lifetime in this signature.
+    #[allow(elided_lifetimes_in_paths)]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.has_column("status_lists", "retired_at").await? {
+                return Ok(());
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(StatusLists::Table)
+                        .add_column(ColumnDef::new(StatusLists::RetiredAt).big_integer().null())
+                        .to_owned(),
+                )
+                .await
+        }
+
+        async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+            refuse_down(self.name())
+        }
+    }
+
+    #[derive(Iden)]
+    enum StatusLists {
+        Table,
+        RetiredAt,
     }
 }
 
@@ -220,6 +262,8 @@ async fn name_unknown_migrations<M: MigratorTrait>(
 
 /// Quoted verbatim in docs/troubleshooting.md as the operator repair; keep them in sync.
 pub(crate) const RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
+     (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired_at IS NULL)";
+const LEGACY_RECOUNT_LIST_COUNT_SQL: &str = "UPDATE issuers SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer)";
 const BACKFILL_CREDENTIAL_LIST_COUNT_SQL: &str = "UPDATE credentials SET list_count = \
      (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = credentials.issuer)";
@@ -1609,7 +1653,7 @@ pub(crate) mod issuer_ownership {
                 .await?;
             manager
                 .get_connection()
-                .execute_unprepared(RECOUNT_LIST_COUNT_SQL)
+                .execute_unprepared(LEGACY_RECOUNT_LIST_COUNT_SQL)
                 .await?;
 
             if !manager

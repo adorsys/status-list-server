@@ -59,6 +59,101 @@ mod tests {
     };
     use crate::test_utils::{authenticated_issuer, test_app_state};
 
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn retired_list_rejects_empty_and_invalid_patches_before_validation() {
+        use std::collections::HashMap;
+
+        use crate::domain::models::tier::IssuerTier;
+        use crate::outbound::sql::list_quota;
+        use crate::server::handlers::status_list::{
+            aggregation::{AggregationQuery, get_aggregation},
+            allocate_indices::{AllocationRequest, allocate_indices},
+            get_status_list::{StatusListQuery, get_status_list},
+        };
+        use crate::test_utils::{publish_list, register_issuer, sqlite_test_db, test_tiers};
+        use axum::{extract::Query, http::HeaderMap};
+
+        let db = sqlite_test_db(None).await;
+        let state = test_app_state(Some(db.clone())).await;
+        register_issuer(&state.service, "issuer").await;
+        let list_id = uuid::Uuid::new_v4().to_string();
+        publish_list(&state.service, "issuer", &list_id).await;
+        list_quota::set_retired(
+            &db,
+            std::slice::from_ref(&list_id),
+            true,
+            &test_tiers(),
+            &HashMap::from([("issuer".into(), IssuerTier::Standard)]),
+        )
+        .await
+        .unwrap();
+
+        for payload in [
+            StatusesRequest { statuses: vec![] },
+            StatusesRequest {
+                statuses: vec![RequestStatusEntry {
+                    index: 100_001,
+                    status: RequestStatus::INVALID,
+                }],
+            },
+        ] {
+            let result = update_status(
+                State(state.clone()),
+                authenticated_issuer("issuer"),
+                Path(list_id.clone()),
+                Json(payload),
+            )
+            .await;
+            let response = match result {
+                Ok(_) => panic!("retired list accepted a patch"),
+                Err(error) => error.into_response(),
+            };
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        let allocation = allocate_indices(
+            State(state.clone()),
+            authenticated_issuer("issuer"),
+            Path(list_id.clone()),
+            Json(AllocationRequest { count: 1 }),
+        )
+        .await;
+        assert_eq!(
+            allocation.err().unwrap().into_response().status(),
+            StatusCode::CONFLICT
+        );
+
+        for time in [None, Some(time::OffsetDateTime::now_utc().unix_timestamp())] {
+            let response = get_status_list(
+                State(state.clone()),
+                Path(list_id.clone()),
+                Ok(Query(StatusListQuery { time })),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap()
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let aggregation = get_aggregation(
+            State(state),
+            HeaderMap::new(),
+            Ok(Query(AggregationQuery {
+                limit: None,
+                cursor: None,
+            })),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(aggregation.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status_lists"], serde_json::json!([]));
+    }
+
     #[tokio::test]
     async fn test_update_token_status_invalid_list_id() {
         let appstate = test_app_state(None).await;

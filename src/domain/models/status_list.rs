@@ -19,6 +19,8 @@ pub enum StatusListError {
     AlreadyExists,
     #[error("status list was not found")]
     NotFound,
+    #[error("status list is retired")]
+    Retired,
     #[error("historical status list token not found")]
     HistoricalNotFound,
     #[error("invalid historical time")]
@@ -87,6 +89,9 @@ pub struct StatusListRecord {
     pub updated_at: i64,
     /// Bumped on every change; the concurrency guard and cache fence, kept apart from updated_at.
     pub version: u64,
+    /// Unix seconds when the operator retired the list; absent while active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<i64>,
 }
 
 /// Also caps max_lists_per_issuer, so an issuer's lists always fit one page.

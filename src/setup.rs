@@ -313,18 +313,60 @@ fn spawn_cert_rotation(config: AppConfig, provider: ReloadingCertificateProvider
 }
 
 pub const LIST_QUOTA_USAGE: &str =
-    "usage: status-list-server list-quota <status|recount|enable|disable>
+    "usage: status-list-server list-quota <status|recount|enable|disable|retire|unretire> [list_id...]
 
-  status   show whether limits.max_lists_per_issuer is enforced
-  recount  recompute every issuer's list count (refused while enforced)
+  status   show enforcement and each issuer's active and retired counts
+  recount  recompute every issuer's active-list count (refused while enforced)
   enable   enforce the quota; refused, naming the issuers, while any issuer
            has more lists than the cap or a stale count
-  disable  stop enforcing the quota";
+  disable  stop enforcing the quota
+  retire   stop writes and aggregation for each list; free its quota slot
+  unretire restore writes and aggregation for each list if quota allows
+
+For retire or unretire, pass IDs directly, `-` for newline-delimited stdin,
+or `--ids-file <path>` for newline-delimited IDs from a file.";
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListQuotaAction {
+    Status,
+    Recount,
+    Enable,
+    Disable,
+    Retire,
+    Unretire,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+impl TryFrom<&str> for ListQuotaAction {
+    type Error = color_eyre::eyre::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "status" => Ok(Self::Status),
+            "recount" => Ok(Self::Recount),
+            "enable" => Ok(Self::Enable),
+            "disable" => Ok(Self::Disable),
+            "retire" => Ok(Self::Retire),
+            "unretire" => Ok(Self::Unretire),
+            _ => Err(color_eyre::eyre::eyre!(LIST_QUOTA_USAGE)),
+        }
+    }
+}
 
 /// Does not run migrations.
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResult<String> {
-    if !matches!(action, "status" | "recount" | "enable" | "disable") {
+pub async fn run_list_quota_command(
+    config: &AppConfig,
+    action: &str,
+    list_ids: &[String],
+) -> EyeResult<String> {
+    let parsed_action = ListQuotaAction::try_from(action)?;
+    if matches!(
+        parsed_action,
+        ListQuotaAction::Retire | ListQuotaAction::Unretire
+    ) != !list_ids.is_empty()
+    {
         return Err(color_eyre::eyre::eyre!("{LIST_QUOTA_USAGE}"));
     }
     if config.database.backend == DatabaseBackend::Memory {
@@ -335,32 +377,66 @@ pub async fn run_list_quota_command(config: &AppConfig, action: &str) -> EyeResu
     }
     let db = connect_database_pool(config).await?;
     let max = config.limits.max_lists_per_issuer;
-    match action {
-        "status" => {
+    match parsed_action {
+        ListQuotaAction::Status => {
             let enforced = list_quota::is_enforced(&db).await?;
-            Ok(if enforced {
+            let mut output = if enforced {
                 format!("list quota: enforced (max {max} lists per issuer)")
             } else {
                 "list quota: not enforced".to_string()
-            })
+            };
+            for issuer in list_quota::issuer_status(&db).await? {
+                output.push_str(&format!(
+                    "\n  {}: {} active, {} retired",
+                    issuer.issuer, issuer.active, issuer.retired
+                ));
+            }
+            Ok(output)
         }
-        "recount" => {
+        ListQuotaAction::Recount => {
             list_quota::recount(&db).await?;
-            Ok("recomputed every issuer's list count".to_string())
+            Ok("recomputed every issuer's active-list count".to_string())
         }
-        "enable" => {
+        ListQuotaAction::Enable => {
             list_quota::enable(&db, max).await?;
             Ok(format!("list quota enforced: max {max} lists per issuer"))
         }
-        _ => {
+        ListQuotaAction::Disable => {
             list_quota::disable(&db).await?;
             Ok("list quota no longer enforced".to_string())
+        }
+        ListQuotaAction::Retire | ListQuotaAction::Unretire => {
+            let retired = parsed_action == ListQuotaAction::Retire;
+            let tiers = config.tier_limits()?;
+            let registry_tiers = if let Some(path) = &config.management_auth.issuers_file {
+                crate::server::auth::issuer_registry::IssuerRegistry::from_file(path)?
+                    .issuers()
+                    .iter()
+                    .map(|issuer| (issuer.id.clone(), issuer.tier))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            let changes =
+                list_quota::set_retired(&db, list_ids, retired, &tiers, &registry_tiers).await?;
+            let mut output = format!("{action}d {} status list(s)", changes.len());
+            for change in changes {
+                output.push_str(&format!(
+                    "\n  {}: {} ({} active)",
+                    change.issuer, change.list_id, change.active_count
+                ));
+            }
+            Ok(output)
         }
     }
 }
 
 #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mysql")))]
-pub async fn run_list_quota_command(_config: &AppConfig, _action: &str) -> EyeResult<String> {
+pub async fn run_list_quota_command(
+    _config: &AppConfig,
+    _action: &str,
+    _list_ids: &[String],
+) -> EyeResult<String> {
     Err(color_eyre::eyre::eyre!(
         "this build has no SQL backend; the memory backend enforces the list quota from startup"
     ))
@@ -546,7 +622,7 @@ async fn build_state_impl(config: &AppConfig) -> EyeResult<BuildStateResult> {
                     tracing::warn!(
                         "server.aggregation_uri is not advertised in the tokens of {} issuer(s) \
                          that have more status lists than one aggregation page \
-                         ({AGGREGATION_DEFAULT_LIMIT}); delete lists until none does, then \
+                         ({AGGREGATION_DEFAULT_LIMIT}); retire lists until none does, then \
                          restart:{}",
                         over.len(),
                         list_quota::name_issuers(&over)
@@ -2246,6 +2322,36 @@ mod general_tests {
         }
 
         #[tokio::test]
+        async fn list_quota_retire_reports_each_changed_list() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let startable = Startable::new().await;
+            let (dir, database) = database_file();
+            let config = startable.config(&[
+                ("APP_DATABASE__BACKEND", "sqlite"),
+                ("APP_DATABASE__URL", &database),
+            ]);
+            let state = build_state(&config).await.expect("first start");
+            register_issuer(&state.service, "issuer").await;
+            let list_ids = [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ];
+            for list_id in &list_ids {
+                publish_list(&state.service, "issuer", list_id).await;
+            }
+
+            let output = run_list_quota_command(&config, "retire", &list_ids)
+                .await
+                .expect("retire lists");
+            for list_id in &list_ids {
+                assert!(output.contains(list_id));
+            }
+            assert!(output.contains("issuer"));
+            assert!(output.contains("0 active"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[tokio::test]
         async fn registry_aggregation_mapping_is_immutable_after_restart() {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let startable = Startable::new().await;
@@ -2470,7 +2576,7 @@ mod general_tests {
             let fresh = build_state(&config).await.expect("first start");
             assert!(fresh.aggregation_uri.is_some());
 
-            run_list_quota_command(&config, "disable")
+            run_list_quota_command(&config, "disable", &[])
                 .await
                 .expect("disable the quota");
             let mut transition = deployment.to_vec();
@@ -2503,7 +2609,7 @@ mod general_tests {
             let state = build_state(&config).await.expect("first start");
             assert!(state.aggregation_uri.is_some());
 
-            run_list_quota_command(&config, "disable")
+            run_list_quota_command(&config, "disable", &[])
                 .await
                 .expect("disable the quota");
             register_issuer(&state.service, "issuer1").await;
