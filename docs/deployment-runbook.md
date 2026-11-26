@@ -1043,21 +1043,13 @@ include that configured value in their management tokens' `aud` claim.
 The release-tag deployment uses `values-aws.yaml`, `values-production.yaml`,
 `values-fscert.yaml`, and `values-datev-staging.yaml`, in that order, in the
 existing `statuslist` namespace.
-`values-fscert.yaml` selects the `fscert` image; the last overlay
-(`values-datev-staging.yaml`) selects the hosted profile and the in-memory
-cache, disables autoscaling, runs one application replica, turns on the
-NetworkPolicy, and admits the developer portal and Prometheus to the admin
-port. Its edge is the shared ingress-nginx controller: the overlay admits only
-the controller pods to the public and management ports, keys rate limits on
-the rightmost untrusted `X-Forwarded-For` entry with the private node subnets
-as trusted proxies, and restores the default public limits. Those limits
-depend on the controller's `use-forwarded-headers`,
-`compute-full-forwarded-for`, `enable-real-ip` and `use-proxy-protocol`
-settings staying off. Turning any of them on lets each client choose its own
-rate-limit bucket. See
+`values-fscert.yaml` selects the `fscert` image. The last overlay,
+[`values-datev-staging.yaml`](../deploy/helm/chart/values-datev-staging.yaml),
+holds the release's settings and runs it on the hosted profile, behind the
+shared ingress-nginx controller as its edge; see
 [hosted profile on an existing release](hosted-sandbox.md#hosted-profile-on-an-existing-release).
-The in-memory cache is local to
-that pod, so status updates invalidate the cache used by subsequent reads. Its
+It runs one application replica on the in-memory cache, which is local to that
+pod, so status updates invalidate the cache used by subsequent reads. Its
 management audience remains `https://statuslist.eudi-adorsys.com/api/v1`.
 Issuers calling this deployment must put this value in their management tokens'
 `aud` claim. The workflow selects the `status-list-server-issuers` ConfigMap as

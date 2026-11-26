@@ -160,15 +160,13 @@ Add these to the release's last site overlay, as
   `APP_RATE_LIMIT__TRUSTED_PROXIES` set to the edge pods' address range. The
   hosted profile refuses to render behind an ingress with `connect_info`, and
   with the management ingress or gateway on, without trusted proxies. The edge
-  must replace `X-Forwarded-For` rather than append to it: ingress-nginx does
-  with `use-forwarded-headers`, `compute-full-forwarded-for`, `enable-real-ip`
-  and `use-proxy-protocol` off, its defaults. `use-forwarded-headers`,
-  `enable-real-ip` and `use-proxy-protocol` each turn on nginx's realip module,
-  which trusts every peer by default, so a client can choose the address nginx
-  forwards and with it its own rate-limit bucket. On a shared controller,
-  turning any of the four on breaks the per-client limits of every hosted
-  release behind it. Over `values-production.yaml`, also restore the default
-  `APP_RATE_LIMIT__PERMISSIVE_*` values, which that overlay lifts for
+  must replace `X-Forwarded-For` rather than append to it, which ingress-nginx
+  does by default. With `use-forwarded-headers` or `enable-real-ip` on, it
+  forwards the address in the client's own header instead, trusting every peer
+  unless `proxy-real-ip-cidr` names the load balancers, so each client could
+  pick its own rate-limit bucket. On a shared controller, these settings apply
+  to every release behind it. Over `values-production.yaml`, also restore the
+  default `APP_RATE_LIMIT__PERMISSIVE_*` values, which that overlay lifts for
   `connect_info`. For Envoy Gateway, `values-envoy-gateway.yaml` sets all three
   and admits only the Envoy proxies to the public and management ports.
 - Distinct management and admin audiences. A release that already has both
@@ -300,10 +298,10 @@ installation; rule creation alone does not deliver notifications.
 
 After the first deployment, run the Python 3 check against every published
 origin using HTTPS. The release-tag deployment runs it against
-`statuslist.eudi-adorsys.com` after every upgrade. It waits up to two minutes
-for `/health/live` to answer through the edge, then runs the check once, because
-each run spends the runner's management auth-failure budget. A failure fails the
-job; it does not roll the release back.
+`statuslist.eudi-adorsys.com` after every upgrade. It waits for `/health/live`
+to answer through the edge, then runs the check once, because each run spends
+the runner's management auth-failure budget. A failure fails the job; it does
+not roll the release back.
 
 ```bash
 python3 scripts/check-hosted-sandbox.py sandbox.example.org
