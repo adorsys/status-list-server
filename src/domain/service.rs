@@ -142,6 +142,7 @@ impl Service {
             sub: command.sub,
             updated_at: current_unix_timestamp(),
             version: 1,
+            retired_at: None,
         };
 
         if record.status_list.lst.len() > policy.max_serialized_list_size {
@@ -175,25 +176,30 @@ impl Service {
         statuses: Vec<StatusEntry>,
         policy: &StatusListPolicy,
     ) -> Result<StatusListRecord, StatusListError> {
+        let mut existing = match self.find_owned_list(issuer, list_id).await {
+            Ok(existing) => existing,
+            Err(error) => {
+                validate_status_count(&statuses, policy.max_statuses_per_request)?;
+                if statuses
+                    .iter()
+                    .all(|entry| entry.index <= policy.max_status_index)
+                {
+                    validate_unique_indices(&statuses)?;
+                }
+                return Err(error);
+            }
+        };
+        if existing.retired_at.is_some() {
+            return Err(StatusListError::Retired);
+        }
         validate_status_count(&statuses, policy.max_statuses_per_request)?;
-        // The index bound is checked before duplicates. An index above the
-        // bound needs the stored list to tell growth from an existing entry.
-        let beyond_bound = statuses
+        if statuses
             .iter()
-            .any(|entry| entry.index > policy.max_status_index);
-        let checked = if beyond_bound {
-            let existing = self.find_owned_list(issuer, list_id).await?;
+            .any(|entry| entry.index > policy.max_status_index)
+        {
             validate_update_indices(&existing.status_list, &statuses, policy.max_status_index)?;
-            Some(existing)
-        } else {
-            None
-        };
+        }
         validate_unique_indices(&statuses)?;
-
-        let mut existing = match checked {
-            Some(existing) => existing,
-            None => self.find_owned_list(issuer, list_id).await?,
-        };
 
         existing
             .status_list
@@ -586,6 +592,7 @@ mod tests {
             },
             updated_at,
             version: 1,
+            retired_at: None,
         }
     }
 

@@ -787,8 +787,8 @@ failure rolls back instead of wedging the release.
 
 Each issuer may publish at most `limits.max_lists_per_issuer` status lists (default `1000`,
 env `APP_LIMITS__MAX_LISTS_PER_ISSUER`). The count lives in `issuers.list_count` and is
-maintained by the publish transaction itself. There is no endpoint that deletes a status list, so
-the count only ever rises. The cap cannot be set above `1000`, the aggregation page size (see
+maintained by the publish transaction itself. An operator can retire a list to release a slot;
+retired lists stay readable but reject writes and disappear from aggregation. The cap cannot be set above `1000`, the aggregation page size (see
 [below](#startup-refused-max_lists_per_issuer-exceeds-the-aggregation-page-size)).
 
 A fresh install enforces it from the first start. On a database a release without the quota has
@@ -808,10 +808,22 @@ example `kubectl exec deploy/<release> -- /app/status-list-server list-quota sta
 
 | Command                                 | Does                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------- |
-| `status-list-server list-quota status`  | Prints whether the quota is enforced                                            |
-| `status-list-server list-quota recount` | Recomputes every `list_count` from the lists that exist; refused while enforced |
+| `status-list-server list-quota status`  | Prints enforcement and each issuer's active and retired counts                   |
+| `status-list-server list-quota recount` | Recomputes every `list_count` from active lists; refused while enforced        |
 | `status-list-server list-quota enable`  | Enforces the quota; refused while any issuer is over the cap or miscounted      |
 | `status-list-server list-quota disable` | Stops enforcing the quota                                                       |
+| `status-list-server list-quota retire <list_id>...` | Retires lists and releases quota slots in one transaction |
+| `status-list-server list-quota unretire <list_id>...` | Restores lists if the issuer stays within the cap |
+
+For a large retirement batch, pass `--ids-file <path>` or `-` to read one list ID per line
+from a file or standard input. Duplicate IDs in one batch are processed once. The command
+prints each changed list ID, its issuer, and that issuer's resulting active count.
+
+The issuer must confirm that no live Referenced Token points to a list before the operator
+retires it. The server cannot verify token expiry. Retirement keeps the list URI and retained
+`?time=` snapshots readable; `snapshot_retention_secs` continues to prune old snapshots.
+`unretire` reverses an early retirement, but fails when it would exceed the configured quota.
+These operator commands apply to SQL backends; the memory backend has no durable retirement state.
 
 ### Upgrading to the list quota
 
@@ -834,9 +846,10 @@ quota starts off on such a database, and a pod does not serve without it unless 
 1. Deploy with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`. Pods then start with the quota off and log
    `limits.max_lists_per_issuer is NOT enforced` at `ERROR` on every start; `list_quota_enforced`
    reads `0`. Until step 2, tokens carry no `aggregation_uri`.
-2. Once the rollout has finished and **no pod of an older release is left**, run
-   `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
-3. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
+2. Once the rollout has finished and **no pod of an older release is left**, retire lists whose
+   issuers have confirmed that no live token still points to them, if needed to get below the cap.
+3. Run `status-list-server list-quota recount`, then `status-list-server list-quota enable`.
+4. Remove `APP_LIMITS__LIST_QUOTA_TRANSITION` and roll again. While it is still set on an enforced
    database, pods warn `limits.list_quota_transition is set, but the list quota is already enforced`.
 
 No pod of an older release can start once a new pod has migrated the database: it finds a migration
@@ -854,19 +867,23 @@ and names them:
 
 ```text
 refusing to enable the list quota
-  1 issuer(s) have more than 1000 status lists; delete lists or raise limits.max_lists_per_issuer:
+  1 issuer(s) have more than 1000 active status lists; retire lists or raise limits.max_lists_per_issuer:
     https://issuer.example (1003 lists)
 ```
 
 - **Over the cap:** raise `APP_LIMITS__MAX_LISTS_PER_ISSUER` (up to `1000`) and roll the
-  Deployment, or delete lists as described [below](#publish-rejected-with-400-list_quota_exceeded),
-  then run `enable` again. An issuer with more than 1000 lists can only be brought under the cap by
-  deleting lists; until then the quota stays off and pods need `APP_LIMITS__LIST_QUOTA_TRANSITION`.
+  Deployment, or follow steps 2–4 above: finish the rollout and stop every older pod, retire
+  lists that no live token uses, recount, enable, remove the transition setting, and restart.
+  An issuer with more than 1000 active lists must retire enough lists to fit one aggregation
+  page before enforcement can resume.
 - **`list_count` does not match:** a pod of an older release published after the recount, or the
   recount was skipped. Make sure none is left, then run `recount` and `enable` again.
 
 `enable` and `recount` wait for publishes that are in flight and hold off new ones until they
 finish, so a publish is either counted by the check or refused by the enforced quota.
+
+Older pods ignore retirement and can still write to retired lists or advertise them in aggregation.
+Stop them before retiring lists or enabling enforcement.
 
 **Rolling back** to a release that predates the quota: run `list-quota disable` first, then follow
 [Rolling back across migrations](deployment-runbook.md#rolling-back-across-migrations). Its pods
@@ -983,13 +1000,9 @@ If `list_count` and `actual` differ, the counter has drifted; recompute it as de
   `APP_LIMITS__MAX_LISTS_PER_ISSUER` if the cap is in the way) and roll the Deployment. The limit
   applies to every issuer of that tier, not only this one. A `sandbox` issuer can also be moved to
   `standard` in the issuer registry.
-- **Delete lists the issuer no longer needs**, directly in the database, then
-  [recompute the counter](#recomputing-issuer-list-counts). Only delete a list that no
-  unexpired Referenced Token still points to: relying parties resolving a deleted list get `404`
-  and can no longer check revocation. Also delete its history rows
-  (`DELETE FROM status_list_history WHERE list_id = '<list_id>'`), which have no foreign key to
-  cascade them, and expect the list to stay readable from cache for up to `APP_CACHE__TTL`
-  seconds.
+- **Retire lists the issuer no longer needs** with `status-list-server list-quota retire <list_id>...`.
+  First confirm with the issuer that no live Referenced Token points to them. Retirement releases
+  quota slots without deleting the lists or their history. Direct reads continue to work.
 
 Lowering `APP_LIMITS__MAX_LISTS_PER_ISSUER` below an issuer's count is not checked: that issuer
 keeps its lists and every further publish is refused. Run `list-quota disable` and then
@@ -1019,7 +1032,7 @@ further publish is refused until they are back under the cap. While one holds mo
 own tokens carry no `aggregation_uri`, other issuers' tokens keep it, and pods name it at startup:
 
 ```text
-server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have more status lists than one aggregation page (1000); delete lists until none does, then restart:
+server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have more status lists than one aggregation page (1000); retire lists until none does, then restart:
     https://issuer.example (1003 lists)
 ```
 
@@ -1027,7 +1040,7 @@ server.aggregation_uri is not advertised in the tokens of 1 issuer(s) that have 
 
 ### Recomputing issuer list counts
 
-Recomputes every issuer's counter from the lists that exist. Needed before
+Recomputes every issuer's counter from active lists. Needed before
 [enabling the quota](#upgrading-to-the-list-quota) and after any manual `DELETE` from `status_lists`.
 Because a recount racing enforced publishes could miss one, it only runs with the quota off:
 
@@ -1040,11 +1053,11 @@ enforced keep advertising `aggregation_uri` until they restart. A request for th
 aggregation without `limit` then gets `409 paging_required` instead of part of it. If `enable`
 refuses, roll the Deployment with `APP_LIMITS__LIST_QUOTA_TRANSITION=true`.
 
-`recount` runs this statement, which is also the migration's backfill (a unit test keeps the
-two identical). It is portable across PostgreSQL, MySQL and SQLite:
+`recount` runs this statement. The original ownership migration has its own pre-retirement
+backfill; both are portable across PostgreSQL, MySQL and SQLite:
 
 ```sql
-UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer);
+UPDATE issuers SET list_count = (SELECT COUNT(*) FROM status_lists WHERE status_lists.issuer = issuers.issuer AND status_lists.retired_at IS NULL);
 ```
 
 Run by hand instead of through `recount`, it can miss a publish that commits while it runs; the

@@ -381,10 +381,12 @@ exclusive lock while it checks, so a publish in flight is either counted by
 the check or refused by the enforced quota. The memory backend enforces the
 quota from startup.
 
-It bounds lists **per issuer**, not in total. Only the operator can add an
-issuer, so the registry bounds the number of issuers. Lists cannot be deleted
-through the API, so an issuer at its quota stays there until the operator
-raises it, which is possible only up to the aggregation page size (see
+It bounds active lists **per issuer**, not in total. Only the operator can add an
+issuer, so the registry bounds the number of issuers. An operator can retire a
+list after its issuer confirms no live Referenced Token points to it. Retirement
+removes the list from aggregation and releases its quota slot, but preserves
+direct and historical reads. It rejects subsequent writes. An operator can
+unretire it when the issuer remains within the quota (see
 [troubleshooting](troubleshooting.md#status-list-quota)).
 
 ### Status list aggregation

@@ -33,7 +33,11 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     if args.first().map(String::as_str) == Some("list-quota") {
         let action = args.get(1).map(String::as_str).unwrap_or_default();
-        println!("{}", run_list_quota_command(&config, action).await?);
+        let list_ids = list_quota_ids(args.get(2..).unwrap_or(&[]))?;
+        println!(
+            "{}",
+            run_list_quota_command(&config, action, &list_ids).await?
+        );
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("issuer-registry") {
@@ -102,6 +106,57 @@ async fn main() -> Result<()> {
 
     http_server.run(shutdown_rx).await?;
     Ok(())
+}
+
+fn list_quota_ids(args: &[String]) -> Result<Vec<String>> {
+    let content = match args {
+        [input] if input == "-" => {
+            use std::io::Read;
+            let mut content = String::new();
+            std::io::stdin().read_to_string(&mut content)?;
+            Some(content)
+        }
+        [flag, path] if flag == "--ids-file" => Some(std::fs::read_to_string(path)?),
+        _ if args.iter().any(|arg| arg == "--ids-file" || arg == "-") => {
+            return Err(eyre!(
+                "pass either list IDs, `-` for stdin, or `--ids-file <path>`"
+            ));
+        }
+        _ => None,
+    };
+    Ok(match content {
+        Some(content) => content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        None => args.to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod list_quota_cli_tests {
+    use super::list_quota_ids;
+
+    #[test]
+    fn accepts_direct_ids_and_rejects_ambiguous_input() {
+        assert_eq!(
+            list_quota_ids(&["first".into(), "second".into()]).unwrap(),
+            ["first", "second"]
+        );
+        assert!(list_quota_ids(&["-".into(), "first".into()]).is_err());
+        assert!(list_quota_ids(&["--ids-file".into()]).is_err());
+    }
+
+    #[test]
+    fn reads_newline_delimited_ids_from_file() {
+        let path = std::env::temp_dir().join(format!("list-quota-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "first\n\n second \n").unwrap();
+        let ids = list_quota_ids(&["--ids-file".into(), path.to_str().unwrap().into()]).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(ids, ["first", "second"]);
+    }
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
