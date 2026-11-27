@@ -774,11 +774,11 @@ version = "0.3.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.google-cloud-auth]]
-version = "1.15.0"
+version = "1.19.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.google-cloud-gax]]
-version = "1.13.0"
+version = "1.15.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.google-cloud-gax-internal]]
@@ -806,7 +806,7 @@ version = "1.6.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.google-cloud-wkt]]
-version = "1.7.0"
+version = "1.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.governor]]
@@ -859,10 +859,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.http]]
 version = "1.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.http-body]]
-version = "0.4.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.http-body]]
@@ -1055,10 +1051,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema-value]]
 version = "0.60.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.jsonwebtoken]]
-version = "10.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonwebtoken]]
@@ -1419,10 +1411,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
-criteria = "safe-to-deploy"
-
-[[exemptions.pin-utils]]
-version = "0.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pkcs8]]
