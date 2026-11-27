@@ -1915,6 +1915,14 @@ impl Config {
                 ))
             })?;
         }
+        #[cfg(feature = "acme")]
+        crate::utils::scheduler::CronSchedule::parse(&config.server.cert.renewal_cron_schedule)
+            .map_err(|err| {
+                ConfigError::Message(format!(
+                    "Invalid server.cert.renewal_cron_schedule {:?}: {err}",
+                    config.server.cert.renewal_cron_schedule
+                ))
+            })?;
         config.cache.validate(config.telemetry.environment)?;
         if config.server.profile.is_hosted() && config.database.backend == DatabaseBackend::Memory {
             return Err(ConfigError::Message(format!(
@@ -2682,6 +2690,19 @@ mod tests {
                 .expect("sqlite database.url override should be set")
                 .expose_secret(),
             "sqlite::memory:"
+        );
+    }
+
+    #[cfg(feature = "acme")]
+    #[test]
+    fn invalid_renewal_cron_schedule_fails_at_load() {
+        let err =
+            Config::load_from_overrides(&[("server.cert.renewal_cron_schedule", "0 0 * * *")])
+                .expect_err("a five-field schedule must be rejected");
+        assert!(
+            err.to_string()
+                .contains("Invalid server.cert.renewal_cron_schedule \"0 0 * * *\""),
+            "unexpected error: {err}"
         );
     }
 

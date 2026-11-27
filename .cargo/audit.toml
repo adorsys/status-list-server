@@ -10,8 +10,6 @@ ignore = [
   "RUSTSEC-2026-0459",
   # chrono via sea-orm, sqlx and others: unmaintained and unpatched; drop once nothing pulls it in.
   "RUSTSEC-2026-0543",
-  # chrono-tz via tokio-cron-scheduler: unmaintained and unpatched; drop once that stops pulling it.
-  "RUSTSEC-2026-0555",
 ]
 
 informational_warnings = ["unmaintained"]

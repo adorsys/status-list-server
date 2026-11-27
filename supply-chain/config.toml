@@ -349,10 +349,6 @@ criteria = "safe-to-deploy"
 version = "0.4.45"
 criteria = "safe-to-deploy"
 
-[[exemptions.chrono-tz]]
-version = "0.10.4"
-criteria = "safe-to-deploy"
-
 [[exemptions.ciborium]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -466,7 +462,7 @@ version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.croner]]
-version = "3.0.1"
+version = "5.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.crossbeam-channel]]
@@ -563,18 +559,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.derive-where]]
 version = "1.7.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.derive_builder]]
-version = "0.20.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.derive_builder_core]]
-version = "0.20.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.derive_builder_macro]]
-version = "0.20.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.derive_more]]
@@ -1001,12 +985,24 @@ criteria = "safe-to-deploy"
 version = "0.2.35"
 criteria = "safe-to-deploy"
 
+[[exemptions.jiff]]
+version = "1.0.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.jiff-core]]
 version = "0.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.jiff-core]]
+version = "1.0.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.jiff-static]]
 version = "0.2.35"
+criteria = "safe-to-deploy"
+
+[[exemptions.jiff-static]]
+version = "1.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.jiff-tzdb]]
@@ -1399,14 +1395,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pgvector]]
 version = "0.4.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.phf]]
-version = "0.12.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.phf_shared]]
-version = "0.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.pin-project]]
@@ -1862,10 +1850,6 @@ criteria = "safe-to-deploy"
 version = "0.6.4"
 criteria = "safe-to-deploy"
 
-[[exemptions.siphasher]]
-version = "1.0.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.slab]]
 version = "0.4.12"
 criteria = "safe-to-deploy"
@@ -1931,15 +1915,7 @@ version = "0.3.0"
 criteria = "safe-to-run"
 
 [[exemptions.strum]]
-version = "0.27.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.strum]]
 version = "0.28.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.strum_macros]]
-version = "0.27.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.strum_macros]]
@@ -2036,10 +2012,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tinystr]]
 version = "0.8.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.tokio-cron-scheduler]]
-version = "0.15.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio-macros]]

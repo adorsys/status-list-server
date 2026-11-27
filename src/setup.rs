@@ -1581,7 +1581,7 @@ pub async fn setup_snapshot_cleanup_scheduler(
     app_state: AppState,
     cron_schedule: &str,
 ) -> color_eyre::Result<()> {
-    use tokio_cron_scheduler::{Job, JobScheduler};
+    use crate::utils::scheduler::{self, CronSchedule};
     use tracing::{error, info, warn};
 
     if app_state.snapshot_retention_secs == 0 {
@@ -1591,22 +1591,22 @@ pub async fn setup_snapshot_cleanup_scheduler(
         return Ok(());
     }
 
-    let scheduler = JobScheduler::new().await?;
-
-    scheduler
-        .add(Job::new_async(cron_schedule, move |_, _| {
+    let schedule = CronSchedule::parse(cron_schedule)?;
+    scheduler::spawn(
+        "snapshot-cleanup",
+        schedule,
+        Arc::new(time::OffsetDateTime::now_utc),
+        move || {
             let app_state = app_state.clone();
-            Box::pin(async move {
+            async move {
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 let cutoff = now - app_state.snapshot_retention_secs as i64;
 
-                match app_state
-                    .service
-                    .cleanup_snapshots(cutoff)
-                    .await
-                {
+                match app_state.service.cleanup_snapshots(cutoff).await {
                     Ok(deleted) => {
-                        info!("Cleaned up {deleted} historical status list snapshots older than {cutoff}");
+                        info!(
+                            "Cleaned up {deleted} historical status list snapshots older than {cutoff}"
+                        );
                     }
                     // Expected now and then; the next run retries, so warn instead of paging.
                     Err(crate::domain::models::status_list::StatusListError::Contention {
@@ -1622,11 +1622,9 @@ pub async fn setup_snapshot_cleanup_scheduler(
                         error!("Failed to clean up historical snapshots: {e:?}");
                     }
                 }
-            })
-        })?)
-        .await?;
-
-    scheduler.start().await?;
+            }
+        },
+    );
     info!("Historical snapshot cleanup scheduler started with schedule: {cron_schedule}");
     Ok(())
 }

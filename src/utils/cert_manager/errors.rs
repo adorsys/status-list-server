@@ -3,10 +3,10 @@ use crate::{
     utils::crypto::Error as KeyOpError,
 };
 use color_eyre::eyre::Error as EyreError;
+use croner::CronError;
 use instant_acme::Error as AcmeError;
 use serde_json::Error as SerdeError;
 use thiserror::Error;
-use tokio_cron_scheduler::JobSchedulerError;
 
 #[derive(Error, Debug)]
 pub enum CertError {
@@ -23,7 +23,7 @@ pub enum CertError {
     Parsing(String),
 
     #[error("Cron error: {0}")]
-    Cron(#[from] JobSchedulerError),
+    Cron(#[from] CronError),
 
     #[error("Serialization error: {0}")]
     Serde(#[from] SerdeError),

@@ -33,13 +33,13 @@ use std::{sync::Arc, time::Duration};
 use time::{OffsetDateTime, macros::format_description};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, instrument, warn};
 use x509_parser::pem::Pem as X509Pem;
 
 use crate::cert_manager::{challenge::ChallengeHandler, http_client::DefaultHttpClient};
 use crate::domain::ports::SigningMaterial;
 use crate::utils::metrics::CERT_TIME_TO_EXPIRY_METRIC;
+use crate::utils::scheduler::{self, CronSchedule};
 
 use opentelemetry::{
     global,
@@ -763,21 +763,21 @@ pub async fn setup_cert_renewal_scheduler(
     cert_manager: Arc<CertManager>,
     cron_schedule: &str,
 ) -> Result<(), CertError> {
-    let scheduler = JobScheduler::new().await?;
-
-    scheduler
-        .add(Job::new_async(cron_schedule, move |_, _| {
+    let schedule = CronSchedule::parse(cron_schedule)?;
+    scheduler::spawn(
+        "cert-renewal",
+        schedule,
+        Arc::new(OffsetDateTime::now_utc),
+        move || {
             let cert_manager = cert_manager.clone();
-            Box::pin(async move {
+            async move {
                 info!("Running scheduled certificate renewal check");
                 if let Err(e) = cert_manager.renew_cert_if_needed().await {
                     error!("Failed to renew certificate: {e}");
                 }
-            })
-        })?)
-        .await?;
-
-    scheduler.start().await?;
+            }
+        },
+    );
     Ok(())
 }
 
