@@ -6,5 +6,8 @@ statuslist:
       configMap:
         name: direct-upgrade-issuers
   env:
+    # statuslist runs the hosted profile.
+    APP_SERVER__PROFILE: hosted
+    APP_ADMIN_AUTH__AUDIENCES: https://upgrade.example.invalid/admin
     APP_SERVER__PUBLIC_BASE_URL: https://upgrade.example.invalid/api/v1
     APP_RATE_LIMIT__CLIENT_IP_SOURCE: connect_info

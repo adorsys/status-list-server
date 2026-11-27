@@ -80,12 +80,17 @@ statuslist:
             app.kubernetes.io/component: controller
             app.kubernetes.io/instance: hosted-sandbox-ingress
     adminIngress:
+      # The portal server and its reminders CronJob; its migration job calls no admin route.
       - namespaceSelector:
           matchLabels:
-            kubernetes.io/metadata.name: sandbox-portal
+            kubernetes.io/metadata.name: status-list-portal
         podSelector:
           matchLabels:
-            app.kubernetes.io/name: sandbox-portal-backend
+            app.kubernetes.io/name: status-list-portal
+          matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values: [server, reminders]
     prometheusIngress:
       - namespaceSelector:
           matchLabels:

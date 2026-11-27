@@ -35,7 +35,7 @@ For production, pin the exact artifact by digest rather than tag. A digest is va
 * [`chart/values-local.yaml`](chart/values-local.yaml): local development overrides.
 * [`chart/values-aws.yaml`](chart/values-aws.yaml): AWS/EKS overlay that keeps Ingress as the public entry point.
 * [`chart/values-fscert.yaml`](chart/values-fscert.yaml): reusable file-backed signing profile — the `fscert` image variant and the ACME settings cleared for file-backed signing. Environment overlays supply the certificate/key mounts.
-* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): the existing EKS release's file-backed settings — single replica with a per-pod memory cache, `Recreate`, and the cert-manager certificate and Secret mounts. Apply after the AWS, production, and fscert overlays; see the [EKS release prerequisites](../../docs/deployment-runbook.md#existing-eks-release-with-file-backed-signing).
+* [`chart/values-datev-staging.yaml`](chart/values-datev-staging.yaml): the existing EKS release's file-backed settings: the hosted profile, a single replica with a per-pod memory cache, `Recreate`, the cert-manager certificate and Secret mounts, the shared ingress-nginx controller as its edge with client-address rate limits, and the portal and Prometheus admin peers. Apply after the AWS, production, and fscert overlays; see the [EKS release prerequisites](../../docs/deployment-runbook.md#existing-eks-release-with-file-backed-signing).
 * [`chart/values-aws-nlb.yaml`](chart/values-aws-nlb.yaml): optional AWS/EKS direct Network Load Balancer overlay.
 * [`chart/values-envoy-gateway.yaml`](chart/values-envoy-gateway.yaml): [Gateway API mode](#gateway-api-mode) behind the reference Envoy Gateway setup.
 * [`chart/values-production.yaml`](chart/values-production.yaml): production delta applied after `values-aws.yaml` by release deployments.
@@ -576,7 +576,7 @@ The `AlertmanagerConfig` CRD must be installed in the cluster (see the top-level
 
 ## Hosted sandbox
 
-Use [values-hosted.yaml](chart/values-hosted.yaml) for the isolated test profile.
+Use [values-hosted.yaml](chart/values-hosted.yaml) for a dedicated hosted release, or follow the guide's [existing release](../../docs/hosted-sandbox.md#hosted-profile-on-an-existing-release) steps to switch a running one.
 The [hosted sandbox guide](../../docs/hosted-sandbox.md) covers required site
 values, signing material, the dedicated ingress-controller configuration, network
 selectors, alerts, and the first-deployment check.

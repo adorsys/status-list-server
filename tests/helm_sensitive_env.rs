@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use status_list_server::config::{ClientIpSource, Config};
+use status_list_server::config::{ClientIpSource, Config, ServerProfile};
 
 fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create test chart directory");
@@ -1307,6 +1307,21 @@ fn helm_documents(rendered: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The developer portal's admin callers: its server and reminders pods, never its migration job.
+fn portal_admin_peer() -> serde_json::Value {
+    serde_json::json!({
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "status-list-portal"}},
+        "podSelector": {
+            "matchLabels": {"app.kubernetes.io/name": "status-list-portal"},
+            "matchExpressions": [{
+                "key": "app.kubernetes.io/component",
+                "operator": "In",
+                "values": ["server", "reminders"]
+            }]
+        }
+    })
+}
+
 #[test]
 fn hosted_ingress_isolates_admin_with_shared_and_separate_hostnames() {
     for management_host in ["", "management.sandbox.invalid"] {
@@ -1445,13 +1460,7 @@ fn hosted_policy_scopes_admin_and_conditionally_allows_prometheus() {
             .unwrap();
         let peers = admin["from"].as_array().unwrap();
         assert_eq!(peers.len(), if monitor == "true" { 2 } else { 1 });
-        assert_eq!(
-            peers[0],
-            serde_json::json!({
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "sandbox-portal"}},
-                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "sandbox-portal-backend"}}
-            })
-        );
+        assert_eq!(peers[0], portal_admin_peer());
         if monitor == "true" {
             assert_eq!(
                 peers[1],
@@ -1595,6 +1604,63 @@ fn hosted_deployment_requires_admin_audience_and_trusted_controller_addresses() 
         };
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
+#[test]
+fn hosted_edge_requires_forwarded_keying_and_edge_only_policy_peers() {
+    for (flag, setting, expected) in [
+        (
+            "--set",
+            "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info",
+            "hosted ingress requires \
+             statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for",
+        ),
+        (
+            "--set",
+            "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=null,\
+             statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=,\
+             statuslist.ingress.management.enabled=false",
+            "hosted ingress requires \
+             statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for",
+        ),
+        (
+            "--set",
+            "statuslist.networkPolicy.ingress=null",
+            "hosted NetworkPolicy requires statuslist.networkPolicy.ingress",
+        ),
+        (
+            "--set",
+            "statuslist.networkPolicy.managementIngress=null",
+            "hosted NetworkPolicy requires statuslist.networkPolicy.managementIngress",
+        ),
+        (
+            "--set-json",
+            "statuslist.networkPolicy.ingress=[{}]",
+            "every statuslist.networkPolicy.ingress peer to name a podSelector",
+        ),
+        (
+            "--set-json",
+            r#"statuslist.networkPolicy.managementIngress=[{"ports":[]}]"#,
+            "every statuslist.networkPolicy.managementIngress peer to name a podSelector",
+        ),
+    ] {
+        let Some(output) = render_helm_failure(&[
+            "-f",
+            "deploy/helm/chart/values-hosted.yaml",
+            "--set",
+            "statuslist.ingress.externalDnsHostname=sandbox.invalid",
+            "--set",
+            "statuslist.ingress.tls.secretName=sandbox-edge-tls",
+            "--set",
+            "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
+            flag,
+            setting,
+        ]) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{setting}: {stderr}");
     }
 }
 
@@ -2097,6 +2163,157 @@ fn envoy_gateway_overlay_over_production_loads_as_application_config() {
         Some(ClientIpSource::RightmostXForwardedFor)
     );
     assert_eq!(config.rate_limit.trusted_proxies, ["10.244.0.0/16"]);
+}
+
+/// The `HELM_VALUES_ARGS` deploy.yml upgrades the `statuslist` release with,
+/// read from the workflow so the two cannot drift.
+fn release_values_args() -> Vec<String> {
+    let workflow = fs::read_to_string(".github/workflows/deploy.yml")
+        .expect("failed to read the deploy workflow");
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| line.trim() != "HELM_VALUES_ARGS: |")
+        .skip(1);
+    let first = lines.next().expect("deploy.yml has no HELM_VALUES_ARGS");
+    let indent = first.len() - first.trim_start().len();
+    let args = std::iter::once(first)
+        .chain(lines.take_while(|line| {
+            line.len() - line.trim_start().len() == indent && !line.trim().is_empty()
+        }))
+        .flat_map(str::split_whitespace)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        args.iter()
+            .any(|arg| arg.ends_with("values-datev-staging.yaml")),
+        "unexpected HELM_VALUES_ARGS: {args:?}"
+    );
+    args
+}
+
+/// The hostname deploy.yml runs the published-surface check against.
+fn release_public_host() -> String {
+    let workflow = fs::read_to_string(".github/workflows/deploy.yml")
+        .expect("failed to read the deploy workflow");
+    workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PUBLIC_HOST:"))
+        .map(|host| host.trim().to_owned())
+        .expect("deploy.yml has no PUBLIC_HOST")
+}
+
+/// Renders the release exactly as deploy.yml does, without the audiences and
+/// trusted proxies the other helpers inject.
+fn render_release() -> Option<String> {
+    if !helm_available() {
+        if env::var_os("CI").is_some() {
+            panic!("helm is required for helm_sensitive_env tests in CI");
+        }
+        eprintln!("skipping Helm render assertions because helm is not installed");
+        return None;
+    }
+    let chart_dir = dependency_free_chart();
+    let output = Command::new("helm")
+        .arg("template")
+        .arg("statuslist")
+        .arg(&chart_dir)
+        .arg("-f")
+        .arg(chart_dir.join("values.yaml"))
+        .args(["--namespace", "statuslist"])
+        .args(release_values_args())
+        .output()
+        .expect("failed to execute helm template");
+    assert!(
+        output.status.success(),
+        "the deploy.yml values must render on their own: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8(output.stdout).expect("helm template output should be valid UTF-8"))
+}
+
+#[test]
+fn release_overlays_load_as_a_hosted_application_config() {
+    let Some(rendered) = render_release() else {
+        return;
+    };
+    let env = rendered_env(&rendered);
+    let overrides = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let config = Config::load_from_overrides(&overrides).expect("release config must load");
+    assert_eq!(config.server.profile, ServerProfile::Hosted);
+    assert_eq!(config.server.domain, release_public_host());
+    assert_ne!(
+        config.management_auth.audiences,
+        config.admin_auth.audiences
+    );
+    // Every client is keyed on its own address behind the edge, under the default limits.
+    let defaults = Config::load_from_overrides(&[]).expect("default config must load");
+    assert_eq!(
+        config.rate_limit.client_ip_source,
+        Some(ClientIpSource::RightmostXForwardedFor)
+    );
+    assert!(!config.rate_limit.trusted_proxies.is_empty());
+    assert_eq!(
+        config.rate_limit.permissive_burst_size,
+        defaults.rate_limit.permissive_burst_size
+    );
+    assert_eq!(
+        config.rate_limit.permissive_period,
+        defaults.rate_limit.permissive_period
+    );
+}
+
+#[test]
+fn release_policy_admits_the_portal_and_prometheus_to_admin_and_only_the_edge_elsewhere() {
+    let Some(rendered) = render_release() else {
+        return;
+    };
+    let documents = helm_documents(&rendered);
+    let policy = of_kind(&documents, "NetworkPolicy")[0];
+    let ingress = policy["spec"]["ingress"].as_array().unwrap();
+    let rule = |port: u64| {
+        ingress
+            .iter()
+            .find(|rule| rule["ports"][0]["port"] == port)
+            .unwrap_or_else(|| panic!("no ingress rule for port {port}"))
+    };
+    assert_eq!(
+        rule(8002)["from"],
+        serde_json::json!([
+            portal_admin_peer(),
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}}
+            }
+        ])
+    );
+    let nginx = serde_json::json!([{
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+        "podSelector": {"matchLabels": {
+            "app.kubernetes.io/name": "ingress-nginx",
+            "app.kubernetes.io/component": "controller",
+            "app.kubernetes.io/instance": "ingress-nginx"
+        }}
+    }]);
+    for port in [8000, 8001] {
+        assert_eq!(
+            rule(port)["from"],
+            nginx,
+            "port {port} must admit only the edge's pods"
+        );
+    }
+    let database = policy["spec"]["egress"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["ports"][0]["port"] == 5432)
+        .expect("database egress rule");
+    assert_eq!(
+        database["to"],
+        serde_json::json!([{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "postgres"}}}])
+    );
 }
 
 #[test]
