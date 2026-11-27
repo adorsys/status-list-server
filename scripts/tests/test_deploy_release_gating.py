@@ -286,10 +286,15 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertIn('gh run download "$SOURCE_RUN_ID"', resolve["run"])
         self.assertIn('scripts/resolve-previous-image.sh "$PREVIOUS_TAG" "$IMAGE_BASE" "$GITHUB_REPOSITORY"', resolve["run"])
         self.assertEqual(direct["permissions"].get("attestations"), "read")
-        self.assertIn("scripts/select-latest-final.sh", steps["Find last stable release"]["run"])
+        selection = steps["Select upgrade baseline"]
+        self.assertIn("scripts/select-latest-final.sh", selection["run"])
+        self.assertIn("scripts/select-direct-upgrade-baseline.sh", selection["run"])
+        self.assertEqual(selection["env"]["DATEV_BASELINE_TAG"], "${{ vars.DATEV_BASELINE_TAG }}")
+        self.assertEqual(direct["strategy"]["matrix"]["baseline"], ["latest-final", "datev"])
 
-        checkout = steps["Checkout last stable release"]
+        checkout = steps["Checkout selected baseline release"]
         self.assertEqual(checkout["with"]["ref"], "refs/tags/${{ steps.previous.outputs.tag }}")
+        self.assertEqual(checkout["if"], "steps.previous.outputs.skip != 'true'")
 
     @unittest.skipIf(shutil.which("bash") is None, "bash is required")
     def test_direct_upgrade_command_passes_unmodified_arguments(self) -> None:
@@ -339,6 +344,30 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertNotIn("image", values["postgres"])
         self.assertIn("/api/v1/status-lists/upgrade-fixture-list", script)
         self.assertIn(".restartCount", script)
+
+    def test_final_release_preflights_its_own_baseline_after_promotion(self) -> None:
+        job = self.jobs["final-baseline-preflight"]
+        self.assertIn("promote-tags", self.needs("final-baseline-preflight"))
+        self.assertTrue(self.runs("final-baseline-preflight", _FINAL_GREEN))
+        self.assertFalse(self.runs("final-baseline-preflight", _PRERELEASE_GREEN))
+        self.assertFalse(self.runs("final-baseline-preflight", {**_FINAL_GREEN, "github.event_name": "workflow_dispatch"}))
+        for result in ("failure", "skipped"):
+            with self.subTest(promote_tags=result):
+                self.assertFalse(self.runs("final-baseline-preflight", {**_FINAL_GREEN, **_outcome(promote_tags=result)}))
+        steps = {step["name"]: step for step in job["steps"]}
+        resolved = steps["Resolve verified final image"]
+        self.assertIn('scripts/resolve-previous-image.sh "$GITHUB_REF_NAME"', resolved["run"])
+        preflight = steps["Preflight the final chart, image and fixture"]
+        self.assertIn('"$CHART_DIR" "$CHART_DIR" "$FINAL_DIGEST" "$FINAL_DIGEST"', preflight["run"])
+
+    def test_upgrade_jobs_need_no_cloud_deployment_credentials(self) -> None:
+        for name in ("direct-upgrade", "final-baseline-preflight"):
+            with self.subTest(job=name):
+                job = self.jobs[name]
+                self.assertNotIn("environment", job)
+                self.assertNotIn("id-token", job["permissions"])
+                self.assertNotIn("packages", job["permissions"])
+                self.assertNotIn("configure-aws-credentials", str(job).lower())
 
     def test_promote_tags_lists_every_job_its_condition_reads(self) -> None:
         condition = str(self.jobs["promote-tags"]["if"])

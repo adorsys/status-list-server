@@ -157,13 +157,16 @@ The normal promotion path is:
 4. Review and merge the release PR into `develop`.
 5. Merge `develop` into `stage`. The RC automation creates
    `v<version>-rc.<N>` from the `stage` commit and deploys it for validation.
-   After the build and provenance checks, the release workflow installs the
-   latest stable chart and `fscert` image in a disposable kind cluster, seeds a
-   PostgreSQL database, and upgrades that installation to the candidate chart
-   and image. Migration or readiness failure blocks image tag promotion and
-   the production deployment. The `stage` to `main` promotion gate also requires
-   a successful RC run, so a failed direct upgrade blocks that merge. A manual dispatch on the candidate branch runs
-   this upgrade before cutting an RC without promoting or deploying the image.
+   After the build and provenance checks, the release workflow upgrades from
+   both the latest final release and the confirmed Datev-installed release in
+   disposable kind clusters. It skips the second run when those releases match.
+   Both runs seed PostgreSQL before upgrading to the candidate chart and image.
+   Migration or readiness failure blocks image tag promotion and production
+   deployment. A missing `DATEV_BASELINE_TAG` repository variable also blocks
+   promotion. The `stage` to `main` promotion gate requires a successful RC
+   run, so a failed direct upgrade blocks that merge. A manual dispatch on the
+   candidate branch runs the upgrades before cutting an RC without promoting
+   or deploying the image.
    Release-plz ignores RC tags because its `git_only` final-tag match is
    `^v(\d+\.\d+\.\d+)$`. If the stage version is already released or older
    than the latest final tag, the stage workflow fails before it creates an RC
@@ -183,7 +186,22 @@ The normal promotion path is:
    failure that recurs blocks the release until its cause is fixed. If the
    candidate's run failed there for a one-off reason, re-run that job; once
    the run concludes `success`, the candidate can be promoted without cutting
-   a new one.
+   a new one. After final image tags are promoted, **Final Release Baseline
+   Preflight** installs that final chart and image in kind, seeds the same
+   fixture, and upgrades to the same pinned chart and image. It neither
+   promotes another image nor deploys to EKS. A failure is visible in the final
+   release run and must be fixed before the next RC.
+
+The assignee of [the Datev baseline issue](https://github.com/adorsys/status-list-server/issues/780)
+owns keeping `DATEV_BASELINE_TAG` current. Before each RC, obtain Datev's
+installed Helm chart version and `fscert` image reference from its deployment
+operator, record the non-secret evidence and confirmation date in that issue,
+then set the repository variable to their matching final tag. Update the
+variable after each Datev rollout. The release maintainer checks that record
+and variable before tagging an RC. The EKS staging overlay and the latest
+GitHub release do not establish what Datev has installed. If Datev's chart and
+image do not correspond to one final tag, record the mismatch and extend the
+baseline test to model the installed pair before cutting an RC.
 
 RC and final releases therefore use the same semantic version and changelog.
 The final `v<version>` tag is created only from `main`.
