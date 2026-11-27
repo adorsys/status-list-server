@@ -105,7 +105,7 @@ hex = "0.4"
 
 serde_json = "1.0"
 serde-saphyr = "2.0"
-serde-aux = "4.7"
+serde-aux = { version = "4.7", default-features = false }
 serde = { version = "1.0", features = ["derive", "rc"] }
 jsonschema = { version = "0.60", default-features = false }
 
@@ -174,7 +174,7 @@ version = "1"
 optional = true
 
 [dependencies.google-cloud-auth]
-version = "1"
+version = "1.16"
 optional = true
 
 [dependencies.azure_security_keyvault_secrets]
@@ -197,7 +197,7 @@ optional = true
 [dev-dependencies]
 rcgen = { version = "0.14", features = ["pem"] }
 wiremock = "0.6"
-sea-orm = { version = "2.0", features = ["mock"] }
+sea-orm = { version = "2.0", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-json", "mock"] }
 tempfile = "3"
 [dev-dependencies.testcontainers-modules]
 version = "0.15"
