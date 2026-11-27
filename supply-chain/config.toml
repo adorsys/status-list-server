@@ -217,6 +217,10 @@ criteria = "safe-to-deploy"
 version = "1.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.azure_security_keyvault_secrets]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.backon]]
 version = "1.6.0"
 criteria = "safe-to-deploy"
@@ -819,6 +823,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
 version = "0.14.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.hashbrown]]
+version = "0.15.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.hashlink]]
