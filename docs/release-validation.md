@@ -44,6 +44,12 @@ and advances the version, none of which can be cleanly undone.
   for another target branch is open. Prepare a new version with **Release-plz PR**
   on `develop`; review and merge it before promoting. The version must be newer
   than the latest final tag or the RC workflow refuses to create a candidate.
+- [ ] Check the Datev-installed chart version and `fscert` image reference with
+  its deployment operator. Record the confirmation date and non-secret evidence
+  in [issue #780](https://github.com/adorsys/status-list-server/issues/780),
+  and ensure `DATEV_BASELINE_TAG` names that installed final release. The issue
+  assignee updates the repository variable after each Datev rollout; a missing
+  or invalid tag fails the Datev upgrade job and blocks RC promotion.
 - [ ] Confirm `stage` will contain the current `main` history before the RC is
   tagged; the `stage` to `main` gate rejects a candidate that omits it.
 - [ ] Agree on the deployment window, validation owner, rollback decision
@@ -85,12 +91,14 @@ the files onto the branch. For each such pull request:
 3. Approve the candidate's **Deploy to Production** job when it waits on the
    `production` environment. The candidate is validated only when its whole
    **Build and Deploy to EKS** run concludes `success`, including CI, Helm
-   checks, image scan, provenance verification, **Direct Upgrade from Last
-   Release**, **Promote Scanned Digest to Release Tags**, **Deploy to
+   checks, image scan, provenance verification, **Direct Upgrade (latest-final)**
+   and **Direct Upgrade (datev)**, **Promote Scanned Digest to Release Tags**, **Deploy to
    Production**, and **Record Validated Release Candidate**. The last job
    creates the `Release candidate v<version>-rc.<N>` prerelease, which records
    the run, commit, and pinned image reference. Then run the
    [smoke checks](#smoke-checks) against that digest.
+   When Datev runs the latest final release, its upgrade job records that the
+   latest-final job already covers the same baseline.
 4. Do not change `stage` after the candidate you intend to promote. Every push
    to `stage` tags a new RC, and the final commit must have the same file tree
    as the highest-numbered RC; any difference, documentation included, fails
@@ -106,7 +114,10 @@ the files onto the branch. For each such pull request:
    GHCR** jobs are skipped, the image is rescanned, and tag promotion succeeds.
    Approve **Deploy to Production**. Compare the final `fscert` tag, deployed
    image, and RC prerelease record: all must resolve to the same index digest.
-   Confirm provenance names the RC ref, not the final ref. Run the
+   Confirm provenance names the RC ref, not the final ref. Confirm **Final
+   Release Baseline Preflight** passes after tag promotion; it uses disposable
+   kind infrastructure and does not promote or deploy anything. Investigate a
+   failure before the next RC. Run the
    [smoke checks](#smoke-checks) and record the final run, digest, Helm
    revision, and results.
 7. Back-merge `main` into `develop` with a merge commit, using the branch
@@ -185,10 +196,11 @@ candidate's run, commit, and image reference; link it instead of copying them.
 | Release-plz PR and prepared version | |
 | `develop` to `stage` PR, gate run, and stage commit | |
 | RC tag, tagging run, and RC prerelease record | |
-| RC deploy run, approval, and direct-upgrade result | |
+| RC deploy run, approval, and both direct-upgrade results | |
 | RC deployed Helm revision and smoke-check results | |
 | `stage` to `main` PR, gate run, and merge commit | |
 | Release approval, final tag, and final deploy run | |
+| Final baseline preflight result | |
 | Final tag and deployed digest comparison with the RC | |
 | Final Helm revision and smoke-check results | |
 | `main` to `develop` back-merge PR and merge commit | |
