@@ -27,6 +27,13 @@ egressInternal shares the database port; 443 and 53 are open to 0.0.0.0/0. */}}
 {{- if and .Values.statuslist.ingress.management.enabled (empty .Values.statuslist.networkPolicy.managementIngress) }}
 {{- fail "hosted NetworkPolicy requires statuslist.networkPolicy.managementIngress for the edge pods while management is routed: an empty list denies every management request" }}
 {{- end }}
+{{- range $list := list "ingress" "managementIngress" }}
+{{- range $peer := (index $.Values.statuslist.networkPolicy $list | default list) }}
+{{- if not (or (kindIs "map" $peer.podSelector) (kindIs "map" $peer.namespaceSelector) (kindIs "map" $peer.ipBlock)) }}
+{{- fail (printf "hosted NetworkPolicy requires every statuslist.networkPolicy.%s peer to name a podSelector, namespaceSelector or ipBlock: a peer without one admits every source" $list) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if and (eq $cacheBackend "redis") (empty $cacheEgress) }}
 {{- fail "statuslist.networkPolicy.cacheEgress must be set when NetworkPolicy is enabled with APP_CACHE__BACKEND=redis because this chart does not deploy Redis" }}

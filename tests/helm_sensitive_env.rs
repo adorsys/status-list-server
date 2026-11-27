@@ -1609,19 +1609,40 @@ fn hosted_deployment_requires_admin_audience_and_trusted_controller_addresses() 
 
 #[test]
 fn hosted_edge_requires_forwarded_keying_and_edge_only_policy_peers() {
-    for (setting, expected) in [
+    for (flag, setting, expected) in [
         (
+            "--set",
             "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=connect_info",
             "hosted ingress requires \
              statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for",
         ),
         (
+            "--set",
+            "statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=null,\
+             statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES=,\
+             statuslist.ingress.management.enabled=false",
+            "hosted ingress requires \
+             statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for",
+        ),
+        (
+            "--set",
             "statuslist.networkPolicy.ingress=null",
             "hosted NetworkPolicy requires statuslist.networkPolicy.ingress",
         ),
         (
+            "--set",
             "statuslist.networkPolicy.managementIngress=null",
             "hosted NetworkPolicy requires statuslist.networkPolicy.managementIngress",
+        ),
+        (
+            "--set-json",
+            "statuslist.networkPolicy.ingress=[{}]",
+            "every statuslist.networkPolicy.ingress peer to name a podSelector",
+        ),
+        (
+            "--set-json",
+            r#"statuslist.networkPolicy.managementIngress=[{"ports":[]}]"#,
+            "every statuslist.networkPolicy.managementIngress peer to name a podSelector",
         ),
     ] {
         let Some(output) = render_helm_failure(&[
@@ -1633,7 +1654,7 @@ fn hosted_edge_requires_forwarded_keying_and_edge_only_policy_peers() {
             "statuslist.ingress.tls.secretName=sandbox-edge-tls",
             "--set",
             "statuslist.env.APP_MANAGEMENT_AUTH__AUDIENCES=https://sandbox.invalid/api/v1",
-            "--set",
+            flag,
             setting,
         ]) else {
             return;

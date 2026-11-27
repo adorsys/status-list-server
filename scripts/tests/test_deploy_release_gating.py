@@ -335,6 +335,8 @@ class DeployReleaseGatingTest(unittest.TestCase):
         self.assertIn("/spec/strategy", script)
         candidate = yaml.safe_load((root / "scripts/direct-upgrade-candidate-values.yaml").read_text(encoding="utf-8"))
         self.assertIn("issuerRegistry", candidate["statuslist"])
+        self.assertEqual(candidate["statuslist"]["env"]["APP_SERVER__PROFILE"], "hosted")
+        self.assertTrue(str(candidate["statuslist"]["env"]["APP_ADMIN_AUTH__AUDIENCES"]).strip())
         self.assertNotIn("issuerRegistry", values["statuslist"])
         self.assertNotIn("image", values["postgres"])
         self.assertIn("/api/v1/status-lists/upgrade-fixture-list", script)

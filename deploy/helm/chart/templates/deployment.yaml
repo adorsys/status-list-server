@@ -29,8 +29,10 @@
 {{- if and .Values.statuslist.ingress.enabled .Values.statuslist.ingress.management.enabled (empty $trustedProxies) }}
 {{- fail "hosted management ingress requires statuslist.env.APP_RATE_LIMIT__TRUSTED_PROXIES for the dedicated controller pods" }}
 {{- end }}
-{{- if and .Values.statuslist.ingress.enabled (eq $clientIpSource "connect_info") }}
-{{- fail "hosted ingress requires statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for: with connect_info every client shares the ingress controller pods' rate limits" }}
+{{- /* An unset source falls back to connect_info when no proxies are trusted. */}}
+{{- $keysOnConnection := or (eq $clientIpSource "connect_info") (and (empty $clientIpSource) (empty $trustedProxies)) }}
+{{- if and .Values.statuslist.ingress.enabled $keysOnConnection }}
+{{- fail "hosted ingress requires statuslist.env.APP_RATE_LIMIT__CLIENT_IP_SOURCE=rightmost_x_forwarded_for: with connect_info, set or by default, every client shares the ingress controller pods' rate limits" }}
 {{- end }}
 {{- end }}
 {{- if and (has $telemetryEnv (list "production" "prod")) (not $registryMounted) }}

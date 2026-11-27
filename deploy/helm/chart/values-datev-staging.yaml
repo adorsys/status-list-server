@@ -26,6 +26,9 @@ statuslist:
     # The private node subnets the VPC CNI assigns pod addresses from, the
     # controller pods' included. Trusting them is only safe while the policy
     # below admits the controller alone to the public and management ports.
+    # The portal pods sit in these subnets too, so a portal pod can set
+    # X-Forwarded-For on the admin port and choose the address its admin rate
+    # limits key on.
     APP_RATE_LIMIT__TRUSTED_PROXIES: "10.0.3.0/24,10.0.4.0/24,10.0.5.0/24"
     # Restores the defaults that values-production.yaml lifts for connect_info.
     APP_RATE_LIMIT__PERMISSIVE_BURST_SIZE: "1000"

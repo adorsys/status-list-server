@@ -215,6 +215,7 @@ After the switch, verify:
   ADMIN=http://statuslist-status-list-server-internal-service.statuslist:8002/health/ready
   PORTAL_POD=$(kubectl -n status-list-portal get pod -o name \
     -l app.kubernetes.io/name=status-list-portal,app.kubernetes.io/component=server | head -n 1)
+  [ -n "$PORTAL_POD" ] || { echo "no portal server pod found" >&2; exit 1; }
   kubectl -n status-list-portal debug -i "$PORTAL_POD" --image=busybox:1.37 -- \
     wget -qO- -T 5 "$ADMIN"
   kubectl -n default run admin-probe --rm -i --restart=Never \
